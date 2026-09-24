@@ -528,10 +528,10 @@ TrainScheduler
 
 ```mermaid
 flowchart TD
-    A([🧑 人工写入初始训练指令\nHiToM / BatchTrain]) --> B
+    A(["🧑 人工写入初始训练指令\nHiToM / BatchTrain"]) --> B
 
     subgraph CTL["控制层 (本地开发机)"]
-        B["ControlPlane\n写入 directive.yaml\n状态=待执行"]
+        B["ControlPlane 调和循环\n写入 directive.yaml\n状态=待执行"]
         G["ControlPlane\n写入 diagnostic_report.yaml"]
         H{{"审核门①\nCheckpoint 晋级\n人工 rismforge approve"}}
         I["ControlPlane\n写入 zengen-v1.yaml\n状态=已晋级"]
@@ -541,36 +541,26 @@ flowchart TD
         M["TrainPlanner\n汇总诊断+战绩\n调用外部 CLI 强模型\n→ 下一轮决策:克隆 recipe-001"]
     end
 
-    subgraph SSH["SSH 调度 (控制层→计算层)"]
-        B -->|调和循环检测 待执行\nSSH 下发| C
-        F -->|产物引用 + sha256 同步回| G
-        G -->|调和循环检测 候选就绪\nSSH 触发诊断| G2
-    end
-
     subgraph CALC["计算层 (远程 GPU 服务器)"]
         C["SocialSimulator 批量模块\n情境生成器(purpose=training)\n三阶/四阶 HiToM 嵌套场景\n人格生成器配套角色人格\n→ Episode 数据集"]
         D["MindTrainer BatchTrain\n读取 Episode 数据集\nSFT 冷启动(行为克隆)\n→ GRPO+OPD 联合更新\n(同一 step:GRPO 探索 / OPD 防偏离)"]
         E["候选 checkpoint"]
-        F["候选 checkpoint 写回引用"]
         G2["SocialSimulator 诊断评测器\n加载候选 checkpoint\n规则式打分(HiToM 有客观答案)\n三阶信念+12.3 / 四阶信念+8.7"]
         MA["MindAgent(异步)\n自主订阅 已晋级 事件\n绑定 zengen-v1\n经验采集(受限接口②)\npurpose=deployment_simulation\n⚠️ 第一轮技能库/记忆库为空\n→ 沉默(预期行为)"]
-        C -->|数据就绪 SSH 启动| D
-        D --> E --> F
-        G2 -->|诊断报告同步回| G
+        C --> D --> E
     end
 
+    B -->|"调和循环检测 待执行\nSSH 下发任务"| C
+    E -->|"产物引用+sha256\nSSH 同步回"| G
+    G -->|"调和循环检测 候选就绪\nSSH 触发诊断"| G2
+    G2 -->|"诊断报告 SSH 同步回"| G
     H -->|approve| I
-    I -->|并行触发| MA
+    I -->|"异步触发"| MA
     I --> J --> K -->|approve| L --> M
 
     note1["⚠️ 设计验证点\n情境生成参数此时是筛选条件\n精确锚定(模板ID集合)在配方打包阶段才确定\n先运行再锚定的时序合理 ✅"]
     C -.-> note1
 ```
-
-**Step 1:初始指令**
-人工直接向 ControlPlane 写入训练指令(TrainPlanner 决策的降级替代路径):目标维度=高阶信念推理(HiToM),训练模式=BatchTrain。TrainScheduler 的指令构造器把 ResolvedAction 写入 ControlPlane,状态=待执行。
-
-**Step 2:情境合成(SocialSimulator 批量模块)**
 调和循环检测到"训练指令=待执行",SSH 下发任务到计算层。情境生成器(purpose=training)按指令参数生成三阶/四阶信念推理嵌套场景,人格生成器配套生成角色人格。Episode 数据集写回 ControlPlane,状态=已生成。
 
 **⚠️ 设计验证点**:指令里的"情境生成参数"此时是筛选条件,还没有"精确锚定的模板 ID 集合"。精确锚定发生在配方候选打包阶段——模板被生成后 ID 集合才确定,RecipeStore 可复现性校验器在入库时验证。先运行再锚定的时序是合理的。✅ 自洽。
@@ -613,12 +603,6 @@ flowchart TD
         M["RecipeStore\n入库 recipe-004\nInteractTrain 类型"]
     end
 
-    subgraph SSH["SSH 调度"]
-        C -->|调和循环检测 待执行\nSSH 下发 InteractTrain 会话| D
-        G -->|候选 checkpoint 引用同步回| H
-        H -->|调和循环检测 候选就绪\nSSH 触发诊断| H2
-    end
-
     subgraph CALC["计算层 (远程 GPU 服务器)"]
         D["SocialSimulator\n实时环境服务网关\n接收 RoleAssignment 参数\n实例化:\n  zengen-v2(被训练方)\n  冻结 zengen-v1(对手方)"]
         E["MindTrainer InteractTrain\n通过受限接口①\n高频 rollout"]
@@ -629,12 +613,16 @@ flowchart TD
 
         D <-->|"受限接口①\n(计算层内部直连,不经 ControlPlane)"| E
         E --> F --> G
-        H2 -->|诊断报告同步回| H
-        J -->|并行触发| MA
     end
 
     A --> B --> C
-    I -->|approve| J --> K --> L -->|approve| M
+    C -->|"调和循环检测 待执行\nSSH 下发 InteractTrain 会话"| D
+    G -->|"候选 checkpoint 引用\nSSH 同步回"| H
+    H -->|"调和循环检测 候选就绪\nSSH 触发诊断"| H2
+    H2 -->|"诊断报告 SSH 同步回"| H
+    I -->|approve| J
+    J -->|"异步触发"| MA
+    J --> K --> L -->|approve| M
 
     warn["🔶 已知局限:对手固定为 zengen-v1\n可能学到特定对抗套路(reward hacking)\n应对:诊断基准含多样人格 + RecipeStore 战绩回写\n若后续退化→生命周期迁移到 已废弃\n改进路径:加中间检查点诊断"]
     E -.-> warn
