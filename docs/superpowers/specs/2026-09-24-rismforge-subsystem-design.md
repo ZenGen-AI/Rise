@@ -520,43 +520,125 @@ TrainScheduler
 
 以下三个场景分别覆盖三种训练路径,用于验证整体架构与子系统设计的自洽性与可实现性。
 
+---
+
 ### 场景一:BatchTrain 路径——首次训练"高阶信念推理"能力
 
 **背景**:工厂刚启动,ZenGen 基座是 Qwen3-14B,没有任何历史配方,第一轮决策人工写死。
+
+```mermaid
+flowchart TD
+    A([🧑 人工写入初始训练指令\nHiToM / BatchTrain]) --> B
+
+    subgraph CTL["控制层 (本地开发机)"]
+        B["ControlPlane\n写入 directive.yaml\n状态=待执行"]
+        G["ControlPlane\n写入 diagnostic_report.yaml"]
+        H{{"审核门①\nCheckpoint 晋级\n人工 rismforge approve"}}
+        I["ControlPlane\n写入 zengen-v1.yaml\n状态=已晋级"]
+        J["TrainScheduler\n配方提名器\n打包 BatchTrain 配方候选"]
+        K{{"审核门③\n配方入库\n人工确认"}}
+        L["RecipeStore\n入库 recipe-001\n可复现性校验通过"]
+        M["TrainPlanner\n汇总诊断+战绩\n调用外部 CLI 强模型\n→ 下一轮决策:克隆 recipe-001"]
+    end
+
+    subgraph SSH["SSH 调度 (控制层→计算层)"]
+        B -->|调和循环检测 待执行\nSSH 下发| C
+        F -->|产物引用 + sha256 同步回| G
+        G -->|调和循环检测 候选就绪\nSSH 触发诊断| G2
+    end
+
+    subgraph CALC["计算层 (远程 GPU 服务器)"]
+        C["SocialSimulator 批量模块\n情境生成器(purpose=training)\n三阶/四阶 HiToM 嵌套场景\n人格生成器配套角色人格\n→ Episode 数据集"]
+        D["MindTrainer BatchTrain\n读取 Episode 数据集\nSFT 冷启动(行为克隆)\n→ GRPO+OPD 联合更新\n(同一 step:GRPO 探索 / OPD 防偏离)"]
+        E["候选 checkpoint"]
+        F["候选 checkpoint 写回引用"]
+        G2["SocialSimulator 诊断评测器\n加载候选 checkpoint\n规则式打分(HiToM 有客观答案)\n三阶信念+12.3 / 四阶信念+8.7"]
+        MA["MindAgent(异步)\n自主订阅 已晋级 事件\n绑定 zengen-v1\n经验采集(受限接口②)\npurpose=deployment_simulation\n⚠️ 第一轮技能库/记忆库为空\n→ 沉默(预期行为)"]
+        C -->|数据就绪 SSH 启动| D
+        D --> E --> F
+        G2 -->|诊断报告同步回| G
+    end
+
+    H -->|approve| I
+    I -->|并行触发| MA
+    I --> J --> K -->|approve| L --> M
+
+    note1["⚠️ 设计验证点\n情境生成参数此时是筛选条件\n精确锚定(模板ID集合)在配方打包阶段才确定\n先运行再锚定的时序合理 ✅"]
+    C -.-> note1
+```
 
 **Step 1:初始指令**
 人工直接向 ControlPlane 写入训练指令(TrainPlanner 决策的降级替代路径):目标维度=高阶信念推理(HiToM),训练模式=BatchTrain。TrainScheduler 的指令构造器把 ResolvedAction 写入 ControlPlane,状态=待执行。
 
 **Step 2:情境合成(SocialSimulator 批量模块)**
-调和循环检测到"训练指令=待执行",SSH 下发任务到计算层。情境生成器(purpose=training)按指令参数生成三阶/四阶信念推理嵌套场景("A 知道 B 以为 C 不知道某件事,但 C 其实已经知道了"),人格生成器配套生成角色人格。Episode 数据集写回 ControlPlane,状态=已生成。
+调和循环检测到"训练指令=待执行",SSH 下发任务到计算层。情境生成器(purpose=training)按指令参数生成三阶/四阶信念推理嵌套场景,人格生成器配套生成角色人格。Episode 数据集写回 ControlPlane,状态=已生成。
 
-**⚠️ 设计验证点**:指令里的"情境生成参数"此时是筛选条件,还没有"精确锚定的模板 ID 集合"。这没有问题——精确锚定发生在配方候选打包阶段:当这批模板被生成后,其 ID 集合才确定,RecipeStore 的可复现性校验器在入库时验证该锚定是否完成。先运行再锚定的时序是合理的。✅ 自洽。
+**⚠️ 设计验证点**:指令里的"情境生成参数"此时是筛选条件,还没有"精确锚定的模板 ID 集合"。精确锚定发生在配方候选打包阶段——模板被生成后 ID 集合才确定,RecipeStore 可复现性校验器在入库时验证。先运行再锚定的时序是合理的。✅ 自洽。
 
 **Step 3:BatchTrain 训练(MindTrainer)**
-调和循环检测到数据集就绪,SSH 启动 MindTrainer。BatchTrain 实现读取数据集,走 SFT 冷启动(行为克隆)→ GRPO+OPD 联合更新(GRPO 探索新推理能力,OPD 约束不偏离已有通用推理分布,作用于同一训练 step)。产出候选 checkpoint 写入 ControlPlane,状态=候选。
+调和循环检测到数据集就绪,SSH 启动 MindTrainer。BatchTrain 实现读取数据集,走 SFT 冷启动 → GRPO+OPD 联合更新(GRPO 探索新推理能力,OPD 约束不偏离已有通用推理分布,作用于同一训练 step)。产出候选 checkpoint 写入 ControlPlane,状态=候选。
 
 **Step 4:诊断评测(SocialSimulator 批量/评测模块)**
-调和循环检测到候选 checkpoint 就绪,触发诊断评测。诊断评测器加载候选 checkpoint,打分器(规则式,HiToM 题有客观答案)产出诊断报告:三阶信念+12.3 分,四阶信念+8.7 分。
+诊断评测器加载候选 checkpoint,打分器(规则式,HiToM 题有客观答案)产出诊断报告:三阶信念+12.3 分,四阶信念+8.7 分,通用推理无退化(-0.3 分,在 OPD 容忍范围内)。
 
 **Step 5:审核门① Checkpoint 晋级(人工)**
-人工执行 `rismforge review run-001`,看到得分及通用推理维度无退化(-0.3 分,在 OPD 容忍范围内)。执行 `rismforge approve run-001`,ControlPlane 状态变更提交 git commit,checkpoint 写入 `models/zengen-v1.yaml`,状态=已晋级。
+人工执行 `rismforge review run-001` 看报告,执行 `rismforge approve run-001`。ControlPlane 状态变更提交 git commit,checkpoint 写入 `models/zengen-v1.yaml`,状态=已晋级。
 
 **Step 6:MindAgent 并行自动触发**
-MindAgent 自主订阅"checkpoint 已晋级"事件,绑定 zengen-v1,通过受限接口②调用 SocialSimulator 实时环境服务,跑一批日常对话场景(purpose=deployment_simulation,从共享模板池按此标记筛选)。
-
-**⚠️ 设计验证点**:第一轮 MindAgent 的技能库和记忆库都是空的,经验分析器无多少有效模式可聚合,提案验证器无法通过验证——不会产出低质量提案打扰审核门②。"第一轮 MindAgent 沉默"是预期行为,不是 bug。✅ 自洽。
+MindAgent 自主订阅"checkpoint 已晋级"事件,绑定 zengen-v1,通过受限接口②调用 SocialSimulator 实时环境服务跑部署仿真 episode。**⚠️ 第一轮技能库/记忆库为空,沉默是预期行为**。✅ 自洽。
 
 **Step 7:配方入库(RecipeStore)**
-TrainScheduler 配方提名器检测到分数提升达标,打包 BatchTrain 类型配方候选:锁定模板 ID 集合、数据集引用(sha256)、超参精确值、Training Executor+Reward Pipeline 的 git commit 哈希、评测基准版本。审核门③批准后,RecipeStore 入库 recipe-001,可复现性校验通过。
+TrainScheduler 配方提名器打包 BatchTrain 类型配方候选:锁定模板 ID 集合、数据集引用(sha256)、超参精确值、Training Executor+Reward Pipeline 的 git commit 哈希、评测基准版本。审核门③批准后,RecipeStore 入库 recipe-001。
 
 **Step 8:TrainPlanner 接手下一轮**
-TrainPlanner 上下文打包器汇总 run-001 诊断报告+recipe-001 战绩,调用外部 CLI 强模型,拿到决策:克隆 recipe-001,提高四阶信念推理场景比例。
+TrainPlanner 汇总 run-001 诊断报告+recipe-001 战绩,调用外部 CLI 强模型,决策:克隆 recipe-001,提高四阶信念推理场景比例。
 
 ---
 
 ### 场景二:InteractTrain 路径——训练"说服与立场维护"的多轮社交能力
 
 **背景**:已有 zengen-v2(经两轮 BatchTrain 产出),RecipeStore 已有三条 BatchTrain 配方。TrainPlanner 决定切换 InteractTrain 模式——"说服与立场维护"需要多轮动态对抗,静态数据无法充分覆盖。
+
+```mermaid
+flowchart TD
+    subgraph CTL["控制层 (本地开发机)"]
+        A["TrainPlanner\n汇总诊断分数+配方战绩\n调用外部 CLI 强模型\n→ PlannerDecision:\n全新 InteractTrain 指令\n目标=说服与立场维护"]
+        B["TrainScheduler\n动作解析器\n解析决策→全新指令\nRoleAssignment:\n  zengen-v2=坚守立场方\n  冻结 zengen-v1=试图说服方"]
+        C["ControlPlane\n写入 directive.yaml\n状态=待执行"]
+        H["ControlPlane\n写入 diagnostic_report.yaml\n状态=候选待审"]
+        I{{"审核门①\nCheckpoint 晋级\n人工 rismforge approve"}}
+        J["ControlPlane\n写入 zengen-v3.yaml\n状态=已晋级"]
+        K["TrainScheduler\n配方提名器\n打包 InteractTrain 配方候选\n标注:含 LLM 非确定性组件\n复现=高度相似而非字节级一致"]
+        L{{"审核门③\n配方入库\n人工确认"}}
+        M["RecipeStore\n入库 recipe-004\nInteractTrain 类型"]
+    end
+
+    subgraph SSH["SSH 调度"]
+        C -->|调和循环检测 待执行\nSSH 下发 InteractTrain 会话| D
+        G -->|候选 checkpoint 引用同步回| H
+        H -->|调和循环检测 候选就绪\nSSH 触发诊断| H2
+    end
+
+    subgraph CALC["计算层 (远程 GPU 服务器)"]
+        D["SocialSimulator\n实时环境服务网关\n接收 RoleAssignment 参数\n实例化:\n  zengen-v2(被训练方)\n  冻结 zengen-v1(对手方)"]
+        E["MindTrainer InteractTrain\n通过受限接口①\n高频 rollout"]
+        F["奖励管线\nLLM-as-judge 话语级归因\n(说服类无客观答案)\n→ 逐句奖励:\n  最终立场是否守住\n  每轮说服力评分\nGRPO+OPD 更新参数"]
+        G["候选 checkpoint"]
+        H2["SocialSimulator\n诊断评测器\n标准化基准(含多样人格说服者)\n不只是 zengen-v1 风格"]
+        MA["MindAgent(异步)\n订阅 已晋级 事件\n绑定 zengen-v3\n经验采集(受限接口②)"]
+
+        D <-->|"受限接口①\n(计算层内部直连,不经 ControlPlane)"| E
+        E --> F --> G
+        H2 -->|诊断报告同步回| H
+        J -->|并行触发| MA
+    end
+
+    A --> B --> C
+    I -->|approve| J --> K --> L -->|approve| M
+
+    warn["🔶 已知局限:对手固定为 zengen-v1\n可能学到特定对抗套路(reward hacking)\n应对:诊断基准含多样人格 + RecipeStore 战绩回写\n若后续退化→生命周期迁移到 已废弃\n改进路径:加中间检查点诊断"]
+    E -.-> warn
+```
 
 **Step 1:InteractTrain 指令生成**
 TrainScheduler 动作解析器解析 PlannerDecision:全新 InteractTrain 指令,目标维度=说服与立场维护,RoleAssignment=被训练模型(zengen-v2)扮演"坚守立场方",对手角色由冻结的 zengen-v1 扮演"试图说服方"(类 R-Zero 的 Challenger-Solver 结构迁移到社会场景)。
@@ -578,24 +660,54 @@ MindTrainer InteractTrain 实现通过受限接口①连接 SocialSimulator 实�
 
 **背景**:MindAgent 已积累三轮模拟部署交互经验(跨 zengen-v1/v2/v3 三个版本),当前绑定 zengen-v3,技能库已有两个技能:意图推断路由、信念状态追踪。
 
-**Step 1:经验采集与分析**
-本轮通过受限接口②跑了 80 个模拟部署 episode(日常情感支持+复杂家庭冲突场景)。经验分析器跨 80 个 episode 聚合分析,发现跨 episode 的稳定模式:当对话方情绪高度激动时(出现"但是"/"你不理解"/"我已经试过了"等表达),意图推断路由把话语全部路由到"目标冲突处理"技能,忽略了情绪状态识别,导致回应逻辑正确但情感共鸣严重不足,约 67% 的 episode 受影响。
+```mermaid
+flowchart TD
+    subgraph CALC["计算层 (远程 GPU 服务器)"]
+        A["MindAgent\nActio实例管理器\n绑定 zengen-v3\n加载当前技能库:\n  意图推断路由\n  信念状态追踪"]
+        B["模拟部署驱动器\n通过受限接口②\n跑 80 个 episode\n日常情感支持+家庭冲突场景"]
+        SS["SocialSimulator\n实时环境服务网关\n实例化对手人格(临时)\nMindAgent 自身=完整 Actio 实例\n(技能库全部生效,不是裸模型)"]
+        C["经验分析器\n跨 80 个 episode 聚合\n发现稳定模式:\n  情绪高激活时(但是/你不理解)\n  意图推断路由→目标冲突处理\n  忽略情绪状态识别\n  67% episode 受影响\n→ BehaviorFinding"]
+        D["技能提案生成器\n调用外部推理桥接(Claude Code)\n生成候选技能:\n  情绪激活检测器\n  在意图路由前检测情绪信号\n  切换 情绪先于目标 策略"]
+        E["提案验证器\n回放 15 个代表性 episode\n加载候选技能\n重新驱动 Actio 实例\n结果:情绪高激活轮次\n对话质量+23%\n无负向影响"]
+        F["提案打包器\n打包 IncrementProposal:\n  BehaviorFinding(67%,80 episode)\n  候选技能定义\n  验证结果(+23%,15 episode)\n  触发 episode 引用列表"]
 
-此发现基于跨 episode 聚合模式而非单一个案,记录为 BehaviorFinding:能力缺口类型=情绪感知缺失,触发场景=高情绪激活对话,影响比例=67%。
+        A --> B
+        B <-->|"受限接口②\n(计算层内部直连)"| SS
+        B --> C --> D --> E --> F
+    end
+
+    subgraph CTL["控制层 (本地开发机)"]
+        G{{"审核门②\n技能/记忆增量纳入\n人工 rismforge review proposal-007\n→ approve"}}
+        H["ControlPlane\n情绪激活检测器\n纳入正式技能库"]
+        I["TrainScheduler\n配方提名器\n打包 AgentRSI 类型配方:\n  锁定 zengen-v3 版本\n  模板精确 ID 集合\n  分析器阈值配置\n  Claude Code prompt 模板版本"]
+        J{{"审核门③\n配方入库\n人工确认"}}
+        K["RecipeStore\n入库 recipe-008\nAgentRSI 类型\n(无训练数据集/无训练超参)\n✅ 三类型配方分开设计的必要性得证"]
+    end
+
+    F -->|增量提案写入 ControlPlane| G
+    G -->|approve| H
+    H --> I --> J -->|approve| K
+
+    warn["🔶 已知局限:验证器用同批数据\n有过拟合风险\n应对:审核门②后续轮次持续监控\n战绩追踪器记录新 episode 表现\n改进路径:验证器加留出集"]
+    E -.-> warn
+```
+
+**Step 1:经验采集与分析**
+本轮通过受限接口②跑了 80 个模拟部署 episode。经验分析器跨 80 个 episode 聚合分析,发现跨 episode 的稳定模式:当对话方情绪高度激动时,意图推断路由把话语全部路由到"目标冲突处理"技能,忽略了情绪状态识别,约 67% 的 episode 受影响。记录为 BehaviorFinding:能力缺口类型=情绪感知缺失。
 
 **Step 2:技能提案生成**
 技能提案生成器调用外部推理桥接(Claude Code)生成候选技能:"情绪激活检测器"——在意图推断路由之前检测高情绪激活信号,若检测到则切换"情绪先于目标"响应策略。
 
 **Step 3:提案验证器**
-回放 15 个代表性 episode,加载候选技能,重新驱动 Actio 实例。验证结果:情绪高激活轮次后续对话质量(LLM-as-judge 打分)平均提升 23%,无负向影响。
+回放 15 个代表性 episode,加载候选技能,重新驱动 Actio 实例。验证结果:情绪高激活轮次后续对话质量平均提升 23%,无负向影响。
 
-**⚠️ 已知局限**:验证器回放的是"触发提案的同批数据",有过拟合风险——只证明了对训练集有效,不直接证明泛化。应对机制:①提案验证器只负责降低低质量提案入门率;②真正的泛化验证发生在审核门②之后,后续轮次 MindAgent 经验采集会用新 episode 持续验证,战绩追踪器记录后续表现。审核门是第一道关,不是最后一道——与 checkpoint 晋级后仍有后续评测回写的逻辑完全一致。🔶 局限已知,架构设计一致。
+**⚠️ 已知局限**:验证器回放的是"触发提案的同批数据",有过拟合风险。应对:审核门②后续轮次 MindAgent 经验采集会用新 episode 持续验证,战绩追踪器记录后续表现。审核门是第一道关,不是最后一道。🔶 局限已知,架构设计一致。
 
 **Step 4:审核门②(人工)**
-IncrementProposal 打包:BehaviorFinding(67% 影响率,80 个 episode 聚合)、候选技能定义、验证结果(+23% 对话质量,15 episode 回放)、触发 episode 引用列表。人工执行 `rismforge review proposal-007`,看到完整证据链后 `rismforge approve proposal-007`,情绪激活检测器纳入正式技能库。
+人工执行 `rismforge review proposal-007`,看到完整证据链后 `rismforge approve proposal-007`,情绪激活检测器纳入正式技能库。
 
 **Step 5:AgentRSI 配方入库**
-TrainScheduler 配方提名器检测到 proposal-007 被批准,打包 AgentRSI 类型配方:锁定 zengen-v3 版本、模拟部署用到的情境/人格模板精确 ID 集合、经验分析器显著性阈值配置、技能提案生成器调用的 Claude Code prompt 模板版本。审核门③批准后入库 recipe-008(AgentRSI 类型)。
+TrainScheduler 配方提名器打包 AgentRSI 类型配方:锁定 zengen-v3 版本、模拟部署用到的情境/人格模板精确 ID 集合、经验分析器显著性阈值配置、技能提案生成器调用的 Claude Code prompt 模板版本。审核门③批准后入库 recipe-008(AgentRSI 类型)。
 
 **⚠️ 设计验证点**:AgentRSI 配方里没有训练数据集和训练超参——这两项是 BatchTrain/InteractTrain 配方的核心字段,对 AgentRSI 毫无意义。三类型配方分开设计而不是强行套同一个 schema 的必要性在此得到直接验证。✅ 设计必要且自洽。
 
