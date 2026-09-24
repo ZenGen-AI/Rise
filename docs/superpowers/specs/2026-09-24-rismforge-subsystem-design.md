@@ -528,7 +528,7 @@ TrainScheduler
 
 ```mermaid
 flowchart TD
-    A(["🧑 人工写入初始训练指令\nHiToM / BatchTrain"]) --> B
+    A(["\U0001f9d1 人工写入初始训练指令\nHiToM / BatchTrain"]) --> B
 
     subgraph CTL["控制层 (本地开发机)"]
         B["ControlPlane 调和循环\n写入 directive.yaml\n状态=待执行"]
@@ -561,8 +561,6 @@ flowchart TD
     note1["⚠️ 设计验证点\n情境生成参数此时是筛选条件\n精确锚定(模板ID集合)在配方打包阶段才确定\n先运行再锚定的时序合理 ✅"]
     C -.-> note1
 ```
-调和循环检测到"训练指令=待执行",SSH 下发任务到计算层。情境生成器(purpose=training)按指令参数生成三阶/四阶信念推理嵌套场景,人格生成器配套生成角色人格。Episode 数据集写回 ControlPlane,状态=已生成。
-
 **⚠️ 设计验证点**:指令里的"情境生成参数"此时是筛选条件,还没有"精确锚定的模板 ID 集合"。精确锚定发生在配方候选打包阶段——模板被生成后 ID 集合才确定,RecipeStore 可复现性校验器在入库时验证。先运行再锚定的时序是合理的。✅ 自洽。
 
 **Step 3:BatchTrain 训练(MindTrainer)**
