@@ -514,6 +514,105 @@ TrainScheduler
 
 ---
 
+---
+
+## 典型场景端到端流程验证
+
+以下三个场景分别覆盖三种训练路径,用于验证整体架构与子系统设计的自洽性与可实现性。
+
+### 场景一:BatchTrain 路径——首次训练"高阶信念推理"能力
+
+**背景**:工厂刚启动,ZenGen 基座是 Qwen3-14B,没有任何历史配方,第一轮决策人工写死。
+
+**Step 1:初始指令**
+人工直接向 ControlPlane 写入训练指令(TrainPlanner 决策的降级替代路径):目标维度=高阶信念推理(HiToM),训练模式=BatchTrain。TrainScheduler 的指令构造器把 ResolvedAction 写入 ControlPlane,状态=待执行。
+
+**Step 2:情境合成(SocialSimulator 批量模块)**
+调和循环检测到"训练指令=待执行",SSH 下发任务到计算层。情境生成器(purpose=training)按指令参数生成三阶/四阶信念推理嵌套场景("A 知道 B 以为 C 不知道某件事,但 C 其实已经知道了"),人格生成器配套生成角色人格。Episode 数据集写回 ControlPlane,状态=已生成。
+
+**⚠️ 设计验证点**:指令里的"情境生成参数"此时是筛选条件,还没有"精确锚定的模板 ID 集合"。这没有问题——精确锚定发生在配方候选打包阶段:当这批模板被生成后,其 ID 集合才确定,RecipeStore 的可复现性校验器在入库时验证该锚定是否完成。先运行再锚定的时序是合理的。✅ 自洽。
+
+**Step 3:BatchTrain 训练(MindTrainer)**
+调和循环检测到数据集就绪,SSH 启动 MindTrainer。BatchTrain 实现读取数据集,走 SFT 冷启动(行为克隆)→ GRPO+OPD 联合更新(GRPO 探索新推理能力,OPD 约束不偏离已有通用推理分布,作用于同一训练 step)。产出候选 checkpoint 写入 ControlPlane,状态=候选。
+
+**Step 4:诊断评测(SocialSimulator 批量/评测模块)**
+调和循环检测到候选 checkpoint 就绪,触发诊断评测。诊断评测器加载候选 checkpoint,打分器(规则式,HiToM 题有客观答案)产出诊断报告:三阶信念+12.3 分,四阶信念+8.7 分。
+
+**Step 5:审核门① Checkpoint 晋级(人工)**
+人工执行 `rismforge review run-001`,看到得分及通用推理维度无退化(-0.3 分,在 OPD 容忍范围内)。执行 `rismforge approve run-001`,ControlPlane 状态变更提交 git commit,checkpoint 写入 `models/zengen-v1.yaml`,状态=已晋级。
+
+**Step 6:MindAgent 并行自动触发**
+MindAgent 自主订阅"checkpoint 已晋级"事件,绑定 zengen-v1,通过受限接口②调用 SocialSimulator 实时环境服务,跑一批日常对话场景(purpose=deployment_simulation,从共享模板池按此标记筛选)。
+
+**⚠️ 设计验证点**:第一轮 MindAgent 的技能库和记忆库都是空的,经验分析器无多少有效模式可聚合,提案验证器无法通过验证——不会产出低质量提案打扰审核门②。"第一轮 MindAgent 沉默"是预期行为,不是 bug。✅ 自洽。
+
+**Step 7:配方入库(RecipeStore)**
+TrainScheduler 配方提名器检测到分数提升达标,打包 BatchTrain 类型配方候选:锁定模板 ID 集合、数据集引用(sha256)、超参精确值、Training Executor+Reward Pipeline 的 git commit 哈希、评测基准版本。审核门③批准后,RecipeStore 入库 recipe-001,可复现性校验通过。
+
+**Step 8:TrainPlanner 接手下一轮**
+TrainPlanner 上下文打包器汇总 run-001 诊断报告+recipe-001 战绩,调用外部 CLI 强模型,拿到决策:克隆 recipe-001,提高四阶信念推理场景比例。
+
+---
+
+### 场景二:InteractTrain 路径——训练"说服与立场维护"的多轮社交能力
+
+**背景**:已有 zengen-v2(经两轮 BatchTrain 产出),RecipeStore 已有三条 BatchTrain 配方。TrainPlanner 决定切换 InteractTrain 模式——"说服与立场维护"需要多轮动态对抗,静态数据无法充分覆盖。
+
+**Step 1:InteractTrain 指令生成**
+TrainScheduler 动作解析器解析 PlannerDecision:全新 InteractTrain 指令,目标维度=说服与立场维护,RoleAssignment=被训练模型(zengen-v2)扮演"坚守立场方",对手角色由冻结的 zengen-v1 扮演"试图说服方"(类 R-Zero 的 Challenger-Solver 结构迁移到社会场景)。
+
+**⚠️ 设计验证点**:"对手角色=冻结的 zengen-v1"通过环境服务接口显式传给 SocialSimulator,不由 SocialSimulator 内部写死。"角色-模型后端映射必须由调用方指定"这条约束得到验证。✅ 自洽。
+
+**Step 2:实时 rollout(计算层内部直连)**
+MindTrainer InteractTrain 实现通过受限接口①连接 SocialSimulator 实时环境服务网关,高频 rollout。奖励管线的归因阶段用 LLM-as-judge(说服类任务无客观答案,规则式打分不适用)做话语级归因,把"最终立场是否守住""每一轮回应的说服力"分解到逐句奖励。GRPO+OPD 更新参数。
+
+**⚠️ 已知局限**:对手是 zengen-v1,被训练模型可能学到"专门对抗 zengen-v1 的套路"而非泛化说服能力(reward hacking)。当前架构的应对是延迟发现机制:①诊断评测用标准化基准(含各种不同人格的说服者,不只有 zengen-v1 风格);②RecipeStore 战绩回写若后续显示退化,生命周期管理器推进配方状态到"已废弃"。这是 v1 已接受的权衡,改进路径是加中间检查点诊断缩短发现周期。🔶 局限已知,有明确改进路径。
+
+**Step 3-7:与场景一相同(诊断→审核门①→晋级→MindAgent 触发→配方入库)**
+
+**InteractTrain 配方入库的特殊处理**:可复现性校验器在 recipe.yaml 元数据中标注"含 LLM 推理服务非确定性组件,复现结果为高度相似而非字节级一致",人工审核门③时可见此说明,不影响入库。✅ 自洽。
+
+---
+
+### 场景三:AgentRSI 路径——MindAgent 自主发现并提案"情绪感知技能"
+
+**背景**:MindAgent 已积累三轮模拟部署交互经验(跨 zengen-v1/v2/v3 三个版本),当前绑定 zengen-v3,技能库已有两个技能:意图推断路由、信念状态追踪。
+
+**Step 1:经验采集与分析**
+本轮通过受限接口②跑了 80 个模拟部署 episode(日常情感支持+复杂家庭冲突场景)。经验分析器跨 80 个 episode 聚合分析,发现跨 episode 的稳定模式:当对话方情绪高度激动时(出现"但是"/"你不理解"/"我已经试过了"等表达),意图推断路由把话语全部路由到"目标冲突处理"技能,忽略了情绪状态识别,导致回应逻辑正确但情感共鸣严重不足,约 67% 的 episode 受影响。
+
+此发现基于跨 episode 聚合模式而非单一个案,记录为 BehaviorFinding:能力缺口类型=情绪感知缺失,触发场景=高情绪激活对话,影响比例=67%。
+
+**Step 2:技能提案生成**
+技能提案生成器调用外部推理桥接(Claude Code)生成候选技能:"情绪激活检测器"——在意图推断路由之前检测高情绪激活信号,若检测到则切换"情绪先于目标"响应策略。
+
+**Step 3:提案验证器**
+回放 15 个代表性 episode,加载候选技能,重新驱动 Actio 实例。验证结果:情绪高激活轮次后续对话质量(LLM-as-judge 打分)平均提升 23%,无负向影响。
+
+**⚠️ 已知局限**:验证器回放的是"触发提案的同批数据",有过拟合风险——只证明了对训练集有效,不直接证明泛化。应对机制:①提案验证器只负责降低低质量提案入门率;②真正的泛化验证发生在审核门②之后,后续轮次 MindAgent 经验采集会用新 episode 持续验证,战绩追踪器记录后续表现。审核门是第一道关,不是最后一道——与 checkpoint 晋级后仍有后续评测回写的逻辑完全一致。🔶 局限已知,架构设计一致。
+
+**Step 4:审核门②(人工)**
+IncrementProposal 打包:BehaviorFinding(67% 影响率,80 个 episode 聚合)、候选技能定义、验证结果(+23% 对话质量,15 episode 回放)、触发 episode 引用列表。人工执行 `rismforge review proposal-007`,看到完整证据链后 `rismforge approve proposal-007`,情绪激活检测器纳入正式技能库。
+
+**Step 5:AgentRSI 配方入库**
+TrainScheduler 配方提名器检测到 proposal-007 被批准,打包 AgentRSI 类型配方:锁定 zengen-v3 版本、模拟部署用到的情境/人格模板精确 ID 集合、经验分析器显著性阈值配置、技能提案生成器调用的 Claude Code prompt 模板版本。审核门③批准后入库 recipe-008(AgentRSI 类型)。
+
+**⚠️ 设计验证点**:AgentRSI 配方里没有训练数据集和训练超参——这两项是 BatchTrain/InteractTrain 配方的核心字段,对 AgentRSI 毫无意义。三类型配方分开设计而不是强行套同一个 schema 的必要性在此得到直接验证。✅ 设计必要且自洽。
+
+---
+
+### 场景验证总结
+
+| 已知局限 | 暴露场景 | 当前应对机制 | v2+ 改进路径 |
+|---|---|---|---|
+| InteractTrain 的 reward hacking 延迟发现 | 场景二 Step 2 | RecipeStore 战绩回写+生命周期迁移到"已废弃" | 加中间检查点诊断,缩短发现周期 |
+| 提案验证器有过拟合风险 | 场景三 Step 3 | 审核门②后续轮次持续监控+战绩回写 | 验证器加留出集(非 motivating episodes) |
+| MindAgent 第一轮沉默 | 场景一 Step 6 | 预期行为,无需应对 | 冷启动阶段可人工预置少量初始技能 |
+
+**三个场景均未发现结构性矛盾或不可实现环节**,整体架构可支撑一次完整的端到端 RSI 闭环。
+
+---
+
 ## 附:七个子系统设计一致性对照
 
 | 设计原则 | 在各子系统中的体现 |
