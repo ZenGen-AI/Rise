@@ -354,7 +354,11 @@ RecipeStore存储的配方按对应的训练路径分三种类型。每种类型
 ### 5.2 内部模块划分
 
 ```
-ControlPlane(审核门③批准) → 可复现性校验器 → 配方存储管理器
+TrainScheduler(配方提名) → 可复现性校验器(生成校验报告)
+                                    ↓
+                        ControlPlane(审核门③,人工审核时参考校验报告)
+                                    ↓ 批准
+                              配方存储管理器
 ControlPlane(轮次结果回写) ──────────────────→ 配方存储管理器
                                                      ↓
                                            ┌─────────┴────────┐
@@ -514,8 +518,6 @@ TrainScheduler
 
 ---
 
----
-
 ## 典型场景端到端流程验证
 
 以下三个场景分别覆盖三种训练路径,用于验证整体架构与子系统设计的自洽性与可实现性。
@@ -561,6 +563,12 @@ flowchart TD
     note1["⚠️ 设计验证点\n情境生成参数此时是筛选条件\n精确锚定(模板ID集合)在配方打包阶段才确定\n先运行再锚定的时序合理 ✅"]
     C -.-> note1
 ```
+**Step 1:初始指令**
+人工直接向 ControlPlane 写入训练指令(TrainPlanner 决策的降级替代路径):目标维度=高阶信念推理(HiToM),训练模式=BatchTrain。TrainScheduler 的指令构造器把 ResolvedAction 写入 ControlPlane,状态=待执行。
+
+**Step 2:情境合成(SocialSimulator 批量模块)**
+调和循环检测到"训练指令=待执行",SSH 下发任务到计算层。情境生成器(purpose=training)按指令参数生成三阶/四阶信念推理嵌套场景,人格生成器配套生成角色人格。Episode 数据集写回 ControlPlane,状态=已生成。
+
 **⚠️ 设计验证点**:指令里的"情境生成参数"此时是筛选条件,还没有"精确锚定的模板 ID 集合"。精确锚定发生在配方候选打包阶段——模板被生成后 ID 集合才确定,RecipeStore 可复现性校验器在入库时验证。先运行再锚定的时序是合理的。✅ 自洽。
 
 **Step 3:BatchTrain 训练(MindTrainer)**
