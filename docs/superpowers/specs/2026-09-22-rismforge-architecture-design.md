@@ -41,6 +41,8 @@ RismForge 是一套"AI驱动的社会心智后训练工厂"——一个 RSI(AI�
 
 RismForge 由**七个能力子系统**、**一个协调层(ControlPlane)**、**一个共享基础设施层**组成。子系统之间**不直接互相调用**,只通过 ControlPlane 读写数据和订阅状态变更事件——除两处经明确批准的高频受限例外直连接口。
 
+**架构图**:[`docs/assets/rismforge-architecture.html`](../assets/rismforge-architecture.html) — 三层结构(能力子系统层 / 协调层 / 共享基础设施层)+ 两处受限例外接口 + 三道人工审核门,支持明暗双主题,在浏览器中打开查看。下方 Mermaid 版本作为终端/纯文本阅读场景的简化备份,信息量以 HTML 版本为准。
+
 ```mermaid
 flowchart TB
     subgraph CAP["能力子系统层"]

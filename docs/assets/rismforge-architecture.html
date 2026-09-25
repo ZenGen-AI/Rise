@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RismForge Architecture</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap">
+<style>
+  :root {
+    --bg:           oklch(97% 0.008 250);
+    --bg-raised:    oklch(100% 0 0);
+    --border:       oklch(88% 0.012 250);
+    --text:         oklch(22% 0.015 250);
+    --text-muted:   oklch(52% 0.018 250);
+
+    --cap-bg:       oklch(96% 0.022 250);
+    --cap-border:   oklch(78% 0.08 250);
+    --cap-label:    oklch(38% 0.14 250);
+    --cap-node-bg:  oklch(42% 0.15 250);
+    --cap-node-txt: oklch(97% 0.008 250);
+
+    --cp-bg:        oklch(97% 0.025 50);
+    --cp-border:    oklch(78% 0.10 50);
+    --cp-label:     oklch(40% 0.12 40);
+    --cp-node-bg:   oklch(46% 0.12 40);
+    --cp-node-txt:  oklch(97% 0.008 50);
+
+    --inf-bg:       oklch(95% 0.018 155);
+    --inf-border:   oklch(76% 0.08 155);
+    --inf-label:    oklch(35% 0.10 155);
+    --inf-node-bg:  oklch(40% 0.09 155);
+    --inf-node-txt: oklch(97% 0.008 155);
+
+    --exc-color:    oklch(55% 0.20 25);
+    --exc-bg:       oklch(96% 0.025 25);
+
+    --gate-color:   oklch(50% 0.16 320);
+
+    --radius-sm: 6px;
+    --radius-md: 10px;
+    --radius-lg: 14px;
+    --font-mono: 'JetBrains Mono', 'Consolas', monospace;
+    --font-body: 'Inter', system-ui, sans-serif;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg:           oklch(14% 0.015 250);
+      --bg-raised:    oklch(18% 0.015 250);
+      --border:       oklch(28% 0.018 250);
+      --text:         oklch(92% 0.008 250);
+      --text-muted:   oklch(62% 0.015 250);
+
+      --cap-bg:       oklch(19% 0.025 250);
+      --cap-border:   oklch(42% 0.10 250);
+      --cap-label:    oklch(72% 0.12 250);
+      --cap-node-bg:  oklch(48% 0.14 250);
+      --cap-node-txt: oklch(97% 0 0);
+
+      --cp-bg:        oklch(18% 0.025 50);
+      --cp-border:    oklch(45% 0.10 50);
+      --cp-label:     oklch(75% 0.10 50);
+      --cp-node-bg:   oklch(52% 0.12 40);
+      --cp-node-txt:  oklch(97% 0 0);
+
+      --inf-bg:       oklch(17% 0.020 155);
+      --inf-border:   oklch(40% 0.09 155);
+      --inf-label:    oklch(68% 0.09 155);
+      --inf-node-bg:  oklch(44% 0.09 155);
+      --inf-node-txt: oklch(97% 0 0);
+
+      --exc-color:    oklch(65% 0.20 25);
+      --exc-bg:       oklch(22% 0.025 25);
+
+      --gate-color:   oklch(68% 0.16 320);
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --bg:           oklch(14% 0.015 250);
+    --bg-raised:    oklch(18% 0.015 250);
+    --border:       oklch(28% 0.018 250);
+    --text:         oklch(92% 0.008 250);
+    --text-muted:   oklch(62% 0.015 250);
+    --cap-bg:       oklch(19% 0.025 250);
+    --cap-border:   oklch(42% 0.10 250);
+    --cap-label:    oklch(72% 0.12 250);
+    --cap-node-bg:  oklch(48% 0.14 250);
+    --cap-node-txt: oklch(97% 0 0);
+    --cp-bg:        oklch(18% 0.025 50);
+    --cp-border:    oklch(45% 0.10 50);
+    --cp-label:     oklch(75% 0.10 50);
+    --cp-node-bg:   oklch(52% 0.12 40);
+    --cp-node-txt:  oklch(97% 0 0);
+    --inf-bg:       oklch(17% 0.020 155);
+    --inf-border:   oklch(40% 0.09 155);
+    --inf-label:    oklch(68% 0.09 155);
+    --inf-node-bg:  oklch(44% 0.09 155);
+    --inf-node-txt: oklch(97% 0 0);
+    --exc-color:    oklch(65% 0.20 25);
+    --exc-bg:       oklch(22% 0.025 25);
+    --gate-color:   oklch(68% 0.16 320);
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html { height: 100%; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-body);
+    font-size: 14px;
+    line-height: 1.5;
+    padding: 32px 24px 48px;
+    min-height: 100%;
+  }
+
+  header {
+    margin-bottom: 32px;
+  }
+
+  .title-row {
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+
+  h1 {
+    font-family: var(--font-mono);
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    color: var(--text);
+    text-wrap: balance;
+  }
+
+  .subtitle {
+    font-size: 13px;
+    color: var(--text-muted);
+    font-weight: 400;
+  }
+
+  .theme-btn {
+    margin-left: auto;
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: color 0.15s, border-color 0.15s;
+  }
+  .theme-btn:hover { color: var(--text); border-color: var(--text-muted); }
+
+  /* ── diagram container ── */
+  .diagram {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    max-width: 1080px;
+    margin: 0 auto;
+  }
+
+  /* ── layer bands ── */
+  .layer {
+    border-radius: var(--radius-lg);
+    border: 1.5px solid;
+    padding: 18px 20px 20px;
+    position: relative;
+  }
+
+  .layer-cap  { background: var(--cap-bg);  border-color: var(--cap-border); }
+  .layer-cp   { background: var(--cp-bg);   border-color: var(--cp-border); }
+  .layer-inf  { background: var(--inf-bg);  border-color: var(--inf-border); }
+
+  .layer-label {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.10em;
+    text-transform: uppercase;
+    margin-bottom: 14px;
+  }
+  .layer-cap  .layer-label { color: var(--cap-label); }
+  .layer-cp   .layer-label { color: var(--cp-label); }
+  .layer-inf  .layer-label { color: var(--inf-label); }
+
+  /* ── node grids ── */
+  .nodes {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .node {
+    border-radius: var(--radius-md);
+    padding: 11px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 150px;
+    flex: 1;
+    max-width: 220px;
+  }
+
+  .node-cap { background: var(--cap-node-bg); color: var(--cap-node-txt); }
+  .node-cp  { background: var(--cp-node-bg);  color: var(--cp-node-txt); }
+  .node-inf { background: var(--inf-node-bg); color: var(--inf-node-txt); }
+
+  .node-name {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+
+  .node-desc {
+    font-size: 11px;
+    opacity: 0.78;
+    line-height: 1.4;
+  }
+
+  /* ── ControlPlane single node (wider) ── */
+  .cp-single {
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    flex-wrap: wrap;
+  }
+
+  .cp-main {
+    background: var(--cp-node-bg);
+    color: var(--cp-node-txt);
+    border-radius: var(--radius-md);
+    padding: 14px 20px;
+    flex: 1;
+    min-width: 260px;
+  }
+
+  .cp-main .node-name { font-size: 13px; }
+
+  .gates {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .gate {
+    background: var(--bg-raised);
+    border: 1.5px solid var(--gate-color);
+    color: var(--gate-color);
+    border-radius: var(--radius-sm);
+    padding: 5px 10px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  /* ── connectors ── */
+  .connectors {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 0 8px;
+  }
+
+  .conn-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .conn-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+  }
+
+  .arrow {
+    font-size: 13px;
+  }
+
+  .conn-line {
+    height: 1.5px;
+    flex: 1;
+    min-width: 24px;
+    border: none;
+    background: var(--border);
+  }
+
+  .conn-exc {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--exc-bg);
+    border: 1px solid var(--exc-color);
+    border-radius: var(--radius-sm);
+    padding: 6px 12px;
+    flex-wrap: wrap;
+  }
+
+  .conn-exc .conn-label {
+    color: var(--exc-color);
+    font-weight: 600;
+  }
+
+  .exc-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--exc-color);
+    flex-shrink: 0;
+  }
+
+  /* ── legend ── */
+  .legend {
+    margin-top: 24px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px 32px;
+    max-width: 1080px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+
+  .legend-swatch {
+    width: 28px;
+    height: 3px;
+    border-radius: 2px;
+  }
+  .swatch-cap { background: var(--cap-node-bg); }
+  .swatch-cp  { background: var(--cp-node-bg); }
+  .swatch-inf { background: var(--inf-node-bg); }
+  .swatch-exc { background: var(--exc-color); }
+  .swatch-gate { background: var(--gate-color); }
+  .swatch-exc-dash {
+    width: 28px;
+    height: 2px;
+    background: repeating-linear-gradient(
+      to right,
+      var(--exc-color) 0,
+      var(--exc-color) 5px,
+      transparent 5px,
+      transparent 9px
+    );
+  }
+
+  @media (max-width: 600px) {
+    body { padding: 20px 14px 36px; }
+    .node { min-width: 130px; }
+    .cp-main { min-width: 180px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="title-row">
+    <h1>RismForge</h1>
+    <span class="subtitle">AI 驱动的社会心智后训练工厂 — 系统架构图</span>
+    <button class="theme-btn" onclick="
+      const r = document.documentElement;
+      const cur = r.getAttribute('data-theme');
+      r.setAttribute('data-theme', cur === 'dark' ? 'light' : 'dark');
+      this.textContent = r.getAttribute('data-theme') === 'dark' ? '☀ Light' : '◑ Dark';
+    ">◑ Dark</button>
+  </div>
+</header>
+
+<div class="diagram">
+
+  <!-- ① 能力子系统层 -->
+  <div class="layer layer-cap">
+    <div class="layer-label">能力子系统层 &nbsp;·&nbsp; 七个子系统</div>
+    <div class="nodes">
+      <div class="node node-cap">
+        <span class="node-name">SocialSimulator</span>
+        <span class="node-desc">情境 / 人格生成<br>多智能体仿真 + 诊断评测</span>
+      </div>
+      <div class="node node-cap">
+        <span class="node-name">MindTrainer</span>
+        <span class="node-desc">权重级 RSI 训练引擎<br>InteractTrain + BatchTrain → ZenGen</span>
+      </div>
+      <div class="node node-cap">
+        <span class="node-name">MindAgent</span>
+        <span class="node-desc">部署态智能体运行时<br>技能 / 记忆 RSI（不改权重）</span>
+      </div>
+      <div class="node node-cap">
+        <span class="node-name">RecipeStore</span>
+        <span class="node-desc">验证配方版本化仓库<br>3 类型 · 可复现 · 生命周期管理</span>
+      </div>
+      <div class="node node-cap">
+        <span class="node-name">TrainScheduler</span>
+        <span class="node-desc">决策执行器<br>指令构造 · 配方提名</span>
+      </div>
+      <div class="node node-cap">
+        <span class="node-name">TrainPlanner</span>
+        <span class="node-desc">决策学习者（元认知 RSI）<br>可插拔后端 · v1 = 外部 CLI 强模型</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- 受限例外直连 -->
+  <div class="connectors">
+    <div class="conn-exc">
+      <div class="exc-dot"></div>
+      <span class="conn-label">受限例外接口① · 计算层内部直连（不经 ControlPlane）</span>
+      <span class="conn-label" style="opacity:.7">MindTrainer ↔ SocialSimulator &nbsp;|&nbsp; InteractTrain rollout · gRPC 双向流 · 高频低延迟</span>
+    </div>
+    <div class="conn-exc">
+      <div class="exc-dot"></div>
+      <span class="conn-label">受限例外接口② · 计算层内部直连（不经 ControlPlane）</span>
+      <span class="conn-label" style="opacity:.7">MindAgent ↔ SocialSimulator &nbsp;|&nbsp; 经验采集 · gRPC 双向流 · 独立于训练 rollout</span>
+    </div>
+  </div>
+
+  <!-- ↕ 状态驱动连接箭头 -->
+  <div class="connectors">
+    <div class="conn-row">
+      <span class="conn-label">所有产物读写 · 事件订阅 / 状态迁移驱动</span>
+      <div class="conn-line"></div>
+      <span class="arrow" style="color:var(--cp-label)">⇅</span>
+    </div>
+  </div>
+
+  <!-- ② 协调层 -->
+  <div class="layer layer-cp">
+    <div class="layer-label">协调层 &nbsp;·&nbsp; 唯一数据衬底</div>
+    <div class="cp-single">
+      <div class="cp-main">
+        <div class="node-name" style="margin-bottom:6px">ControlPlane</div>
+        <div class="node-desc" style="opacity:.82; line-height:1.5">
+          Git 版本化文件树（元数据唯一真相）&nbsp;+&nbsp; SQLite 索引（查询加速）&nbsp;+&nbsp; SSH（控制层 ↔ 计算层传输）<br>
+          调和循环（Reconciliation Loop）&nbsp;·&nbsp; 轮询驱动 · 幂等可恢复
+        </div>
+      </div>
+      <div class="gates">
+        <div class="gate">审核门① Checkpoint 晋级</div>
+        <div class="gate">审核门② 技能 / 记忆纳入</div>
+        <div class="gate">审核门③ 配方入库</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ↓ 依赖箭头 -->
+  <div class="connectors">
+    <div class="conn-row">
+      <span class="conn-label">Actio 实例化 · vLLM 推理服务 · ROLL 分布式训练 · 外部推理桥接</span>
+      <div class="conn-line"></div>
+      <span class="arrow" style="color:var(--inf-label)">↓</span>
+    </div>
+  </div>
+
+  <!-- ③ 共享基础设施层 -->
+  <div class="layer layer-inf">
+    <div class="layer-label">共享基础设施层 &nbsp;·&nbsp; 多子系统共同依赖</div>
+    <div class="nodes">
+      <div class="node node-inf">
+        <span class="node-name">Actio</span>
+        <span class="node-desc">社会心智基础智能体框架<br>技能路由 · 显式记忆 · 激活轨迹<br>SocialSimulator + MindAgent 共用</span>
+      </div>
+      <div class="node node-inf">
+        <span class="node-name">ROLL</span>
+        <span class="node-desc">分布式训练引擎<br>MindTrainer 的 SFT / GRPO+OPD<br>计算层运行</span>
+      </div>
+      <div class="node node-inf">
+        <span class="node-name">vLLM</span>
+        <span class="node-desc">推理服务引擎<br>MindTrainer rollout · SocialSimulator<br>MindAgent 模型后端</span>
+      </div>
+      <div class="node node-inf">
+        <span class="node-name">外部推理桥接</span>
+        <span class="node-desc">CLI / API 调用外部强模型<br>Claude Code · Codex · DeepSeek<br>TrainPlanner v1 推荐后端</span>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- legend -->
+<div class="legend">
+  <div class="legend-item">
+    <div class="legend-swatch swatch-cap"></div>
+    <span>能力子系统</span>
+  </div>
+  <div class="legend-item">
+    <div class="legend-swatch swatch-cp"></div>
+    <span>协调层 / 数据衬底</span>
+  </div>
+  <div class="legend-item">
+    <div class="legend-swatch swatch-inf"></div>
+    <span>共享基础设施</span>
+  </div>
+  <div class="legend-item">
+    <div class="legend-swatch swatch-exc-dash"></div>
+    <span>受限例外直连接口</span>
+  </div>
+  <div class="legend-item">
+    <div class="legend-swatch swatch-gate"></div>
+    <span>人工审核门</span>
+  </div>
+</div>
+
+</body>
+</html>
