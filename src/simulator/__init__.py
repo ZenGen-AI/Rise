@@ -1,0 +1,1 @@
+"""RismForge factory simulator stubs."""
