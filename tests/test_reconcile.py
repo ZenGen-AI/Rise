@@ -54,6 +54,10 @@ def test_reconcile_is_pure_no_mutation():
         candidates=[],
         model_count=0,
     )
-    reconcile(state)
-    reconcile(state)
+    actions1 = reconcile(state)
+    actions2 = reconcile(state)
+    assert actions1 == actions2  # 相同输入两次调用结果一致
     assert state.directives[0].status == "pending"  # 未被修改
+    assert state.model_count == 0  # 未被修改
+    assert state.candidates == []  # 未被修改
+    assert len(state.directives) == 1  # 未被修改
