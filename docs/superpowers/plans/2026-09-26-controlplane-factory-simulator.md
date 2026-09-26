@@ -31,6 +31,9 @@
   3. 大体量引用含可选 `fetch_hint` 字段（V1 可为 `null`）。
   4. 读取任一产物必须走"迁移器链（V1 为空）后再消费"的结构，禁止直接反序列化后交给业务逻辑。
 - **状态机（spec §1.3）**：需审核类产物状态 `draft → pending_review → approved → effective →（deprecated | superseded）`，另 `pending_review → rejected`；非审核类产物状态 `pending → executed → consumed`，另 `pending → failed`。负面状态（rejected/failed）保留不删除。
+- **凭证绝不进 git 树（spec 补充 G.3，安全关键）**：git 树里的配置只允许出现**凭证的变量名引用**（如 `token_env: ANTHROPIC_API_KEY`），绝不出现凭证值。因为每次状态变更都会 `git commit`，凭证一旦写进配置文件就会进入 git 历史，事后清除代价极高。仓库 `.gitignore` 必须排除 `.env` / `*.local.yaml` / `secrets/`；凭证解析失败必须报明确错误（提示缺哪个环境变量），禁止静默降级或发送空 token。
+- **V1 人机接口为纯 CLI（spec 补充 G.1）**：不做任何图形界面、不引入监控看板。
+- **配置分层（spec 补充 G.2）**：影响可复现性的配置（后端选择/模型名/prompt 模板版本/RetryPolicy/单价表）进 git 树 `control-plane/config/`；凭证走环境变量。
 - **标识与命名**：产物状态、字段名用英文小写下划线标识符；ZenGen 版本产物命名 `zengen-v<N>`。
 - **目录结构**：git 仓库根为 `control-plane/`，子目录 `runs/ recipes/ skill_memory_proposals/ models/ compute/`，与 spec §1.2 一致。
 
@@ -46,12 +49,17 @@
 - `gitstore.py` — git CLI 子进程封装（init/read/write/commit/list）
 - `reconcile.py` — 纯函数 `reconcile(TreeState) -> list[Action]` + 视图数据类
 - `daemon.py` — 轮询调和（一次性 `reconcile_once` + 守护 `run_daemon`）+ 动作执行器
+- `config.py` — 三层配置加载 + 凭证按变量名从环境解析 + 日志脱敏，落实补充 G.3 安全边界
+- `observe.py` — 只读可观测呈现（`trace`/`cost`），落实补充 G.4
 
 **Python 包 `src/simulator/`（工厂模拟器 stub）**
 - `stubs.py` — 子系统 stub（SocialSimulator/MindTrainer 产出真实产物，其余 no-op）
 
 **语言中立 schema `schemas/`**
 - `envelope.schema.json` — 信封 JSON Schema（Python 与 TS 共用）
+
+**仓库根**
+- `.gitignore` — 排除凭证文件（`.env` / `*.local.yaml` / `secrets/`），补充 G.3 硬约束
 
 **TypeScript 包 `cli/`（审核门 CLI）**
 - `src/gittree.ts` — 读写 YAML 产物 + git commit（子进程）
@@ -687,7 +695,7 @@ git commit -m "feat: schema migrator chain + load_product read path (F.5 tax)"
 **Interfaces:**
 - Consumes: 无
 - Produces:
-  - `paths.py`: `CONTROL_PLANE_ROOT = "control-plane"`；`run_dir(run_id) -> str`；`model_file(n: int) -> str`；`SUBDIRS: list[str]`
+  - `paths.py`: `CONTROL_PLANE_ROOT = "control-plane"`；`run_dir(run_id) -> str`；`model_file(n: int) -> str`；`backends_config_file() -> str`；`SUBDIRS: list[str]`（含 `config`）
   - `states.py`:
     - `REVIEW_TRANSITIONS: dict[str, set[str]]` / `NONREVIEW_TRANSITIONS: dict[str, set[str]]`
     - `ProductKind`（`"review"` | `"nonreview"` 字符串常量）
@@ -711,8 +719,12 @@ def test_model_file():
     assert paths.model_file(3) == "control-plane/models/zengen-v3.yaml"
 
 
+def test_backends_config_file():
+    assert paths.backends_config_file() == "control-plane/config/backends.yaml"
+
+
 def test_subdirs_match_spec():
-    assert paths.SUBDIRS == ["runs", "recipes", "skill_memory_proposals", "models", "compute"]
+    assert paths.SUBDIRS == ["runs", "recipes", "skill_memory_proposals", "models", "compute", "config"]
 ```
 
 - [ ] **Step 2: 写 states 失败测试**
@@ -774,7 +786,7 @@ Expected: FAIL（`ModuleNotFoundError`）
 from __future__ import annotations
 
 CONTROL_PLANE_ROOT = "control-plane"
-SUBDIRS = ["runs", "recipes", "skill_memory_proposals", "models", "compute"]
+SUBDIRS = ["runs", "recipes", "skill_memory_proposals", "models", "compute", "config"]
 
 
 def run_dir(run_id: str) -> str:
@@ -783,6 +795,10 @@ def run_dir(run_id: str) -> str:
 
 def model_file(n: int) -> str:
     return f"{CONTROL_PLANE_ROOT}/models/zengen-v{n}.yaml"
+
+
+def backends_config_file() -> str:
+    return f"{CONTROL_PLANE_ROOT}/config/backends.yaml"
 ```
 
 - [ ] **Step 5: 实现 states**
@@ -1917,6 +1933,400 @@ git commit -m "test: end-to-end fake RSI orchestration loop"
 
 ---
 
+### Task 12: 配置加载、凭证边界与日志脱敏（安全关键）
+
+**Files:**
+- Create: `src/controlplane/config.py`
+- Modify: `.gitignore`（追加凭证文件排除规则）
+- Test: `tests/test_config.py`
+
+**Interfaces:**
+- Consumes: `GitStore`（Task 6）、`paths.backends_config_file()`（Task 5）
+- Produces:
+  - `BackendConfig(backend: str, invocation_form: str, model_name: str, prompt_template_version: str, token_env: str, retry_policy: dict)` dataclass
+  - `MissingCredentialError(Exception)`
+  - `CredentialInGitTreeError(Exception)`
+  - `load_backend_config(raw: dict) -> BackendConfig`（拒绝含凭证值的配置，抛 `CredentialInGitTreeError`）
+  - `resolve_credential(cfg: BackendConfig, env: dict[str, str]) -> str`（按变量名从环境解析，缺失抛 `MissingCredentialError`）
+  - `redact(text: str, secrets: list[str]) -> str`（日志脱敏，把秘密值替换为 `***REDACTED***`）
+
+**背景（spec 补充 G.3）**：系统每次状态变更都 `git commit`，凭证写进 git 树里的配置就会进入 git 历史，事后清除代价极高。因此配置只存变量名，值从环境解析；L3 日志记录外部 CLI 完整请求/响应时必须脱敏。
+
+- [ ] **Step 1: 写失败测试**
+
+`tests/test_config.py`:
+```python
+import pytest
+
+from controlplane.config import (
+    BackendConfig,
+    load_backend_config,
+    resolve_credential,
+    redact,
+    MissingCredentialError,
+    CredentialInGitTreeError,
+)
+
+
+def _raw() -> dict:
+    return {
+        "backend": "claude_cli",
+        "invocation_form": "cli",
+        "model_name": "claude-sonnet-4",
+        "prompt_template_version": "v1",
+        "token_env": "ANTHROPIC_API_KEY",
+        "retry_policy": {"max_attempts": 3, "backoff_base_s": 2},
+    }
+
+
+def test_load_backend_config_keeps_only_var_name():
+    cfg = load_backend_config(_raw())
+    assert cfg.token_env == "ANTHROPIC_API_KEY"
+    # 配置对象里没有任何存放凭证值的字段
+    assert not hasattr(cfg, "token")
+
+
+def test_config_with_literal_token_is_rejected():
+    raw = _raw()
+    raw["token"] = "sk-ant-secret"
+    with pytest.raises(CredentialInGitTreeError):
+        load_backend_config(raw)
+
+
+def test_config_with_api_key_field_is_rejected():
+    raw = _raw()
+    raw["api_key"] = "sk-ant-secret"
+    with pytest.raises(CredentialInGitTreeError):
+        load_backend_config(raw)
+
+
+def test_resolve_credential_reads_env():
+    cfg = load_backend_config(_raw())
+    assert resolve_credential(cfg, {"ANTHROPIC_API_KEY": "sk-live"}) == "sk-live"
+
+
+def test_missing_credential_raises_with_var_name():
+    cfg = load_backend_config(_raw())
+    with pytest.raises(MissingCredentialError) as exc:
+        resolve_credential(cfg, {})
+    # 错误必须指明缺哪个环境变量，不得静默降级
+    assert "ANTHROPIC_API_KEY" in str(exc.value)
+
+
+def test_empty_credential_also_raises():
+    cfg = load_backend_config(_raw())
+    with pytest.raises(MissingCredentialError):
+        resolve_credential(cfg, {"ANTHROPIC_API_KEY": ""})
+
+
+def test_redact_removes_secret_from_log():
+    log = "calling api with token sk-live-123 and retry"
+    out = redact(log, ["sk-live-123"])
+    assert "sk-live-123" not in out
+    assert "***REDACTED***" in out
+
+
+def test_redact_ignores_empty_secrets():
+    log = "no secrets here"
+    assert redact(log, ["", None]) == log
+```
+
+- [ ] **Step 2: 运行测试确认失败**
+
+Run: `uv run --extra dev pytest tests/test_config.py -v`
+Expected: FAIL（`ModuleNotFoundError: controlplane.config`）
+
+- [ ] **Step 3: 实现配置与凭证边界**
+
+`src/controlplane/config.py`:
+```python
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+# 出现在 git 树配置里即视为凭证泄漏的字段名（spec 补充 G.3）
+_FORBIDDEN_SECRET_KEYS = {"token", "api_key", "apikey", "password", "secret", "private_key"}
+
+_REDACTED = "***REDACTED***"
+
+
+class MissingCredentialError(Exception):
+    """按变量名解析凭证失败：环境变量缺失或为空。"""
+
+
+class CredentialInGitTreeError(Exception):
+    """git 树配置里出现了凭证值本身，而非变量名引用。"""
+
+
+@dataclass(frozen=True)
+class BackendConfig:
+    """外部推理后端配置（L-A 层，进 git 树）。只存凭证变量名，不存值。"""
+
+    backend: str
+    invocation_form: str  # "cli" | "api"
+    model_name: str
+    prompt_template_version: str
+    token_env: str  # 环境变量名，如 "ANTHROPIC_API_KEY"
+    retry_policy: dict
+
+
+def load_backend_config(raw: dict) -> BackendConfig:
+    leaked = _FORBIDDEN_SECRET_KEYS & set(raw.keys())
+    if leaked:
+        raise CredentialInGitTreeError(
+            f"credential value fields found in git-tree config: {sorted(leaked)}; "
+            "store only the env var name via 'token_env'"
+        )
+    return BackendConfig(
+        backend=raw["backend"],
+        invocation_form=raw["invocation_form"],
+        model_name=raw["model_name"],
+        prompt_template_version=raw["prompt_template_version"],
+        token_env=raw["token_env"],
+        retry_policy=raw.get("retry_policy", {}),
+    )
+
+
+def resolve_credential(cfg: BackendConfig, env: dict[str, str]) -> str:
+    """按变量名从环境解析凭证。缺失/为空即明确失败，禁止静默降级。"""
+    value = env.get(cfg.token_env)
+    if not value:
+        raise MissingCredentialError(
+            f"environment variable {cfg.token_env} is not set or empty; "
+            f"required by backend {cfg.backend}"
+        )
+    return value
+
+
+def redact(text: str, secrets: list[str | None]) -> str:
+    """日志脱敏：把秘密值替换掉。L3 记录外部 CLI 请求/响应前必须过它。"""
+    out = text
+    for secret in secrets:
+        if secret:
+            out = out.replace(secret, _REDACTED)
+    return out
+```
+
+- [ ] **Step 4: 运行测试确认通过**
+
+Run: `uv run --extra dev pytest tests/test_config.py -v`
+Expected: PASS（8 passed）
+
+- [ ] **Step 5: 追加 .gitignore 凭证排除规则**
+
+在 `.gitignore` 末尾追加（保留已有的 `.DS_Store` 行）：
+```gitignore
+
+# 凭证绝不进 git 树（spec 补充 G.3）
+.env
+.env.*
+*.local.yaml
+secrets/
+
+# 派生产物
+control-plane/index.sqlite
+```
+
+- [ ] **Step 6: 验证凭证文件确实被忽略**
+
+Run: `printf 'ANTHROPIC_API_KEY=sk-test\n' > .env && git check-ignore -v .env && rm .env`
+Expected: 输出含 `.gitignore` 行号与 `.env`，证明被忽略
+
+- [ ] **Step 7: 提交**
+
+```bash
+git add src/controlplane/config.py tests/test_config.py .gitignore
+git commit -m "feat: config loading with credential boundary + log redaction"
+```
+
+---
+
+### Task 13: 可观测只读命令（trace / cost）
+
+**Files:**
+- Create: `src/controlplane/observe.py`
+- Test: `tests/test_observe.py`
+
+**Interfaces:**
+- Consumes: `GitStore`（Task 6）、`paths.run_dir`（Task 5）、`Envelope`/`OwnerRef`/`BigRef`（Task 2）
+- Produces:
+  - `trace(store: GitStore, run_id: str) -> str`（打印该轮各产物状态 + `links` 溯源 + L2/L3 引用清单）
+  - `cost(store: GitStore, run_id: str) -> str`（打印本轮成本明细与汇总）
+  - `sum_costs(records: list[dict]) -> dict`（纯函数：汇总 GPU·时与 token 数）
+
+**设计约束（spec 补充 G.4）**：只做"定位 + 呈现"，不重新计算、不聚合出新真相。引用指向的计算层文件不可达时，须明确报告"引用存在但文件不可达"及其 `uri`，不得假装没有数据。
+
+- [ ] **Step 1: 写失败测试**
+
+`tests/test_observe.py`:
+```python
+from controlplane.envelope import Envelope, OwnerRef
+from controlplane.gitstore import GitStore
+from controlplane.paths import run_dir
+from controlplane.observe import trace, cost, sum_costs
+
+
+def _seed_run(store: GitStore, run_id: str) -> None:
+    directive = Envelope(
+        id=run_id, type="directive", version=1, created_at="2026-09-26T00:00:00Z",
+        created_by=OwnerRef(), status="executed", schema_version=1,
+        payload={"target_dimension": "tom", "recipe_ref": ""},
+    )
+    store.write_product(f"{run_dir(run_id)}/directive.yaml", directive, "seed directive")
+    run_trace = Envelope(
+        id=f"trace-{run_id}", type="run_trace", version=1, created_at="2026-09-26T00:00:00Z",
+        created_by=OwnerRef(), status="effective", schema_version=1,
+        links=[run_id],
+        payload={
+            "wall_clock_s": 120,
+            "log_refs": [{"uri": "file:///compute/logs/run-001/task-1.log", "sha256": "a" * 64, "size_bytes": 10, "fetch_hint": None}],
+            "cost_records": [
+                {"run_id": run_id, "task_id": "task-1", "cost_type": "gpu", "gpu_hours": 1.5, "tokens": 0},
+                {"run_id": run_id, "task_id": "task-2", "cost_type": "external_inference", "gpu_hours": 0.0, "tokens": 3200},
+            ],
+        },
+    )
+    store.write_product(f"{run_dir(run_id)}/run_trace.yaml", run_trace, "seed run trace")
+
+
+def test_sum_costs_is_pure_aggregation():
+    records = [
+        {"cost_type": "gpu", "gpu_hours": 1.5, "tokens": 0},
+        {"cost_type": "gpu", "gpu_hours": 0.5, "tokens": 0},
+        {"cost_type": "external_inference", "gpu_hours": 0.0, "tokens": 3200},
+    ]
+    assert sum_costs(records) == {"gpu_hours": 2.0, "tokens": 3200}
+
+
+def test_trace_lists_products_and_links(tmp_path):
+    store = GitStore(str(tmp_path))
+    store.init()
+    _seed_run(store, "run-001")
+    out = trace(store, "run-001")
+    assert "directive" in out
+    assert "executed" in out
+    assert "run_trace" in out
+
+
+def test_trace_reports_unreachable_reference(tmp_path):
+    store = GitStore(str(tmp_path))
+    store.init()
+    _seed_run(store, "run-001")
+    out = trace(store, "run-001")
+    # 引用指向计算层文件，本地不可达时必须明说，而非静默省略
+    assert "unreachable" in out
+    assert "file:///compute/logs/run-001/task-1.log" in out
+
+
+def test_cost_prints_detail_and_summary(tmp_path):
+    store = GitStore(str(tmp_path))
+    store.init()
+    _seed_run(store, "run-001")
+    out = cost(store, "run-001")
+    assert "task-1" in out
+    assert "1.5" in out
+    assert "3200" in out
+    assert "gpu_hours=2.0" in out
+
+
+def test_cost_on_run_without_trace(tmp_path):
+    store = GitStore(str(tmp_path))
+    store.init()
+    out = cost(store, "run-404")
+    assert "no run_trace" in out
+```
+
+- [ ] **Step 2: 运行测试确认失败**
+
+Run: `uv run --extra dev pytest tests/test_observe.py -v`
+Expected: FAIL（`ModuleNotFoundError: controlplane.observe`）
+
+- [ ] **Step 3: 实现只读呈现**
+
+`src/controlplane/observe.py`:
+```python
+from __future__ import annotations
+
+from urllib.parse import urlparse
+from pathlib import Path
+
+from controlplane.gitstore import GitStore
+from controlplane.paths import run_dir
+
+
+def sum_costs(records: list[dict]) -> dict:
+    """纯函数汇总。只加总物理量，不换算金额（单价表可选，见 spec D.4）。"""
+    return {
+        "gpu_hours": sum(r.get("gpu_hours", 0.0) for r in records),
+        "tokens": sum(r.get("tokens", 0) for r in records),
+    }
+
+
+def _reachable(uri: str) -> bool:
+    parsed = urlparse(uri)
+    if parsed.scheme != "file":
+        return False
+    return Path(parsed.path).is_file()
+
+
+def trace(store: GitStore, run_id: str) -> str:
+    """打印该轮全链路：各产物状态 + links 溯源 + L2/L3 引用可达性。只读。"""
+    lines: list[str] = [f"run {run_id}"]
+    products = store.list_products(run_dir(run_id))
+    if not products:
+        return f"run {run_id}: no products found"
+    for rel in products:
+        env = store.read_product(rel)
+        links = ",".join(env.links) if env.links else "-"
+        lines.append(f"  {env.type:<22} [{env.status}] id={env.id} links={links}")
+        for ref in env.payload.get("log_refs", []):
+            uri = ref["uri"]
+            mark = "ok" if _reachable(uri) else "unreachable"
+            lines.append(f"      log_ref [{mark}] {uri}")
+        for ref in env.payload.get("metric_stream_refs", []):
+            uri = ref["uri"]
+            mark = "ok" if _reachable(uri) else "unreachable"
+            lines.append(f"      metric_ref [{mark}] {uri}")
+    return "\n".join(lines)
+
+
+def cost(store: GitStore, run_id: str) -> str:
+    """打印本轮成本明细与汇总。只读，不重新计算真相。"""
+    rel = f"{run_dir(run_id)}/run_trace.yaml"
+    if not store.exists(rel):
+        return f"run {run_id}: no run_trace (nothing recorded yet)"
+    env = store.read_product(rel)
+    records = env.payload.get("cost_records", [])
+    lines = [f"run {run_id} cost detail"]
+    for r in records:
+        lines.append(
+            f"  {r.get('task_id', '-'):<10} {r.get('cost_type', '-'):<20} "
+            f"gpu_hours={r.get('gpu_hours', 0.0)} tokens={r.get('tokens', 0)}"
+        )
+    total = sum_costs(records)
+    lines.append(f"  total: gpu_hours={total['gpu_hours']} tokens={total['tokens']}")
+    return "\n".join(lines)
+```
+
+- [ ] **Step 4: 运行测试确认通过**
+
+Run: `uv run --extra dev pytest tests/test_observe.py -v`
+Expected: PASS（5 passed）
+
+- [ ] **Step 5: 运行全部 Python 测试确认无回归**
+
+Run: `uv run --extra dev pytest -v`
+Expected: PASS（全部通过）
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add src/controlplane/observe.py tests/test_observe.py
+git commit -m "feat: read-only observability commands (trace/cost)"
+```
+
+---
+
 ## Self-Review
 
 **1. Spec coverage（对照 spec §1 ControlPlane + §7 测试策略 + 补充 B/F）**
@@ -1938,8 +2348,12 @@ git commit -m "test: end-to-end fake RSI orchestration loop"
 | 补充 F.5 税② schema_version | Task 2 Envelope |
 | 补充 F.5 税③ fetch_hint | Task 2 BigRef |
 | 补充 F.5 税④ 迁移器链读取路径 | Task 4 load_product + Task 6 read_product 调用它 |
+| 补充 G.1 V1 纯 CLI 无界面 | Task 10 CLI（全局约束已声明不做 GUI） |
+| 补充 G.2 配置分层（L-A 进 git `config/`） | Task 5 `backends_config_file()` + Task 12 `BackendConfig` |
+| 补充 G.3 凭证不进 git 树 + 脱敏 | Task 12（`CredentialInGitTreeError`、`resolve_credential`、`redact`、`.gitignore`） |
+| 补充 G.4 可观测只读命令 | Task 13 `trace`/`cost`（含"引用不可达"分支） |
 
-**明确不在本计划范围（后续计划）**：SQLite 索引（RecipeStore 计划）、指令确认门 `confirm`（TrainScheduler 计划）、审核门②③（RecipeStore/MindAgent 计划）、真实 SSH 传输与计算层、SocialSimulator/MindTrainer/MindAgent/RecipeStore/TrainScheduler/TrainPlanner 真实实现、诊断评测、gRPC 实时环境服务。这些在本计划里以 stub 或"不实现"占位，符合 §7"逐步替换"策略。
+**明确不在本计划范围（后续计划）**：SQLite 索引（RecipeStore 计划）、指令确认门 `confirm`（TrainScheduler 计划）、审核门②③（RecipeStore/MindAgent 计划）、真实 SSH 传输与计算层、SocialSimulator/MindTrainer/MindAgent/RecipeStore/TrainScheduler/TrainPlanner 真实实现、诊断评测、gRPC 实时环境服务、`rismforge logs`（需真实计算层日志才有意义，本计划只实现 `trace`/`cost`，`logs` 留到接入真实 SSH 的计划）、外部推理桥接的实际调用（Task 12 只建配置与凭证边界，真实调用在 TrainPlanner 计划）。这些在本计划里以 stub 或"不实现"占位，符合 §7"逐步替换"策略。
 
 **2. Placeholder scan**：无 TBD/TODO；每个 code 步骤含完整可运行代码；无"类似 Task N"引用（各任务代码自包含）；错误处理为具体实现（`assert_transition` 抛具体异常、CLI `assertTransition` 抛 `not allowed`）。
 
