@@ -1,0 +1,57 @@
+from __future__ import annotations
+
+from controlplane.envelope import Envelope, OwnerRef, BigRef
+from controlplane.gitstore import GitStore
+from controlplane.paths import run_dir
+
+_NOW = "2026-09-26T00:00:00Z"
+
+
+def social_simulator_stub(run_id: str, target_dimension: str) -> Envelope:
+    """SocialSimulator 批量模块 stub：假装生成了一个情境池。"""
+    return Envelope(
+        id=f"scen-{run_id}",
+        type="scenario_pool",
+        version=1,
+        created_at=_NOW,
+        created_by=OwnerRef(),
+        status="executed",
+        schema_version=1,
+        links=[run_id],
+        payload={"target_dimension": target_dimension, "episode_count": 0},
+    )
+
+
+def mind_trainer_stub(run_id: str, scenario_id: str) -> Envelope:
+    """MindTrainer stub：假装训练出一个候选 checkpoint，置为待审。"""
+    ckpt = BigRef(
+        uri=f"file:///compute/checkpoints/{run_id}.safetensors",
+        sha256="0" * 64,
+        size_bytes=0,
+        fetch_hint=None,
+    )
+    return Envelope(
+        id=f"cand-{run_id}",
+        type="candidate_checkpoint",
+        version=1,
+        created_at=_NOW,
+        created_by=OwnerRef(),
+        status="pending_review",
+        schema_version=1,
+        links=[run_id, scenario_id],
+        payload={"checkpoint_ref": ckpt.to_dict(), "train_curve_summary": {"final_loss": 0.0}},
+    )
+
+
+def execute_dispatch(store: GitStore, run_id: str, target_dimension: str) -> None:
+    """动作执行器：本骨架用 stub 顶替计算层。真实实现会经 SSH 下发到 GPU。"""
+    scenario = social_simulator_stub(run_id, target_dimension)
+    store.write_product(
+        f"{run_dir(run_id)}/scenario_pool.yaml", scenario, f"stub: scenario for {run_id}"
+    )
+    candidate = mind_trainer_stub(run_id, scenario.id)
+    store.write_product(
+        f"{run_dir(run_id)}/candidate_checkpoint.yaml",
+        candidate,
+        f"stub: candidate checkpoint for {run_id}",
+    )
