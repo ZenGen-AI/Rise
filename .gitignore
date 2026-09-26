@@ -9,3 +9,12 @@ __pycache__/
 # Node
 node_modules/
 dist/
+
+# 凭证绝不进 git 树（spec 补充 G.3）
+.env
+.env.*
+*.local.yaml
+secrets/
+
+# 派生产物
+control-plane/index.sqlite
