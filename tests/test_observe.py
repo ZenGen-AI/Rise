@@ -20,7 +20,7 @@ def _seed_run(store: GitStore, run_id: str) -> None:
             "log_refs": [{"uri": "file:///compute/logs/run-001/task-1.log", "sha256": "a" * 64, "size_bytes": 10, "fetch_hint": None}],
             "cost_records": [
                 {"run_id": run_id, "task_id": "task-1", "cost_type": "gpu", "gpu_hours": 1.5, "tokens": 0},
-                {"run_id": run_id, "task_id": "task-2", "cost_type": "external_inference", "gpu_hours": 0.5, "tokens": 3200},
+                {"run_id": run_id, "task_id": "task-2", "cost_type": "external_inference", "gpu_hours": 0.0, "tokens": 3200},
             ],
         },
     )
@@ -64,7 +64,7 @@ def test_cost_prints_detail_and_summary(tmp_path):
     assert "task-1" in out
     assert "1.5" in out
     assert "3200" in out
-    assert "gpu_hours=2.0" in out
+    assert "gpu_hours=1.5" in out
 
 
 def test_cost_on_run_without_trace(tmp_path):
