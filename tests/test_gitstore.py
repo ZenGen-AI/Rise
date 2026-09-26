@@ -43,6 +43,28 @@ def test_write_commits(tmp_path):
     assert "add directive" in log
 
 
+def test_write_product_idempotent_on_identical_rewrite(tmp_path):
+    import subprocess
+
+    store = GitStore(str(tmp_path))
+    store.init()
+    env = _env("run-001", "pending")
+    store.write_product("control-plane/runs/run-001/directive.yaml", env, "add directive")
+    count_before = subprocess.run(
+        ["git", "-C", str(tmp_path), "rev-list", "--count", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    # 崩溃恢复重放：内容逐字节相同的重复写入不应抛出异常
+    store.write_product("control-plane/runs/run-001/directive.yaml", env, "add directive")
+
+    count_after = subprocess.run(
+        ["git", "-C", str(tmp_path), "rev-list", "--count", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert count_after == count_before  # 未产生空提交
+
+
 def test_list_products(tmp_path):
     store = GitStore(str(tmp_path))
     store.init()

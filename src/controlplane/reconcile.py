@@ -40,6 +40,7 @@ def reconcile(state: TreeState) -> list[Action]:
     - candidate=approved → promote_candidate（登记新 ZenGen 版本 + 写 outcome）
     """
     actions: list[Action] = []
+    next_model_version = state.model_count
     for d in state.directives:
         if d.status == "pending":
             actions.append(Action(kind="dispatch_directive", target_id=d.id, detail={}))
@@ -47,11 +48,12 @@ def reconcile(state: TreeState) -> list[Action]:
         if c.status == "pending_review":
             actions.append(Action(kind="await_review", target_id=c.id, detail={}))
         elif c.status == "approved":
+            next_model_version += 1
             actions.append(
                 Action(
                     kind="promote_candidate",
                     target_id=c.id,
-                    detail={"run_id": c.run_id, "model_version": state.model_count + 1},
+                    detail={"run_id": c.run_id, "model_version": next_model_version},
                 )
             )
     return actions

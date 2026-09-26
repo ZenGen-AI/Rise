@@ -42,6 +42,16 @@ class GitStore:
         with abs_path.open("w", encoding="utf-8") as f:
             yaml.safe_dump(env.to_dict(), f, allow_unicode=True, sort_keys=False)
         self._git("add", rel_path)
+        # 幂等性保护（§1.4）：若内容与已提交版本逐字节相同，git add 不会暂存任何
+        # 改动，此时无条件 commit 会因 "nothing to commit" 以非零退出码失败并
+        # 抛出 CalledProcessError（_git 使用 check=True）。先探测暂存区是否为空，
+        # 为空则跳过提交（no-op），避免崩溃恢复重放半程 tick 时把守护进程整个杀死。
+        staged_check = subprocess.run(
+            ["git", "-C", str(self.repo_root), "diff", "--cached", "--quiet", rel_path],
+            capture_output=True, text=True, check=False,
+        )
+        if staged_check.returncode == 0:
+            return
         self._git("commit", "-m", message)
 
     def read_product(self, rel_path: str) -> Envelope:

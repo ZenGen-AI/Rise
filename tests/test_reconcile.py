@@ -48,6 +48,25 @@ def test_approved_candidate_promoted_with_next_version():
     ]
 
 
+def test_two_approved_candidates_get_distinct_monotonic_versions():
+    state = TreeState(
+        directives=[],
+        candidates=[
+            CandidateView(id="cand-001", status="approved", run_id="run-001"),
+            CandidateView(id="cand-002", status="approved", run_id="run-002"),
+        ],
+        model_count=0,
+    )
+    actions = reconcile(state)
+    assert actions == [
+        Action(kind="promote_candidate", target_id="cand-001", detail={"run_id": "run-001", "model_version": 1}),
+        Action(kind="promote_candidate", target_id="cand-002", detail={"run_id": "run-002", "model_version": 2}),
+    ]
+    versions = [a.detail["model_version"] for a in actions]
+    assert len(set(versions)) == 2  # 版本号必须互不相同，禁止静默覆盖
+    assert state.model_count == 0  # 未被修改（纯函数）
+
+
 def test_reconcile_is_pure_no_mutation():
     state = TreeState(
         directives=[DirectiveView(id="run-001", status="pending", target_dimension="tom", recipe_ref="")],
