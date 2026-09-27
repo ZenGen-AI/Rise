@@ -3,12 +3,17 @@ from __future__ import annotations
 from controlplane.envelope import Envelope, OwnerRef, BigRef
 from controlplane.gitstore import GitStore
 from controlplane.paths import run_dir
+from simulator.backends import TemplateGenerationBackend
+from simulator.generators import generate_scenario
 
 _NOW = "2026-09-26T00:00:00Z"
 
 
 def social_simulator_stub(run_id: str, target_dimension: str) -> Envelope:
-    """SocialSimulator 批量模块 stub：假装生成了一个情境池。"""
+    """SocialSimulator 批量模块:用真实情境生成器产出一个情境,再包装成
+    scenario_pool 信封。target_dimension → purpose 的完整映射留待 recipe 计划;
+    V1 固定 purpose="training"。保留计划 1 既有 payload 键以兼容 daemon 消费。"""
+    scenario = generate_scenario(TemplateGenerationBackend(), seed=0, purpose="training")
     return Envelope(
         id=f"scen-{run_id}",
         type="scenario_pool",
@@ -18,7 +23,11 @@ def social_simulator_stub(run_id: str, target_dimension: str) -> Envelope:
         status="executed",
         schema_version=1,
         links=[run_id],
-        payload={"target_dimension": target_dimension, "episode_count": 0},
+        payload={
+            "target_dimension": target_dimension,
+            "episode_count": 0,
+            "scenario_id": scenario.id,
+        },
     )
 
 
