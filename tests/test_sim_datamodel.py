@@ -1,4 +1,4 @@
-from simulator.datamodel import Persona, RoleSlot, Scenario, RoleBinding, RoleAssignment
+from simulator.datamodel import Persona, RoleSlot, Scenario, RoleBinding, RoleAssignment, TurnRecord, Episode
 
 
 def test_persona_round_trip():
@@ -80,4 +80,44 @@ def test_role_assignment_round_trip_and_slot_ids():
     assert len(d["bindings"]) == 2
     assert RoleAssignment.from_dict(d) == ra
     assert ra.slot_ids() == {"persuader", "skeptic"}
+
+
+def test_turn_record_round_trip_with_none_trace():
+    t = TurnRecord(turn_index=0, speaker_slot="persuader", utterance="我认为我们该冒险一试")
+    d = t.to_dict()
+    assert d["turn_index"] == 0
+    assert d["speaker_slot"] == "persuader"
+    assert d["inner_thought"] is None
+    assert d["activation_trace"] is None  # 裸模型：无激活轨迹语义
+    assert TurnRecord.from_dict(d) == t
+
+
+def test_turn_record_preserves_inner_thought():
+    t = TurnRecord(
+        turn_index=1,
+        speaker_slot="skeptic",
+        utterance="风险太高了",
+        inner_thought="对方在施压，我需要坚持",
+    )
+    assert TurnRecord.from_dict(t.to_dict()) == t
+
+
+def test_episode_round_trip():
+    ra = RoleAssignment(
+        scenario_id="scen-001",
+        bindings=[RoleBinding(slot_id="persuader", persona_id="pers-001", model_backend="self_play")],
+        max_turns=2,
+    )
+    ep = Episode(
+        id="ep-001",
+        scenario_id="scen-001",
+        role_assignment=ra,
+        turns=[TurnRecord(turn_index=0, speaker_slot="persuader", utterance="开场")],
+        terminated_reason="max_turns",
+    )
+    d = ep.to_dict()
+    assert d["id"] == "ep-001"
+    assert d["terminated_reason"] == "max_turns"
+    assert len(d["turns"]) == 1
+    assert Episode.from_dict(d) == ep
 

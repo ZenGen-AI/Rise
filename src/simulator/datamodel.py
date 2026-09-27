@@ -139,3 +139,63 @@ class RoleAssignment:
         """返回所有被绑定的角色位 ID。"""
         return {b.slot_id for b in self.bindings}
 
+
+@dataclass
+class TurnRecord:
+    """单次交互记录（在剧集中按顺序追加）。"""
+
+    turn_index: int
+    speaker_slot: str
+    utterance: str
+    inner_thought: str | None = None
+    activation_trace: dict | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "turn_index": self.turn_index,
+            "speaker_slot": self.speaker_slot,
+            "utterance": self.utterance,
+            "inner_thought": self.inner_thought,
+            "activation_trace": self.activation_trace,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "TurnRecord":
+        return cls(
+            turn_index=d["turn_index"],
+            speaker_slot=d["speaker_slot"],
+            utterance=d["utterance"],
+            inner_thought=d.get("inner_thought"),
+            activation_trace=d.get("activation_trace"),
+        )
+
+
+@dataclass
+class Episode:
+    """单次剧集运行结果：Scenario × RoleAssignment 的一次实例化。"""
+
+    id: str
+    scenario_id: str
+    role_assignment: RoleAssignment
+    turns: list[TurnRecord]
+    terminated_reason: str
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "scenario_id": self.scenario_id,
+            "role_assignment": self.role_assignment.to_dict(),
+            "turns": [t.to_dict() for t in self.turns],
+            "terminated_reason": self.terminated_reason,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Episode":
+        return cls(
+            id=d["id"],
+            scenario_id=d["scenario_id"],
+            role_assignment=RoleAssignment.from_dict(d["role_assignment"]),
+            turns=[TurnRecord.from_dict(t) for t in d["turns"]],
+            terminated_reason=d["terminated_reason"],
+        )
+
