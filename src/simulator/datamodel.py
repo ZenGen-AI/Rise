@@ -86,3 +86,56 @@ class Scenario:
             source=d.get("source", "auto"),
         )
 
+
+@dataclass
+class RoleBinding:
+    """把一个抽象角色位绑定到具体 Persona + 具体模型后端（§2.2 关键接口约定）。
+    model_backend 由调用方指定，SocialSimulator 内部不写死。"""
+
+    slot_id: str
+    persona_id: str
+    model_backend: str  # "self_play" | "frozen_reference" | "external_api"
+
+    def to_dict(self) -> dict:
+        return {
+            "slot_id": self.slot_id,
+            "persona_id": self.persona_id,
+            "model_backend": self.model_backend,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "RoleBinding":
+        return cls(
+            slot_id=d["slot_id"],
+            persona_id=d["persona_id"],
+            model_backend=d["model_backend"],
+        )
+
+
+@dataclass
+class RoleAssignment:
+    """角色分配（Runner 的核心输入）：将 Scenario 的角色位与 Personas + 模型后端绑定。"""
+
+    scenario_id: str
+    bindings: list[RoleBinding]
+    max_turns: int
+
+    def to_dict(self) -> dict:
+        return {
+            "scenario_id": self.scenario_id,
+            "bindings": [b.to_dict() for b in self.bindings],
+            "max_turns": self.max_turns,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "RoleAssignment":
+        return cls(
+            scenario_id=d["scenario_id"],
+            bindings=[RoleBinding.from_dict(b) for b in d["bindings"]],
+            max_turns=d["max_turns"],
+        )
+
+    def slot_ids(self) -> set[str]:
+        """返回所有被绑定的角色位 ID。"""
+        return {b.slot_id for b in self.bindings}
+

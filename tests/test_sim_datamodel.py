@@ -1,4 +1,4 @@
-from simulator.datamodel import Persona, RoleSlot, Scenario
+from simulator.datamodel import Persona, RoleSlot, Scenario, RoleBinding, RoleAssignment
 
 
 def test_persona_round_trip():
@@ -52,4 +52,32 @@ def test_scenario_round_trip_with_purpose():
 def test_scenario_default_source_is_auto():
     s = Scenario(id="s", background="", role_slots=[], conflict="", norms=[], purpose="training")
     assert s.source == "auto"
+
+
+def test_role_binding_round_trip():
+    b = RoleBinding(slot_id="persuader", persona_id="pers-001", model_backend="self_play")
+    d = b.to_dict()
+    assert d == {
+        "slot_id": "persuader",
+        "persona_id": "pers-001",
+        "model_backend": "self_play",
+    }
+    assert RoleBinding.from_dict(d) == b
+
+
+def test_role_assignment_round_trip_and_slot_ids():
+    ra = RoleAssignment(
+        scenario_id="scen-001",
+        bindings=[
+            RoleBinding(slot_id="persuader", persona_id="pers-001", model_backend="self_play"),
+            RoleBinding(slot_id="skeptic", persona_id="pers-002", model_backend="frozen_reference"),
+        ],
+        max_turns=6,
+    )
+    d = ra.to_dict()
+    assert d["scenario_id"] == "scen-001"
+    assert d["max_turns"] == 6
+    assert len(d["bindings"]) == 2
+    assert RoleAssignment.from_dict(d) == ra
+    assert ra.slot_ids() == {"persuader", "skeptic"}
 
