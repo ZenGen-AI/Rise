@@ -1,4 +1,4 @@
-from simulator.datamodel import Persona
+from simulator.datamodel import Persona, RoleSlot, Scenario
 
 
 def test_persona_round_trip():
@@ -20,3 +20,36 @@ def test_persona_round_trip():
 def test_persona_default_source_is_auto():
     p = Persona(id="p", traits=[], motivation="", speech_style="", values=[])
     assert p.source == "auto"
+
+
+def test_role_slot_round_trip():
+    r = RoleSlot(slot_id="persuader", description="试图说服对方改变立场的一方")
+    d = r.to_dict()
+    assert d == {"slot_id": "persuader", "description": "试图说服对方改变立场的一方"}
+    assert RoleSlot.from_dict(d) == r
+
+
+def test_scenario_round_trip_with_purpose():
+    s = Scenario(
+        id="scen-001",
+        background="两位同事就项目方向产生分歧",
+        role_slots=[
+            RoleSlot(slot_id="persuader", description="主张激进方案"),
+            RoleSlot(slot_id="skeptic", description="主张保守方案"),
+        ],
+        conflict="资源有限下的方案取舍",
+        norms=["不得人身攻击", "尊重对方发言"],
+        purpose="training",
+        source="auto",
+    )
+    d = s.to_dict()
+    assert d["purpose"] == "training"
+    assert len(d["role_slots"]) == 2
+    assert d["role_slots"][0]["slot_id"] == "persuader"
+    assert Scenario.from_dict(d) == s
+
+
+def test_scenario_default_source_is_auto():
+    s = Scenario(id="s", background="", role_slots=[], conflict="", norms=[], purpose="training")
+    assert s.source == "auto"
+
