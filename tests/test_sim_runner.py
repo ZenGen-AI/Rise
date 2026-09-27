@@ -94,3 +94,14 @@ def test_run_episode_records_activation_trace_none_for_bare_models():
     }
     ep = run_episode(_scenario(), _assignment(2), _personas(), backends, "ep-001")
     assert all(t.activation_trace is None for t in ep.turns)
+
+
+def test_run_episode_rejects_empty_bindings():
+    empty_assignment = RoleAssignment(
+        scenario_id="scen-001",
+        bindings=[],
+        max_turns=1,
+    )
+    backends = {}
+    with pytest.raises(RoleSlotMismatchError):
+        run_episode(_scenario(), empty_assignment, _personas(), backends, "ep-001")

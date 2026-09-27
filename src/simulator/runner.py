@@ -38,6 +38,11 @@ def run_episode(
                 f"RoleAssignment 引用了 Scenario 中不存在的角色位: {slot}"
             )
 
+    if not assignment.bindings:
+        raise RoleSlotMismatchError(
+            "RoleAssignment 未包含任何 binding，无法驱动交互"
+        )
+
     turns: list[TurnRecord] = []
     n_roles = len(assignment.bindings)
     for turn_index in range(assignment.max_turns):

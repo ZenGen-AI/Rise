@@ -1,10 +1,7 @@
 from controlplane.gitstore import GitStore
-from controlplane.paths import run_dir
 from simulator.datamodel import (
-    RoleSlot,
     RoleBinding,
     RoleAssignment,
-    Persona,
 )
 from simulator.backends import TemplateGenerationBackend, ScriptedBackend
 from simulator.generators import generate_scenario, generate_persona
