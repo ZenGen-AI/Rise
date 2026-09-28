@@ -34,7 +34,8 @@ def detect_regressions(
     candidate_bench: BenchmarkVersion | None = None,
     baseline_bench: BenchmarkVersion | None = None,
 ) -> RegressionFlags:
-    """Compare candidate vs baseline DimensionScores, paired by dimension.
+    """Compare candidate vs baseline DimensionScores, paired by
+    (dimension, level, track_provenance).
 
     Flags a regression only when the candidate score is lower AND the two
     confidence intervals are disjoint (statistically significant drop).
@@ -49,11 +50,13 @@ def detect_regressions(
                 "candidate and baseline benchmark versions are not comparable"
             )
 
-    baseline_by_dim = {b.dimension: b for b in baseline_scores}
+    baseline_by_key = {
+        (b.dimension, b.level, b.track_provenance): b for b in baseline_scores
+    }
 
     flags: list[dict] = []
     for cand in candidate_scores:
-        base = baseline_by_dim.get(cand.dimension)
+        base = baseline_by_key.get((cand.dimension, cand.level, cand.track_provenance))
         if base is None:
             continue
         if cand.score < base.score and difference_is_significant(
@@ -66,6 +69,8 @@ def detect_regressions(
                     "drop": base.score - cand.score,
                     "baseline_version": baseline_version,
                     "beyond_ci": True,
+                    "level": cand.level,
+                    "track": cand.track_provenance,
                 }
             )
 

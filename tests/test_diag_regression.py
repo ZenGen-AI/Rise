@@ -57,6 +57,27 @@ def test_reward_hacking_not_flagged_when_aligned():
     assert detect_reward_hacking(diag_delta=+0.10, reward_delta=+0.12, threshold=0.15) is None
 
 
+def test_per_track_l3_collision_still_flags_single_track_drop():
+    # 同一 dimension + 同一 level(l3),但 static/dynamic 两条 track 各有一条基线/候选。
+    # 仅按 dimension 分组会在 dict 中相互覆盖,导致 static 的真实回归被漏检。
+    cand = [
+        _ds("fbt", 0.40, 0.30, 0.50, level="l3", track="static"),
+        _ds("fbt", 0.90, 0.80, 0.96, level="l3", track="dynamic"),
+    ]
+    base = [
+        _ds("fbt", 0.90, 0.80, 0.96, level="l3", track="static"),
+        _ds("fbt", 0.40, 0.30, 0.50, level="l3", track="dynamic"),
+    ]
+    rf = detect_regressions(cand, base, baseline_version="zengen-v3")
+    assert len(rf.flags) == 1
+    f = rf.flags[0]
+    assert f["dimension"] == "fbt"
+    assert f["track"] == "static"
+    assert f["level"] == "l3"
+    assert f["drop"] == pytest.approx(0.50)
+    assert f["beyond_ci"] is True
+
+
 def test_cross_version_comparison_refused():
     cand = [_ds("empathy", 0.6, 0.5, 0.7)]
     base = [_ds("empathy", 0.85, 0.8, 0.9)]
