@@ -98,21 +98,23 @@ class SelfEvalBiasError(Exception):
 
 def _is_near_relative(judge_model_id: str, candidate_model_id: str) -> bool:
     """
-    Check if judge model is the same as or a fine-tune variant of candidate model.
+    Check if judge model is the same as or a close relative of candidate model.
 
-    A model is considered a "near relative" if it has the exact same ID or if
-    it starts with the candidate model ID (e.g., "cand-model-sft" is a variant
-    of "cand-model").
+    Self-eval bias (spec §2.5.2) is symmetric: a judge that is a fine-tune of
+    the candidate ("cand-model-sft" judging "cand-model") is biased, and so is
+    a judge that is the base model of the candidate ("cand-model" judging
+    "cand-model-sft"). So the check is bidirectional: either id being a prefix
+    of the other (which subsumes the equal case) counts as a near relative.
 
     Args:
         judge_model_id: Identifier for the judge model
         candidate_model_id: Identifier for the candidate model
 
     Returns:
-        True if judge is too close to candidate (same or prefix match)
+        True if judge is too close to candidate (same, ancestor, or descendant)
     """
-    return judge_model_id == candidate_model_id or judge_model_id.startswith(
-        candidate_model_id
+    return judge_model_id.startswith(candidate_model_id) or candidate_model_id.startswith(
+        judge_model_id
     )
 
 

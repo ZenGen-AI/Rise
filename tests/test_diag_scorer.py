@@ -50,6 +50,14 @@ def test_judge_must_not_be_candidate_or_near_relative():
         LLMJudgeScorer(judge, candidate_model_id="cand-model")
 
 
+def test_judge_must_not_be_base_model_of_candidate():
+    # Reverse direction: judge is the base model, candidate is its fine-tune.
+    # Self-eval bias is symmetric, so this must also be rejected.
+    judge = MockJudgeBackend(model_id="cand-model", fixed={})
+    with pytest.raises(SelfEvalBiasError):
+        LLMJudgeScorer(judge, candidate_model_id="cand-model-sft")
+
+
 def test_judge_backend_is_protocol_swappable():
     class _Stub:
         model_id = "external-judge"
