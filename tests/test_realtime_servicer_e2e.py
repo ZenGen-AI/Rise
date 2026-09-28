@@ -192,8 +192,19 @@ def test_client_initiated_end_terminates_promptly(server_address):
     channel.close()
 
 
-def test_abrupt_disconnect_does_not_hang_server(server_address):
-    channel = grpc.insecure_channel(server_address)
+def test_abrupt_disconnect_does_not_hang_server():
+    # 断连必须判定为 FAILED（§2.6.5），不能被误记为 client_terminated 正常
+    # 结束，也不应触发 on_session_closed 持久化——半途断开的会话不是正常
+    # 完成的 episode（修复回归防护）。不用共享 fixture，因为需要注入自己的
+    # on_session_closed 探针。
+    closed_episodes = []
+    server = create_server(
+        _opponent_backends_factory, port=0, turn_timeout_s=2.0,
+        on_session_closed=lambda ep: closed_episodes.append(ep.id),
+    )
+    server.start()
+    address = f"127.0.0.1:{server.bound_port}"
+    channel = grpc.insecure_channel(address)
     stub = pb2_grpc.EnvironmentServiceStub(channel)
     q: "queue.Queue[pb2.ClientMessage | None]" = queue.Queue()
 
@@ -206,18 +217,24 @@ def test_abrupt_disconnect_does_not_hang_server(server_address):
 
     resp_iter = stub.Interact(gen())
     q.put(_create_session_msg(max_turns=100))
-    next(resp_iter)  # session_ready
+    ready = next(resp_iter)
+    assert ready.WhichOneof("payload") == "session_ready"
     q.put(None)  # 立即关闭客户端流，不发 end_session（模拟进程崩溃）
-    # 半关闭在本环境表现为优雅结束（StopIteration），个别 grpc 版本可能抛 RpcError；
-    # 两者都可接受——协议层要求的是服务端行为（检测断连、收尾、不挂起），非客户端异常类型。
+    # 半关闭在本环境表现为优雅结束（StopIteration），个别 grpc 版本可能抛
+    # RpcError；两者都可接受——协议层要求的是服务端行为，非客户端异常类型。
+    end_msg = None
     try:
-        for _ in resp_iter:
-            pass
+        for msg in resp_iter:
+            if msg.WhichOneof("payload") == "end_session":
+                end_msg = msg
     except grpc.RpcError:
         pass
     channel.close()
+    assert end_msg is not None, "服务端应主动判定断连并发出 EndSession，而非静默挂起"
+    assert end_msg.end_session.reason == "client_disconnected"
+    assert closed_episodes == []  # 断连不应触发持久化钩子
     # 服务端未挂起、进程仍可继续接受新连接，用一次全新的正常会话验证
-    channel2 = grpc.insecure_channel(server_address)
+    channel2 = grpc.insecure_channel(address)
     stub2 = pb2_grpc.EnvironmentServiceStub(channel2)
     q2: "queue.Queue[pb2.ClientMessage | None]" = queue.Queue()
 
@@ -234,6 +251,47 @@ def test_abrupt_disconnect_does_not_hang_server(server_address):
     assert ready2.WhichOneof("payload") == "session_ready"
     q2.put(None)
     channel2.close()
+    server.stop(0)
+
+
+def test_persistence_hook_exception_does_not_break_stream():
+    # 修复回归防护：on_session_closed 抛异常不应吞掉/打断 EndSession 的
+    # 发送——客户端必须仍能拿到收尾消息。
+    def boom_hook(episode):
+        raise RuntimeError("simulated persistence failure")
+
+    server = create_server(
+        _opponent_backends_factory, port=0, turn_timeout_s=2.0,
+        on_session_closed=boom_hook,
+    )
+    server.start()
+    address = f"127.0.0.1:{server.bound_port}"
+    channel = grpc.insecure_channel(address)
+    stub = pb2_grpc.EnvironmentServiceStub(channel)
+    q: "queue.Queue[pb2.ClientMessage | None]" = queue.Queue()
+
+    def gen():
+        while True:
+            item = q.get()
+            if item is None:
+                return
+            yield item
+
+    resp_iter = stub.Interact(gen())
+    q.put(_create_session_msg(max_turns=2))
+    next(resp_iter)  # session_ready
+    q.put(pb2.ClientMessage(submit_turn=pb2.SubmitTurn(utterance="cand-0")))
+    end_msg = None
+    for _ in range(5):
+        msg = next(resp_iter)
+        if msg.WhichOneof("payload") == "end_session":
+            end_msg = msg
+            break
+    assert end_msg is not None, "持久化钩子异常不应阻止 EndSession 送达客户端"
+    assert end_msg.end_session.reason == "max_turns"
+    q.put(None)
+    channel.close()
+    server.stop(0)
 
 
 def test_concurrent_sessions_do_not_cross_talk(server_address):

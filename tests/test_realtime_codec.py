@@ -56,3 +56,25 @@ def test_turn_record_round_trip_with_activation_trace():
     assert proto.HasField("activation_trace") is True
     back = turn_record_from_proto(proto)
     assert back == t
+
+
+def test_turn_record_round_trip_with_empty_activation_trace_preserves_presence():
+    t = TurnRecord(turn_index=0, speaker_slot="a", utterance="x", activation_trace={})
+    proto = turn_record_to_proto(t)
+    assert proto.HasField("activation_trace") is True  # 显式空字典 ≠ 未设置
+    back = turn_record_from_proto(proto)
+    assert back.activation_trace == {}
+    assert back == t
+
+
+def test_turn_record_activation_trace_survives_yaml_round_trip():
+    import yaml
+    t = TurnRecord(
+        turn_index=1, speaker_slot="a", utterance="x",
+        activation_trace={"triggered_skills": ["s1", "s2"], "selected_skill": "s1", "memory_hits": []},
+    )
+    back = turn_record_from_proto(turn_record_to_proto(t))
+    # 必须是纯 Python 类型（list/dict/str），能被 yaml.safe_dump 序列化——
+    # 这是 write_episode 落盘所依赖的（ControlPlane 产物用 yaml.safe_dump）。
+    dumped = yaml.safe_dump(back.to_dict())
+    assert "triggered_skills" in dumped

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import queue
 import threading
 import uuid
@@ -16,6 +17,8 @@ from simulator.realtime.driver import SessionDriver
 from simulator.realtime.proto import realtime_env_pb2 as pb2
 from simulator.realtime.proto import realtime_env_pb2_grpc as pb2_grpc
 
+logger = logging.getLogger(__name__)
+
 BackendsFactory = Callable[
     [Scenario, RoleAssignment, dict[str, Persona], str], dict[str, ModelBackend]
 ]
@@ -27,7 +30,10 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
     """gRPC 双向流服务实现（§2.6.2）。每个 Interact 调用对应一个会话：
     先收 CreateSession 起 SessionDriver，随后把 SubmitTurn 转发给驱动器、
     把驱动器 outbox 里的事件转成 ServerMessage yield 出去。会话间除各自
-    的 SessionDriver 实例外不共享任何可变状态（§2.6.4）。"""
+    的 SessionDriver 实例外不共享任何可变状态（§2.6.4）。
+
+    on_session_closed 若提供，调用方须保证其自身线程安全——多个并发会话
+    可能几乎同时调用它（例如都写同一个 ControlPlane GitStore）。"""
 
     def __init__(
         self,
@@ -46,7 +52,16 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
         _CLIENT_CLOSED 哨兵。主循环交替做两件事：非阻塞轮询 inbox 处理客户端
         消息；抽干驱动器 outbox 转发服务端事件。这样服务端主动产生的事件
         （超时、后端失败）无需等待下一条客户端消息即可推送（§2.6.5），
-        TurnUpdate 也不再与客户端消息一一绑定（§2.6.2）。"""
+        TurnUpdate 也不再与客户端消息一一绑定（§2.6.2）。
+
+        终止判定只信任"drain 到一条 end_session"这一件事——不读 driver.state
+        做旁路判断（那条路径存在"状态先置位、事件后入队"的竞态，曾经导致
+        整个会话在半关闭时无声消失）。client_closed 分两种收尾：客户端已
+        显式发过 end_session（explicit_end_requested）则什么都不做，静候
+        驱动器自然收尾；否则视为异常断连，主动调 request_abort 把会话判为
+        FAILED（§2.6.5：客户端侧异常由服务端自行判定，不需要客户端配合），
+        且这条路径不会触发 on_session_closed——半途断开的会话不是正常完成
+        的 episode。"""
         inbox: "queue.Queue" = queue.Queue()
 
         def _pump() -> None:
@@ -65,6 +80,8 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
 
         driver: SessionDriver | None = None
         client_closed = False
+        explicit_end_requested = False
+        disconnect_handled = False
         try:
             while True:
                 try:
@@ -88,6 +105,7 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
                         )
                     elif kind == "end_session" and driver is not None:
                         driver.request_end("client_terminated")
+                        explicit_end_requested = True
 
                 if driver is not None:
                     terminal = False
@@ -101,13 +119,15 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
                 if client_closed:
                     if driver is None:
                         return
-                    if driver.state in ("CLOSED", "FAILED"):
-                        return
-                    driver.request_end("client_terminated")
-                    # 继续循环：等待驱动器收尾产生 closed 事件后由 drain 转发并 return
+                    if not explicit_end_requested and not disconnect_handled:
+                        driver.request_abort("client_disconnected")
+                        disconnect_handled = True
+                    # 继续循环：无论走哪条收尾路径，都不在此处自行判定终止——
+                    # 等驱动器真正产出 closed/failed 事件，由上面的 drain
+                    # 转发并 return，避免旁路读 driver.state 的竞态。
         finally:
             if driver is not None and driver.state not in ("CLOSED", "FAILED"):
-                driver.request_end("client_terminated")
+                driver.request_abort("client_disconnected")
 
     def _handle_create(self, create_session, session_id: str):
         role_assignment = role_assignment_from_proto(create_session.role_assignment)
@@ -149,13 +169,21 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
                 )
             elif event.kind == "closed":
                 episode = event.payload
-                if self._on_session_closed is not None:
-                    self._on_session_closed(episode)
-                yield pb2.ServerMessage(
+                end_msg = pb2.ServerMessage(
                     end_session=pb2.EndSession(
                         reason=episode.terminated_reason, episode_id=episode.id,
                     )
                 )
+                if self._on_session_closed is not None:
+                    try:
+                        self._on_session_closed(episode)
+                    except Exception:
+                        # 持久化钩子失败不应把整条流也跟着弄挂——客户端仍需
+                        # 拿到收尾消息；钩子异常只记日志，不向上传播。
+                        logger.exception(
+                            "on_session_closed hook raised for episode %s", episode.id
+                        )
+                yield end_msg
                 return
             elif event.kind == "failed":
                 yield pb2.ServerMessage(

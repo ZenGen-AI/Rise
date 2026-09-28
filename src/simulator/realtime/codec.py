@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from google.protobuf.json_format import MessageToDict
+
 from simulator.datamodel import Persona, RoleBinding, RoleAssignment, TurnRecord
 from simulator.realtime.proto import realtime_env_pb2 as pb2
 
@@ -53,6 +55,10 @@ def turn_record_to_proto(t: TurnRecord) -> pb2.TurnRecordProto:
     if t.inner_thought is not None:
         proto.inner_thought = t.inner_thought
     if t.activation_trace is not None:
+        # SetInParent() 显式置位 presence——仅 update({}) 对空字典不会设置
+        # presence，会导致解码时把"显式空轨迹"误判为"未设置"（§2.6.3 要求
+        # 区分这两种语义）。
+        proto.activation_trace.SetInParent()
         proto.activation_trace.update(t.activation_trace)
     return proto
 
@@ -64,6 +70,11 @@ def turn_record_from_proto(proto: pb2.TurnRecordProto) -> TurnRecord:
         utterance=proto.utterance,
         inner_thought=proto.inner_thought if proto.HasField("inner_thought") else None,
         activation_trace=(
-            dict(proto.activation_trace) if proto.HasField("activation_trace") else None
+            # MessageToDict（非 dict()）：把嵌套的 ListValue/Struct 包装对象
+            # 转成纯 list/dict——dict() 留下的包装对象无法被 yaml.safe_dump
+            # 序列化，会在 write_episode 落盘时炸掉。Struct 的动态 key 不是
+            # 具名 message 字段，MessageToDict 不会对它们做 camelCase 转换，
+            # 原样保留。
+            MessageToDict(proto.activation_trace) if proto.HasField("activation_trace") else None
         ),
     )

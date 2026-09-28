@@ -4,7 +4,7 @@ import time
 import pytest
 
 from simulator.datamodel import Persona, Scenario, RoleSlot
-from simulator.realtime.backend import ClientDrivenBackend, TurnTimeoutError
+from simulator.realtime.backend import ClientDrivenBackend, SessionEndRequested, TurnTimeoutError
 
 
 def _persona_scenario():
@@ -62,3 +62,45 @@ def test_multiple_submits_are_consumed_in_order():
     u1, _ = backend.respond(persona, scenario, [], "a")
     u2, _ = backend.respond(persona, scenario, [], "a")
     assert (u1, u2) == ("first", "second")
+
+
+def test_request_end_raises_session_end_requested_not_a_fake_utterance():
+    # 回归防护（Critical 修复）：唤醒哨兵必须让 respond() 抛异常，
+    # 绝不能被当成一句真实话语("", None) 返回。
+    backend = ClientDrivenBackend(slot_id="a", timeout_s=2.0)
+    persona, scenario = _persona_scenario()
+    backend.request_end()
+    with pytest.raises(SessionEndRequested):
+        backend.respond(persona, scenario, [], "a")
+
+
+def test_request_end_wakes_a_blocked_respond_call():
+    backend = ClientDrivenBackend(slot_id="a", timeout_s=2.0)
+    persona, scenario = _persona_scenario()
+    result = {}
+
+    def responder():
+        try:
+            backend.respond(persona, scenario, [], "a")
+        except SessionEndRequested:
+            result["ended"] = True
+
+    t = threading.Thread(target=responder)
+    t.start()
+    time.sleep(0.1)  # respond() 应仍在阻塞
+    assert "ended" not in result
+    backend.request_end()
+    t.join(timeout=2.0)
+    assert result.get("ended") is True
+
+
+def test_pending_real_submit_is_consumed_before_a_later_request_end():
+    # FIFO 顺序防护：先提交的真实话语必须先被消费，哨兵排在其后才生效。
+    backend = ClientDrivenBackend(slot_id="a", timeout_s=1.0)
+    persona, scenario = _persona_scenario()
+    backend.submit("real turn", None)
+    backend.request_end()
+    utterance, _ = backend.respond(persona, scenario, [], "a")
+    assert utterance == "real turn"
+    with pytest.raises(SessionEndRequested):
+        backend.respond(persona, scenario, [], "a")

@@ -72,6 +72,7 @@ message TurnUpdate {
 message EndSession {
   string reason = 1;  // "max_turns" | "goal_reached" | "client_terminated"
                        // | "role_backend_failure" | "timeout" | "invalid_session"
+                       // | "client_disconnected"
   string episode_id = 2;
   optional string failure_detail = 3;
 }
