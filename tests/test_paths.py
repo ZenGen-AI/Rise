@@ -14,4 +14,4 @@ def test_backends_config_file():
 
 
 def test_subdirs_match_spec():
-    assert paths.SUBDIRS == ["runs", "recipes", "skill_memory_proposals", "models", "compute", "config", "scenarios", "personas"]
+    assert paths.SUBDIRS == ["runs", "recipes", "skill_memory_proposals", "models", "compute", "config", "scenarios", "personas", "diagnostics"]

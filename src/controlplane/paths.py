@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 CONTROL_PLANE_ROOT = "control-plane"
-SUBDIRS = ["runs", "recipes", "skill_memory_proposals", "models", "compute", "config", "scenarios", "personas"]
+SUBDIRS = ["runs", "recipes", "skill_memory_proposals", "models", "compute", "config", "scenarios", "personas", "diagnostics"]
 
 
 def run_dir(run_id: str) -> str:
@@ -30,3 +30,15 @@ def episodes_dir(run_id: str) -> str:
 
 def episode_file(run_id: str, episode_id: str) -> str:
     return f"{episodes_dir(run_id)}/{episode_id}.yaml"
+
+
+def diagnostic_report_file(run_id: str) -> str:
+    return f"{run_dir(run_id)}/diagnostic_report.yaml"
+
+
+def taxonomy_file(version: str) -> str:
+    return f"{CONTROL_PLANE_ROOT}/diagnostics/taxonomy_{version}.yaml"
+
+
+def item_pool_file(version: str) -> str:
+    return f"{CONTROL_PLANE_ROOT}/diagnostics/item_pool_{version}.yaml"
