@@ -234,3 +234,61 @@ def test_abrupt_disconnect_does_not_hang_server(server_address):
     assert ready2.WhichOneof("payload") == "session_ready"
     q2.put(None)
     channel2.close()
+
+
+def test_concurrent_sessions_do_not_cross_talk(server_address):
+    import threading
+
+    def run_one_session(tag, out):
+        channel = grpc.insecure_channel(server_address)
+        stub = pb2_grpc.EnvironmentServiceStub(channel)
+        q: "queue.Queue[pb2.ClientMessage | None]" = queue.Queue()
+
+        def gen():
+            while True:
+                item = q.get()
+                if item is None:
+                    return
+                yield item
+
+        resp_iter = stub.Interact(gen())
+        q.put(_create_session_msg(max_turns=4))
+        ready = next(resp_iter)
+        session_id = ready.session_ready.session_id
+        seen = [f"session:{session_id}"]
+        for i in range(2):
+            q.put(pb2.ClientMessage(submit_turn=pb2.SubmitTurn(utterance=f"{tag}-{i}")))
+            while True:
+                msg = next(resp_iter)
+                if msg.WhichOneof("payload") == "turn_update":
+                    seen.append(msg.turn_update.turn.utterance)
+                    if msg.turn_update.turn.speaker_slot == "a":
+                        break
+        end_msg = None
+        while end_msg is None:
+            msg = next(resp_iter)
+            if msg.WhichOneof("payload") == "turn_update":
+                seen.append(msg.turn_update.turn.utterance)
+            elif msg.WhichOneof("payload") == "end_session":
+                end_msg = msg
+        q.put(None)
+        channel.close()
+        out[tag] = (session_id, seen)
+
+    results: dict[str, tuple] = {}
+    tags = [f"client-{i}" for i in range(5)]
+    threads = [threading.Thread(target=run_one_session, args=(tag, results)) for tag in tags]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert len(results) == 5
+    session_ids = [sid for sid, _ in results.values()]
+    assert len(set(session_ids)) == 5  # 每会话唯一 session_id
+    for tag in tags:
+        session_id, seen = results[tag]
+        cand_utterances = [u for u in seen if u.startswith(tag)]
+        assert cand_utterances == [f"{tag}-0", f"{tag}-1"]  # 只看到自己提交的候选话语
+        other_tags = [t for t in tags if t != tag]
+        assert not any(u.startswith(other) for u in seen for other in other_tags)
