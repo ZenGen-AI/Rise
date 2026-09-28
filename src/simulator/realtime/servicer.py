@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import queue
+import threading
 import uuid
 from typing import Callable
 
@@ -15,6 +17,8 @@ from simulator.realtime.proto import realtime_env_pb2_grpc as pb2_grpc
 BackendsFactory = Callable[
     [Scenario, RoleAssignment, dict[str, Persona], str], dict[str, ModelBackend]
 ]
+
+_CLIENT_CLOSED = object()
 
 
 class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
@@ -35,26 +39,65 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
         self._on_session_closed = on_session_closed
 
     def Interact(self, request_iterator, context):
+        """双向流主循环（select 风格）。一个后台泄流线程把 request_iterator 的
+        消息搬进 inbox，迭代器耗尽（客户端正常结束或异常断连）时投递
+        _CLIENT_CLOSED 哨兵。主循环交替做两件事：非阻塞轮询 inbox 处理客户端
+        消息；抽干驱动器 outbox 转发服务端事件。这样服务端主动产生的事件
+        （超时、后端失败）无需等待下一条客户端消息即可推送（§2.6.5），
+        TurnUpdate 也不再与客户端消息一一绑定（§2.6.2）。"""
+        inbox: "queue.Queue" = queue.Queue()
+
+        def _pump() -> None:
+            try:
+                for msg in request_iterator:
+                    inbox.put(msg)
+            finally:
+                inbox.put(_CLIENT_CLOSED)
+
+        threading.Thread(target=_pump, daemon=True).start()
+
         driver: SessionDriver | None = None
-        session_id = ""
+        client_closed = False
         try:
-            for msg in request_iterator:
-                kind = msg.WhichOneof("payload")
-                if kind == "create_session":
-                    session_id = f"sess-{uuid.uuid4().hex[:12]}"
-                    driver, ready = self._handle_create(msg.create_session, session_id)
-                    yield ready
-                elif kind == "submit_turn":
-                    driver.submit_turn(
-                        msg.submit_turn.utterance,
-                        msg.submit_turn.inner_thought
-                        if msg.submit_turn.HasField("inner_thought") else None,
-                    )
-                elif kind == "end_session":
-                    driver.request_end("client_terminated")
+            while True:
+                try:
+                    msg = inbox.get(timeout=0.01)
+                except queue.Empty:
+                    msg = None
+
+                if msg is _CLIENT_CLOSED:
+                    client_closed = True
+                elif msg is not None:
+                    kind = msg.WhichOneof("payload")
+                    if kind == "create_session":
+                        session_id = f"sess-{uuid.uuid4().hex[:12]}"
+                        driver, ready = self._handle_create(msg.create_session, session_id)
+                        yield ready
+                    elif kind == "submit_turn" and driver is not None:
+                        driver.submit_turn(
+                            msg.submit_turn.utterance,
+                            msg.submit_turn.inner_thought
+                            if msg.submit_turn.HasField("inner_thought") else None,
+                        )
+                    elif kind == "end_session" and driver is not None:
+                        driver.request_end("client_terminated")
 
                 if driver is not None:
-                    yield from self._drain_ready_events(driver)
+                    terminal = False
+                    for out in self._drain_ready_events(driver):
+                        yield out
+                        if out.WhichOneof("payload") == "end_session":
+                            terminal = True
+                    if terminal:
+                        return
+
+                if client_closed:
+                    if driver is None:
+                        return
+                    if driver.state in ("CLOSED", "FAILED"):
+                        return
+                    driver.request_end("client_terminated")
+                    # 继续循环：等待驱动器收尾产生 closed 事件后由 drain 转发并 return
         finally:
             if driver is not None and driver.state not in ("CLOSED", "FAILED"):
                 driver.request_end("client_terminated")
