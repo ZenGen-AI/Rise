@@ -23,6 +23,7 @@ def run_episode(
     backends: dict[str, ModelBackend],
     episode_id: str,
     stop_predicate: "Callable[[list], bool] | None" = None,
+    on_turn: "Callable[[TurnRecord], None] | None" = None,
 ) -> Episode:
     """Simulation Runner 核心（§2.4 纯函数）：给定情境、角色分配、人格池、
     每个角色位的模型后端替身，驱动多轮交互产出全新 Episode。
@@ -68,6 +69,8 @@ def run_episode(
                 activation_trace=None,  # V1 裸模型：无激活轨迹（§2.6.3）
             )
         )
+        if on_turn is not None:
+            on_turn(turns[-1])
         if stop_predicate is not None and stop_predicate(turns):
             return Episode(
                 id=episode_id, scenario_id=scenario.id,
