@@ -734,8 +734,8 @@ def _fixture():
                   RoleBinding("b", "pb", "frozen_reference")],
         max_turns=4,
     )
-    backends = {"self_play": ScriptedBackend({"a": ["a1", "a2"]}),
-                "frozen_reference": ScriptedBackend({"b": ["b1", "b2"]})}
+    backends = {"a": ScriptedBackend({"a": ["a1", "a2"]}),
+                "b": ScriptedBackend({"b": ["b1", "b2"]})}
     return scenario, assignment, personas, backends
 
 
@@ -792,8 +792,8 @@ def _dyn_fixture():
     assignment = RoleAssignment("s1",
         [RoleBinding("candidate", "pc", "self_play"),
          RoleBinding("opponent", "po", "frozen_reference")], max_turns=4)
-    backends = {"self_play": ScriptedBackend({"candidate": ["ok", "agreed", "ok"]}),
-                "frozen_reference": ScriptedBackend({"opponent": ["no", "no", "no"]})}
+    backends = {"candidate": ScriptedBackend({"candidate": ["ok", "agreed", "ok"]}),
+                "opponent": ScriptedBackend({"opponent": ["no", "no", "no"]})}
     item = DiagnosticItem("i2", "persuasion_maintenance", "open", "judge", "dynamic",
                           None, {"goal_keyword": "agreed"}, None)
     return item, scenario, assignment, personas, backends
