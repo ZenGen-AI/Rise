@@ -52,6 +52,25 @@ def mind_trainer_stub(run_id: str, scenario_id: str) -> Envelope:
     )
 
 
+def diagnostic_evaluator_stub(run_id: str, candidate_id: str) -> Envelope:
+    """DiagnosticEvaluator stub:占位诊断评测产出信封,真实实现见 diagnostic.orchestrator。"""
+    return Envelope(
+        id=f"diag-{run_id}",
+        type="diagnostic_report",
+        version=1,
+        created_at=_NOW,
+        created_by=OwnerRef(),
+        status="executed",
+        schema_version=1,
+        links=[run_id],
+        payload={
+            "candidate_ref": candidate_id,
+            "benchmark_version": "bench-v1",
+            "dimension_count": 0,
+        },
+    )
+
+
 def execute_dispatch(store: GitStore, run_id: str, target_dimension: str) -> None:
     """动作执行器：本骨架用 stub 顶替计算层。真实实现会经 SSH 下发到 GPU。"""
     scenario = social_simulator_stub(run_id, target_dimension)
