@@ -5,6 +5,8 @@ import threading
 import uuid
 from typing import Callable
 
+import grpc
+
 from simulator.datamodel import Persona, RoleAssignment, Scenario, RoleSlot
 from simulator.backends import ModelBackend
 from simulator.realtime.codec import (
@@ -51,6 +53,11 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
             try:
                 for msg in request_iterator:
                     inbox.put(msg)
+            except grpc.RpcError:
+                # 流被取消/客户端断连：对泄流线程而言这与迭代器正常耗尽是同一
+                # 终止条件，哨兵已足以通知主循环，无需向上传播（§2.6.5 客户端
+                # 侧异常由服务端自行检测收尾，不需要客户端配合）。
+                pass
             finally:
                 inbox.put(_CLIENT_CLOSED)
 
