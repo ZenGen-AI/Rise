@@ -1,0 +1,98 @@
+syntax = "proto3";
+
+package rismforge.realtime;
+
+import "google/protobuf/struct.proto";
+
+// 人格模板(镜像 simulator.datamodel.Persona)
+message PersonaProto {
+  string id = 1;
+  repeated string traits = 2;
+  string motivation = 3;
+  string speech_style = 4;
+  repeated string values = 5;
+  string source = 6;
+}
+
+// 角色绑定(镜像 simulator.datamodel.RoleBinding)
+message RoleBindingProto {
+  string slot_id = 1;
+  string persona_id = 2;
+  string model_backend = 3;  // "self_play" | "frozen_reference" | "external_api"
+}
+
+// 角色分配(镜像 simulator.datamodel.RoleAssignment)
+message RoleAssignmentProto {
+  string scenario_id = 1;
+  repeated RoleBindingProto bindings = 2;
+  int32 max_turns = 3;
+}
+
+// 轮次记录(镜像 simulator.datamodel.TurnRecord)。activation_trace 用 Struct——
+// 唯一天然无固定 schema 的字段(§2.6.3);裸模型时不设置该字段(HasField=false)。
+message TurnRecordProto {
+  int32 turn_index = 1;
+  string speaker_slot = 2;
+  string utterance = 3;
+  optional string inner_thought = 4;
+  optional google.protobuf.Struct activation_trace = 5;
+}
+
+// 客户端 → 服务端:发起会话。personas 覆盖 RoleAssignment 涉及的全部 persona_id。
+// client_driven_slot 指定由客户端实时驱动的角色位(V1 每会话恰好一个,
+// 对应 MindTrainer 自博弈角色 或 MindAgent 自身角色);其余角色位由服务端
+// 的 backends_factory 提供的 ModelBackend 驱动。
+message CreateSession {
+  string scenario_id = 1;
+  RoleAssignmentProto role_assignment = 2;
+  map<string, PersonaProto> personas = 3;
+  string purpose = 4;  // "training" | "deployment_simulation"
+  string client_driven_slot = 5;
+}
+
+// 服务端 → 客户端:会话已进入 ACTIVE。
+message SessionReady {
+  string session_id = 1;
+}
+
+// 客户端 → 服务端:为 client_driven_slot 当前这一轮提交话语。
+message SubmitTurn {
+  string utterance = 1;
+  optional string inner_thought = 2;
+}
+
+// 服务端 → 客户端:某一轮完成,立即推送(§2.6.2 硬约束,不攒批)。
+message TurnUpdate {
+  TurnRecordProto turn = 1;
+}
+
+// 双向:会话终止。episode_id 是摘要引用(§2.6.2"最终Episode摘要引用")——
+// 客户端已通过逐轮 TurnUpdate 拿到全部 TurnRecord,可在本地用
+// episode_id + reason 重建完整 Episode,协议不重复内联整个 Episode。
+message EndSession {
+  string reason = 1;  // "max_turns" | "goal_reached" | "client_terminated"
+                       // | "role_backend_failure" | "timeout" | "invalid_session"
+  string episode_id = 2;
+  optional string failure_detail = 3;
+}
+
+message ClientMessage {
+  oneof payload {
+    CreateSession create_session = 1;
+    SubmitTurn submit_turn = 2;
+    EndSession end_session = 3;  // 客户端主动终止
+  }
+}
+
+message ServerMessage {
+  oneof payload {
+    SessionReady session_ready = 1;
+    TurnUpdate turn_update = 2;
+    EndSession end_session = 3;  // 服务端终止或确认终止
+  }
+}
+
+service EnvironmentService {
+  // 双向流:一条连接承载一次完整会话(§2.6 补充 C.1)。
+  rpc Interact(stream ClientMessage) returns (stream ServerMessage);
+}
