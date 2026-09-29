@@ -2157,3 +2157,16 @@ Task 1(proto+依赖)是唯一无依赖基石。2(状态机)、3(run_episode 扩�
 **收尾:** whole-branch review → fix-wave(如需)→ finishing-a-development-branch(合入 main;因 session git-fenced,ff-only merge 在 main checkout 终端执行)。
 
 **Ledger:** `.superpowers/sdd/2026-09-28-realtime-env-service/progress.md`。
+
+---
+
+## 实施后修订(Post-implementation amendments)
+
+本计划的 11 个任务落地并合入分支后,最终评审与后续补强修订了下列接口。**以下修订优先于上文任务里的代码块与 Interfaces 描述**;上文保留原样,作为当时的计划记录。
+
+- **`EnvironmentServiceClient.submit_turn`(Task 10)**:返回类型由 `TurnRecord | None` 改为 `list[TurnRecord]`——从客户端提交起,到"再次轮到客户端"之前收到的全部对方轮次,**不含**客户端自己那一轮的回显。客户端按 `bindings[turn_index % n]` 推算轮到谁,不再假定只有 2 个角色、也不再假定客户端先说。新增 `opening_turns`(客户端后说时,`create_session` 返回前收到的对方开场轮)、`closed` 属性与 `SessionRejectedError`(会话在 create 阶段被拒绝)。这是破坏性变更,仓库内无其他调用方。
+- **CreateSession 校验(Task 7)**:`_handle_create` 在启动 driver 之前经 `validation.validate_create_session` 校验;违规、重复 `create_session`、create 之前收到 `submit_turn`/`end_session`、迟迟不发 create,一律以 `EndSession(reason="invalid_session")` 显式拒绝并结束流。服务端自身依赖故障(`backends_factory` 抛异常或漏返回后端、`scenario_resolver` 抛非 `LookupError`)不冒充客户端输入错误,以 `role_backend_failure` 拒绝(可能瞬态,T1)。
+- **新增可选参数(Task 7)**:`create_server(..., scenario_resolver, max_turns_cap, create_timeout_s, backend_timeout_s, keepalive_time_ms, keepalive_timeout_ms)`;`maximum_concurrent_rpcs` 与 `max_workers` 对齐。服务端后端调用经新增的 `TimeoutBackend` 包装,超时以独立原因 `role_backend_timeout` 结束会话。
+- **新增终止原因**:`client_disconnected`(客户端流未发 `end_session` 即结束,判 FAILED、不落盘)、`role_backend_timeout`。
+- **`SessionDriver`(Task 6)**:新增 `request_abort`(与优雅结束的 `request_end` 区分,收尾为 `failed`,且首个原因为准);`ClientDrivenBackend` 新增 `request_end()` 与 `SessionEndRequested`,唤醒哨兵不再被当作一句真实(空)发言写进 Episode。
+- **仍未处理**:`Interact` 的 `finally` 兜底无条件按断连中止、不区分客户端是否已发 `end_session`(极窄的取消竞态,最坏是把一次已优雅结束但尚未收尾的会话记为 FAILED);keepalive 只设置未验证;超时的后端线程无法强杀,会跑到自然结束后丢弃结果。
