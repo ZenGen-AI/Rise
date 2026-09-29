@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+import time
 import uuid
 from typing import Callable
 
@@ -10,18 +11,21 @@ import grpc
 
 from simulator.datamodel import Persona, RoleAssignment, Scenario, RoleSlot
 from simulator.backends import ModelBackend
+from simulator.realtime.backend_timeout import TimeoutBackend
 from simulator.realtime.codec import (
     persona_from_proto, role_assignment_from_proto, turn_record_to_proto,
 )
 from simulator.realtime.driver import SessionDriver
 from simulator.realtime.proto import realtime_env_pb2 as pb2
 from simulator.realtime.proto import realtime_env_pb2_grpc as pb2_grpc
+from simulator.realtime.validation import validate_create_session
 
 logger = logging.getLogger(__name__)
 
 BackendsFactory = Callable[
     [Scenario, RoleAssignment, dict[str, Persona], str], dict[str, ModelBackend]
 ]
+ScenarioResolver = Callable[[str], Scenario]
 
 _CLIENT_CLOSED = object()
 
@@ -32,8 +36,17 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
     把驱动器 outbox 里的事件转成 ServerMessage yield 出去。会话间除各自
     的 SessionDriver 实例外不共享任何可变状态（§2.6.4）。
 
-    on_session_closed 若提供，调用方须保证其自身线程安全——多个并发会话
-    可能几乎同时调用它（例如都写同一个 ControlPlane GitStore）。"""
+    调用方约定：
+    - on_session_closed 若提供，须自行保证线程安全——多个并发会话可能几乎
+      同时调用它（例如都写同一个 ControlPlane GitStore）。
+    - backends_factory 每次调用必须返回**全新**的后端实例。若多个会话共享
+      同一个有状态后端（如带游标的 ScriptedBackend），就会出现 §2.6.4
+      明确禁止的跨会话串话。
+    - scenario_resolver 若提供，按 CreateSession.scenario_id 返回完整
+      Scenario（此时其 purpose 以解析结果为准）；不提供则退回空 Scenario。
+
+    资源边界：max_turns_cap 限制单会话轮次；create_timeout_s 限制连接建立
+    后等待 CreateSession 的时长；backend_timeout_s 限制单次服务端后端调用。"""
 
     def __init__(
         self,
@@ -41,10 +54,27 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
         *,
         turn_timeout_s: float = 30.0,
         on_session_closed=None,
+        scenario_resolver: ScenarioResolver | None = None,
+        max_turns_cap: int = 200,
+        create_timeout_s: float = 10.0,
+        backend_timeout_s: float = 60.0,
     ) -> None:
         self._backends_factory = backends_factory
         self._turn_timeout_s = turn_timeout_s
         self._on_session_closed = on_session_closed
+        self._scenario_resolver = scenario_resolver
+        self._max_turns_cap = max_turns_cap
+        self._create_timeout_s = create_timeout_s
+        self._backend_timeout_s = backend_timeout_s
+
+    @staticmethod
+    def _invalid_session(detail: str) -> pb2.ServerMessage:
+        """协议层显式拒绝：EndSession 是唯一的错误通道，且按约定是终止性的。"""
+        return pb2.ServerMessage(
+            end_session=pb2.EndSession(
+                reason="invalid_session", episode_id="", failure_detail=detail,
+            )
+        )
 
     def Interact(self, request_iterator, context):
         """双向流主循环（select 风格）。一个后台泄流线程把 request_iterator 的
@@ -61,7 +91,12 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
         驱动器自然收尾；否则视为异常断连，主动调 request_abort 把会话判为
         FAILED（§2.6.5：客户端侧异常由服务端自行判定，不需要客户端配合），
         且这条路径不会触发 on_session_closed——半途断开的会话不是正常完成
-        的 episode。"""
+        的 episode。
+
+        协议违规一律以 EndSession(reason="invalid_session") 显式拒绝并结束
+        流，而不是静默丢弃：CreateSession 校验不过、factory/resolver 抛异常、
+        同一条流上重复 create、create 之前就收到 submit_turn/end_session、
+        迟迟不发 create（create_timeout_s）。"""
         inbox: "queue.Queue" = queue.Queue()
 
         def _pump() -> None:
@@ -78,6 +113,7 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
 
         threading.Thread(target=_pump, daemon=True).start()
 
+        started_at = time.monotonic()
         driver: SessionDriver | None = None
         client_closed = False
         explicit_end_requested = False
@@ -94,18 +130,42 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
                 elif msg is not None:
                     kind = msg.WhichOneof("payload")
                     if kind == "create_session":
+                        if driver is not None:
+                            # 同一条流只承载一次会话。EndSession 是唯一（且终止性
+                            # 的）错误通道，所以重复 create 会连带结束整条流；
+                            # 已启动的第一个会话判为 FAILED（不落盘）。
+                            driver.request_abort("invalid_session")
+                            yield self._invalid_session(
+                                "create_session received twice on one stream"
+                            )
+                            return
                         session_id = f"sess-{uuid.uuid4().hex[:12]}"
-                        driver, ready = self._handle_create(msg.create_session, session_id)
-                        yield ready
-                    elif kind == "submit_turn" and driver is not None:
+                        driver, out = self._handle_create(msg.create_session, session_id)
+                        yield out
+                        if driver is None:
+                            return  # 校验/解析/factory 失败：未启动任何 driver
+                    elif kind in ("submit_turn", "end_session") and driver is None:
+                        yield self._invalid_session(f"{kind} received before create_session")
+                        return
+                    elif kind == "submit_turn":
                         driver.submit_turn(
                             msg.submit_turn.utterance,
                             msg.submit_turn.inner_thought
                             if msg.submit_turn.HasField("inner_thought") else None,
                         )
-                    elif kind == "end_session" and driver is not None:
+                    elif kind == "end_session":
                         driver.request_end("client_terminated")
                         explicit_end_requested = True
+
+                if (
+                    driver is None
+                    and not client_closed
+                    and time.monotonic() - started_at > self._create_timeout_s
+                ):
+                    yield self._invalid_session(
+                        f"no create_session received within {self._create_timeout_s}s"
+                    )
+                    return
 
                 if driver is not None:
                     terminal = False
@@ -130,23 +190,66 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
                 driver.request_abort("client_disconnected")
 
     def _handle_create(self, create_session, session_id: str):
+        """校验并启动会话。返回 (driver, 要 yield 的消息)：成功为
+        (driver, SessionReady)，任何校验/解析/factory 失败为
+        (None, EndSession(invalid_session))，且此时绝不启动 driver——
+        校验必须先于 ACTIVE（§2.6.1"校验通过即直接进入 ACTIVE"）。"""
         role_assignment = role_assignment_from_proto(create_session.role_assignment)
         personas = {
             pid: persona_from_proto(p) for pid, p in create_session.personas.items()
         }
-        scenario = Scenario(
-            id=create_session.scenario_id,
-            background="",
-            role_slots=[RoleSlot(slot_id=s, description="") for s in role_assignment.slot_ids()],
-            conflict="", norms=[], purpose=create_session.purpose,
+        client_slot = create_session.client_driven_slot
+
+        reason = validate_create_session(
+            role_assignment, personas, client_slot, max_turns_cap=self._max_turns_cap,
         )
-        server_backends = self._backends_factory(
-            scenario, role_assignment, personas, create_session.client_driven_slot,
-        )
+        if reason is not None:
+            return None, self._invalid_session(reason)
+
+        if self._scenario_resolver is not None:
+            try:
+                scenario = self._scenario_resolver(create_session.scenario_id)
+            except Exception as exc:
+                logger.exception(
+                    "scenario_resolver raised for scenario %r", create_session.scenario_id
+                )
+                return None, self._invalid_session(
+                    f"scenario_resolver failed for {create_session.scenario_id!r}: {exc!r}"
+                )
+            missing = role_assignment.slot_ids() - {s.slot_id for s in scenario.role_slots}
+            if missing:
+                return None, self._invalid_session(
+                    f"scenario {create_session.scenario_id!r} lacks role slots "
+                    f"required by bindings: {sorted(missing)}"
+                )
+        else:
+            scenario = Scenario(
+                id=create_session.scenario_id,
+                background="",
+                role_slots=[
+                    RoleSlot(slot_id=s, description="") for s in role_assignment.slot_ids()
+                ],
+                conflict="", norms=[], purpose=create_session.purpose,
+            )
+
+        try:
+            raw_backends = self._backends_factory(
+                scenario, role_assignment, personas, client_slot,
+            )
+        except Exception as exc:
+            logger.exception(
+                "backends_factory raised for scenario %r", create_session.scenario_id
+            )
+            return None, self._invalid_session(f"backends_factory failed: {exc!r}")
+
+        server_backends = {
+            slot: TimeoutBackend(backend, self._backend_timeout_s)
+            for slot, backend in raw_backends.items()
+        }
         driver = SessionDriver(
             scenario, role_assignment, personas,
             server_backends=server_backends,
-            client_driven_slot=create_session.client_driven_slot,
+            client_driven_slot=client_slot,
             episode_id=f"ep-{session_id}",
             turn_timeout_s=self._turn_timeout_s,
         )

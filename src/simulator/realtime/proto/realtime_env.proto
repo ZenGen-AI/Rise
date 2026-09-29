@@ -71,8 +71,8 @@ message TurnUpdate {
 // episode_id + reason 重建完整 Episode,协议不重复内联整个 Episode。
 message EndSession {
   string reason = 1;  // "max_turns" | "goal_reached" | "client_terminated"
-                       // | "role_backend_failure" | "timeout" | "invalid_session"
-                       // | "client_disconnected"
+                       // | "role_backend_failure" | "role_backend_timeout" | "timeout"
+                       // | "invalid_session" | "client_disconnected"
   string episode_id = 2;
   optional string failure_detail = 3;
 }
