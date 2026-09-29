@@ -21,6 +21,11 @@ def validate_create_session(
     if not role_assignment.bindings:
         return "role_assignment has no bindings"
 
+    slot_order = [b.slot_id for b in role_assignment.bindings]
+    duplicated = sorted({s for s in slot_order if slot_order.count(s) > 1})
+    if duplicated:
+        return f"duplicate slot_id in bindings: {duplicated}"
+
     bound_slots = role_assignment.slot_ids()
     if client_driven_slot not in bound_slots:
         return (

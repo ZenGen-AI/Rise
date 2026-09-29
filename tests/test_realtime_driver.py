@@ -149,3 +149,22 @@ def test_driver_request_abort_marks_failed_not_closed():
     assert failed is not None, "driver did not fail within bound after request_abort"
     assert failed.payload == "client_disconnected"
     assert driver.state == SessionState.FAILED
+
+
+def test_driver_request_abort_first_reason_wins():
+    # 复现评审发现的场景：重复 create 先以 "invalid_session" 中止，随后 Interact
+    # 的 finally 兜底又以 "client_disconnected" 中止——后者不得覆盖前者。
+    # 两次 abort 都在 start() 之前发出，后台线程还没跑，结果是确定的而非靠调度。
+    scenario, assignment, personas = _fixture(max_turns=100)
+    driver = SessionDriver(
+        scenario, assignment, personas,
+        server_backends={"b": ScriptedBackend({"b": ["opp"] * 100})},
+        client_driven_slot="a", episode_id="ep-6", turn_timeout_s=2.0,
+    )
+    driver.request_abort("invalid_session")
+    driver.request_abort("client_disconnected")
+    driver.start()
+    event = driver.poll_event(timeout_s=2.0)
+    assert event.kind == "failed"
+    assert event.payload == "invalid_session"
+    assert driver.state == SessionState.FAILED

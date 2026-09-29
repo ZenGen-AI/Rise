@@ -77,7 +77,8 @@ class SessionDriver:
         §2.6.5 要求客户端侧异常由服务端自行判定为失败，不能与"客户端主动
         结束"混同，也不应经 on_session_closed 被当成正常完成的 episode
         持久化（closed 与 failed 事件的持久化路径本就不同，见 servicer.py）。"""
-        self._abort_reason = reason
+        if self._abort_reason is None:  # 首个原因为准：后续（如 finally 兜底）不得覆盖
+            self._abort_reason = reason
         self._end_requested.set()
         self._client_backend.request_end()
 

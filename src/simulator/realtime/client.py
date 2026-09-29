@@ -10,8 +10,10 @@ from simulator.realtime.proto import realtime_env_pb2 as pb2
 
 
 class SessionRejectedError(Exception):
-    """服务端在 create_session 阶段就以 EndSession 拒绝了会话（如
-    invalid_session）。reason/detail 原样来自 EndSession.reason/failure_detail。"""
+    """服务端在 create_session 阶段就以 EndSession 拒绝了会话。reason/detail 原样
+    来自 EndSession.reason/failure_detail：reason 为 "invalid_session" 表示
+    请求本身有问题（重试无益）；为 "role_backend_failure" 表示服务端依赖故障
+    （工厂/解析器出错），可能是瞬态的，可按 T1 重试。"""
 
     def __init__(self, reason: str, detail: str) -> None:
         super().__init__(f"{reason}: {detail}" if detail else reason)
@@ -38,7 +40,11 @@ class EnvironmentServiceClient:
         while not client.closed:
             opponent_turns = client.submit_turn(my_utterance)
         episode = client.drain_until_end()
-    """
+
+    注意 closed 在 create_session 返回时就可能已为 True（例如客户端后说而
+    max_turns=1），先检查再提交。传输层出错（服务端宕机、连接被取消）时
+    方法抛出 grpc.RpcError / RuntimeError，此时客户端已置为 closed 并释放
+    请求流，不会泄漏后台线程。"""
 
     def __init__(self, stub) -> None:
         self._stub = stub
@@ -56,7 +62,7 @@ class EnvironmentServiceClient:
 
     @property
     def closed(self) -> bool:
-        """会话是否已收到服务端的 EndSession。"""
+        """会话是否已终止（收到服务端 EndSession，或传输层出错后被放弃）。"""
         return self._closed
 
     @property
@@ -80,6 +86,8 @@ class EnvironmentServiceClient:
         purpose: str,
         client_driven_slot: str,
     ) -> str:
+        """建立会话，返回 session_id。服务端拒绝时抛 SessionRejectedError；
+        传输层出错时抛 grpc.RpcError。"""
         cs = pb2.CreateSession(
             scenario_id=scenario_id,
             role_assignment=role_assignment_to_proto(role_assignment),
@@ -88,13 +96,17 @@ class EnvironmentServiceClient:
             client_driven_slot=client_driven_slot,
         )
         self._send_q.put(pb2.ClientMessage(create_session=cs))
-        first = next(self._resp_iter)
-        if first.WhichOneof("payload") == "end_session":
+        first = self._next_msg()
+        kind = first.WhichOneof("payload")
+        if kind == "end_session":
             end = first.end_session
             self._finish(end)
             raise SessionRejectedError(
                 end.reason, end.failure_detail if end.HasField("failure_detail") else "",
             )
+        if kind != "session_ready":
+            self._abandon("protocol_error")
+            raise RuntimeError(f"expected session_ready after create_session, got {kind!r}")
         self._session_id = first.session_ready.session_id
         self._scenario_id = scenario_id
         self._role_assignment = role_assignment
@@ -105,8 +117,9 @@ class EnvironmentServiceClient:
 
     def submit_turn(self, utterance: str, inner_thought: str | None = None) -> list[TurnRecord]:
         """提交客户端这一轮，返回随后直到"再次轮到客户端"之前收到的全部对方
-        轮次（可能为空；会话在此期间结束则包含结束前收到的轮次，此后
-        closed 为 True）。不再假定角色数量或客户端位置。"""
+        轮次（可能为空）。返回值**不含**客户端自己那一轮的回显。会话在此期间
+        结束则返回结束前收到的轮次，此后 closed 为 True。会话已结束时再调用
+        抛 RuntimeError。不假定角色数量或客户端位置。"""
         if self._closed:
             raise RuntimeError("session already ended; check client.closed before submitting")
         submit = pb2.SubmitTurn(utterance=utterance)
@@ -114,10 +127,20 @@ class EnvironmentServiceClient:
             submit.inner_thought = inner_thought
         self._send_q.put(pb2.ClientMessage(submit_turn=submit))
         # 服务端会把客户端自己的这一轮也作为 TurnUpdate 回显——先吞掉它，
-        # 否则轮次计数会错位，后面的"轮到谁"判断就不成立。
+        # 否则轮次计数会错位，后面的"轮到谁"判断就不成立。回显必须正是
+        # 客户端这一轮，否则说明客户端与服务端对轮转顺序的理解出现分歧，
+        # 与其静默错位不如立刻报错。
         own_index = len(self._turns)
         while not self._closed and len(self._turns) <= own_index:
-            self._pump_one()
+            turn = self._pump_one()
+            if turn is not None and (
+                turn.turn_index != own_index or turn.speaker_slot != self._client_slot
+            ):
+                self._abandon("protocol_error")
+                raise RuntimeError(
+                    f"expected echo of own turn #{own_index} from slot "
+                    f"{self._client_slot!r}, got #{turn.turn_index} from {turn.speaker_slot!r}"
+                )
         return self._await_client_turn()
 
     def drain_until_end(self) -> Episode:
@@ -132,10 +155,22 @@ class EnvironmentServiceClient:
             self._pump_one()
         return self._build_episode(self._last_reason)
 
+    def _next_msg(self):
+        """读一条服务端消息；传输层出错或流意外结束时放弃会话再抛出，避免
+        请求生成器永远阻塞在 send_q.get()（gRPC 的请求消费线程会泄漏）。"""
+        try:
+            return next(self._resp_iter)
+        except StopIteration:
+            self._abandon("stream_ended_without_end_session")
+            raise RuntimeError("server closed the stream without sending EndSession") from None
+        except BaseException:
+            self._abandon("client_transport_error")
+            raise
+
     def _pump_one(self) -> TurnRecord | None:
         """读一条服务端消息：turn_update → 累积并返回该轮；end_session →
         收尾并返回 None。"""
-        msg = next(self._resp_iter)
+        msg = self._next_msg()
         kind = msg.WhichOneof("payload")
         if kind == "turn_update":
             turn = turn_record_from_proto(msg.turn_update.turn)
@@ -144,6 +179,7 @@ class EnvironmentServiceClient:
         if kind == "end_session":
             self._finish(msg.end_session)
             return None
+        self._abandon("protocol_error")
         raise RuntimeError(f"unexpected server message {kind!r} mid-session")
 
     def _await_client_turn(self) -> list[TurnRecord]:
@@ -169,6 +205,13 @@ class EnvironmentServiceClient:
         self._closed = True
         self._last_reason = end_session_proto.reason
         self._send_q.put(None)
+
+    def _abandon(self, reason: str) -> None:
+        """会话无法继续（传输层出错/协议错乱）：置为终止态并释放请求流。"""
+        if not self._closed:
+            self._closed = True
+            self._last_reason = reason
+            self._send_q.put(None)
 
     def _build_episode(self, reason: str) -> Episode:
         return Episode(

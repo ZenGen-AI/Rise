@@ -44,6 +44,9 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
       明确禁止的跨会话串话。
     - scenario_resolver 若提供，按 CreateSession.scenario_id 返回完整
       Scenario（此时其 purpose 以解析结果为准）；不提供则退回空 Scenario。
+      未知 id 应抛 LookupError（含 KeyError）；返回的 Scenario 须是每次新建
+      或实际不可变的对象——并发会话会共享同一个返回值，缓存可变对象会
+      造成跨会话串话（§2.6.4）。
 
     资源边界：max_turns_cap 限制单会话轮次；create_timeout_s 限制连接建立
     后等待 CreateSession 的时长；backend_timeout_s 限制单次服务端后端调用。"""
@@ -76,6 +79,17 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
             )
         )
 
+    @staticmethod
+    def _server_fault(detail: str) -> pb2.ServerMessage:
+        """服务端自身依赖故障（工厂/解析器出错、工厂漏返回后端）。刻意不用
+        invalid_session：那表示"请求本身有问题、重试无益"，而这类故障可能是
+        瞬态的（T1），调用方应能区分（§2.6.5、补充 E：每个失败点显式标注 T1/T2）。"""
+        return pb2.ServerMessage(
+            end_session=pb2.EndSession(
+                reason="role_backend_failure", episode_id="", failure_detail=detail,
+            )
+        )
+
     def Interact(self, request_iterator, context):
         """双向流主循环（select 风格）。一个后台泄流线程把 request_iterator 的
         消息搬进 inbox，迭代器耗尽（客户端正常结束或异常断连）时投递
@@ -94,9 +108,15 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
         的 episode。
 
         协议违规一律以 EndSession(reason="invalid_session") 显式拒绝并结束
-        流，而不是静默丢弃：CreateSession 校验不过、factory/resolver 抛异常、
+        流，而不是静默丢弃：CreateSession 校验不过、未知 scenario_id、
         同一条流上重复 create、create 之前就收到 submit_turn/end_session、
-        迟迟不发 create（create_timeout_s）。"""
+        迟迟不发 create（create_timeout_s）。
+
+        服务端自身依赖故障不冒充客户端输入错误：backends_factory 抛异常或漏
+        返回后端、scenario_resolver 抛非 LookupError 异常，一律以
+        role_backend_failure 拒绝——它们可能是瞬态的（模型加载失败、外部
+        API 不可达），调用方应按可重试处理；invalid_session 则表示请求本身
+        有问题、重试无益。"""
         inbox: "queue.Queue" = queue.Queue()
 
         def _pump() -> None:
@@ -209,11 +229,17 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
         if self._scenario_resolver is not None:
             try:
                 scenario = self._scenario_resolver(create_session.scenario_id)
+            except LookupError as exc:
+                # 未知 scenario_id 是客户端输入错误（T2）
+                return None, self._invalid_session(
+                    f"unknown scenario {create_session.scenario_id!r}: {exc!r}"
+                )
             except Exception as exc:
+                # 其余异常（IO/网络等）是服务端依赖故障，可能瞬态（T1）
                 logger.exception(
                     "scenario_resolver raised for scenario %r", create_session.scenario_id
                 )
-                return None, self._invalid_session(
+                return None, self._server_fault(
                     f"scenario_resolver failed for {create_session.scenario_id!r}: {exc!r}"
                 )
             missing = role_assignment.slot_ids() - {s.slot_id for s in scenario.role_slots}
@@ -240,7 +266,16 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
             logger.exception(
                 "backends_factory raised for scenario %r", create_session.scenario_id
             )
-            return None, self._invalid_session(f"backends_factory failed: {exc!r}")
+            return None, self._server_fault(f"backends_factory failed: {exc!r}")
+
+        # 工厂契约：必须为每个非客户端角色位返回后端。漏返回会在会话中途
+        # （已发 SessionReady、甚至已有客户端轮次之后）才在 run_episode 里
+        # KeyError，所以在启动 driver 之前就拦下。
+        missing_backends = (role_assignment.slot_ids() - {client_slot}) - set(raw_backends)
+        if missing_backends:
+            return None, self._server_fault(
+                f"backends_factory returned no backend for slots {sorted(missing_backends)}"
+            )
 
         server_backends = {
             slot: TimeoutBackend(backend, self._backend_timeout_s)

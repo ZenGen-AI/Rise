@@ -66,3 +66,14 @@ def test_max_turns_at_cap_allowed():
     assert validate_create_session(
         _ra(_ok_bindings(), max_turns=200), _personas("pa", "pb"), "a", max_turns_cap=200,
     ) is None
+
+
+def test_duplicate_slot_id_in_bindings_rejected():
+    # 同一角色位绑两个人格：客户端与服务端的轮转判断虽然一致，但语义含糊
+    bindings = [RoleBinding("a", "pa", "self_play"), RoleBinding("a", "pb", "frozen_reference")]
+    reason = validate_create_session(
+        _ra(bindings), _personas("pa", "pb"), "a", max_turns_cap=200,
+    )
+    assert reason is not None
+    assert "duplicate" in reason
+    assert "'a'" in reason

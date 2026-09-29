@@ -78,15 +78,25 @@ def start_server():
         server.stop(0)
 
 
-def _expect_invalid_session(stream, *needles):
+def _expect_rejected(stream, reason, *needles):
     msg = stream.recv()
     assert msg.WhichOneof("payload") == "end_session", msg
-    assert msg.end_session.reason == "invalid_session"
+    assert msg.end_session.reason == reason, msg.end_session
     for needle in needles:
         assert needle in msg.end_session.failure_detail, msg.end_session.failure_detail
     # 被拒绝的会话必须就此结束：没有 session_ready，也没有后续消息
     with pytest.raises(StopIteration):
         stream.recv()
+
+
+def _expect_invalid_session(stream, *needles):
+    """请求本身有问题（重试无益，T2）。"""
+    _expect_rejected(stream, "invalid_session", *needles)
+
+
+def _expect_server_fault(stream, *needles):
+    """服务端依赖故障（可能瞬态，T1）：刻意与 invalid_session 区分开。"""
+    _expect_rejected(stream, "role_backend_failure", *needles)
 
 
 # ---------------- Important 3：CreateSession 校验 ----------------
@@ -115,27 +125,75 @@ def test_max_turns_over_cap_rejected(start_server):
     stream.close()
 
 
-def test_backends_factory_exception_becomes_invalid_session(start_server):
+def test_backends_factory_exception_is_server_fault_not_invalid_session(start_server):
+    # 工厂出错（模型加载失败、外部 API 不可达等）是服务端依赖故障，可能瞬态，
+    # 不能冒充"客户端请求有问题"——否则调用方会误判为重试无益。
     def exploding_factory(scenario, assignment, personas, client_driven_slot):
         raise ValueError("factory-exploded")
 
     address = start_server(factory=exploding_factory)
     stream = _Stream(address)
     stream.send(_create_msg())
-    _expect_invalid_session(stream, "factory-exploded")
+    _expect_server_fault(stream, "factory-exploded")
     stream.close()
 
 
-def test_duplicate_create_session_rejected_and_first_session_not_persisted(start_server):
+def test_backends_factory_missing_a_slot_is_rejected_before_any_driver_starts(start_server):
+    # 曾经的行为：先发 session_ready，客户端已提交若干轮，之后 run_episode 在
+    # backends[slot] 上 KeyError，被误报成会话中途的 role_backend_failure。
+    def incomplete_factory(scenario, assignment, personas, client_driven_slot):
+        return {}  # 漏返回对手 "b" 的后端
+
+    address = start_server(factory=incomplete_factory)
+    stream = _Stream(address)
+    stream.send(_create_msg())
+    _expect_server_fault(stream, "['b']")  # 第一条消息就是拒绝，没有 session_ready
+    stream.close()
+
+
+def test_duplicate_create_session_winds_down_first_driver_with_invalid_session(
+    start_server, monkeypatch,
+):
+    # 只断言 closed == [] 是空转的：拒绝后 Interact 立刻返回，不会再去 drain
+    # 第一个 driver 的 outbox，on_session_closed 无论如何都不会被调用。所以这里
+    # 直接拿到第一个 driver，检查它确实被主动收尾、且原因是 invalid_session。
+    from simulator.realtime.session import SessionState
+    import simulator.realtime.servicer as servicer_module
+
+    drivers = []
+
+    class RecordingDriver(servicer_module.SessionDriver):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            drivers.append(self)
+
+    monkeypatch.setattr(servicer_module, "SessionDriver", RecordingDriver)
     closed = []
-    address = start_server(on_session_closed=lambda ep: closed.append(ep.id))
+    # turn_timeout_s 取大：若第一个 driver 是靠自身超时才结束，就等不到 failed
+    # 事件，测试会失败——以此证明它是被 request_abort 主动收尾的。
+    address = start_server(
+        on_session_closed=lambda ep: closed.append(ep.id), turn_timeout_s=30.0,
+    )
     stream = _Stream(address)
     stream.send(_create_msg(max_turns=100))
     assert stream.recv().WhichOneof("payload") == "session_ready"
     stream.send(_create_msg(max_turns=100))
     _expect_invalid_session(stream, "twice")
-    assert closed == []  # 被连带终止的第一个会话不得当作正常 episode 落盘
     stream.close()
+
+    assert len(drivers) == 1
+    failed = None
+    deadline = time.monotonic() + 2.0
+    while failed is None and time.monotonic() < deadline:
+        event = drivers[0].poll_event(timeout_s=0.1)
+        if event is not None and event.kind == "failed":
+            failed = event
+    assert failed is not None, "第一个 driver 没有被主动收尾"
+    # 原因必须是重复创建触发的 invalid_session；Interact 的 finally 兜底随后会
+    # 再调一次 request_abort("client_disconnected")，后者不得覆盖前者。
+    assert failed.payload == "invalid_session"
+    assert drivers[0].state == SessionState.FAILED
+    assert closed == []
 
 
 def test_submit_turn_before_create_session_rejected(start_server):
@@ -269,12 +327,25 @@ def test_resolver_scenario_missing_required_slots_rejected(start_server):
     stream.close()
 
 
-def test_resolver_exception_becomes_invalid_session(start_server):
+def test_resolver_unknown_scenario_id_is_invalid_session(start_server):
+    # 未知 id 是客户端输入错误（T2）：重试无益
     def resolver(scenario_id):
-        raise KeyError("resolver-exploded")
+        raise KeyError(scenario_id)
+
+    address = start_server(scenario_resolver=resolver)
+    stream = _Stream(address)
+    stream.send(_create_msg(scenario_id="no-such-scenario"))
+    _expect_invalid_session(stream, "no-such-scenario")
+    stream.close()
+
+
+def test_resolver_infrastructure_error_is_server_fault_not_invalid_session(start_server):
+    # 场景库不可达之类的 IO 故障是服务端依赖故障（可能瞬态，T1）
+    def resolver(scenario_id):
+        raise OSError("scenario-store-unreachable")
 
     address = start_server(scenario_resolver=resolver)
     stream = _Stream(address)
     stream.send(_create_msg())
-    _expect_invalid_session(stream, "resolver-exploded")
+    _expect_server_fault(stream, "scenario-store-unreachable")
     stream.close()
