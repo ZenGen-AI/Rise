@@ -254,6 +254,7 @@ class TrainingExecutor(Protocol):
     def grpo_opd_step(self, rewarded: list[RewardedTrajectory], *,
                       opd_coefficient: float, teacher_model_ref: BigRef) -> StepResult: ...
     def save_checkpoint(self, tag: str) -> BigRef: ...
+    def checkpoint_intact(self, checkpoint_ref: BigRef) -> bool: ...   # 能否重建该 checkpoint;供 decide_resume
 ```
 
 - **GRPO 与 OPD 只有一个方法**:spec §3.2 明说两者作用在同一个训练 step 里,不是先后阶段。
@@ -343,9 +344,16 @@ decide_resume(run, config, *, checkpoint_intact: bool | None) -> ResumeDecision
 薄编排,不含判定逻辑,只调下层纯函数和协议(沿用 Plan 3 `run_diagnostic` 的做法):
 
 ```python
-def run_training(cfg, *, store, run_id, source, attribution, executor, converter,
-                 resume_from: TrainingRun | None = None) -> TrainingRun
+def run_training(cfg, *, store, run_id, make_sources, attribution, executor, converter,
+                 resume_from: TrainingRun | None = None,
+                 metric_stream_refs: list[BigRef] | None = None,
+                 on_step: Callable[[StepResult], None] | None = None) -> TrainingRun
 ```
+
+**实现时的两处调整(写实施计划时发现)**
+
+- `source` 改为 **`make_sources` 工厂**:`Callable[[int], dict[str, TrajectorySource]]`,参数是已完成的 GRPO step 数,返回 `{"sft": 源, "grpo_opd": 源}`。原因是 Interact 的轨迹源续训时要从正确的 scenario 轮转位置起步(`InteractTrajectorySource` 的 `start_step`),而 SFT 与 GRPO 本来就不是同一个源。
+- 多了 `metric_stream_refs`(调用方写好指标流文件,只把引用交给编排器记录)和 `on_step`(逐步指标不进 git,这是调用方观察每一步的唯一出口)。
 
 1. **起点**:先 `validate_training_config`。新运行 `load(base_checkpoint_ref)` 从 step 0 起;续训 `load(last_checkpoint_ref)` 从 `checkpoint_step` 起。写 `training_run`(`pending`)。
 2. **SFT 阶段**(步数不足 `sft_steps` 时):取 `batch_for_step` 的数据,调 `sft_step`。
@@ -394,7 +402,7 @@ def run_training(cfg, *, store, run_id, source, attribution, executor, converter
 |---|---|
 | `test_mt_datamodel` | 往返序列化 |
 | `test_mt_config` | `validate_training_config` 各违规分支;`config_hash` 随配置变;`phase_at` 边界(含 `sft_steps=0`) |
-| `test_mt_trajectory_source` | Batch:篡改、整体哈希不符、空清单;Interact:与直接 `run_episode` parity、客户端后说、策略抛异常后探针没收到半截 episode、T1 重试与 `failed_attempts` |
+| `test_mt_trajectory_batch` / `test_mt_trajectory_interact` | Batch:篡改、整体哈希不符、空清单;Interact:与直接 `run_episode` parity、客户端后说、策略抛异常后探针没收到半截 episode、T1 重试与 `failed_attempts` |
 | `test_mt_reward_pipeline` | §4 全部用例:校验各拒绝分支;规则归因 γ=1/γ<1/不命中/对手轮为 `None`;judge 归因含缺键会响与自评守卫的相同/judge 是前缀/被训模型是前缀/独立 id 四种;`sum`/`product` 数值;长短两条 episode 的 `combined_reward` 无长度偏置 |
 | `test_mt_grouping` | `group_advantages` 已知数值;单条组与零方差组计为退化;`validate_groups` 列出组 id |
 | `test_mt_executor` | 联合 step 同时报告 `grpo_loss` 与 `opd_loss`;系数为 0 时 `opd_weight` 为 0 但 `opd_loss` 仍报告;checkpoint 哈希链;未 `load` 抛错;**续训等价(Batch)** |
@@ -402,6 +410,8 @@ def run_training(cfg, *, store, run_id, source, attribution, executor, converter
 | `test_mt_resume` | `decide_resume` 全部分支(含 `resume_attempts` 刚好等于上限);`batch_for_step` |
 | `test_mt_orchestrator` | 端到端 Batch;端到端 Interact(沿用 Plan 4 的真实 loopback 服务端);崩溃后续训;确定性失败写 `failed` |
 | `test_mt_packaging` | wheel 包列表防回归 |
+
+另有 `test_mt_training_run`(训练记录往返、非审核类状态机、`trace` 读得到指标流引用)与 `test_mt_integration`(下面两条集成测试)。
 
 **续训等价(Batch)**:固定数据下,一次跑 N 步,与跑 k 步、存点、新执行器 `load` 后再跑 N−k 步,最终 checkpoint 的 sha256 相同;再加一种情形——在 checkpoint 步之后又多跑几步才崩,续训应回到 checkpoint 步重做,最终哈希仍相同。
 
@@ -444,7 +454,7 @@ def run_training(cfg, *, store, run_id, source, attribution, executor, converter
 
 ## 12. 规模与拆分
 
-约 10 个源文件(`datamodel`、`training_config`、`trajectory_source`、`reward_pipeline`、`grouping`、`executor`、`checkpoint`、`training_run`、`store_adapter`、`orchestrator`)、约 10 个测试文件,另有对 Plan 4 客户端的两处增量改动,估计 80 到 110 条新测试(**估计值**,未排期)。
+约 10 个源文件(`datamodel`、`training_config`、`trajectory_source`、`reward_pipeline`、`grouping`、`executor`、`checkpoint`、`resume`、`store_adapter`、`orchestrator`;`TrainingRun` 放在 `datamodel`,`batch_for_step` 放在 `trajectory_source`)、约 10 个测试文件,另有对 Plan 4 客户端的两处增量改动,实际写进两份计划的新测试约 331 条(上半段 223、下半段 108;设计阶段的估计 80 到 110 条偏低,因为每条违规分支各占一个参数化用例)。
 
 这是个大计划,建议执行时拆成两段,中间过一次评审:
 
