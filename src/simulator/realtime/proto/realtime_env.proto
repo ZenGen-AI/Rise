@@ -19,6 +19,9 @@ message RoleBindingProto {
   string slot_id = 1;
   string persona_id = 2;
   string model_backend = 3;  // "self_play" | "frozen_reference" | "external_api"
+  // 具体模型制品引用(如 "zengen-v1"):让调用方显式指定"这个角色位是哪个冻结模型"
+  // (§2.2 关键接口约定)。optional 以区分"未指定"与空串;self_play 不得携带。
+  optional string model_ref = 4;
 }
 
 // 角色分配(镜像 simulator.datamodel.RoleAssignment)

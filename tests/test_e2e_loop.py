@@ -1,6 +1,6 @@
 from controlplane.envelope import Envelope, OwnerRef
 from controlplane.gitstore import GitStore
-from controlplane.paths import run_dir, model_file
+from controlplane.paths import run_dir, model_file, diagnostic_report_file
 from controlplane.daemon import reconcile_once
 
 
@@ -38,7 +38,10 @@ def test_full_fake_rsi_loop(tmp_path):
     assert store.read_product(f"{run_dir('run-001')}/scenario_pool.yaml").status == "executed"
     assert store.read_product(f"{run_dir('run-001')}/candidate_checkpoint.yaml").status == "pending_review"
 
-    # 3. 调和 tick 2：候选待审，仅 await_review，不越过审核门自动晋级
+    # 3. 调和 tick 2：候选待审但还没有诊断 → 先触发诊断（审核门的证据）；
+    #    tick 3：证据就位，仅 await_review，不越过审核门自动晋级
+    assert [a.kind for a in reconcile_once(store)] == ["request_diagnostic"]
+    assert store.exists(diagnostic_report_file("run-001"))
     actions = reconcile_once(store)
     assert [a.kind for a in actions] == ["await_review"]
     assert not store.exists(model_file(1))  # 未经批准不得晋级
@@ -46,7 +49,7 @@ def test_full_fake_rsi_loop(tmp_path):
     # 4. 人工审核门①批准（等价 CLI approve）
     _approve_like_cli(store, "run-001")
 
-    # 5. 调和 tick 3：晋级 → 登记 zengen-v1 + 写 outcome + 候选→effective
+    # 5. 调和 tick 4：晋级 → 登记 zengen-v1 + 写 outcome + 候选→effective
     reconcile_once(store)
     assert store.exists(model_file(1))
     model = store.read_product(model_file(1))
@@ -56,7 +59,7 @@ def test_full_fake_rsi_loop(tmp_path):
     assert outcome.payload["promoted_model"] == "zengen-v1"
     assert store.read_product(f"{run_dir('run-001')}/candidate_checkpoint.yaml").status == "effective"
 
-    # 6. 调和 tick 4：闭环稳定，无剩余动作
+    # 6. 调和 tick 5：闭环稳定，无剩余动作
     assert reconcile_once(store) == []
 
 

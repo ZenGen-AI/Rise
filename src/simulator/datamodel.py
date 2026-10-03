@@ -95,13 +95,19 @@ class RoleBinding:
     slot_id: str
     persona_id: str
     model_backend: str  # "self_play" | "frozen_reference" | "external_api"
+    # 具体模型制品引用(如 "zengen-v1")。frozen_reference / external_api 必填,
+    # self_play 必须为 None。None 时不进 to_dict,既有 Episode 的序列化与哈希保持不变。
+    model_ref: str | None = None
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "slot_id": self.slot_id,
             "persona_id": self.persona_id,
             "model_backend": self.model_backend,
         }
+        if self.model_ref is not None:
+            d["model_ref"] = self.model_ref
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "RoleBinding":
@@ -109,6 +115,7 @@ class RoleBinding:
             slot_id=d["slot_id"],
             persona_id=d["persona_id"],
             model_backend=d["model_backend"],
+            model_ref=d.get("model_ref"),
         )
 
 

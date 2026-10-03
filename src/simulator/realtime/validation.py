@@ -36,6 +36,13 @@ def validate_create_session(
     for binding in role_assignment.bindings:
         if binding.persona_id not in personas:
             return f"binding for slot {binding.slot_id!r} references missing persona {binding.persona_id!r}"
+        if binding.model_ref is not None and not binding.model_ref:
+            return f"binding for slot {binding.slot_id!r} has an empty model_ref"
+        if binding.model_backend == "self_play" and binding.model_ref is not None:
+            return (
+                f"binding for slot {binding.slot_id!r} is self_play and must not "
+                f"carry model_ref {binding.model_ref!r}"
+            )
 
     if role_assignment.max_turns <= 0:
         return f"max_turns must be positive, got {role_assignment.max_turns}"

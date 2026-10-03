@@ -24,14 +24,16 @@ class PersonaProto(_message.Message):
     def __init__(self, id: _Optional[str] = ..., traits: _Optional[_Iterable[str]] = ..., motivation: _Optional[str] = ..., speech_style: _Optional[str] = ..., values: _Optional[_Iterable[str]] = ..., source: _Optional[str] = ...) -> None: ...
 
 class RoleBindingProto(_message.Message):
-    __slots__ = ("slot_id", "persona_id", "model_backend")
+    __slots__ = ("slot_id", "persona_id", "model_backend", "model_ref")
     SLOT_ID_FIELD_NUMBER: _ClassVar[int]
     PERSONA_ID_FIELD_NUMBER: _ClassVar[int]
     MODEL_BACKEND_FIELD_NUMBER: _ClassVar[int]
+    MODEL_REF_FIELD_NUMBER: _ClassVar[int]
     slot_id: str
     persona_id: str
     model_backend: str
-    def __init__(self, slot_id: _Optional[str] = ..., persona_id: _Optional[str] = ..., model_backend: _Optional[str] = ...) -> None: ...
+    model_ref: str
+    def __init__(self, slot_id: _Optional[str] = ..., persona_id: _Optional[str] = ..., model_backend: _Optional[str] = ..., model_ref: _Optional[str] = ...) -> None: ...
 
 class RoleAssignmentProto(_message.Message):
     __slots__ = ("scenario_id", "bindings", "max_turns")

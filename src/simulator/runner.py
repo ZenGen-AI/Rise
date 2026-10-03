@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from copy import deepcopy
+from dataclasses import replace
 from typing import Callable
 
 from simulator.datamodel import (
@@ -57,8 +59,18 @@ def run_episode(
             )
         persona = personas[binding.persona_id]
         backend = backends[binding.slot_id]
+        # 每个后端只能看到自己角色位的内部推理/激活轨迹：其他角色位的这两项在
+        # 传给它的 history 里被抹掉，否则对手能偷看被训练模型的"内心独白"，训练
+        # 出的策略学的就是"对手作弊"条件下的行为。完整记录仍留在 turns/Episode
+        # 里。两类轮次都必须是副本：自己角色位的轮次也要深拷贝（activation_trace
+        # 是可变 dict），否则后端改自己的历史会直接污染 Episode。
+        history = [
+            deepcopy(t) if t.speaker_slot == binding.slot_id
+            else replace(t, inner_thought=None, activation_trace=None)
+            for t in turns
+        ]
         utterance, inner_thought = backend.respond(
-            persona, scenario, turns, binding.slot_id
+            persona, scenario, history, binding.slot_id
         )
         turns.append(
             TurnRecord(

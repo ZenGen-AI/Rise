@@ -42,3 +42,9 @@ def taxonomy_file(version: str) -> str:
 
 def item_pool_file(version: str) -> str:
     return f"{CONTROL_PLANE_ROOT}/diagnostics/item_pool_{version}.yaml"
+
+
+def dataset_manifest_file(run_id: str, name: str) -> str:
+    """数据集清单。按阶段（name，如 "sft" / "grpo_opd"）各一份，放 run 目录顶层——
+    GitStore.list_products 不递归，顶层文件才能被 rismforge trace 扫到。"""
+    return f"{run_dir(run_id)}/dataset_manifest_{name}.yaml"

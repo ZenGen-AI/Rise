@@ -4,7 +4,7 @@ import time
 
 from controlplane.envelope import Envelope, OwnerRef
 from controlplane.gitstore import GitStore
-from controlplane.paths import CONTROL_PLANE_ROOT, run_dir, model_file
+from controlplane.paths import CONTROL_PLANE_ROOT, run_dir, model_file, diagnostic_report_file
 from controlplane.reconcile import (
     DirectiveView,
     CandidateView,
@@ -13,7 +13,7 @@ from controlplane.reconcile import (
     reconcile,
 )
 from controlplane.states import assert_transition
-from simulator.stubs import execute_dispatch
+from simulator.stubs import diagnostic_evaluator_stub, execute_dispatch
 
 _NOW = "2026-09-26T00:00:00Z"
 
@@ -44,7 +44,12 @@ def read_tree_state(store: GitStore) -> TreeState:
         c_path = f"{run_dir(run_id)}/candidate_checkpoint.yaml"
         if store.exists(c_path):
             c = store.read_product(c_path)
-            candidates.append(CandidateView(id=c.id, status=c.status, run_id=run_id))
+            candidates.append(
+                CandidateView(
+                    id=c.id, status=c.status, run_id=run_id,
+                    has_diagnostic=store.exists(diagnostic_report_file(run_id)),
+                )
+            )
     model_count = len(store.list_products(f"{CONTROL_PLANE_ROOT}/models"))
     return TreeState(directives=directives, candidates=candidates, model_count=model_count)
 
@@ -62,7 +67,13 @@ def apply_action(store: GitStore, action: Action) -> None:
     elif action.kind == "promote_candidate":
         run_id = action.detail["run_id"]
         version = action.detail["model_version"]
-        # 1) 登记 ZenGen 版本产物（仅引用）
+        cand = store.read_product(f"{run_dir(run_id)}/candidate_checkpoint.yaml")
+        # 1) 登记 ZenGen 版本产物（仅引用）。把候选的 checkpoint_ref 带过来：
+        # 下一轮训练的基座要从"最新已晋级模型"解析（controlplane.models），
+        # 不能再靠人手填。候选没有该引用时不编造——解析侧会明确报错。
+        model_payload: dict = {"promoted_from": action.target_id}
+        if "checkpoint_ref" in cand.payload:
+            model_payload["checkpoint_ref"] = cand.payload["checkpoint_ref"]
         model = Envelope(
             id=f"zengen-v{version}",
             type="zengen_model",
@@ -72,11 +83,10 @@ def apply_action(store: GitStore, action: Action) -> None:
             status="effective",
             schema_version=1,
             links=[action.target_id, run_id],
-            payload={"promoted_from": action.target_id},
+            payload=model_payload,
         )
         store.write_product(model_file(version), model, f"reconcile: promote zengen-v{version}")
         # 2) 候选 approved → effective
-        cand = store.read_product(f"{run_dir(run_id)}/candidate_checkpoint.yaml")
         assert_transition("review", cand.status, "effective")
         cand.status = "effective"
         store.write_product(
@@ -95,6 +105,15 @@ def apply_action(store: GitStore, action: Action) -> None:
             payload={"promoted_model": f"zengen-v{version}"},
         )
         store.write_product(f"{run_dir(run_id)}/outcome.yaml", outcome, f"reconcile: outcome {run_id}")
+    elif action.kind == "request_diagnostic":
+        run_id = action.detail["run_id"]
+        # 骨架里计算层由 stub 顶替（同 execute_dispatch）。stub 报告带 stub 标记，
+        # 审核门 review 会醒目标出，不会被误当成真诊断。真实诊断见 diagnostic.orchestrator。
+        report = diagnostic_evaluator_stub(run_id, action.target_id)
+        store.write_product(
+            diagnostic_report_file(run_id), report,
+            f"reconcile: diagnostic for {action.target_id}",
+        )
     # await_review / noop：无自动动作，等待人工
 
 

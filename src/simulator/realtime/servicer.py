@@ -5,6 +5,7 @@ import queue
 import threading
 import time
 import uuid
+from dataclasses import replace
 from typing import Callable
 
 import grpc
@@ -302,8 +303,14 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
             if event is None:
                 return
             if event.kind == "turn":
+                turn = event.payload
+                if turn.speaker_slot != driver.client_driven_slot:
+                    # 对手的内部推理/激活轨迹不下行给客户端（被训练模型）：和
+                    # run_episode 里给后端的 history 同一条规则。服务端落盘的
+                    # Episode 来自 driver 自己的完整记录，不受影响。
+                    turn = replace(turn, inner_thought=None, activation_trace=None)
                 yield pb2.ServerMessage(
-                    turn_update=pb2.TurnUpdate(turn=turn_record_to_proto(event.payload))
+                    turn_update=pb2.TurnUpdate(turn=turn_record_to_proto(turn))
                 )
             elif event.kind == "closed":
                 episode = event.payload

@@ -67,6 +67,7 @@ def diagnostic_evaluator_stub(run_id: str, candidate_id: str) -> Envelope:
             "candidate_ref": candidate_id,
             "benchmark_version": "bench-v1",
             "dimension_count": 0,
+            "stub": True,  # 占位报告：审核门 review 据此醒目标出 [STUB]
         },
     )
 
