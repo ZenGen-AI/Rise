@@ -139,6 +139,52 @@ class TrainingConfig:
         )
 
 
+_INT_FIELDS = (
+    "sft_steps", "grpo_steps", "sft_batch_size", "groups_per_step", "group_size",
+    "checkpoint_every_steps", "max_turns_per_episode", "max_retries_per_episode",
+    "min_group_size", "max_resume_attempts",
+)
+
+
+def _check_types(cfg: TrainingConfig) -> str | None:
+    """类型校验,在任何比较之前跑一遍。错误类型绝不让后面的代码看到:
+    字符串当真值、浮点数当整数之类的输入会在这里被挡下,返回点名字段的可读原因,
+    而不是让 '<' 之类的运算在后面抛裸 TypeError。"""
+    if not isinstance(cfg.mode, str):
+        return f"mode must be a str, got {type(cfg.mode).__name__}"
+    if not isinstance(cfg.trained_slot, str):
+        return f"trained_slot must be a str, got {type(cfg.trained_slot).__name__}"
+    for name in _INT_FIELDS:
+        value = getattr(cfg, name)
+        if isinstance(value, bool) or not isinstance(value, int):
+            return f"{name} must be an int, got {type(value).__name__}"
+    if not isinstance(cfg.allow_resume, bool):
+        return f"allow_resume must be a bool, got {type(cfg.allow_resume).__name__}"
+    if isinstance(cfg.opd_coefficient, bool) or not isinstance(cfg.opd_coefficient, (int, float)):
+        return f"opd_coefficient must be an int or float, got {type(cfg.opd_coefficient).__name__}"
+    if isinstance(cfg.reward.gamma, bool) or not isinstance(cfg.reward.gamma, (int, float)):
+        return f"reward.gamma must be an int or float, got {type(cfg.reward.gamma).__name__}"
+    if not isinstance(cfg.grpo_config, dict):
+        return f"grpo_config must be a dict, got {type(cfg.grpo_config).__name__}"
+    try:
+        json.dumps(cfg.grpo_config)
+    except TypeError as exc:
+        return f"grpo_config must be JSON serializable: {exc}"
+    for name, ref in (
+        ("base_checkpoint_ref", cfg.base_checkpoint_ref),
+        ("teacher_model_ref", cfg.teacher_model_ref),
+    ):
+        if not isinstance(ref.sha256, str):
+            return f"{name}.sha256 must be a str, got {type(ref.sha256).__name__}"
+    if not isinstance(cfg.scenario_ids, list) or not all(
+        isinstance(s, str) and s for s in cfg.scenario_ids
+    ):
+        return "scenario_ids must be a list of non-empty str"
+    if not isinstance(cfg.stage_manifest_refs, dict):
+        return f"stage_manifest_refs must be a dict, got {type(cfg.stage_manifest_refs).__name__}"
+    return None
+
+
 def _validate_reward(r: RewardConfig) -> str | None:
     if not r.components or len(set(r.components)) != len(r.components) or not all(r.components):
         return "reward.components must be non-empty and unique"
@@ -207,7 +253,13 @@ def _validate_interact(cfg: TrainingConfig) -> str | None:
 
 
 def validate_training_config(cfg: TrainingConfig) -> str | None:
-    """返回第一条违规的可读原因;全部合法返回 None。纯函数。"""
+    """返回第一条违规的可读原因;全部合法返回 None。纯函数。
+
+    类型检查在任何比较之前跑:任何字段的错误类型都绝不抛异常,一律返回可读原因
+    (原因里含字段名和 "must be"),不能以裸 TypeError 或静默通过的形式逃出去。"""
+    type_reason = _check_types(cfg)
+    if type_reason is not None:
+        return type_reason
     if cfg.mode not in MODES:
         return f"mode must be one of {list(MODES)}, got {cfg.mode!r}"
     if not cfg.trained_slot:
@@ -264,8 +316,15 @@ def ensure_valid_config(cfg: TrainingConfig) -> TrainingConfig:
 
 
 def config_hash(cfg: TrainingConfig) -> str:
-    """配置的 sha256:规范化 JSON(键排序、无空白),不依赖字典顺序或 YAML 排版。"""
-    text = json.dumps(cfg.to_dict(), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    """配置的 sha256:规范化 JSON(键排序、无空白),不依赖字典顺序或 YAML 排版。
+
+    这一步在 validate_training_config 之前就会被下半段编排器调用,所以
+    grpo_config 之类带不可序列化值的配置在这里必须抛 InvalidTrainingConfigError
+    (确定性失败),不能是裸 TypeError(会被当成瞬态失败重试)。"""
+    try:
+        text = json.dumps(cfg.to_dict(), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    except TypeError as exc:
+        raise InvalidTrainingConfigError(f"grpo_config must be JSON serializable: {exc}") from exc
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
@@ -282,16 +341,26 @@ def phase_at(step: int, cfg: TrainingConfig) -> str:
 
 
 def load_config_from_directive(env: Envelope) -> TrainingConfig:
-    """从 directive 产物读出训练配置。缺键或缺字段抛 InvalidTrainingConfigError;
-    不替调用方校验,校验见 validate_training_config / ensure_valid_config。"""
+    """从 directive 产物读出训练配置。缺键、缺字段或 training_config 本身不是 dict
+    一律抛 InvalidTrainingConfigError;不替调用方校验,校验见
+    validate_training_config / ensure_valid_config。"""
     raw = env.payload.get("training_config")
     if raw is None:
         raise InvalidTrainingConfigError(
             f"directive {env.id} has no 'training_config' in its payload"
+        )
+    if not isinstance(raw, dict):
+        raise InvalidTrainingConfigError(
+            f"directive {env.id}: training_config must be a dict, got {type(raw).__name__}"
         )
     try:
         return TrainingConfig.from_dict(raw)
     except KeyError as exc:
         raise InvalidTrainingConfigError(
             f"directive {env.id}: training_config is missing field {exc}"
+        ) from exc
+    except (TypeError, AttributeError) as exc:
+        raise InvalidTrainingConfigError(
+            f"directive {env.id}: training_config is malformed "
+            f"({type(exc).__name__}: {exc})"
         ) from exc

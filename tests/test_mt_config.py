@@ -276,3 +276,87 @@ def test_directive_with_a_missing_field_names_the_field():
     del d["opd_coefficient"]
     with pytest.raises(InvalidTrainingConfigError, match="opd_coefficient"):
         load_config_from_directive(_directive({"training_config": d}))
+
+
+# ---------------- F1:字段类型校验 ----------------
+# 下半段编排器靠异常类型区分"确定性失败写 failed"和"其余保持 pending 等续训",
+# 类型错误绝不能以裸 TypeError 或静默通过的形式逃出 validate_training_config。
+
+TYPE_INVALID = [
+    ("mode_not_str", lambda: _interact(mode=123), "mode"),
+    ("trained_slot_not_str", lambda: _interact(trained_slot=123), "trained_slot"),
+    ("sft_steps_is_a_string", lambda: _interact(sft_steps="3"), "sft_steps"),
+    ("sft_steps_is_a_bool", lambda: _interact(sft_steps=True), "sft_steps"),
+    ("grpo_steps_is_a_float", lambda: _interact(grpo_steps=2.5), "grpo_steps"),
+    ("sft_batch_size_is_a_string", lambda: _interact(sft_batch_size="2"), "sft_batch_size"),
+    ("groups_per_step_is_a_bool", lambda: _interact(groups_per_step=True), "groups_per_step"),
+    ("group_size_is_a_float", lambda: _interact(group_size=2.5), "group_size"),
+    ("checkpoint_every_steps_is_a_float", lambda: _interact(checkpoint_every_steps=1.5), "checkpoint_every_steps"),
+    ("max_turns_per_episode_is_a_bool", lambda: _interact(max_turns_per_episode=True), "max_turns_per_episode"),
+    ("max_retries_per_episode_is_a_bool", lambda: _interact(max_retries_per_episode=True), "max_retries_per_episode"),
+    ("min_group_size_is_a_bool", lambda: _interact(min_group_size=True), "min_group_size"),
+    ("max_resume_attempts_is_a_bool", lambda: _interact(max_resume_attempts=True), "max_resume_attempts"),
+    ("allow_resume_is_the_string_false", lambda: _interact(allow_resume="false"), "allow_resume"),
+    ("allow_resume_is_an_int", lambda: _interact(allow_resume=1), "allow_resume"),
+    ("opd_coefficient_is_a_string", lambda: _interact(opd_coefficient="0.1"), "opd_coefficient"),
+    ("opd_coefficient_is_a_bool", lambda: _interact(opd_coefficient=True), "opd_coefficient"),
+    ("gamma_is_a_string", lambda: _interact(reward=_reward(gamma="0.9")), "reward.gamma"),
+    ("gamma_is_a_bool", lambda: _interact(reward=_reward(gamma=True)), "reward.gamma"),
+    ("grpo_config_is_not_a_dict", lambda: _interact(grpo_config=["lr"]), "grpo_config"),
+    ("grpo_config_has_an_unserializable_value", lambda: _interact(grpo_config={"x": {1, 2, 3}}), "grpo_config"),
+    ("base_checkpoint_sha256_is_not_a_string", lambda: _interact(base_checkpoint_ref=BigRef("u", 123, 1)), "base_checkpoint_ref.sha256"),
+    ("teacher_sha256_is_not_a_string", lambda: _interact(teacher_model_ref=BigRef("u", 123, 1)), "teacher_model_ref.sha256"),
+    ("scenario_ids_is_not_a_list", lambda: _interact(scenario_ids="s1"), "scenario_ids"),
+    ("scenario_ids_has_a_non_string_entry", lambda: _interact(scenario_ids=["s1", 2]), "scenario_ids"),
+    ("scenario_ids_has_an_empty_string_entry", lambda: _interact(scenario_ids=["s1", ""]), "scenario_ids"),
+    ("stage_manifest_refs_is_not_a_dict", lambda: _interact(stage_manifest_refs=["sft"]), "stage_manifest_refs"),
+]
+
+
+@pytest.mark.parametrize(
+    "build,field", [(b, f) for _, b, f in TYPE_INVALID], ids=[i for i, _, _ in TYPE_INVALID],
+)
+def test_wrong_field_types_are_rejected_with_a_reason_not_an_exception(build, field):
+    reason = validate_training_config(build())
+    assert reason is not None, "应当被拒绝"
+    assert field in reason, reason
+    assert "must be" in reason, reason
+
+
+def test_sft_steps_as_a_string_does_not_raise_type_error():
+    # 曾经的裸 TypeError 来源:字符串和整数比较(cfg.sft_steps < 0)
+    cfg = _interact(sft_steps="3")
+    reason = validate_training_config(cfg)
+    assert reason is not None and "sft_steps" in reason
+
+
+def test_opd_coefficient_as_a_string_does_not_raise_type_error():
+    # 曾经的裸 TypeError 来源:math.isfinite(str)
+    cfg = _interact(opd_coefficient="0.1")
+    reason = validate_training_config(cfg)
+    assert reason is not None and "opd_coefficient" in reason
+
+
+def test_ensure_valid_config_raises_invalid_training_config_error_not_type_error_for_bad_types():
+    with pytest.raises(InvalidTrainingConfigError, match="sft_steps"):
+        ensure_valid_config(_interact(sft_steps="3"))
+
+
+# ---------------- F1:config_hash 遇到不可序列化字段 ----------------
+
+def test_config_hash_rejects_unserializable_grpo_config_with_a_named_error_not_a_bare_type_error():
+    cfg = _interact(grpo_config={"x": {1, 2, 3}})
+    with pytest.raises(InvalidTrainingConfigError, match="grpo_config"):
+        config_hash(cfg)
+
+
+# ---------------- F1:load_config_from_directive 遇到错误类型的 training_config ----------------
+
+@pytest.mark.parametrize(
+    "bad_training_config",
+    [["a", "b"], "oops", 42],
+    ids=["list", "str", "int"],
+)
+def test_directive_with_a_non_dict_training_config_is_rejected_not_a_bare_type_error(bad_training_config):
+    with pytest.raises(InvalidTrainingConfigError, match="training_config"):
+        load_config_from_directive(_directive({"training_config": bad_training_config}))
