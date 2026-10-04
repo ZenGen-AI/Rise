@@ -1,10 +1,13 @@
 import pytest
 
+from mindtrainer.datamodel import TrajectoryBatch
 from mindtrainer.reward_pipeline import (
     AttributionError, JudgeAttribution, MockTurnJudge, OutcomeSplitAttribution,
-    SelfEvalBiasError, build_attribution_backend,
+    SelfEvalBiasError, build_attribution_backend, combine, run_reward_pipeline,
+    summarize_rewards, validate_attribution,
 )
 from mindtrainer.training_config import RewardConfig
+from simulator.dataset import episode_group_id
 from simulator.datamodel import Episode, RoleAssignment, RoleBinding, TurnRecord
 
 
@@ -217,3 +220,168 @@ def test_build_judge_backend_still_applies_the_self_eval_guard():
 def test_build_outcome_split_backend_refuses_a_stray_judge():
     with pytest.raises(ValueError, match="outcome_split"):
         build_attribution_backend(_rule_cfg(), judge=_ConstJudge(0.5))
+
+
+# ---------------- 校验 ----------------
+
+def _valid():
+    return {"goal": [0.5, None, 1.0, None], "norm": [0.0, None, 0.25, None]}
+
+
+def _set(name, index, value):
+    def mutate(scores):
+        scores[name][index] = value
+    return mutate
+
+
+INVALID = [
+    ("missing_component", lambda s: s.pop("norm"), "components"),
+    ("extra_component", lambda s: s.update(extra=[0.5, None, 0.5, None]), "components"),
+    ("short_list", lambda s: s["goal"].pop(), "scores for"),
+    ("long_list", lambda s: s["goal"].append(None), "scores for"),
+    ("none_on_trained_turn", _set("goal", 0, None), "has no score"),
+    ("value_on_opponent_turn", _set("goal", 1, 0.5), "must be None"),
+    ("negative", _set("goal", 0, -0.1), "not a finite number in [0, 1]"),
+    ("above_one", _set("goal", 0, 1.01), "not a finite number in [0, 1]"),
+    ("nan", _set("goal", 0, float("nan")), "not a finite number in [0, 1]"),
+    ("inf", _set("goal", 0, float("inf")), "not a finite number in [0, 1]"),
+    ("string", _set("goal", 0, "0.5"), "not a finite number in [0, 1]"),
+    ("bool", _set("goal", 0, True), "not a finite number in [0, 1]"),
+]
+
+
+def test_valid_attribution_passes_and_includes_the_boundaries_zero_and_one():
+    validate_attribution(_episode(["a", "b", "c", "d"]), "a", ["goal", "norm"], _valid())
+
+
+@pytest.mark.parametrize("mutate,needle", [(m, n) for _, m, n in INVALID], ids=[i for i, _, _ in INVALID])
+def test_invalid_attribution_is_rejected_with_the_episode_id_and_reason(mutate, needle):
+    scores = _valid()
+    mutate(scores)
+    with pytest.raises(AttributionError) as exc:
+        validate_attribution(_episode(["a", "b", "c", "d"]), "a", ["goal", "norm"], scores)
+    assert needle in str(exc.value)
+    assert "ep-1" in str(exc.value)
+
+
+def test_an_unbound_trained_slot_is_rejected():
+    with pytest.raises(AttributionError, match="'ghost' is not bound"):
+        validate_attribution(_episode(["a", "b", "c", "d"]), "ghost", ["goal", "norm"], _valid())
+
+
+def test_an_episode_where_the_trained_slot_never_spoke_is_rejected_not_skipped():
+    ep = _episode(["only a spoke"])  # 只有 a 说过话
+    with pytest.raises(AttributionError, match="no turns from trained slot 'b'"):
+        validate_attribution(ep, "b", ["goal"], {"goal": [None]})
+
+
+# ---------------- 组合 ----------------
+
+def test_sum_and_product_combine_per_turn_and_keep_none():
+    scores = {"goal": [0.5, None, 1.0, None], "norm": [0.5, None, 0.25, None]}
+    assert combine(scores, ["goal", "norm"], "sum") == [1.0, None, 1.25, None]
+    assert combine(scores, ["goal", "norm"], "product") == [0.25, None, 0.25, None]
+
+
+def test_combine_does_not_depend_on_dict_order():
+    a = {"goal": [0.3, None], "norm": [0.6, None]}
+    b = {"norm": [0.6, None], "goal": [0.3, None]}
+    assert combine(a, ["goal", "norm"], "sum") == combine(b, ["goal", "norm"], "sum")
+
+
+def test_a_single_component_combines_to_itself():
+    scores = {"goal": [0.4, None, 0.9, None]}
+    assert combine(scores, ["goal"], "sum") == [0.4, None, 0.9, None]
+    assert combine(scores, ["goal"], "product") == [0.4, None, 0.9, None]
+
+
+def test_combine_rejects_bad_inputs():
+    with pytest.raises(ValueError, match="combination must be one of"):
+        combine({"goal": [0.5]}, ["goal"], "avg")
+    with pytest.raises(ValueError, match="different lengths"):
+        combine({"goal": [0.5, None], "norm": [0.5]}, ["goal", "norm"], "sum")
+    with pytest.raises(ValueError, match="disagree"):
+        combine({"goal": [0.5, None], "norm": [None, None]}, ["goal", "norm"], "sum")
+    with pytest.raises(ValueError, match="non-empty"):
+        combine({}, [], "sum")
+
+
+# ---------------- 管线入口 ----------------
+
+def _run(episodes, cfg=None, backend=None, trained_slot="a"):
+    cfg = cfg or _rule_cfg()
+    backend = backend or OutcomeSplitAttribution(cfg.outcome_rules, cfg.gamma)
+    return run_reward_pipeline(TrajectoryBatch(list(episodes)), cfg, backend, trained_slot=trained_slot)
+
+
+def test_pipeline_attaches_group_id_aligned_rewards_and_the_mean():
+    ep = _episode(["agreed", "x", "y", "x", "z", "x"])
+    [out] = _run([ep], _rule_cfg(gamma=0.5))
+    assert out.episode is ep
+    assert out.group_id == episode_group_id(ep)
+    assert out.per_turn_rewards == [0.25, None, 0.5, None, 1.0, None]
+    assert out.combined_reward == pytest.approx((0.25 + 0.5 + 1.0) / 3)
+
+
+def test_combined_reward_has_no_length_bias():
+    short = _episode(["agreed", "x", "y", "x"], ep_id="short")
+    long = _episode(["agreed", "x"] + ["y", "x"] * 4, ep_id="long")  # 5 个训练轮
+    out = _run([short, long])
+    assert [r.combined_reward for r in out] == [1.0, 1.0]  # 取总和的话 long 会是 5.0
+
+
+def test_product_combination_gates_on_every_component():
+    cfg = _rule_cfg(
+        components=["goal", "norm"], combination="product",
+        outcome_rules={"goal": ["agreed"], "norm": ["please"]},
+    )
+    both = _episode(["agreed, please", "x", "y", "x"], ep_id="both")
+    only_goal = _episode(["agreed", "x", "y", "x"], ep_id="only_goal")
+    out = _run([both, only_goal], cfg)
+    assert [r.combined_reward for r in out] == [1.0, 0.0]
+
+
+def test_pipeline_preserves_episode_order_and_handles_an_empty_batch():
+    eps = [_episode(["agreed", "x"], ep_id=f"e{i}") for i in range(3)]
+    assert [r.episode.id for r in _run(eps)] == ["e0", "e1", "e2"]
+    assert _run([]) == []
+
+
+def test_pipeline_with_a_judge_backend():
+    judge = MockTurnJudge("external-judge", {("ep-1", 0, "goal"): 0.9, ("ep-1", 2, "goal"): 0.3})
+    backend = JudgeAttribution(judge, "zengen-v1")
+    [out] = _run([_episode(["a", "b", "c", "d"])], _judge_cfg(), backend)
+    assert out.per_turn_rewards == [0.9, None, 0.3, None]
+    assert out.combined_reward == pytest.approx(0.6)
+
+
+def test_a_judge_missing_a_table_entry_surfaces_as_keyerror():
+    backend = JudgeAttribution(MockTurnJudge("external-judge", {}), "zengen-v1")
+    with pytest.raises(KeyError):
+        _run([_episode(["a", "b", "c", "d"])], _judge_cfg(), backend)
+
+
+@pytest.mark.parametrize("bad", [1.5, -0.2, float("nan"), float("inf")])
+def test_a_judge_returning_an_unusable_score_is_caught_by_validation(bad):
+    backend = JudgeAttribution(_ConstJudge(bad), "zengen-v1")
+    with pytest.raises(AttributionError, match="ep-1"):
+        _run([_episode(["a", "b", "c", "d"])], _judge_cfg(), backend)
+
+
+def test_pipeline_rejects_an_episode_where_the_trained_slot_is_unbound():
+    with pytest.raises(AttributionError, match="'ghost' is not bound"):
+        _run([_episode(["agreed", "x"])], trained_slot="ghost")
+
+
+# ---------------- 摘要 ----------------
+
+def test_summarize_rewards_reports_mean_and_count():
+    out = _run([_episode(["agreed", "x"], ep_id="hit"), _episode(["nope", "x"], ep_id="miss")])
+    summary = summarize_rewards(out)
+    assert summary == {"mean": 0.5, "n": 2}
+
+
+def test_summarize_rewards_refuses_to_average_nothing():
+    with pytest.raises(ValueError, match="zero trajectories"):
+        summarize_rewards([])
+

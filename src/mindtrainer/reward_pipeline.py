@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import math
 from typing import Protocol
 
-from mindtrainer.training_config import RewardConfig
+from mindtrainer.datamodel import RewardedTrajectory, TrajectoryBatch
+from mindtrainer.training_config import COMBINATIONS, RewardConfig
 from simulator.datamodel import Episode
+from simulator.dataset import episode_group_id
 
 
 class AttributionError(ValueError):
@@ -141,3 +144,122 @@ def build_attribution_backend(
             )
         return JudgeAttribution(judge, trained_model_id)
     raise ValueError(f"unknown attribution {config.attribution!r}")
+
+
+# ---------------- 校验与组合 ----------------
+
+def validate_attribution(
+    episode: Episode,
+    trained_slot: str,
+    components: list[str],
+    scores: dict[str, list[float | None]],
+) -> None:
+    """纯函数,不通过抛 AttributionError。训练角色位一个发言都没有的 episode 抛错,
+    不静默跳过——静默跳过会让数据集悄悄变小。"""
+    eid = episode.id
+    if set(scores) != set(components):
+        raise AttributionError(
+            f"episode {eid}: attribution components {sorted(scores)} "
+            f"!= configured {sorted(components)}"
+        )
+    if trained_slot not in episode.role_assignment.slot_ids():
+        raise AttributionError(f"episode {eid}: slot {trained_slot!r} is not bound")
+    trained = [t.speaker_slot == trained_slot for t in episode.turns]
+    if not any(trained):
+        raise AttributionError(f"episode {eid}: no turns from trained slot {trained_slot!r}")
+    for name in components:
+        values = scores[name]
+        if len(values) != len(episode.turns):
+            raise AttributionError(
+                f"episode {eid}: component {name!r} has {len(values)} scores "
+                f"for {len(episode.turns)} turns"
+            )
+        for i, (value, is_trained) in enumerate(zip(values, trained)):
+            if not is_trained:
+                if value is not None:
+                    raise AttributionError(
+                        f"episode {eid}: component {name!r} turn {i}: "
+                        f"non-trained turn must be None, got {value!r}"
+                    )
+                continue
+            if value is None:
+                raise AttributionError(
+                    f"episode {eid}: component {name!r} turn {i}: trained turn has no score"
+                )
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or not (0.0 <= value <= 1.0)
+            ):
+                raise AttributionError(
+                    f"episode {eid}: component {name!r} turn {i}: "
+                    f"score {value!r} is not a finite number in [0, 1]"
+                )
+
+
+def combine(
+    scores: dict[str, list[float | None]], components: list[str], combination: str
+) -> list[float | None]:
+    """逐轮把各分量按 sum 或 product 合成。不做权重——分量都在 [0,1] 上,保持最小。
+    按 components 的顺序累加,结果与字典顺序无关。"""
+    if combination not in COMBINATIONS:
+        raise ValueError(f"combination must be one of {list(COMBINATIONS)}, got {combination!r}")
+    if not components:
+        raise ValueError("components must be non-empty")
+    lengths = {len(scores[name]) for name in components}
+    if len(lengths) != 1:
+        raise ValueError(f"components have different lengths: {sorted(lengths)}")
+    out: list[float | None] = []
+    for i in range(lengths.pop()):
+        values = [scores[name][i] for name in components]
+        if all(v is None for v in values):
+            out.append(None)
+        elif any(v is None for v in values):
+            raise ValueError(f"turn {i}: components disagree on whether it is a trained turn")
+        elif combination == "sum":
+            out.append(sum(values))
+        else:
+            out.append(math.prod(values))
+    return out
+
+
+# ---------------- 入口 ----------------
+
+def run_reward_pipeline(
+    batch: TrajectoryBatch,
+    config: RewardConfig,
+    backend: AttributionBackend,
+    *,
+    trained_slot: str,
+) -> list[RewardedTrajectory]:
+    """批到批的变换,每次训练迭代都可重跑。combined_reward 取训练轮的**均值**,
+    不取总和:总和随 episode 变长而变大,会奖励拖长对话。"""
+    components = list(config.components)
+    out: list[RewardedTrajectory] = []
+    for episode in batch.episodes:
+        scores = backend.attribute(episode, trained_slot, components)
+        validate_attribution(episode, trained_slot, components, scores)
+        per_turn = combine(scores, components, config.combination)
+        trained_rewards = [r for r in per_turn if r is not None]
+        out.append(
+            RewardedTrajectory(
+                episode=episode,
+                group_id=episode_group_id(episode),
+                per_turn_rewards=per_turn,
+                combined_reward=math.fsum(trained_rewards) / len(trained_rewards),
+            )
+        )
+    return out
+
+
+def summarize_rewards(rewarded: list[RewardedTrajectory]) -> dict:
+    """写进训练曲线摘要。"训练奖励 vs 诊断分背离"的检测靠这条曲线,
+    MindTrainer 只记录,不读诊断。"""
+    if not rewarded:
+        raise ValueError("cannot summarize zero trajectories")
+    return {
+        "mean": math.fsum(r.combined_reward for r in rewarded) / len(rewarded),
+        "n": len(rewarded),
+    }
+
