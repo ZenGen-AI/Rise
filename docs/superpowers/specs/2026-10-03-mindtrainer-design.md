@@ -439,12 +439,19 @@ def run_training(cfg, *, store, run_id, make_sources, attribution, executor, con
 7. **Interact 的 episode 永远不会以 `goal_reached` 结束**(driver 接管了 `stop_predicate`),所以没有任何依赖它的奖励规则。如果将来要让实时会话支持目标达成早停,是对 Plan 4 的改动。
 8. **对手模型的版本只通过 `model_ref` 字符串记录,没有制品锚定**(没有 sha256)。RecipeStore 落地时应改成可校验的引用。
 9. **晋级链路里 checkpoint 的格式**(§6.1)。候选带的是转换后的推理格式引用,下一轮训练的基座由它解析而来。ROLL 能否直接加载推理格式权重作为训练起点,我没核实;若不能,要加 `training_checkpoint_ref`,并改 daemon 晋级与 `latest_promoted_checkpoint`。mock 执行器不区分格式,所以测试暴露不出这个问题。
+10. **`gamma < 1` 时 `combined_reward` 仍偏向更短的对话。** 取均值消除了"训练轮越多总和越大"的长度偏置,但 `gamma < 1` 时第 k 个训练轮得 `γ^(距结尾的训练轮数)`,训练轮数 K 越大均值越低。上半段整支评审用真实管线实测:同样命中关键词,gamma=0.9 时 K=1/3/5 得 1.0/0.903/0.819;gamma=0.5 时得 1.0/0.583/0.388(下面的数值已由控制者用公式复算)。Interact 下被接受的 episode 都跑满 `max_turns`,K 固定,不受影响;Batch 数据集若各 episode 长度不一则受影响。这是设计选择,没有改代码;`test_mt_reward_pipeline` 里"无长度偏置"那条用例只测默认 `gamma=1.0`。
 
 ---
 
 ## 11. 明确不做(推迟)
 
 - 接入 ControlPlane 调和循环、替换 `mind_trainer_stub`(接线后置,含"候选出现 → 调真实诊断"和"`scenario_resolver` 读同一 ControlPlane")。
+  - 接线时需要注意(来自上半段整支评审的报告,未逐条复核):
+    - `client_factory` 应复用同一个 gRPC channel、每次只新建 stub 与 client;评审报告称已用真实服务端验证 4 个 client 共用 1 个 channel(含一次 abort 之后再 collect)可行。
+    - 失败的 `collect()` 里已成功的 rollout 已被服务端落盘,ControlPlane 会留下不属于任何 batch 的完整 episode;下游只能按 `metadata["episode_ids"]` 取数据,不能按 scenario 扫描。
+    - 服务端 `turn_timeout_s` 必须大于策略最坏延迟:否则慢策略会被当作 T1 重试,最多 `1 + max_retries_per_episode` 次策略调用,配置错误被放大成同倍数的推理成本。
+    - `trained_model_id` 没有锚定:`TrainingConfig` 里没有对应字段,也不进 `config_hash`;接线时应取 `PromotedBase.model_id`。
+    - `on_session_closed` 钩子只收到 `Episode`,需要自己决定写入哪个 `run_id`,并保证线程安全。
 - 真实 ROLL 训练执行器、真实 LLM 归因、真实格式转换。
 - RecipeStore 与 `recipe_ref`;完整 `FailureRecord` 产物;`CostRecord` 成本记账。
 - 编排层调用 `produce_grouped_dataset`(生产方函数已有,没有谁在驱动它)。
@@ -454,7 +461,7 @@ def run_training(cfg, *, store, run_id, make_sources, attribution, executor, con
 
 ## 12. 规模与拆分
 
-约 10 个源文件(`datamodel`、`training_config`、`trajectory_source`、`reward_pipeline`、`grouping`、`executor`、`checkpoint`、`resume`、`store_adapter`、`orchestrator`;`TrainingRun` 放在 `datamodel`,`batch_for_step` 放在 `trajectory_source`)、约 10 个测试文件,另有对 Plan 4 客户端的两处增量改动,实际写进两份计划的新测试约 331 条(上半段 223、下半段 108;设计阶段的估计 80 到 110 条偏低,因为每条违规分支各占一个参数化用例)。
+约 10 个源文件(`datamodel`、`training_config`、`trajectory_source`、`reward_pipeline`、`grouping`、`executor`、`checkpoint`、`resume`、`store_adapter`、`orchestrator`;`TrainingRun` 放在 `datamodel`,`batch_for_step` 放在 `trajectory_source`)、约 10 个测试文件,另有对 Plan 4 客户端的两处增量改动,实际写进两份计划的新测试约 366 条(上半段 258、下半段 108;设计阶段的估计 80 到 110 条偏低,因为每条违规分支各占一个参数化用例)。
 
 这是个大计划,建议执行时拆成两段,中间过一次评审:
 

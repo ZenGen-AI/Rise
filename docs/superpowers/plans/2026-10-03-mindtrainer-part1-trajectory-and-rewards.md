@@ -3507,3 +3507,16 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 1. `batch_for_step` 放在 `trajectory_source.py`(Interact 轨迹源要用它轮转 scenario),下半段的续训测试与编排器从那里 import,不要另写一份。
 2. `InteractTrajectorySource` 的 `start_step` 是**已完成的 GRPO step 数**,不是全局 step。续训时编排器传 `global_step - sft_steps`(不小于 0)。
 3. `SelfEvalBiasError` 是 `mindtrainer.reward_pipeline` 自己的类,与 `diagnostic.scorer.SelfEvalBiasError` 同名但互不相干;MindTrainer 全程不 import `diagnostic.*`。
+
+---
+
+## 实施后修订(Post-implementation amendments)
+
+本计划的 9 个任务落地并通过逐任务评审后,整支评审提出了一条 Important 和若干小问题,随后经一次修复波修订了下列内容。**以下修订优先于上文任务里的代码块;上文保留原样,作为当时的计划记录**(上文的代码块曾逐字回放验证过,逐块改写会破坏这条证据链)。最终全量测试为 581 passed。
+
+- **`validate_training_config` 与 `load_config_from_directive`(任务 3)**:对任何字段的错误类型都不再抛异常,一律返回含字段名和 "must be" 的原因。整数字段拒绝 `bool` 和非 `int`;`allow_resume` 必须是 `bool`;`opd_coefficient` 与 `reward.gamma` 必须是非 `bool` 的数;`grpo_config` 必须是可 JSON 序列化的 `dict`。`load_config_from_directive` 在 `training_config` 不是 `dict` 时,以及 `from_dict` 阶段出现 `TypeError`、`AttributeError` 时,抛 `InvalidTrainingConfigError`,缺字段时仍点名字段。原因:下半段编排器靠异常类型区分"确定性失败写 failed"和"其余保持 pending 等续训",类型错误以裸 `TypeError` 或静默通过的形式逃出,会被当作可续训失败反复重试。`tests/test_mt_config.py` 在原有 74 条之后追加 34 条,该文件现为 108 条。
+- **`tests/test_mt_grouping.py`(任务 9)**:空组的两条断言由 `match="empty"` 收紧为 `match="group 'g' is empty"`。原因:去掉 `_checked` 里的显式空组检查后,Python 内置的 `max() iterable argument is empty` 恰好也含 "empty",旧断言放过了它。
+- **`tests/test_mt_trajectory_interact.py`(任务 6)**:新增 1 条 `goal_reached` 被接受的用例。此前 `_ACCEPTED_REASONS` 里的 `"goal_reached"` 去掉后测试不会变红。
+- **`InteractTrajectorySource` 类文档(任务 6)**:补两条契约。失败的 `collect()` 里已成功的 rollout 已被服务端落盘,`metadata["episode_ids"]` 是唯一权威索引,下游不能按 scenario 扫描;批内 episode 是策略视角,与服务端落盘版本的 `episode_digest` 不同(`episode_group_id` 相同),不能互相核对摘要。
+- **空白清理**:`reward_pipeline.py` 与 `test_mt_reward_pipeline.py` 去掉文件末尾多余的空行;`client.py` 里 `turns` 与 `abort()` 前后各多出的一个空行删去。`git diff --check` 在整支范围内无输出。
+- **仍未处理(不在上半段范围,已分别记入下半段计划、设计 §10 与 §11)**:`gamma < 1` 时均值仍偏向更短的对话(设计 §10 第 10 条);`TrainingConfig` 的 `frozen` 是浅层的;`RewardedTrajectory.from_dict` 不核对 `group_id`;`RolloutFailedError` 没有 `transient` 标志;策略异常路径丢失已累积的瞬态 `failed_attempts`;边界 1(不导入 `diagnostic.*`)没有自动化守卫。后四项见下半段计划的"整支评审的其余建议"。接线时的注意事项(复用 gRPC channel、孤儿 episode、`turn_timeout_s`、`trained_model_id` 未锚定、`on_session_closed` 的 `run_id`)见设计 §11。

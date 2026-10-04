@@ -19,10 +19,22 @@
 |---|---|
 | `mindtrainer.training_config` | `TrainingConfig`、`RewardConfig`、`validate_training_config`、`InvalidTrainingConfigError`、`config_hash`、`total_steps`、`phase_at`、`STAGES` |
 | `mindtrainer.datamodel` | `TrajectoryBatch`、`RewardedTrajectory`(本计划任务 10 往同一文件加 `StepResult`、`TrainingRun`) |
-| `mindtrainer.trajectory_source` | `TrajectorySource`、`BatchTrajectorySource`、`InteractTrajectorySource(..., start_step=0)`、`batch_for_step` |
-| `mindtrainer.reward_pipeline` | `AttributionBackend`、`build_attribution_backend`、`run_reward_pipeline`、`summarize_rewards`、`AttributionError` |
+| `mindtrainer.trajectory_source` | `TrajectorySource`、`BatchTrajectorySource`、`InteractTrajectorySource(..., start_step=0)`、`batch_for_step`、`RolloutFailedError` |
+| `mindtrainer.reward_pipeline` | `AttributionBackend`、`build_attribution_backend`、`run_reward_pipeline`、`summarize_rewards`、`AttributionError`、`SelfEvalBiasError` |
 | `mindtrainer.grouping` | `group_by_id`、`count_degenerate_groups`、`validate_groups`、`DegenerateGroupError` |
 | `controlplane.paths` | `training_run_file`、`candidate_checkpoint_file`(上半段任务 1 已加) |
+
+**上半段整支评审指出、本计划尚未处理的两件事(执行下半段前需要决定)**
+
+- `SelfEvalBiasError` 由调用方在 `run_training` 之外构造归因后端时抛出(`build_attribution_backend`),这时还没有 `training_run` 可以写 `failed`。这是合理的,但任务 14 没有明说,执行者不要试图在编排器里捕获它。
+- `RolloutFailedError` 目前**没有**被任务 14 引用:它不在 `_DETERMINISTIC` 里,所以 Interact 的 rollout 失败(无论是瞬态重试用尽,还是 `invalid_session` 这类确定性拒绝)都会让 `training_run` 保持 `pending`,交给 `decide_resume`,最坏会反复续训直到 `max_resume_attempts` 触顶才升级。是否把不可重试的原因归为确定性失败写 `failed`,以及 `failed_attempts` 如何进入 `curve_summary`,是尚未决定的取舍,不是遗漏的实现细节。
+
+**整支评审的其余建议(可选,尚未纳入任何任务;要做就在对应任务里加步骤并同步更新测试数)**
+
+- **边界 1 的自动化守卫。** 现在"`src/mindtrainer` 不导入 `diagnostic.*`"只靠人工预检。建议加一个约 15 行的测试(静态扫描 `src/mindtrainer/*.py` 的 import 语句,或导入全部 mindtrainer 模块后断言 `sys.modules` 里没有 `diagnostic*`),与 `test_mt_packaging` 同类。下半段还会再加 5 个源文件,越早加越划算。
+- **`RolloutFailedError` 没有 `transient` 标志。** 编排器要区分"瞬态重试用尽"和"确定性拒绝"时,只能硬编码 reason 集合。给它加一个 `transient: bool` 属性成本很低(一行加一条断言),但要改上半段任务 6 的代码,需先决定上面"未决事项"里的取舍。
+- **策略异常路径丢失已累积的瞬态 `failed_attempts`。** 简报要求策略异常原样上抛、不包装,所以异常上拿不到这些数据。评审给的不改异常类型的做法:`collect()` 开头把 `failed_attempts` 列表挂到 `self.last_failed_attempts`,这样策略异常和 `RolloutFailedError` 两条路径都能读到。
+- **`RewardedTrajectory.from_dict` 不核对 `group_id`。** 手改的 `group_id` 会静默改变分组。可在 `from_dict` 里重算 `episode_group_id(episode)` 并在不一致时抛 `ValueError`;是否值得取决于有没有人会手改落盘的 `RewardedTrajectory`,目前没有这个路径。
 
 **打包说明:** 设计把打包防回归放在第二段,但上半段任务 1 已把 `src/mindtrainer` 登记进 wheel 包列表并加了 `tomllib` 防回归测试(越早加,后面每个任务都受保护)。所以本计划没有单独的打包任务。
 
@@ -40,7 +52,7 @@
 - **候选 payload 的 `checkpoint_ref` 键名与形状是契约**:daemon 晋级时原样带进 `zengen_model`,不得改动,调和循环与现有端到端测试都不用为它改。
 - **凭证绝不进 git 树**;**无新增第三方依赖**。
 - 每个源文件以 `from __future__ import annotations` 开头;提交信息结尾空一行后加:`Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`。
-- **测试基线**:上半段全部完成后,`uv run --extra dev pytest -q` 为 546 通过、无警告;每个任务后应递增,不得出现警告。
+- **测试基线**:上半段全部完成后,`uv run --extra dev pytest -q` 为 581 通过、无警告;每个任务后应递增,不得出现警告。
 
 ---
 
@@ -388,7 +400,7 @@ Expected: 28 passed(本任务 18 + 任务 4 的 10)。
 - [ ] **Step 5: 全量回归**
 
 Run: `uv run --extra dev pytest -q`
-Expected: 564 passed,无警告。
+Expected: 599 passed,无警告。
 
 - [ ] **Step 6: 提交**
 
@@ -913,7 +925,7 @@ Expected: 26 passed。
 - [ ] **Step 5: 全量回归**
 
 Run: `uv run --extra dev pytest -q`
-Expected: 590 passed,无警告。
+Expected: 625 passed,无警告。
 
 - [ ] **Step 6: 提交**
 
@@ -1199,7 +1211,7 @@ Expected: 14 passed。
 - [ ] **Step 5: 全量回归**
 
 Run: `uv run --extra dev pytest -q`
-Expected: 604 passed,无警告。
+Expected: 639 passed,无警告。
 
 - [ ] **Step 6: 提交**
 
@@ -1497,7 +1509,7 @@ Expected: 19 passed。
 - [ ] **Step 5: 全量回归**
 
 Run: `uv run --extra dev pytest -q`
-Expected: 623 passed,无警告。
+Expected: 658 passed,无警告。
 
 - [ ] **Step 6: 提交**
 
@@ -2377,7 +2389,7 @@ Expected: 29 passed。
 - [ ] **Step 5: 全量回归**
 
 Run: `uv run --extra dev pytest -q`
-Expected: 652 passed,无警告。
+Expected: 687 passed,无警告。
 
 - [ ] **Step 6: 提交**
 
@@ -2558,7 +2570,7 @@ Expected: 2 passed。
 - [ ] **Step 3: 全量回归**
 
 Run: `uv run --extra dev pytest -q`
-Expected: 654 passed,无警告。
+Expected: 689 passed,无警告。
 
 - [ ] **Step 4: 提交**
 
@@ -2575,7 +2587,7 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 **完成标准**
 
-- `uv run --extra dev pytest -q` 为 654 passed,无警告(上半段 546 + 本计划 108)。
+- `uv run --extra dev pytest -q` 为 689 passed,无警告(上半段 581 + 本计划 108)。
 - `src/mindtrainer/` 新增 `store_adapter.py`、`executor.py`、`checkpoint.py`、`resume.py`、`orchestrator.py`;`datamodel.py` 多了 `StepResult` 与 `TrainingRun`。
 - 本计划的代码在编写时已在隔离副本上逐任务做过红绿验证,并对 49 处关键断言做过变异验证(逐处植入回归,确认对应测试变红),全部被测试捕获。其中 5 处最初存活(逐步取数据、失败尝试计入摘要、Interact 组校验、checkpoint 完整性核对),补了 6 条守护测试后才被捕获——这正是变异验证的用处。执行时若某个新测试在"实现尚不存在"时意外通过,先怀疑它是不是空转。
 - 变异验证请**关闭字节码缓存**(`PYTHONDONTWRITEBYTECODE=1`)且**不要两组并行**,否则陈旧字节码或 CPU 争抢会让结果不可信。
