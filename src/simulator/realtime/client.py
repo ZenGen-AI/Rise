@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import queue
+from copy import deepcopy
 
 from simulator.datamodel import Episode, Persona, RoleAssignment, TurnRecord
 from simulator.realtime.codec import (
@@ -69,6 +70,15 @@ class EnvironmentServiceClient:
     def opening_turns(self) -> list[TurnRecord]:
         """create_session 返回前、客户端首次发言之前收到的对方轮次。"""
         return list(self._opening_turns)
+
+    @property
+    def turns(self) -> list[TurnRecord]:
+        """目前已收到的完整历史(含客户端自己轮次的回显)的深拷贝。
+
+        策略据此决定下一句。必须是深拷贝:TurnRecord 是可变数据类,策略若改了
+        某条记录,会直接改坏客户端自己重建的 Episode。"""
+        return deepcopy(self._turns)
+
 
     def _request_gen(self):
         while True:
@@ -154,6 +164,17 @@ class EnvironmentServiceClient:
         while not self._closed:
             self._pump_one()
         return self._build_episode(self._last_reason)
+
+    def abort(self) -> None:
+        """放弃会话:**不发 EndSession**,置 closed 并释放请求流。
+
+        服务端看到请求流结束而没有 EndSession,按客户端断连判 FAILED,
+        不会经 on_session_closed 落盘。策略抛异常时必须走它——若改发
+        end_session(),服务端会把这条半截 episode 当作正常结束并写进
+        ControlPlane,污染训练数据。可重复调用;会话已结束时是空操作,
+        不改写已有的终止原因。放弃之后不要使用 drain_until_end() 的结果。"""
+        self._abandon("client_aborted")
+
 
     def _next_msg(self):
         """读一条服务端消息；传输层出错或流意外结束时放弃会话再抛出，避免
