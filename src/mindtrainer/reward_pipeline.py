@@ -262,4 +262,3 @@ def summarize_rewards(rewarded: list[RewardedTrajectory]) -> dict:
         "mean": math.fsum(r.combined_reward for r in rewarded) / len(rewarded),
         "n": len(rewarded),
     }
-

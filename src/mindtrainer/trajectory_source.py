@@ -139,6 +139,13 @@ class InteractTrajectorySource:
       光看 reason 分不出 T1 还是 T2,所以保守地不重试。
     - 策略自己抛的异常不重试、不包装:会话先 abort()(服务端按断连判 FAILED、不落盘),
       原异常原样向上抛——那是被训模型的 bug,不是瞬态服务问题。
+    - 失败的 collect() 里已经成功的 rollout 已被服务端经 on_session_closed 落盘,下次
+      collect() 会对同一批 scenario 产出新的 episode,所以 ControlPlane 里会留下不属于
+      任何 batch 的完整 episode;metadata["episode_ids"] 是唯一权威索引,下游不能按
+      scenario 扫描取数据。
+    - 批内的 episode 是策略视角:对手的 inner_thought 等不会流给客户端,所以它与服务端
+      落盘的版本内容不同、episode_digest 也不同(episode_group_id 相同);权威版本按
+      metadata["episode_ids"] 到 ControlPlane 取,两者不能互相核对摘要。
     """
 
     def __init__(

@@ -64,7 +64,7 @@ def test_zero_variance_advantages_are_exactly_zero_for_equivalent_float_spelling
 
 @pytest.mark.parametrize(
     "bad,needle",
-    [([], "empty"), ([0.5, math.nan], "non-finite"), ([math.inf, 0.5], "non-finite")],
+    [([], "group 'g' is empty"), ([0.5, math.nan], "non-finite"), ([math.inf, 0.5], "non-finite")],
     ids=["empty", "nan", "inf"],
 )
 def test_group_advantages_rejects_unusable_groups(bad, needle):
@@ -106,7 +106,7 @@ def test_no_degenerate_groups_counts_zero():
 
 
 def test_count_degenerate_groups_rejects_an_empty_group():
-    with pytest.raises(ValueError, match="empty"):
+    with pytest.raises(ValueError, match="group 'g' is empty"):
         count_degenerate_groups({"g": []})
 
 

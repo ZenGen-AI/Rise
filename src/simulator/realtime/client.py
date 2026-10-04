@@ -79,7 +79,6 @@ class EnvironmentServiceClient:
         某条记录,会直接改坏客户端自己重建的 Episode。"""
         return deepcopy(self._turns)
 
-
     def _request_gen(self):
         while True:
             item = self._send_q.get()
@@ -174,7 +173,6 @@ class EnvironmentServiceClient:
         ControlPlane,污染训练数据。可重复调用;会话已结束时是空操作,
         不改写已有的终止原因。放弃之后不要使用 drain_until_end() 的结果。"""
         self._abandon("client_aborted")
-
 
     def _next_msg(self):
         """读一条服务端消息；传输层出错或流意外结束时放弃会话再抛出，避免

@@ -384,4 +384,3 @@ def test_summarize_rewards_reports_mean_and_count():
 def test_summarize_rewards_refuses_to_average_nothing():
     with pytest.raises(ValueError, match="zero trajectories"):
         summarize_rewards([])
-

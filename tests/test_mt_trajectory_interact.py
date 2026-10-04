@@ -325,6 +325,15 @@ def _source(store, factory, policy=None, **cfg_kw):
 _ONE_GROUP = dict(scenario_ids=["s1"], groups_per_step=1)
 
 
+def test_a_goal_reached_episode_is_accepted_like_max_turns(store):
+    factory = _FakeFactory({"end_reason": "goal_reached"})
+    batch = _source(store, factory, **_ONE_GROUP).collect()
+    assert len(batch.episodes) == 2
+    assert batch.episodes[0].terminated_reason == "goal_reached"
+    assert batch.metadata["failed_attempts"] == []
+    assert len(factory.clients) == 2
+
+
 @pytest.mark.parametrize(
     "plan,reason",
     [
