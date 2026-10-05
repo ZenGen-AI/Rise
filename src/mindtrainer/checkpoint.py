@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 from typing import Protocol
 
@@ -74,7 +75,7 @@ def register_candidate(
         links=[run_id, *manifest_ids],
         payload={
             "checkpoint_ref": checkpoint_ref.to_dict(),
-            "train_curve_summary": dict(curve_summary),
+            "train_curve_summary": copy.deepcopy(curve_summary),
             "training_run_ref": f"trainrun-{run_id}",
             "base_checkpoint_ref": base_checkpoint_ref.to_dict(),
             "config_hash": config_hash,

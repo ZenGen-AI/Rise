@@ -127,7 +127,7 @@ def test_a_replay_after_review_refuses_and_keeps_the_human_decision(store, revie
     assert store.read_product(path).status == reviewed
 
 
-def test_payload_does_not_alias_the_callers_summary(store):
+def test_the_stored_summary_keeps_the_values_from_registration_time(store):
     summary = {"curve": {"mean": 0.5}}
     _register(store, curve_summary=summary)
     summary["curve"]["mean"] = 99
