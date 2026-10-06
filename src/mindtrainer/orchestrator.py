@@ -19,7 +19,7 @@ from mindtrainer.training_config import (
     STAGES, InvalidTrainingConfigError, TrainingConfig, config_hash, phase_at,
     total_steps, validate_training_config,
 )
-from mindtrainer.trajectory_source import TrajectorySource, batch_for_step
+from mindtrainer.trajectory_source import RolloutFailedError, TrajectorySource, batch_for_step
 from simulator.dataset import DatasetIntegrityError
 
 
@@ -102,7 +102,8 @@ def run_training(
     - 每 checkpoint_every_steps 步存点,并把引用、checkpoint_step 与当时的曲线摘要一起回写。
       曲线摘要只在存点时落盘,所以续训后它与存点时一致,不会重复计入崩溃前多跑的步。
     - 收尾:存最终 checkpoint(先回写 pending,再转换),注册候选,置 executed。
-    - 确定性失败写 failed(category T2)并原样重抛;其余异常不吞,run 保持 pending。
+    - 确定性失败写 failed(category T2)并原样重抛,其中包括 Interact 的 invalid_session 拒绝;
+      其余异常(含 timeout 用尽、role_backend_failure)不吞,run 保持 pending。
     - metric_stream_refs 与 on_step:逐步指标不进 git(补充 D.2),on_step 是调用方观察
       每一步的唯一出口;指标流文件本身由调用方写,只把引用交给这里记录。
     """
@@ -199,6 +200,12 @@ def run_training(
                 write_training_run(store, run)
     except _DETERMINISTIC as exc:
         write_training_run(store, _failed(run, point, exc))
+        raise
+    except RolloutFailedError as exc:
+        # invalid_session 是请求本身有问题(服务端、客户端、轨迹源都写明重试无益):写 failed 保留。
+        # 其余 reason(timeout 用尽、role_backend_failure 分不出 T1/T2)不吞,run 保持 pending。
+        if exc.reason == "invalid_session":
+            write_training_run(store, _failed(run, point, exc))
         raise
 
     final_ref = executor.save_checkpoint("final")

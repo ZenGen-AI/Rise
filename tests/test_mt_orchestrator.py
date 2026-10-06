@@ -18,7 +18,9 @@ from mindtrainer.resume import NeedsHumanError
 from mindtrainer.reward_pipeline import AttributionError, build_attribution_backend
 from mindtrainer.store_adapter import read_training_run, write_training_run
 from mindtrainer.training_config import InvalidTrainingConfigError, RewardConfig, TrainingConfig
-from mindtrainer.trajectory_source import BatchTrajectorySource, InteractTrajectorySource
+from mindtrainer.trajectory_source import (
+    BatchTrajectorySource, InteractTrajectorySource, RolloutFailedError,
+)
 from simulator.backends import ScriptedBackend
 from simulator.dataset import DatasetIntegrityError, produce_grouped_dataset, read_manifest
 from simulator.datamodel import Persona, RoleAssignment, RoleBinding, RoleSlot, Scenario
@@ -551,3 +553,42 @@ def test_a_corrupt_checkpoint_in_the_record_escalates_instead_of_being_loaded(st
     with pytest.raises(NeedsHumanError, match="integrity"):
         _go(store, _batch_cfg(), MockExecutor())
     assert read_training_run(store, RUN) == tampered  # 升级时不改动任何记录
+
+
+# ====================== 终审修复 C1:invalid_session 是确定性拒绝,写 failed 而不是续训重试 ======================
+
+class _RejectedSource:
+    """替身 Interact 源:每次 collect 都以给定 reason 抛 RolloutFailedError,并记下被调用的次数。"""
+
+    def __init__(self, reason):
+        self.reason, self.collects = reason, 0
+
+    def collect(self):
+        self.collects += 1
+        raise RolloutFailedError(
+            scenario_id="s1", rollout=0, reason=self.reason, detail="detail-x",
+            attempts=1, failed_attempts=[{"reason": self.reason}],
+        )
+
+
+def test_an_invalid_session_rejection_fails_the_run_and_is_never_retried(store):
+    source = _RejectedSource("invalid_session")
+    with pytest.raises(RolloutFailedError):
+        _go(store, _interact_cfg(), MockExecutor(), make_sources=_stub_sources(store, source))
+    failed = read_training_run(store, RUN)
+    assert (failed.status, failed.failure["category"], failed.failure["point"]) == (
+        "failed", "T2", "step 1 (grpo_opd)",
+    )
+    assert "invalid_session" in failed.failure["detail"]
+    with pytest.raises(NeedsHumanError, match="failed"):
+        _go(store, _interact_cfg(), MockExecutor(), make_sources=_stub_sources(store, source))
+    assert source.collects == 1  # 第二次进入被 escalate 挡住,没有再去开会话
+
+
+@pytest.mark.parametrize("reason", ["timeout", "role_backend_failure"])
+def test_other_rollout_failures_stay_pending_for_the_attempt_limit_to_bound(store, reason):
+    source = _RejectedSource(reason)
+    with pytest.raises(RolloutFailedError):
+        _go(store, _interact_cfg(), MockExecutor(), make_sources=_stub_sources(store, source))
+    pending = read_training_run(store, RUN)
+    assert (pending.status, pending.failure) == ("pending", None)
