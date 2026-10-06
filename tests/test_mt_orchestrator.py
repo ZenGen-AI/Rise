@@ -633,10 +633,19 @@ def test_a_candidate_approved_in_the_crash_window_does_not_stop_the_run_from_fin
     assert _candidate(store).status == "approved"  # 人工结论原样保留,没有被重置
 
 
-def test_a_reviewed_candidate_that_is_not_this_runs_is_left_for_a_human(store):
+@pytest.mark.parametrize(
+    "edit",
+    [
+        {"config_hash": "f" * 64},
+        {"training_run_ref": "trainrun-other"},
+        {"checkpoint_ref": {"uri": "mock://x.hf", "sha256": "f" * 64, "size_bytes": 0, "fetch_hint": None}},
+    ],
+    ids=["other_config", "other_run", "other_weights"],
+)
+def test_a_reviewed_candidate_that_is_not_this_runs_is_left_for_a_human(store, edit):
     cfg = _batch_cfg()
     _crash_between_registration_and_executed(store, cfg)
-    _review(store, "approved", config_hash="f" * 64)  # 候选被改成不属于本次配置
+    _review(store, "approved", **edit)  # 候选被改成不属于本 run、本配置、同一份权重
     with pytest.raises(CandidateAlreadyReviewedError):
         _go(store, cfg, MockExecutor())
     assert read_training_run(store, RUN).status == "pending"
