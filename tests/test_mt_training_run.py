@@ -153,3 +153,32 @@ def test_a_failed_run_must_say_why(store):
         write_training_run(store, _run(status="failed"))
     with pytest.raises(ValueError, match="failure"):
         write_training_run(store, _run(status="failed", failure={"detail": "no category"}))
+
+
+# ---------------- 终审修复 C2:终态记录不可被不同内容悄悄改写 ----------------
+
+_FAILED = dict(status="failed", failure={"category": "T2", "point": "step 1", "detail": "A"})
+_EXECUTED = dict(status="executed", curve_summary={"final_mean_reward": 0.5})
+
+
+@pytest.mark.parametrize("terminal", [_FAILED, _EXECUTED], ids=["failed", "executed"])
+def test_a_finished_record_accepts_an_identical_replay_without_a_new_commit(store, tmp_path, terminal):
+    write_training_run(store, _run(**terminal))
+    before = _commits(tmp_path)
+    write_training_run(store, _run(**terminal))
+    assert _commits(tmp_path) == before
+
+
+@pytest.mark.parametrize(
+    "terminal,changed",
+    [
+        (_FAILED, dict(_FAILED, failure={"category": "T2", "point": "step 1", "detail": "B"})),
+        (_EXECUTED, dict(_EXECUTED, curve_summary={"final_mean_reward": 0.9})),
+    ],
+    ids=["failed", "executed"],
+)
+def test_a_finished_record_cannot_be_rewritten_with_different_content(store, terminal, changed):
+    write_training_run(store, _run(**terminal))
+    with pytest.raises(ValueError, match="finished record"):
+        write_training_run(store, _run(**changed))
+    assert read_training_run(store, "run-1") == _run(**terminal)

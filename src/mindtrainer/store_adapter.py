@@ -13,16 +13,25 @@ _NOW = "2026-10-03T00:00:00Z"
 
 def write_training_run(store: GitStore, run: TrainingRun) -> str:
     """写 training_run 产物。状态机沿用非审核类:pending -> executed | failed。
-    同状态重写(pending -> pending,更新 checkpoint 进度)允许;其余非法迁移抛
-    InvalidTransitionError,所以 executed/failed 的记录不会被悄悄改回 pending。"""
+    同状态重写只在 pending -> pending(更新 checkpoint 进度)时允许改内容;终态记录只接受
+    内容相同的重放,内容不同抛 ValueError。其余非法迁移抛 InvalidTransitionError,
+    所以 executed/failed 的记录不会被悄悄改回 pending。"""
     if run.status == "failed" and not (run.failure and run.failure.get("category")):
         # 失败是数据:failed 记录必须说明为什么失败,否则事后无法追查
         raise ValueError(f"training_run {run.run_id}: a failed run needs failure['category']")
     path = training_run_file(run.run_id)
     if store.exists(path):
-        previous = store.read_product(path).status
-        if previous != run.status:
-            assert_transition(NONREVIEW, previous, run.status)
+        stored = store.read_product(path)
+        if stored.status != run.status:
+            assert_transition(NONREVIEW, stored.status, run.status)
+        elif stored.status != "pending" and TrainingRun.from_dict(
+            stored.payload, status=stored.status
+        ) != run:
+            # 终态记录是审计凭据:只接受内容相同的重放,不同内容说明有人想改写已定论的记录
+            raise ValueError(
+                f"training_run {run.run_id} is already {stored.status}; a finished record is kept "
+                f"and cannot be rewritten with different content"
+            )
     env = Envelope(
         id=f"trainrun-{run.run_id}",
         type="training_run",
