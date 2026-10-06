@@ -9,10 +9,11 @@ from controlplane.envelope import BigRef
 from controlplane.gitstore import GitStore
 from controlplane.observe import trace
 from controlplane.paths import candidate_checkpoint_file
-from mindtrainer.checkpoint import MockConverter
+from mindtrainer.checkpoint import CandidateAlreadyReviewedError, MockConverter
 from mindtrainer.datamodel import StepResult, TrainingRun, TrajectoryBatch
 from mindtrainer.executor import MockExecutor, SimulatedCrashError
 from mindtrainer.grouping import DegenerateGroupError
+from mindtrainer import orchestrator as orchestrator_module
 from mindtrainer.orchestrator import NotEnoughGroupsError, resume_or_run, run_training
 from mindtrainer.resume import NeedsHumanError
 from mindtrainer.reward_pipeline import AttributionError, build_attribution_backend
@@ -592,3 +593,50 @@ def test_other_rollout_failures_stay_pending_for_the_attempt_limit_to_bound(stor
         _go(store, _interact_cfg(), MockExecutor(), make_sources=_stub_sources(store, source))
     pending = read_training_run(store, RUN)
     assert (pending.status, pending.failure) == ("pending", None)
+
+
+# ====================== 终审修复 I1:收尾窗口内候选被批准,续训直接收尾 ======================
+
+def _crash_between_registration_and_executed(store, cfg):
+    """让训练做完、候选注册完,但在写 executed 记录时崩溃。"""
+    real = orchestrator_module.write_training_run
+
+    def boom(st, run):
+        if run.status == "executed":
+            raise SimulatedCrashError("crash before the executed record")
+        return real(st, run)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(orchestrator_module, "write_training_run", boom)
+        with pytest.raises(SimulatedCrashError):
+            _go(store, cfg, MockExecutor())
+    pending = read_training_run(store, RUN)
+    assert (pending.status, pending.checkpoint_step) == ("pending", 6)
+    assert _candidate(store).status == "pending_review"
+
+
+def _review(store, status, **payload_edits):
+    path = candidate_checkpoint_file(RUN)
+    cand = store.read_product(path)
+    cand.status = status
+    cand.payload.update(payload_edits)
+    store.write_product(path, cand, "human: review")
+
+
+def test_a_candidate_approved_in_the_crash_window_does_not_stop_the_run_from_finishing(store):
+    cfg = _batch_cfg()
+    _crash_between_registration_and_executed(store, cfg)
+    _review(store, "approved")
+    run = _go(store, cfg, MockExecutor())
+    assert (run.status, run.resume_attempts) == ("executed", 1)
+    assert read_training_run(store, RUN).status == "executed"
+    assert _candidate(store).status == "approved"  # 人工结论原样保留,没有被重置
+
+
+def test_a_reviewed_candidate_that_is_not_this_runs_is_left_for_a_human(store):
+    cfg = _batch_cfg()
+    _crash_between_registration_and_executed(store, cfg)
+    _review(store, "approved", config_hash="f" * 64)  # 候选被改成不属于本次配置
+    with pytest.raises(CandidateAlreadyReviewedError):
+        _go(store, cfg, MockExecutor())
+    assert read_training_run(store, RUN).status == "pending"

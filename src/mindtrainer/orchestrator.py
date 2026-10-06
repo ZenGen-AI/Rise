@@ -6,7 +6,10 @@ from typing import Callable
 
 from controlplane.envelope import BigRef
 from controlplane.gitstore import GitStore
-from mindtrainer.checkpoint import CheckpointConverter, register_candidate
+from controlplane.paths import candidate_checkpoint_file
+from mindtrainer.checkpoint import (
+    CandidateAlreadyReviewedError, CheckpointConverter, register_candidate,
+)
 from mindtrainer.datamodel import StepResult, TrainingRun
 from mindtrainer.executor import TrainingExecutor
 from mindtrainer.grouping import DegenerateGroupError, group_by_id, validate_groups
@@ -62,6 +65,17 @@ def _prepare_batch_grpo(cfg, source, attribution):
     return groups
 
 
+def _candidate_is_this_runs(store: GitStore, run_id: str, chash: str, checkpoint_ref: BigRef) -> bool:
+    """收尾时候选已被人审核过(崩溃窗口里批准的)。只有它确实是本 run、本配置、同一份转换后
+    权重注册的,才算"注册已完成";否则交给人,不替人判断。"""
+    payload = store.read_product(candidate_checkpoint_file(run_id)).payload
+    return (
+        payload.get("training_run_ref") == f"trainrun-{run_id}"
+        and payload.get("config_hash") == chash
+        and payload.get("checkpoint_ref") == checkpoint_ref.to_dict()
+    )
+
+
 def _update_summary(summary: dict, result: StepResult, reward_mean: float | None, failed: int) -> None:
     summary["failed_rollout_attempts"] = summary.get("failed_rollout_attempts", 0) + failed
     if result.phase == "sft":
@@ -101,7 +115,8 @@ def run_training(
       与"崩溃后从存点续"逐字节等价。Interact 的 rollout 是实时的,不声称等价。
     - 每 checkpoint_every_steps 步存点,并把引用、checkpoint_step 与当时的曲线摘要一起回写。
       曲线摘要只在存点时落盘,所以续训后它与存点时一致,不会重复计入崩溃前多跑的步。
-    - 收尾:存最终 checkpoint(先回写 pending,再转换),注册候选,置 executed。
+    - 收尾:存最终 checkpoint(先回写 pending,再转换),注册候选,置 executed。候选若在崩溃
+      窗口里已被人审核、且确属本 run 本配置同一份权重,视为注册已完成,照常置 executed。
     - 确定性失败写 failed(category T2)并原样重抛,其中包括 Interact 的 invalid_session 拒绝;
       其余异常(含 timeout 用尽、role_backend_failure)不吞,run 保持 pending。
     - metric_stream_refs 与 on_step:逐步指标不进 git(补充 D.2),on_step 是调用方观察
@@ -214,15 +229,21 @@ def run_training(
         curve_summary=copy.deepcopy(summary),
     )
     write_training_run(store, run)  # 先记下最终存点:转换或注册崩了,续训直接回到这里收尾
-    register_candidate(
-        store,
-        run_id=run_id,
-        checkpoint_ref=converter.convert(final_ref),
-        base_checkpoint_ref=cfg.base_checkpoint_ref,
-        config_hash=chash,
-        curve_summary=summary,
-        manifest_ids=[cfg.stage_manifest_refs[s] for s in STAGES if cfg.stage_manifest_refs.get(s)],
-    )
+    candidate_ref = converter.convert(final_ref)
+    try:
+        register_candidate(
+            store,
+            run_id=run_id,
+            checkpoint_ref=candidate_ref,
+            base_checkpoint_ref=cfg.base_checkpoint_ref,
+            config_hash=chash,
+            curve_summary=summary,
+            manifest_ids=[cfg.stage_manifest_refs[s] for s in STAGES if cfg.stage_manifest_refs.get(s)],
+        )
+    except CandidateAlreadyReviewedError:
+        # 崩在"注册之后、置 executed 之前",期间人批准了候选:注册其实早已完成,只差置 executed。
+        if not _candidate_is_this_runs(store, run_id, chash, candidate_ref):
+            raise
     run = dataclasses.replace(run, status="executed")
     write_training_run(store, run)
     return run
