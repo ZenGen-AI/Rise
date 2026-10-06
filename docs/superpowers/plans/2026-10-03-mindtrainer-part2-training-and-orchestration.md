@@ -31,6 +31,9 @@
 
 **整支评审的其余建议(可选,尚未纳入任何任务;要做就在对应任务里加步骤并同步更新测试数)**
 
+- **配置类型校验的剩余缺口**(上半段整支评审的 F1,部分修复已合并、剩余缺口记在这里)。已修好的字段:、整数字段(//// 等)、、、(可 JSON 序列化)、两个 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 必须是 str、 必须是非空 str 组成的 list、 本身必须是 dict。剩余未修(范围复审用只读探针验证,均可直接构造 / 到达,部分还能经  外部输入直达): 非 list 抛裸 ; 非 dict 同样裸 ; 与  为整数时静默接受; 非 list 或元素非  抛裸 ;/ 本身不是  抛裸 ; 的值非 str 静默接受; 本身是 dict 或 None 抛裸 。已修的那部分(12 个现象)控制者与复审者都独立验证过确实修对了,且它们正是整支评审报告里举例的那些现象;剩余缺口都不在原始清单里,是复审者按"任何字段"搜出来的,且没有一个能被上半段计划给出的合法配置示例触发。最坏后果:下半段编排器捕获  全部异常并写 ,所以剩余缺口让  记录里出现裸异常而不是 ,而不是让  卡在 。下半段开工前决定是否值得再开一轮修复波。
+
+
 - **边界 1 的自动化守卫。** 现在"`src/mindtrainer` 不导入 `diagnostic.*`"只靠人工预检。建议加一个约 15 行的测试(静态扫描 `src/mindtrainer/*.py` 的 import 语句,或导入全部 mindtrainer 模块后断言 `sys.modules` 里没有 `diagnostic*`),与 `test_mt_packaging` 同类。下半段还会再加 5 个源文件,越早加越划算。
 - **`RolloutFailedError` 没有 `transient` 标志。** 编排器要区分"瞬态重试用尽"和"确定性拒绝"时,只能硬编码 reason 集合。给它加一个 `transient: bool` 属性成本很低(一行加一条断言),但要改上半段任务 6 的代码,需先决定上面"未决事项"里的取舍。
 - **策略异常路径丢失已累积的瞬态 `failed_attempts`。** 简报要求策略异常原样上抛、不包装,所以异常上拿不到这些数据。评审给的不改异常类型的做法:`collect()` 开头把 `failed_attempts` 列表挂到 `self.last_failed_attempts`,这样策略异常和 `RolloutFailedError` 两条路径都能读到。
@@ -2609,3 +2612,15 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 1. **离线分组 GRPO 在 ROLL 上的语义**:本计划只保证分组契约和退化组的显式报错,不保证算法正确性。
 2. **推理格式权重能否直接作为下一轮训练的起点**(任务 11、12、15 都碰到了它):mock 不区分格式,测试暴露不出问题;若不能,要加 `training_checkpoint_ref`,并改 daemon 晋级与 `latest_promoted_checkpoint`。
 3. **审核门证据只保证在场,不保证被读过、也不保证可信**:真实诊断接入前,这道门是"形式在场"。
+
+---
+
+## 实施后修订(Post-implementation amendments)
+
+本计划的 6 个任务落地并通过逐任务评审后,整支评审提出了若干问题,随后经一次修复波修订了下列内容。**以下修订优先于上文任务里的代码块;上文保留原样,作为当时的计划记录**(上文的代码块曾逐字回放验证过,逐块改写会破坏这条证据链)。最终全量测试为 700 passed。
+
+- **`register_candidate` 的摘要拷贝(任务 12,提交 390440f)**:`"train_curve_summary": dict(curve_summary)` 改为 `copy.deepcopy(curve_summary)`(并 `import copy`);测试 `test_payload_does_not_alias_the_callers_summary` 改名为 `test_the_stored_summary_keeps_the_values_from_registration_time`,断言不变。原因:函数在调用栈内同步落盘,调用返回后再改入参根本碰不到已写入的内容,旧名字承诺了一件测不到的事;深拷贝则防住嵌套结构在落盘前被别处改写。上文任务 12 的两处代码块与此不一致。
+- **`invalid_session` 的拒绝写 failed(任务 14,提交 ceb64d6)**:编排器现在对 `RolloutFailedError` 且 `reason == "invalid_session"` 写 failed(category T2)并重抛;`timeout` 用尽与 `role_backend_failure`(服务端分不出 T1/T2)仍保持 pending,由 `max_resume_attempts` 兜底。**上文「尚未处理的两件事」把它列为未决取舍;执行时控制者曾裁决不加入 `_DETERMINISTIC`(理由是写 failed 与"失败是数据"冲突),终审后改判。** 改判的依据是实际相反——`pending` 且 `failure` 为空才是把原因丢了,而且每次续训都要再开一次真实会话去撞同一个拒绝。服务端、客户端、轨迹源三处文档都写明 `invalid_session` 重试无益。
+- **终态记录只接受逐字节相同的重放(任务 10,提交 89d10fa)**:`write_training_run` 对 `pending → pending` 仍允许更新内容;`executed`/`failed` 的记录只接受与磁盘内容相同的重放,内容不同抛 `ValueError`。原因:原先同状态重写一律放行,直接调 `run_training` 连续两次写不同失败原因时,前一条会被悄悄覆盖。
+- **收尾窗口内候选被批准(任务 14,提交 07674d0)**:崩在 `register_candidate` 之后、置 `executed` 之前,期间人批准了候选,原先续训会连续抛 `CandidateAlreadyReviewedError` 直到升级。现在编排器捕获它,核对候选的 `training_run_ref`、`config_hash`、`checkpoint_ref` 确属本 run 本配置同一份权重,才视为注册已完成并置 `executed`;否则原样重抛。`register_candidate` 本身不变。对应的「候选不属于本 run」测试原先只篡改 `config_hash` 一个字段,变异检查发现删掉另外两个比较测试照样绿,所以参数化为三个用例各篡改一个字段(提交 c724748)。
+- **仍未处理(已记入设计 §10 第 11–13 条)**:`config_hash` 在不可序列化的 `grpo_config` 上于没有任何记录时抛出,失败原因不落盘;`max_resume_attempts` 与 `allow_resume` 在 `config_hash` 内,升级后调大它们会被拒为"配置变了";续训等价只在 mock 下有证据。另有两件只是性能:收尾崩溃后的续训会再存一次同哈希的最终点,Batch 续训会重算整份奖励。`_DETERMINISTIC` 里的 `InvalidTrainingConfigError` 实际是防御性冗余(它只会在 `try` 之前被抛出)。
