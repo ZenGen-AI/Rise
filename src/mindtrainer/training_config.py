@@ -242,7 +242,8 @@ def _check_bindings(bindings) -> str | None:
 
 
 def _check_types(cfg: TrainingConfig) -> str | None:
-    """类型校验,在任何比较之前跑一遍,自己永不抛异常。错误类型绝不让后面的代码看到:
+    """类型校验,在任何比较之前跑一遍。对 YAML 或 from_dict 能产出的值(内建的 str、int、float、bool、None、list、dict)
+    永不抛异常;字段里若被塞进 __deepcopy__ 之类会抛任意异常的自定义对象,to_dict 的深拷贝仍可能穿透。错误类型绝不让后面的代码看到:
     字符串当列表、浮点数当整数、None 当对象之类的输入会在这里被挡下,返回点名字段的可读原因
     (原因里含字段名和 "must be"),而不是让 '<' 之类的运算在后面抛裸 TypeError,也不是静默通过。
     覆盖嵌套对象(reward、bindings、两个 BigRef)和各容器的元素。
@@ -432,7 +433,7 @@ def config_hash(cfg: TrainingConfig) -> str:
 
     这一步在 validate_training_config 之前就会被下半段编排器调用,所以序列化不了的配置在这里必须
     抛 InvalidTrainingConfigError(确定性失败),不能是裸 TypeError 或 AttributeError(会被当成
-    瞬态失败重试)。校验与哈希共用 _canonical_json,所以校验放行的配置一定算得出哈希,算不出哈希的配置校验一定拒绝,异常信息就是校验给出的原因,点名真正出问题的字段。只是没过校验、
+    瞬态失败重试)。校验与哈希共用 _canonical_json,所以(只要 to_dict 本身不抛校验之外的异常,配置来自 YAML 或 from_dict 时恒成立)校验放行的配置一定算得出哈希,算不出哈希的配置校验一定拒绝,异常信息就是校验给出的原因,点名真正出问题的字段。只是没过校验、
     但仍能序列化的配置照常算出哈希:编排器要靠它建 training_run 记录,配置失败才会留下 failed 的痕迹。"""
     try:
         payload = _canonical_json(cfg.to_dict())
