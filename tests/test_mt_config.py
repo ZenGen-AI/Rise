@@ -360,3 +360,213 @@ def test_config_hash_rejects_unserializable_grpo_config_with_a_named_error_not_a
 def test_directive_with_a_non_dict_training_config_is_rejected_not_a_bare_type_error(bad_training_config):
     with pytest.raises(InvalidTrainingConfigError, match="training_config"):
         load_config_from_directive(_directive({"training_config": bad_training_config}))
+
+
+# ---------------- 配置类型缺口:剩余字段的类型错误也必须返回原因,不能抛、不能静默通过 ----------------
+
+_CIRCULAR: dict = {}
+_CIRCULAR["self"] = _CIRCULAR
+
+
+def _bad_ref(**kw) -> BigRef:
+    base = dict(uri="file:///ckpt/x", sha256="a" * 64, size_bytes=1, fetch_hint=None)
+    base.update(kw)
+    return BigRef(**base)
+
+
+TYPE_GAPS = [
+    ("components_is_an_int", lambda: _interact(reward=_reward(components=5)), "reward.components"),
+    ("components_is_a_string", lambda: _interact(reward=_reward(components="goal")), "reward.components"),
+    ("components_has_a_non_string_entry",
+     lambda: _interact(reward=_reward(components=["goal", 5], outcome_rules={"goal": ["a"]})), "reward.components"),
+    ("outcome_rules_is_a_list",
+     lambda: _interact(reward=_reward(outcome_rules=["goal", "norm"])), "reward.outcome_rules"),
+    ("outcome_rules_value_is_a_string",
+     lambda: _interact(reward=_reward(outcome_rules={"goal": "agreed", "norm": ["please"]})), "reward.outcome_rules"),
+    ("outcome_rules_keyword_is_an_int",
+     lambda: _interact(reward=_reward(outcome_rules={"goal": [1], "norm": ["please"]})), "reward.outcome_rules"),
+    ("outcome_rules_key_is_an_int",
+     lambda: _interact(reward=_reward(components=["goal"], outcome_rules={5: ["x"]})), "reward.outcome_rules"),
+    ("judge_model_id_is_an_int", lambda: _interact(reward=_reward(judge_model_id=5)), "reward.judge_model_id"),
+    ("rubric_version_is_an_int", lambda: _interact(reward=_reward(rubric_version=5)), "reward.rubric_version"),
+    ("reward_is_none", lambda: _interact(reward=None), "reward"),
+    ("reward_is_a_dict", lambda: _interact(reward={"components": ["goal"]}), "reward"),
+    ("bindings_is_an_int", lambda: _interact(bindings=5), "bindings"),
+    ("bindings_has_a_non_binding_entry", lambda: _interact(bindings=[_trained(), 5]), "bindings"),
+    ("binding_slot_id_is_an_int",
+     lambda: _interact(bindings=[RoleBinding(5, "pa", "self_play"), _opponent()]), "bindings"),
+    ("binding_model_ref_is_an_int",
+     lambda: _interact(bindings=[_trained(), RoleBinding("b", "pb", "frozen_reference", model_ref=5)]), "bindings"),
+    ("base_checkpoint_ref_is_a_string", lambda: _interact(base_checkpoint_ref="base"), "base_checkpoint_ref"),
+    ("teacher_model_ref_is_none", lambda: _interact(teacher_model_ref=None), "teacher_model_ref"),
+    ("ref_uri_is_an_int", lambda: _interact(base_checkpoint_ref=_bad_ref(uri=5)), "base_checkpoint_ref.uri"),
+    ("ref_size_bytes_is_a_string",
+     lambda: _interact(teacher_model_ref=_bad_ref(size_bytes="1")), "teacher_model_ref.size_bytes"),
+    ("ref_size_bytes_is_a_bool",
+     lambda: _interact(base_checkpoint_ref=_bad_ref(size_bytes=True)), "base_checkpoint_ref.size_bytes"),
+    ("ref_fetch_hint_is_a_string",
+     lambda: _interact(base_checkpoint_ref=_bad_ref(fetch_hint="x")), "base_checkpoint_ref.fetch_hint"),
+    ("stage_manifest_refs_value_is_an_int",
+     lambda: _batch(stage_manifest_refs={"sft": "a", "grpo_opd": 5}), "stage_manifest_refs"),
+    ("stage_manifest_refs_key_is_an_int",
+     lambda: _batch(stage_manifest_refs={1: "a", "sft": "b"}), "stage_manifest_refs"),
+    ("grpo_config_is_circular", lambda: _interact(grpo_config=_CIRCULAR), "grpo_config"),
+    ("opd_coefficient_overflows_a_float", lambda: _interact(opd_coefficient=10 ** 400), "opd_coefficient"),
+]
+
+
+@pytest.mark.parametrize(
+    "build,field", [(b, f) for _, b, f in TYPE_GAPS], ids=[i for i, _, _ in TYPE_GAPS],
+)
+def test_the_remaining_wrong_field_types_are_rejected_with_a_reason_and_never_raise(build, field):
+    reason = validate_training_config(build())
+    assert reason is not None, "应当被拒绝"
+    assert field in reason, reason
+    assert "must be" in reason, reason
+
+
+# ---------------- config_hash:序列化不了时点名真正的字段,而且永远是具名异常 ----------------
+
+HASH_FAILS = [
+    ("components_is_an_int", lambda: _interact(reward=_reward(components=5)), "reward.components"),
+    ("outcome_rules_is_a_list", lambda: _interact(reward=_reward(outcome_rules=["goal"])), "reward.outcome_rules"),
+    ("bindings_is_an_int", lambda: _interact(bindings=5), "bindings"),
+    ("bindings_has_a_non_binding_entry", lambda: _interact(bindings=[5]), "bindings"),
+    ("reward_is_none", lambda: _interact(reward=None), "reward"),
+    ("base_checkpoint_ref_is_a_string", lambda: _interact(base_checkpoint_ref="base"), "base_checkpoint_ref"),
+    ("grpo_config_is_circular", lambda: _interact(grpo_config=_CIRCULAR), "grpo_config"),
+]
+
+
+@pytest.mark.parametrize(
+    "build,field", [(b, f) for _, b, f in HASH_FAILS], ids=[i for i, _, _ in HASH_FAILS],
+)
+def test_config_hash_names_the_field_that_cannot_be_serialized(build, field):
+    with pytest.raises(InvalidTrainingConfigError) as exc:
+        config_hash(build())
+    message = str(exc.value)
+    assert field in message, message
+    if field != "grpo_config":
+        assert "grpo_config" not in message, message  # 不能把别的字段的毛病栽给 grpo_config
+
+
+def test_config_hash_still_hashes_a_serializable_config_that_only_fails_validation():
+    # 编排器靠它:能算出哈希,才有 training_run 记录可写,配置失败才会留下 failed 记录
+    assert len(config_hash(_interact(sft_steps="3"))) == 64
+
+
+# ---------------- 外部输入(directive):容器类型不能被悄悄转换成别的东西 ----------------
+
+def _load_or_reason(training_config: dict):
+    try:
+        cfg = load_config_from_directive(_directive({"training_config": training_config}))
+    except InvalidTrainingConfigError as exc:
+        return str(exc)
+    return validate_training_config(cfg)
+
+
+def _raw(build, mutate) -> dict:
+    d = build().to_dict()
+    mutate(d)
+    return d
+
+
+EXTERNAL_NAMED = [
+    ("scenario_ids_is_a_string", _interact, lambda d: d.__setitem__("scenario_ids", "s1"), "scenario_ids"),
+    ("components_is_a_string", _interact, lambda d: d["reward"].__setitem__("components", "goal"), "reward.components"),
+    ("components_is_an_int", _interact, lambda d: d["reward"].__setitem__("components", 5), "reward.components"),
+    ("outcome_rules_is_a_list", _interact,
+     lambda d: d["reward"].__setitem__("outcome_rules", ["goal"]), "reward.outcome_rules"),
+    ("outcome_rules_value_is_a_string", _interact,
+     lambda d: d["reward"]["outcome_rules"].__setitem__("goal", "agreed"), "reward.outcome_rules"),
+    ("stage_manifest_refs_is_a_string", _batch,
+     lambda d: d.__setitem__("stage_manifest_refs", "ab"), "stage_manifest_refs"),
+    ("stage_manifest_refs_is_a_list_of_pairs", _batch,
+     lambda d: d.__setitem__("stage_manifest_refs", [["sft", "x"], ["grpo_opd", "y"]]), "stage_manifest_refs"),
+    ("bindings_is_a_dict", _interact, lambda d: d.__setitem__("bindings", {"a": 1}), "bindings"),
+]
+
+
+@pytest.mark.parametrize(
+    "build,mutate,field", [(b, m, f) for _, b, m, f in EXTERNAL_NAMED], ids=[i for i, _, _, _ in EXTERNAL_NAMED],
+)
+def test_a_wrong_container_type_in_a_directive_is_reported_by_field_not_silently_converted(build, mutate, field):
+    reason = _load_or_reason(_raw(build, mutate))
+    assert reason is not None, "错误类型的输入不能当作合法配置通过"
+    assert field in reason, reason
+
+
+EXTERNAL_REJECTED = [
+    ("bindings_has_a_non_object_entry", _interact, lambda d: d.__setitem__("bindings", [5])),
+    ("reward_is_none", _interact, lambda d: d.__setitem__("reward", None)),
+    ("reward_is_a_list", _interact, lambda d: d.__setitem__("reward", ["goal"])),
+    ("base_checkpoint_ref_is_a_string", _interact, lambda d: d.__setitem__("base_checkpoint_ref", "base")),
+    ("teacher_model_ref_is_none", _interact, lambda d: d.__setitem__("teacher_model_ref", None)),
+]
+
+
+@pytest.mark.parametrize(
+    "build,mutate", [(b, m) for _, b, m in EXTERNAL_REJECTED], ids=[i for i, _, _ in EXTERNAL_REJECTED],
+)
+def test_a_malformed_object_in_a_directive_is_rejected_with_the_named_error(build, mutate):
+    assert _load_or_reason(_raw(build, mutate)) is not None
+
+
+# ---------------- 变异检查补洞:根对象类型、最终序列化兜底、超大数字、空容器 ----------------
+
+def test_validate_rejects_something_that_is_not_a_training_config_at_all():
+    for bogus in (None, {}, "config", 5):
+        reason = validate_training_config(bogus)
+        assert reason is not None and "TrainingConfig" in reason and "must be" in reason, reason
+
+
+def test_a_fetch_hint_with_an_unserializable_value_is_caught_by_the_final_serialization_check():
+    # fetch_hint 本身是 dict,逐项检查都放行;只有最后一道"整份配置能不能序列化"能抓住它
+    cfg = _interact(base_checkpoint_ref=_bad_ref(fetch_hint={"url": {1, 2, 3}}))
+    reason = validate_training_config(cfg)
+    assert reason is not None and "JSON serializable" in reason and "must be" in reason, reason
+    with pytest.raises(InvalidTrainingConfigError, match="JSON serializable"):
+        config_hash(cfg)
+
+
+@pytest.mark.parametrize(
+    "build,field",
+    [
+        (lambda: _interact(opd_coefficient=10 ** 400), "opd_coefficient"),
+        (lambda: _interact(reward=_reward(gamma=10 ** 400)), "reward.gamma"),
+    ],
+    ids=["opd_coefficient", "gamma"],
+)
+def test_an_absurdly_large_number_does_not_flood_the_failure_reason(build, field):
+    reason = validate_training_config(build())
+    assert reason is not None and field in reason, reason
+    assert len(reason) < 130, len(reason)  # 401 位数字原样写进去会有 400 多个字符
+
+
+def test_a_number_too_large_to_print_inside_a_container_still_yields_a_reason():
+    import sys
+
+    limit = sys.get_int_max_str_digits()
+    if limit == 0:
+        pytest.skip("this interpreter has no int-to-str digit limit")
+    huge = 10 ** (limit + 50)  # repr 这个数会抛 ValueError
+    cfg = _interact(reward=_reward(components=[huge], outcome_rules={"goal": ["a"]}))
+    reason = validate_training_config(cfg)
+    assert reason is not None and "reward.components" in reason, reason
+
+
+EXTERNAL_EMPTY = [
+    ("bindings_is_an_empty_dict", _batch, lambda d: d.__setitem__("bindings", {}), "bindings"),
+    ("scenario_ids_is_an_empty_dict", _batch, lambda d: d.__setitem__("scenario_ids", {}), "scenario_ids"),
+    ("stage_manifest_refs_is_an_empty_list", _interact,
+     lambda d: d.__setitem__("stage_manifest_refs", []), "stage_manifest_refs"),
+]
+
+
+@pytest.mark.parametrize(
+    "build,mutate,field", [(b, m, f) for _, b, m, f in EXTERNAL_EMPTY], ids=[i for i, _, _, _ in EXTERNAL_EMPTY],
+)
+def test_an_empty_container_of_the_wrong_type_in_a_directive_is_not_silently_converted(build, mutate, field):
+    reason = _load_or_reason(_raw(build, mutate))
+    assert reason is not None, "空容器也不能因为类型不对被悄悄转成合法的空值"
+    assert field in reason, reason

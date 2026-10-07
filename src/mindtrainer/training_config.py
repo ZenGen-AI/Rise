@@ -21,6 +21,18 @@ class InvalidTrainingConfigError(ValueError):
     """训练配置缺字段或违反校验规则。"""
 
 
+def _expect(value, kind: type, label: str):
+    """from_dict 用:容器类型不对就点名字段地抛 TypeError,而不是把字符串悄悄拆成字符、
+    把空列表悄悄当成空字典。load_config_from_directive 会把它包成 InvalidTrainingConfigError。"""
+    if not isinstance(value, kind):
+        raise TypeError(f"{label} must be a {kind.__name__}, got {type(value).__name__}")
+    return value
+
+
+def _ref_from_dict(name: str, value) -> BigRef:
+    return BigRef.from_dict(_expect(value, dict, name))
+
+
 @dataclass(frozen=True)
 class RewardConfig:
     """奖励配置(设计 §4)。不含任何凭证字段:judge 只存模型标识与 rubric 版本。"""
@@ -48,11 +60,14 @@ class RewardConfig:
 
     @classmethod
     def from_dict(cls, d: dict) -> "RewardConfig":
+        rules = _expect(d.get("outcome_rules", {}), dict, "reward.outcome_rules")
         return cls(
-            components=list(d["components"]),
+            components=list(_expect(d["components"], list, "reward.components")),
             attribution=d["attribution"],
             combination=d["combination"],
-            outcome_rules={k: list(v) for k, v in d.get("outcome_rules", {}).items()},
+            outcome_rules={
+                k: list(_expect(v, list, f"reward.outcome_rules[{k!r}]")) for k, v in rules.items()
+            },
             gamma=d.get("gamma", 1.0),
             judge_model_id=d.get("judge_model_id"),
             rubric_version=d.get("rubric_version"),
@@ -117,9 +132,9 @@ class TrainingConfig:
         return cls(
             mode=d["mode"],
             trained_slot=d["trained_slot"],
-            base_checkpoint_ref=BigRef.from_dict(d["base_checkpoint_ref"]),
-            teacher_model_ref=BigRef.from_dict(d["teacher_model_ref"]),
-            reward=RewardConfig.from_dict(d["reward"]),
+            base_checkpoint_ref=_ref_from_dict("base_checkpoint_ref", d["base_checkpoint_ref"]),
+            teacher_model_ref=_ref_from_dict("teacher_model_ref", d["teacher_model_ref"]),
+            reward=RewardConfig.from_dict(_expect(d["reward"], dict, "reward")),
             sft_steps=d["sft_steps"],
             grpo_steps=d["grpo_steps"],
             sft_batch_size=d["sft_batch_size"],
@@ -129,9 +144,14 @@ class TrainingConfig:
             opd_coefficient=d["opd_coefficient"],
             checkpoint_every_steps=d["checkpoint_every_steps"],
             allow_resume=d["allow_resume"],
-            stage_manifest_refs=dict(d.get("stage_manifest_refs", {})),
-            scenario_ids=list(d.get("scenario_ids", [])),
-            bindings=[RoleBinding.from_dict(b) for b in d.get("bindings", [])],
+            stage_manifest_refs=dict(
+                _expect(d.get("stage_manifest_refs", {}), dict, "stage_manifest_refs")
+            ),
+            scenario_ids=list(_expect(d.get("scenario_ids", []), list, "scenario_ids")),
+            bindings=[
+                RoleBinding.from_dict(_expect(b, dict, f"bindings[{i}]"))
+                for i, b in enumerate(_expect(d.get("bindings", []), list, "bindings"))
+            ],
             max_turns_per_episode=d.get("max_turns_per_episode", 0),
             max_retries_per_episode=d.get("max_retries_per_episode", 2),
             min_group_size=d.get("min_group_size", 2),
@@ -146,10 +166,81 @@ _INT_FIELDS = (
 )
 
 
+def _short(value) -> str:
+    """错误信息里展示的值:太长就截断;转字符串本身会抛(例如超过位数上限的大整数)时只写类型,
+    免得拼错误信息的时候又抛出一个裸异常。"""
+    try:
+        text = repr(value)
+    except (ValueError, RecursionError):
+        return f"<{type(value).__name__}>"
+    return text if len(text) <= 48 else text[:45] + "..."
+
+
+def _is_finite_number(value) -> bool:
+    try:
+        return math.isfinite(value)
+    except OverflowError:  # 大整数转不成浮点数
+        return False
+
+
+def _check_ref(name: str, ref) -> str | None:
+    if not isinstance(ref, BigRef):
+        return f"{name} must be a BigRef, got {type(ref).__name__}"
+    if not isinstance(ref.uri, str):
+        return f"{name}.uri must be a str, got {type(ref.uri).__name__}"
+    if not isinstance(ref.sha256, str):
+        return f"{name}.sha256 must be a str, got {type(ref.sha256).__name__}"
+    if isinstance(ref.size_bytes, bool) or not isinstance(ref.size_bytes, int):
+        return f"{name}.size_bytes must be an int, got {type(ref.size_bytes).__name__}"
+    if ref.fetch_hint is not None and not isinstance(ref.fetch_hint, dict):
+        return f"{name}.fetch_hint must be a dict or None, got {type(ref.fetch_hint).__name__}"
+    return None
+
+
+def _check_reward_types(r) -> str | None:
+    if not isinstance(r, RewardConfig):
+        return f"reward must be a RewardConfig, got {type(r).__name__}"
+    if not isinstance(r.components, list) or not all(isinstance(c, str) for c in r.components):
+        return f"reward.components must be a list of str, got {_short(r.components)}"
+    if not isinstance(r.outcome_rules, dict):
+        return f"reward.outcome_rules must be a dict, got {type(r.outcome_rules).__name__}"
+    for key, words in r.outcome_rules.items():
+        if not isinstance(key, str):
+            return f"reward.outcome_rules keys must be str, got {type(key).__name__}"
+        if not isinstance(words, list) or not all(isinstance(w, str) for w in words):
+            return f"reward.outcome_rules[{key!r}] must be a list of str, got {_short(words)}"
+    if isinstance(r.gamma, bool) or not isinstance(r.gamma, (int, float)):
+        return f"reward.gamma must be an int or float, got {type(r.gamma).__name__}"
+    for name in ("judge_model_id", "rubric_version"):
+        value = getattr(r, name)
+        if value is not None and not isinstance(value, str):
+            return f"reward.{name} must be a str or None, got {type(value).__name__}"
+    return None
+
+
+def _check_bindings(bindings) -> str | None:
+    if not isinstance(bindings, list):
+        return f"bindings must be a list, got {type(bindings).__name__}"
+    for i, b in enumerate(bindings):
+        if not isinstance(b, RoleBinding):
+            return f"bindings[{i}] must be a RoleBinding, got {type(b).__name__}"
+        for name in ("slot_id", "persona_id", "model_backend"):
+            value = getattr(b, name)
+            if not isinstance(value, str):
+                return f"bindings[{i}].{name} must be a str, got {type(value).__name__}"
+        if b.model_ref is not None and not isinstance(b.model_ref, str):
+            return f"bindings[{i}].model_ref must be a str or None, got {type(b.model_ref).__name__}"
+    return None
+
+
 def _check_types(cfg: TrainingConfig) -> str | None:
-    """类型校验,在任何比较之前跑一遍。错误类型绝不让后面的代码看到:
-    字符串当真值、浮点数当整数之类的输入会在这里被挡下,返回点名字段的可读原因,
-    而不是让 '<' 之类的运算在后面抛裸 TypeError。"""
+    """类型校验,在任何比较之前跑一遍,自己永不抛异常。错误类型绝不让后面的代码看到:
+    字符串当列表、浮点数当整数、None 当对象之类的输入会在这里被挡下,返回点名字段的可读原因
+    (原因里含字段名和 "must be"),而不是让 '<' 之类的运算在后面抛裸 TypeError,也不是静默通过。
+    覆盖嵌套对象(reward、bindings、两个 BigRef)和各容器的元素。
+    config_hash 序列化失败时也靠它点名真正出问题的字段。"""
+    if not isinstance(cfg, TrainingConfig):
+        return f"config must be a TrainingConfig, got {type(cfg).__name__}"
     if not isinstance(cfg.mode, str):
         return f"mode must be a str, got {type(cfg.mode).__name__}"
     if not isinstance(cfg.trained_slot, str):
@@ -162,26 +253,38 @@ def _check_types(cfg: TrainingConfig) -> str | None:
         return f"allow_resume must be a bool, got {type(cfg.allow_resume).__name__}"
     if isinstance(cfg.opd_coefficient, bool) or not isinstance(cfg.opd_coefficient, (int, float)):
         return f"opd_coefficient must be an int or float, got {type(cfg.opd_coefficient).__name__}"
-    if isinstance(cfg.reward.gamma, bool) or not isinstance(cfg.reward.gamma, (int, float)):
-        return f"reward.gamma must be an int or float, got {type(cfg.reward.gamma).__name__}"
+    reason = _check_reward_types(cfg.reward)
+    if reason is not None:
+        return reason
     if not isinstance(cfg.grpo_config, dict):
         return f"grpo_config must be a dict, got {type(cfg.grpo_config).__name__}"
     try:
         json.dumps(cfg.grpo_config)
-    except TypeError as exc:
+    except (TypeError, ValueError, RecursionError) as exc:
         return f"grpo_config must be JSON serializable: {exc}"
     for name, ref in (
         ("base_checkpoint_ref", cfg.base_checkpoint_ref),
         ("teacher_model_ref", cfg.teacher_model_ref),
     ):
-        if not isinstance(ref.sha256, str):
-            return f"{name}.sha256 must be a str, got {type(ref.sha256).__name__}"
+        reason = _check_ref(name, ref)
+        if reason is not None:
+            return reason
     if not isinstance(cfg.scenario_ids, list) or not all(
         isinstance(s, str) and s for s in cfg.scenario_ids
     ):
         return "scenario_ids must be a list of non-empty str"
     if not isinstance(cfg.stage_manifest_refs, dict):
         return f"stage_manifest_refs must be a dict, got {type(cfg.stage_manifest_refs).__name__}"
+    if not all(isinstance(k, str) and isinstance(v, str) for k, v in cfg.stage_manifest_refs.items()):
+        return "stage_manifest_refs must be a dict of str to str"
+    reason = _check_bindings(cfg.bindings)
+    if reason is not None:
+        return reason
+    try:
+        json.dumps(cfg.to_dict())
+    except (TypeError, ValueError, RecursionError) as exc:
+        # 兜底:前面的逐项检查都过了,却仍序列化不了(例如 BigRef.fetch_hint 里夹带了不可序列化的值)
+        return f"config must be JSON serializable: {exc}"
     return None
 
 
@@ -202,7 +305,7 @@ def _validate_reward(r: RewardConfig) -> str | None:
             if not words or not all(isinstance(w, str) and w for w in words):
                 return f"reward.outcome_rules[{name!r}] needs a non-empty keyword list"
         if not (0 < r.gamma <= 1):  # NaN 也会落到这里
-            return f"reward.gamma must be in (0, 1], got {r.gamma}"
+            return f"reward.gamma must be in (0, 1], got {_short(r.gamma)}"
     if r.attribution == "judge":
         if not r.judge_model_id:
             return "reward.judge_model_id is required for judge attribution"
@@ -255,7 +358,8 @@ def _validate_interact(cfg: TrainingConfig) -> str | None:
 def validate_training_config(cfg: TrainingConfig) -> str | None:
     """返回第一条违规的可读原因;全部合法返回 None。纯函数。
 
-    类型检查在任何比较之前跑:任何字段的错误类型都绝不抛异常,一律返回可读原因
+    类型检查在任何比较之前跑:任何字段(含嵌套的 reward、bindings、两个 BigRef 与各容器的元素,
+    甚至传进来的根本不是 TrainingConfig)的错误类型都绝不抛异常,一律返回可读原因
     (原因里含字段名和 "must be"),不能以裸 TypeError 或静默通过的形式逃出去。"""
     type_reason = _check_types(cfg)
     if type_reason is not None:
@@ -281,8 +385,8 @@ def validate_training_config(cfg: TrainingConfig) -> str | None:
         return f"group_size {cfg.group_size} is below min_group_size {cfg.min_group_size}"
     if cfg.checkpoint_every_steps < 1:
         return f"checkpoint_every_steps must be >= 1, got {cfg.checkpoint_every_steps}"
-    if not (math.isfinite(cfg.opd_coefficient) and cfg.opd_coefficient >= 0):
-        return f"opd_coefficient must be a finite number >= 0, got {cfg.opd_coefficient}"
+    if not (_is_finite_number(cfg.opd_coefficient) and cfg.opd_coefficient >= 0):
+        return f"opd_coefficient must be a finite number >= 0, got {_short(cfg.opd_coefficient)}"
     if cfg.max_retries_per_episode < 0:
         return f"max_retries_per_episode must be >= 0, got {cfg.max_retries_per_episode}"
     if cfg.max_resume_attempts < 0:
@@ -318,13 +422,17 @@ def ensure_valid_config(cfg: TrainingConfig) -> TrainingConfig:
 def config_hash(cfg: TrainingConfig) -> str:
     """配置的 sha256:规范化 JSON(键排序、无空白),不依赖字典顺序或 YAML 排版。
 
-    这一步在 validate_training_config 之前就会被下半段编排器调用,所以
-    grpo_config 之类带不可序列化值的配置在这里必须抛 InvalidTrainingConfigError
-    (确定性失败),不能是裸 TypeError(会被当成瞬态失败重试)。"""
+    这一步在 validate_training_config 之前就会被下半段编排器调用,所以序列化不了的配置在这里必须
+    抛 InvalidTrainingConfigError(确定性失败),不能是裸 TypeError 或 AttributeError(会被当成
+    瞬态失败重试)。异常信息点名真正出问题的字段,不再一律说成 grpo_config。只是没过校验、
+    但仍能序列化的配置照常算出哈希:编排器要靠它建 training_run 记录,配置失败才会留下 failed 的痕迹。"""
     try:
         text = json.dumps(cfg.to_dict(), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    except TypeError as exc:
-        raise InvalidTrainingConfigError(f"grpo_config must be JSON serializable: {exc}") from exc
+    except (TypeError, ValueError, AttributeError, RecursionError) as exc:
+        reason = _check_types(cfg)
+        raise InvalidTrainingConfigError(
+            reason or f"config must be JSON serializable: {exc}"
+        ) from exc
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
