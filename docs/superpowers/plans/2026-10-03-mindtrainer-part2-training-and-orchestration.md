@@ -31,9 +31,11 @@
 
 **整支评审的其余建议(可选,尚未纳入任何任务;要做就在对应任务里加步骤并同步更新测试数)**
 
-- **配置类型校验的剩余缺口**(上半段整支评审的 F1,部分修复已合并、剩余缺口记在这里)。已修好的字段:、整数字段(//// 等)、、、(可 JSON 序列化)、两个 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 必须是 str、 必须是非空 str 组成的 list、 本身必须是 dict。剩余未修(范围复审用只读探针验证,均可直接构造 / 到达,部分还能经  外部输入直达): 非 list 抛裸 ; 非 dict 同样裸 ; 与  为整数时静默接受; 非 list 或元素非  抛裸 ;/ 本身不是  抛裸 ; 的值非 str 静默接受; 本身是 dict 或 None 抛裸 。已修的那部分(12 个现象)控制者与复审者都独立验证过确实修对了,且它们正是整支评审报告里举例的那些现象;剩余缺口都不在原始清单里,是复审者按"任何字段"搜出来的,且没有一个能被上半段计划给出的合法配置示例触发。最坏后果:下半段编排器捕获  全部异常并写 ,所以剩余缺口让  记录里出现裸异常而不是 ,而不是让  卡在 。下半段开工前决定是否值得再开一轮修复波。
-
-
+- **配置类型校验的剩余缺口**(上半段整支评审的 F1,部分修复已合并,剩余缺口记在这里)。**已修好**的字段已用只读探针逐个复核,`validate_training_config` 对它们都返回含字段名的原因字符串:`allow_resume`;整数字段(`sft_steps`、`grpo_steps`、`checkpoint_every_steps`、`group_size`、`max_turns_per_episode` 等,拒绝 `bool` 和非 `int`);`opd_coefficient`;`reward.gamma`;`grpo_config`(须可 JSON 序列化);`base_checkpoint_ref` 与 `teacher_model_ref` 的 `sha256` 须是 `str`;`scenario_ids` 须是非空 `str` 组成的 `list`;`stage_manifest_refs` 本身须是 `dict`。**剩余未修**的字段不在整支评审报告列举的那 12 个现象里,是范围复审者按"任何字段"搜出来的。下面按 `run_training` 实际怎么处理分三类,都是直接构造 `TrainingConfig` 复现的:
+  - **静默接受,run 照常 `executed`**:`reward.judge_model_id` 或 `reward.rubric_version` 是整数;`stage_manifest_refs` 里某个值不是 `str`(例如 `grpo_opd` 为 5)。这三项经 `load_config_from_directive` 的外部输入同样原样通过。
+  - **抛裸异常,且此时没有任何 `training_run` 记录**:`reward.outcome_rules` 是 `list`、`bindings` 的元素不是 `RoleBinding`、`base_checkpoint_ref` 或 `teacher_model_ref` 不是 `BigRef`、`reward` 是 `None` 或 `dict`,抛的都是裸 `AttributeError`。`config_hash` 是 `run_training` 的第一条语句,先于 `validate_training_config`,所以走不到写记录那一步。
+  - **抛具名异常,但消息指错了字段**:`reward.components` 或 `bindings` 不可迭代时,`config_hash` 抛 `InvalidTrainingConfigError`,消息却写成 "grpo_config must be JSON serializable",因为它把 `to_dict` 里的任何 `TypeError` 都归给了 `grpo_config`。同样没有记录。
+  - **后果与范围**:编排器只对 `_DETERMINISTIC` 里那几类写 `failed`,后两类在它写任何记录之前就已抛出,调用方直接看到异常,`failed` 记录里不会有痕迹。`load_config_from_directive` 会把 `from_dict` 阶段的 `TypeError` 与 `AttributeError` 包成 `InvalidTrainingConfigError`,所以后两类只有绕过它直接构造 `TrainingConfig` 才会遇到。范围复审者判断上半段计划给出的合法配置示例都不会触发这些缺口,这一点本次没有复核。它与设计 §10 第 11 条同源,接线时应由调用方在构造配置后、调编排器前先校验并自行记录。是否再开一轮修复波,留给用户决定。
 - **边界 1 的自动化守卫。** 现在"`src/mindtrainer` 不导入 `diagnostic.*`"只靠人工预检。建议加一个约 15 行的测试(静态扫描 `src/mindtrainer/*.py` 的 import 语句,或导入全部 mindtrainer 模块后断言 `sys.modules` 里没有 `diagnostic*`),与 `test_mt_packaging` 同类。下半段还会再加 5 个源文件,越早加越划算。
 - **`RolloutFailedError` 没有 `transient` 标志。** 编排器要区分"瞬态重试用尽"和"确定性拒绝"时,只能硬编码 reason 集合。给它加一个 `transient: bool` 属性成本很低(一行加一条断言),但要改上半段任务 6 的代码,需先决定上面"未决事项"里的取舍。
 - **策略异常路径丢失已累积的瞬态 `failed_attempts`。** 简报要求策略异常原样上抛、不包装,所以异常上拿不到这些数据。评审给的不改异常类型的做法:`collect()` 开头把 `failed_attempts` 列表挂到 `self.last_failed_attempts`,这样策略异常和 `RolloutFailedError` 两条路径都能读到。
