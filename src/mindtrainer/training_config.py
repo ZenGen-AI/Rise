@@ -171,7 +171,7 @@ def _short(value) -> str:
     免得拼错误信息的时候又抛出一个裸异常。"""
     try:
         text = repr(value)
-    except (ValueError, RecursionError):
+    except Exception:  # 自定义对象的 __repr__ 可以抛任何异常
         return f"<{type(value).__name__}>"
     return text if len(text) <= 48 else text[:45] + "..."
 
@@ -181,6 +181,14 @@ def _is_finite_number(value) -> bool:
         return math.isfinite(value)
     except OverflowError:  # 大整数转不成浮点数
         return False
+
+
+def _canonical_json(value) -> bytes:
+    """config_hash 与类型校验共用的序列化:键排序、无空白、不转义非 ASCII,再编码成 UTF-8。
+    两边走同一个函数,所以"校验放行却算不出哈希"不可能发生。键类型互不可比较、字符串里有孤立代理字符
+    (编码成 UTF-8 才失败)这类只有排序或编码才暴露的毛病,校验阶段就能拦下。"""
+    text = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return text.encode("utf-8")
 
 
 def _check_ref(name: str, ref) -> str | None:
@@ -259,7 +267,7 @@ def _check_types(cfg: TrainingConfig) -> str | None:
     if not isinstance(cfg.grpo_config, dict):
         return f"grpo_config must be a dict, got {type(cfg.grpo_config).__name__}"
     try:
-        json.dumps(cfg.grpo_config)
+        _canonical_json(cfg.grpo_config)
     except (TypeError, ValueError, RecursionError) as exc:
         return f"grpo_config must be JSON serializable: {exc}"
     for name, ref in (
@@ -281,7 +289,7 @@ def _check_types(cfg: TrainingConfig) -> str | None:
     if reason is not None:
         return reason
     try:
-        json.dumps(cfg.to_dict())
+        _canonical_json(cfg.to_dict())
     except (TypeError, ValueError, RecursionError) as exc:
         # 兜底:前面的逐项检查都过了,却仍序列化不了(例如 BigRef.fetch_hint 里夹带了不可序列化的值)
         return f"config must be JSON serializable: {exc}"
@@ -424,16 +432,16 @@ def config_hash(cfg: TrainingConfig) -> str:
 
     这一步在 validate_training_config 之前就会被下半段编排器调用,所以序列化不了的配置在这里必须
     抛 InvalidTrainingConfigError(确定性失败),不能是裸 TypeError 或 AttributeError(会被当成
-    瞬态失败重试)。异常信息点名真正出问题的字段,不再一律说成 grpo_config。只是没过校验、
+    瞬态失败重试)。校验与哈希共用 _canonical_json,所以校验放行的配置一定算得出哈希,算不出哈希的配置校验一定拒绝,异常信息就是校验给出的原因,点名真正出问题的字段。只是没过校验、
     但仍能序列化的配置照常算出哈希:编排器要靠它建 training_run 记录,配置失败才会留下 failed 的痕迹。"""
     try:
-        text = json.dumps(cfg.to_dict(), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        payload = _canonical_json(cfg.to_dict())
     except (TypeError, ValueError, AttributeError, RecursionError) as exc:
         reason = _check_types(cfg)
         raise InvalidTrainingConfigError(
             reason or f"config must be JSON serializable: {exc}"
         ) from exc
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return hashlib.sha256(payload).hexdigest()
 
 
 def total_steps(cfg: TrainingConfig) -> int:

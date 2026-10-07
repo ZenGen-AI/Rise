@@ -570,3 +570,60 @@ def test_an_empty_container_of_the_wrong_type_in_a_directive_is_not_silently_con
     reason = _load_or_reason(_raw(build, mutate))
     assert reason is not None, "空容器也不能因为类型不对被悄悄转成合法的空值"
     assert field in reason, reason
+
+
+# ---------------- 评审补洞:validate_training_config 与 config_hash 对"能不能序列化"必须判得一致 ----------------
+
+class _BadRepr:
+    def __repr__(self):
+        raise ZeroDivisionError("repr is broken")
+
+
+HASH_ONLY_FAILS = [
+    # 不排序键能序列化、排序键不能:config_hash 排序,所以校验也必须排序
+    ("grpo_config_keys_cannot_be_sorted", lambda: _interact(grpo_config={1: "a", "b": 2}), "grpo_config"),
+    # 孤立代理字符:json.dumps 能写出来,编码成 UTF-8 才失败
+    ("grpo_config_has_a_lone_surrogate", lambda: _interact(grpo_config={"x": "\ud800"}), "grpo_config"),
+    ("fetch_hint_keys_cannot_be_sorted",
+     lambda: _interact(base_checkpoint_ref=_bad_ref(fetch_hint={1: "a", "b": 2})), "JSON serializable"),
+    ("trained_slot_has_a_lone_surrogate", lambda: _batch(trained_slot="\ud800"), "JSON serializable"),
+]
+
+
+@pytest.mark.parametrize(
+    "build,needle", [(b, n) for _, b, n in HASH_ONLY_FAILS], ids=[i for i, _, _ in HASH_ONLY_FAILS],
+)
+def test_a_config_that_cannot_be_hashed_is_rejected_by_validate_with_the_same_reason(build, needle):
+    cfg = build()
+    with pytest.raises(InvalidTrainingConfigError) as exc:
+        config_hash(cfg)
+    reason = validate_training_config(cfg)
+    assert reason is not None, "config_hash 抛了,validate 却放行"
+    assert str(exc.value) == reason
+    assert needle in reason, reason
+    assert "must be" in reason, reason
+
+
+def test_a_value_whose_repr_raises_still_yields_a_reason():
+    cfg = _interact(reward=_reward(components=[_BadRepr()], outcome_rules={"goal": ["a"]}))
+    reason = validate_training_config(cfg)
+    assert reason is not None and "reward.components" in reason, reason
+
+
+# ---------------- 哈希公式:已落盘的 training_run 与候选里存着旧哈希,公式一变,续训就会被判成"配置变了" ----------------
+
+def test_the_canonical_form_is_sorted_compact_utf8_and_keeps_non_ascii_as_is():  # CANONICAL_FORM
+    from mindtrainer.training_config import _canonical_json
+
+    assert _canonical_json({"b": 1, "a": "é", "c": [1, 2]}) == b'{"a":"\xc3\xa9","b":1,"c":[1,2]}'
+
+
+@pytest.mark.parametrize(
+    "build", [_interact, _batch, lambda: _batch(trained_slot="角色")], ids=["interact", "batch", "non_ascii"],
+)
+def test_config_hash_keeps_the_formula_existing_records_were_hashed_with(build):
+    import hashlib
+
+    cfg = build()
+    legacy = json.dumps(cfg.to_dict(), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    assert config_hash(cfg) == hashlib.sha256(legacy.encode("utf-8")).hexdigest()
