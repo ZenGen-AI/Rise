@@ -448,7 +448,7 @@ def run_training(cfg, *, store, run_id, make_sources, attribution, executor, con
 
 ## 11. 明确不做(推迟)
 
-- 接入 ControlPlane 调和循环、替换 `mind_trainer_stub`(接线后置,含"候选出现 → 调真实诊断"和"`scenario_resolver` 读同一 ControlPlane")。
+- 接入 ControlPlane 调和循环、替换 `mind_trainer_stub`:**派发缝、MindTrainer 派发器与 batch 接线入口已落地**(见 `docs/superpowers/plans/2026-10-07-mindtrainer-wiring.md`;调和循环默认仍走桩,注入派发器后才走 MindTrainer)。仍推迟:"候选出现 → 调真实诊断"(daemon 的 `request_diagnostic` 仍是桩)、`scenario_resolver` 读同一 ControlPlane(入口不启动实时服务端,所以 Interact 指令在入口处被判 failed;注入 `client_factory` 与 `policy` 的调用方可以跑)、judge 归因(入口不提供 judge)、`produce_grouped_dataset` 的驱动(清单必须已在树里)。
   - 接线时需要注意(来自上半段整支评审的报告,未逐条复核):
     - `client_factory` 应复用同一个 gRPC channel、每次只新建 stub 与 client;评审报告称已用真实服务端验证 4 个 client 共用 1 个 channel(含一次 abort 之后再 collect)可行。
     - 失败的 `collect()` 里已成功的 rollout 已被服务端落盘,ControlPlane 会留下不属于任何 batch 的完整 episode;下游只能按 `metadata["episode_ids"]` 取数据,不能按 scenario 扫描。
