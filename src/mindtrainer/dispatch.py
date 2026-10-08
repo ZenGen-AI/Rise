@@ -33,11 +33,16 @@ _DETERMINISTIC = (
 
 
 def _required_stages(cfg: TrainingConfig) -> list[str]:
-    """真正会用到的阶段:配了步数的才算。stage_manifest_refs 里多写的阶段不读。"""
+    """真正会用到的阶段:配了步数的才算,且与模式有关。stage_manifest_refs 里多写的阶段不读。
+
+    sft 两种模式都从清单读,配了 sft_steps 就要。grpo_opd 只有 batch 模式从清单读;
+    interact 模式的 grpo_opd 来自实时会话(_interact_sources 事后整段覆盖),不读清单,
+    所以即便指令在 stage_manifest_refs 里为 interact 顺手点了一个 grpo_opd 的清单 id
+    (validate_training_config 并不禁止),这里也不该把它当成需要校验的阶段。"""
     wanted = []
     if cfg.sft_steps > 0:
         wanted.append("sft")
-    if cfg.grpo_steps > 0:
+    if cfg.mode == "batch" and cfg.grpo_steps > 0:
         wanted.append("grpo_opd")
     return wanted
 

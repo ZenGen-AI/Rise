@@ -363,6 +363,26 @@ def test_an_interact_directive_trains_against_a_live_server_and_leaves_a_candida
     assert _wait_until(lambda: len(env.closed) == 4)  # 2 个 GRPO step x 每步一组 2 条 rollout
 
 
+def test_an_interact_directive_ignores_a_stray_grpo_opd_manifest_ref(store, live):
+    """interact 模式的 grpo_opd 来自实时会话,不读清单。即便指令在 stage_manifest_refs 里
+    顺手点了一个 grpo_opd 的清单 id(validate_training_config 并不禁止),且那个 id 指向
+    一个没有数据的 run,也不该被当成需要校验的阶段去读,否则会被这个用不到的清单拖垮。"""
+    env = live()
+    cfg = _cfg_dict(
+        mode="interact", grpo_steps=2, scenario_ids=["s1", "s2"], max_turns_per_episode=4,
+        stage_manifest_refs={"sft": f"dsm-{RUN}-sft", "grpo_opd": "dsm-run-9-grpo_opd"},
+        bindings=[RoleBinding("a", "pa", "self_play").to_dict(),
+                  RoleBinding("b", "pb", "frozen_reference", model_ref="zengen-v1").to_dict()],
+    )
+    _directive(store, payload={"target_dimension": "tom", "recipe_ref": "", "training_config": cfg})
+    policy = ScriptedBackend({"a": ["agreed", "x", "no", "x"] * 8})
+    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
+        client_factory=env.client_factory, policy=policy))
+    assert store.read_product(f"{run_dir(RUN)}/directive.yaml").status == "executed"
+    assert store.read_product(f"{run_dir(RUN)}/training_run.yaml").status == "executed"
+    assert store.read_product(candidate_checkpoint_file(RUN)).status == "pending_review"
+
+
 def test_a_rollout_the_server_rejects_for_good_fails_the_directive_in_the_same_tick(store, live):
     """max_turns_per_episode 超过服务端的 max_turns_cap(200):服务端以 invalid_session 拒绝,重试无益。
     编排器把 training_run 写成 failed 再重抛;派发器不能让这个异常逃出调和循环,要当轮判指令 failed。"""
