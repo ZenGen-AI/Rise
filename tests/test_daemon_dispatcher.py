@@ -1,9 +1,10 @@
 import pytest
 
-from controlplane.daemon import DirectiveFailedError, reconcile_once, run_daemon, stub_dispatcher
+from controlplane.daemon import DirectiveFailedError, apply_action, reconcile_once, run_daemon, stub_dispatcher
 from controlplane.envelope import Envelope, OwnerRef
 from controlplane.gitstore import GitStore
 from controlplane.paths import candidate_checkpoint_file, run_dir
+from controlplane.reconcile import Action
 
 
 def _put(store, run_id, payload=None):
@@ -140,3 +141,26 @@ def test_the_failure_error_carries_its_reason_and_category():
     exc = DirectiveFailedError("why", category="T3")
     assert (exc.reason, exc.category, str(exc)) == ("why", "T3", "why")
     assert DirectiveFailedError("x").category == "T2"
+
+
+def test_the_default_stub_writes_the_hardcoded_tom_dimension(store):
+    """The default dispatcher must write 'tom' as target_dimension, not any other value."""
+    _put(store, "run-1")
+    reconcile_once(store)
+    scenario = store.read_product(f"{run_dir('run-1')}/scenario_pool.yaml")
+    assert scenario.payload["target_dimension"] == "tom"
+
+
+def test_apply_action_dispatcher_is_keyword_only(store):
+    """apply_action's dispatcher parameter must be keyword-only."""
+    _put(store, "run-1")
+    action = Action(kind="dispatch_directive", target_id="run-1", detail={})
+    with pytest.raises(TypeError):
+        apply_action(store, action, stub_dispatcher)
+
+
+def test_run_daemon_dispatcher_is_keyword_only(store):
+    """run_daemon's dispatcher parameter must be keyword-only."""
+    _put(store, "run-1")
+    with pytest.raises(TypeError):
+        run_daemon(store, 0, 1, stub_dispatcher)
