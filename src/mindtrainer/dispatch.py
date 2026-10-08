@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import yaml
+
 from controlplane.daemon import DirectiveFailedError, Dispatcher
 from controlplane.envelope import Envelope
 from controlplane.gitstore import GitStore
+from controlplane.migration import UnknownSchemaVersionError
 from controlplane.paths import dataset_manifest_file
 from mindtrainer.checkpoint import CheckpointConverter, MockConverter
 from mindtrainer.executor import MockExecutor, TrainingExecutor
@@ -73,7 +76,17 @@ def _batch_manifests(store: GitStore, run_id: str, cfg: TrainingConfig) -> dict[
             raise DirectiveFailedError(
                 f"directive {run_id}: dataset manifest {ref!r} for stage {name!r} is not in the tree"
             )
-        manifest = read_manifest(store, data_run, name)
+        try:
+            manifest = read_manifest(store, data_run, name)
+        except (KeyError, TypeError, AttributeError, yaml.YAMLError, UnknownSchemaVersionError) as exc:
+            # 文件在场但读不出来(缺键、YAML 语法错、schema_version 没有迁移器):这同样是
+            # 确定性的配置/数据问题,重试不会变好,不能让它逃出 dispatch() 变成每轮重派的
+            # "瞬态失败"(那样会在同一处卡死 run_daemon,排在它后面的指令永远轮不到)。
+            # 真正瞬态的异常(例如 OSError)不在这个元组里,原样上抛,指令保持 pending。
+            raise DirectiveFailedError(
+                f"directive {run_id}: dataset manifest {ref!r} for stage {name!r} cannot be "
+                f"read ({type(exc).__name__}: {exc})"
+            ) from exc
         if manifest.id != ref:
             raise DirectiveFailedError(
                 f"directive {run_id}: the manifest at {dataset_manifest_file(data_run, name)} "
@@ -164,7 +177,12 @@ def make_mindtrainer_dispatcher(
                 attribution=attribution, executor=executor_factory(), converter=converter,
             )
         except _DETERMINISTIC as exc:
-            raise DirectiveFailedError(f"directive {run_id}: {type(exc).__name__}: {exc}") from exc
+            # NeedsHumanError 的含义是"该人工介入"(设计 §6.2、resume.py),是 T3,不是 T2;
+            # _DETERMINISTIC 里其余几种都是数据/配置层面的确定性失败,仍是 T2。
+            category = "T3" if isinstance(exc, NeedsHumanError) else "T2"
+            raise DirectiveFailedError(
+                f"directive {run_id}: {type(exc).__name__}: {exc}", category=category
+            ) from exc
         except Exception as exc:
             # 编排器对 invalid_session 这类确定性的 rollout 拒绝,会先把 training_run 写成 failed 再重抛。
             # 记录已是终态,下一轮重派只会换来 NeedsHumanError,而这一轮的异常会一路逃出守护循环,

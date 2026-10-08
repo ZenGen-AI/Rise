@@ -93,8 +93,9 @@ def test_the_wired_loop_still_reaches_promotion(repo, tmp_path):
     assert (model.id, model.payload["promoted_from"]) == ("zengen-v1", "cand-run-1")
 
 
-def test_a_second_tick_over_a_finished_run_does_nothing(repo, tmp_path):
+def test_a_second_tick_leaves_the_training_record_unchanged(repo, tmp_path):
     run(str(tmp_path / "cp"), interval_s=0, max_ticks=1)
     before = repo.read_product(f"{run_dir(RUN)}/training_run.yaml")
     run(str(tmp_path / "cp"), interval_s=0, max_ticks=1)
-    assert repo.read_product(f"{run_dir(RUN)}/training_run.yaml") == before
+    assert repo.read_product(f"{run_dir(RUN)}/directive.yaml").status == "executed"
+    assert repo.read_product(f"{run_dir(RUN)}/training_run.yaml") == before  # 没有第二份记录,不是重新派发了一遍又碰巧写出同样的内容

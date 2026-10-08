@@ -8,6 +8,11 @@
 
 batch 指令可跑;interact 指令还需要 client_factory 与 policy(实时服务端与策略模型),
 本入口不提供,所以 interact 指令会被判 failed 并写明原因,而不是静默跑错。
+
+request_diagnostic 仍是骨架里的桩,所以诊断报告带着 stub 标记,不是真实评估结果。
+循环遇到第一个没被接住的异常就整段退出,需要外部的监督者(supervisor)把它重启,
+本入口自己不重试。failed 是终态,不会被自动重跑;一条指令要能跑,它点名的数据集清单
+必须先在 git 树里,而不是指令本身先就位、清单随后再补。
 """
 from __future__ import annotations
 

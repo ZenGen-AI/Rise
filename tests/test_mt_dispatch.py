@@ -227,6 +227,90 @@ def test_a_manifest_file_that_is_not_the_one_the_config_names_fails_the_directiv
     assert "dsm-someone-else-sft" in failed.payload["failure"]["reason"]
 
 
+def _corrupt_missing_episode_refs(store, path):
+    env = store.read_product(path)
+    del env.payload["episode_refs"]
+    store.write_product(path, env, "corrupt: drop episode_refs")
+
+
+def _corrupt_merge_conflict_markers(store, path):
+    abs_path = store.repo_root / path
+    text = abs_path.read_text(encoding="utf-8")
+    abs_path.write_text(
+        f"<<<<<<< HEAD\n{text}=======\n{text}>>>>>>> other\n", encoding="utf-8"
+    )
+
+
+def _corrupt_unknown_schema_version(store, path):
+    env = store.read_product(path)
+    env.schema_version = 99
+    store.write_product(path, env, "corrupt: bump schema_version")
+
+
+@pytest.mark.parametrize(
+    "corrupt",
+    [_corrupt_missing_episode_refs, _corrupt_merge_conflict_markers, _corrupt_unknown_schema_version],
+    ids=["missing_episode_refs", "merge_conflict_markers", "unknown_schema_version"],
+)
+def test_a_manifest_that_exists_but_cannot_be_read_fails_the_directive(store, corrupt):
+    """清单文件在场但读不出来(缺键、YAML 语法错、schema_version 没有迁移器):这同样是
+    确定性的数据问题,派发器必须判 failed,而不是让异常逃出 dispatch() 每轮卡在同一处重派。"""
+    path = dataset_manifest_file(RUN, "sft")
+    corrupt(store, path)
+    _directive(store, payload={"target_dimension": "tom", "recipe_ref": "", "training_config": _cfg_dict()})
+    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher())
+    env = store.read_product(f"{run_dir(RUN)}/directive.yaml")
+    assert env.status == "failed"
+    reason = env.payload["failure"]["reason"]
+    assert f"dsm-{RUN}-sft" in reason
+    assert any(
+        name in reason
+        for name in ("KeyError", "ScannerError", "ParserError", "UnknownSchemaVersionError")
+    )
+    assert reconcile_once(store, dispatcher=make_mindtrainer_dispatcher()) == []
+
+
+def test_a_poisoned_directive_does_not_block_the_one_after_it(store, tmp_path):
+    """reconcile 按 run id 排序派发;一条读不出清单的指令若排在前面,不能把排在它后面的
+    好指令一起卡住(_iter_run_ids 按 id 排序,'a-bad' 必排在 'z-good' 之前)。"""
+    bad_path = dataset_manifest_file(RUN, "sft")
+    _corrupt_missing_episode_refs(store, bad_path)
+    _directive(store, run_id="a-bad",
+               payload={"target_dimension": "tom", "recipe_ref": "", "training_config": _cfg_dict()})
+
+    _seed_data(store, run_id="run-2")
+    good_cfg = _cfg_dict(stage_manifest_refs={"sft": "dsm-run-2-sft", "grpo_opd": "dsm-run-2-grpo_opd"})
+    _directive(store, run_id="z-good",
+               payload={"target_dimension": "tom", "recipe_ref": "", "training_config": good_cfg})
+
+    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher())  # 不抛
+
+    assert store.read_product(f"{run_dir('a-bad')}/directive.yaml").status == "failed"
+    assert store.read_product(f"{run_dir('z-good')}/directive.yaml").status == "executed"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"sft_steps": "3"},
+        {"grpo_steps": None},
+        {"stage_manifest_refs": {"sft": 5, "grpo_opd": f"dsm-{RUN}-grpo_opd"}},
+    ],
+    ids=["sft_steps_str", "grpo_steps_none", "stage_manifest_refs_int_value"],
+)
+def test_a_wrong_typed_config_field_fails_the_directive_before_touching_the_tree(store, overrides):
+    """validate_training_config 的类型检查是承重的:没有它,错类型的字段会一路滑到
+    _required_stages / _data_run_id 才炸,抛出点名字段以外的裸 TypeError/AttributeError。
+    这里只证明派发器确实先用上了那条校验。"""
+    cfg = _cfg_dict(**overrides)
+    _directive(store, payload={"target_dimension": "tom", "recipe_ref": "", "training_config": cfg})
+    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher())  # 不抛
+    env = store.read_product(f"{run_dir(RUN)}/directive.yaml")
+    assert env.status == "failed"
+    field_name = next(iter(overrides))
+    assert field_name in env.payload["failure"]["reason"]
+
+
 def test_a_judge_attribution_directive_fails_because_this_entry_has_no_judge(store):
     reward = dict(REWARD.to_dict(), attribution="judge", judge_model_id="judge-1",
                   rubric_version="r1", outcome_rules={})
@@ -253,6 +337,7 @@ def test_a_directive_that_keeps_crashing_is_failed_once_the_resume_limit_is_spen
     env = store.read_product(f"{run_dir(RUN)}/directive.yaml")
     assert env.status == "failed"
     assert "resume attempts exhausted" in env.payload["failure"]["reason"]
+    assert env.payload["failure"]["category"] == "T3"  # NeedsHumanError 是该人工介入,不是 T2
     assert reconcile_once(store, dispatcher=crashing) == []
 
 
@@ -298,7 +383,9 @@ def test_a_tampered_episode_fails_the_directive(store):
     env = store.read_product(f"{run_dir(RUN)}/directive.yaml")
     assert env.status == "failed"
     assert "DatasetIntegrityError" in env.payload["failure"]["reason"]
-    assert store.read_product(f"{run_dir(RUN)}/training_run.yaml").status in ("pending", "failed")
+    run = store.read_product(f"{run_dir(RUN)}/training_run.yaml")
+    assert run.status == "failed"
+    assert run.payload["failure"]["point"] == "grpo precheck"
 
 
 @pytest.fixture
