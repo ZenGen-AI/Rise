@@ -80,11 +80,11 @@
 | 文件 | 动作 | 职责 |
 |---|---|---|
 | `src/controlplane/daemon.py` | 修改(137 → 178 行) | 派发缝:`Dispatcher`、`DirectiveFailedError`、`stub_dispatcher`,三个函数各加一个 keyword-only 的 `dispatcher` |
-| `src/mindtrainer/dispatch.py` | 新建(172 行) | `make_mindtrainer_dispatcher`:directive → 配置 → 数据源 → `resume_or_run` |
+| `src/mindtrainer/dispatch.py` | 新建(195 行) | `make_mindtrainer_dispatcher`:directive → 配置 → 数据源 → `resume_or_run` |
 | `src/mindtrainer/wire.py` | 新建 | `run` / `main`:把调和循环与 MindTrainer 派发器接成入口 |
 | `scripts/run_controlplane.py` | 新建 | 薄壳,只负责把 `src` 放进 `sys.path` 再调 `mindtrainer.wire.main` |
 | `tests/test_daemon_dispatcher.py` | 新建 | 派发缝(11 个用例) |
-| `tests/test_mt_dispatch.py` | 新建 | MindTrainer 派发器(30 个用例) |
+| `tests/test_mt_dispatch.py` | 新建 | MindTrainer 派发器(38 个用例) |
 | `tests/test_mt_wire.py` | 新建 | 入口端到端(4 个用例) |
 | `docs/superpowers/specs/2026-10-03-mindtrainer-design.md` | 修改 | §11 第一条改成"已落地一部分" |
 
@@ -1296,10 +1296,10 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 三个任务都提交后:
 
-- `uv run --extra dev pytest -q` 为 **808 通过**、无警告(基线 763 + 11 + 30 + 4)。
-- `git diff 4bdc4d4 --stat` 只涉及本计划 File Structure 表里的文件,**不含** `cli/package*.json`,也不含 `simulator/stubs.py`、`tests/test_stubs.py`。
+- `uv run --extra dev pytest -q` 为 **819 通过**、无警告(基线 763,加本计划三个任务的用例与两轮修复轮、一次整支评审修复波补的用例;各文件用例数见下方「实施后修订」)。
+- `git diff f432cf4 --stat`(基点取计划自己的提交)只涉及本计划 File Structure 表里的文件,**不含** `cli/package*.json`,也不含 `simulator/stubs.py`、`tests/test_stubs.py`。
 - `src/controlplane` 下没有任何 `mindtrainer` 的导入;`src/mindtrainer` 下没有任何 `diagnostic` 的导入。
-- 对一个只含一条 batch 指令和已有数据集清单的仓库运行 `uv run python scripts/run_controlplane.py <repo> --interval-s 0 --max-ticks 1`,留下 `training_run`(`executed`)和待审核候选;`--max-ticks 5` 之后(诊断桩、人工批准、晋级,各占一轮)出现 `zengen-v1`。端到端测试已覆盖这条链。
+- 对一个只含一条 batch 指令和已有数据集清单的仓库运行 `uv run python scripts/run_controlplane.py <repo> --interval-s 0 --max-ticks 1`,留下 `training_run`(`executed`)和待审核候选;跑完是指令 `executed`、`training_run` 为 `executed`、候选 `pending_review`;晋级须人工批准候选后再跑一轮才会出现 `zengen-v1`(批准是带外的人工动作)。端到端测试 `test_the_wired_loop_still_reaches_promotion` 覆盖了这条链。
 
 ## 已知限制与不在本计划内的事
 
@@ -1310,3 +1310,29 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 5. **候选里的 `checkpoint_ref` 是 mock 转换后的引用。** 调和循环晋级、下一轮取它当基座都照常工作(`tests/test_mt_integration.py` 已覆盖),但它不是真实权重。设计 §10 第 2 条(推理格式权重能否直接当训练起点)仍然未核实。
 6. **`request_diagnostic` 仍走 `diagnostic_evaluator_stub`。** 审核门里的诊断报告带 stub 标记。接真实诊断是另一个计划。
 7. **设计 §11 里"接线时需要注意"的几条**(channel 复用、失败 rollout 遗留 episode、`turn_timeout_s`、`trained_model_id` 未锚定、`on_session_closed`)都是调用方构造实时客户端与服务端时的事,本入口不涉及,原样保留在设计文档里。
+
+---
+
+## 实施后修订(Post-implementation amendments)
+
+本计划的 3 个任务落地并通过逐任务评审后,执行中发现并修掉了一处计划自带的缺陷,整支评审又提出一处 Important 与若干小项,经一次合并修复波处理。**以下修订优先于上文任务里的代码块;上文保留原样,作为当时的计划记录**。最终全量测试为 819 passed。
+
+- **任务 17 的 `_required_stages` 按模式过滤阶段(提交 07bb2de)**:原代码块是 `if cfg.grpo_steps > 0:`,改为 `if cfg.mode == "batch" and cfg.grpo_steps > 0:`。原因:Interact 模式下 `grpo_opd` 来自实时会话,`_interact_sources` 事后会整段覆盖它,从不读清单;原写法把用不上的清单引用也当需要校验的阶段,于是"interact 配置顺手点了一个指向无数据 run 的 `grpo_opd` 清单"会让指令被误判 `failed`。改后与 `validate_training_config`(training_config.py:414)对称,batch 路径不变。新增用例 `test_an_interact_directive_ignores_a_stray_grpo_opd_manifest_ref` 钉住它。
+- **整支评审的修复波(提交 09aeeff)**:
+  - **清单文件在场但读不出来,现在判指令 `failed`。** 原代码里 `read_manifest` 不在任何 `try` 里:清单缺 `episode_refs` 键、YAML 留着合并冲突标记、`schema_version` 为未知版本,都会让异常逃出 `dispatch`,指令永远 `pending`,而且守护进程每次都死在同一处,排在后面的指令全被堵住。现在把 `KeyError`、`TypeError`、`AttributeError`、`yaml.YAMLError`、`UnknownSchemaVersionError` 转成 `DirectiveFailedError`,原因里带清单 id、阶段与异常类型。`OSError` 之类的瞬态错误仍原样上抛。新增参数化用例和"毒指令不堵后面的指令"用例。
+  - **早期配置校验是承重的,补了测试。** 先前的变异检查我把它记成等价行为(因为 `run_training` 内部会再校验一次),这只对类型都对的配置成立。把它拿掉,`sft_steps="3"`、`grpo_steps=None`、`stage_manifest_refs` 的值非字符串这三种配置会在 `_required_stages` 与 `_data_run_id` 里抛 `TypeError` 或 `AttributeError`,逃出守护循环。新增参数化用例钉住。
+  - `NeedsHumanError` 记成类别 `T3`(设计 §6.2 的语义),其余确定性失败仍是 `T2`。
+  - 篡改 episode 用例的断言从 `status in ("pending", "failed")` 收紧为 `== "failed"`;入口测试 `test_a_second_tick_over_a_finished_run_does_nothing` 改名为 `test_a_second_tick_leaves_the_training_record_unchanged` 并加强断言;`wire.py` 的模块说明补三句(诊断仍是桩、循环遇未处理异常即退出需外部重启、`failed` 是终态且数据集须先于指令入树)。
+- **全量数与各文件数的更正**:计划里写的各任务后全量数(774 / 804 / 808)是推算,未计入两轮修复轮补的测试。实况:任务 16 后 774、任务 16 修复轮后 777、任务 17 后 807、任务 17 修复轮后 808、任务 18 后 812、整支评审修复波后 819。File Structure 表里的行数与用例数同样过期:`dispatch.py` 为 195 行,`tests/test_daemon_dispatcher.py` 为 14 个用例,`tests/test_mt_dispatch.py` 为 38 个,`tests/test_mt_wire.py` 为 4 个。
+- **「完成标准」两处订正**:
+  - `git diff 4bdc4d4 --stat` 的基点写错了。4bdc4d4 在计划提交之前,diff 会把计划文件本身(1312 行)也算进来,而它不在 File Structure 表里。基点应取计划自己的提交。
+  - 跑 `--max-ticks 5` 之后**不会**出现 `zengen-v1`:批准是带外的人工动作。跑完的状态是指令 `executed`、`training_run` 为 `executed`、候选 `pending_review`。要看到晋级,须人工批准候选后再跑一轮,端到端测试 `test_the_wired_loop_still_reaches_promotion` 就是这么做的。
+- **仍未处理(补进「已知限制」)**:
+  - `training_run.yaml` 被写坏时 `read_training_run` 抛 `ParserError`,指令一直 `pending`;人为改坏这份记录的概率远低于清单,本分支不处理。
+  - 失败指令配可晋级候选的窄窗口:候选已注册、`executed` 写入失败,下一轮续训预算又不让续,指令被判 `failed` 而候选仍是 `pending_review`,三个状态互相矛盾,审核人看不到提示。候选本身是完整训练的产物,所以可以接受;更好的做法是升级为 `failed` 时检查候选是否已存在并写进 `failure.reason`。
+  - 入口不校验 `repo_root`(不存在或非 git 目录静默退出码 0)、`--interval-s` 为负数是回溯、全程零输出,派发了什么、哪条指令 `failed` 都不打印;cli 的 `status` 只列 `pending_review`,所以 `failed` 的指令对人不可见。
+  - 指令必须晚于它点名的数据集入树:先入树的指令被判 `failed` 且不会复活。
+  - 瞬态异常会让 `run_daemon` 退出(已有)。最小修复二选一:`wire.run` 外包一层重启;或在 `reconcile_once` 里按动作隔离,加一个 keyword-only 的 `on_error` 钩子(默认 `None`,原样上抛)。换成真实执行器、长训练之后,它会从已知限制升级为需要修的缺陷。
+  - 派发在一个 tick 里是同步的:真实执行器长训练期间,审批与晋级动作会被饿住。
+  - 默认桩里写死的 `"tom"` 仍然保留。
+- **两处测试缺口(整支评审修复波的变异检查发现,未修)**:读清单那段 `try` 的异常元组刻意不含 `OSError`(瞬态错误要原样上抛、指令保持 `pending`),但没有测试钉住这一点 —— 把它放宽成接一切 `Exception`,相关 56 个用例全过;确定性失败的分类里,`NeedsHumanError` 记 `T3` 有断言,其余成员记 `T2` 没有 —— 把分类改成一律 `T3`,同样全过。两处都是代码正确、测试没钉住相邻行为,补齐各约十行,留待后续。
