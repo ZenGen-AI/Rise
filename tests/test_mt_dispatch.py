@@ -270,6 +270,19 @@ def test_a_manifest_that_exists_but_cannot_be_read_fails_the_directive(store, co
     assert reconcile_once(store, dispatcher=make_mindtrainer_dispatcher()) == []
 
 
+def test_a_transient_error_while_reading_a_manifest_leaves_the_directive_pending(store, monkeypatch):
+    """读清单那段只接确定性的读取失败。OSError 是瞬态的,必须原样上抛、指令保持 pending,
+    下一轮才有机会重派;若被当成确定性失败接住,一次磁盘抖动就会把指令永久判 failed。"""
+    def flaky(*args, **kwargs):
+        raise OSError("disk hiccup")
+
+    monkeypatch.setattr("mindtrainer.dispatch.read_manifest", flaky)
+    _directive(store, payload={"target_dimension": "tom", "recipe_ref": "", "training_config": _cfg_dict()})
+    with pytest.raises(OSError, match="disk hiccup"):
+        reconcile_once(store, dispatcher=make_mindtrainer_dispatcher())
+    assert store.read_product(f"{run_dir(RUN)}/directive.yaml").status == "pending"
+
+
 def test_a_poisoned_directive_does_not_block_the_one_after_it(store, tmp_path):
     """reconcile 按 run id 排序派发;一条读不出清单的指令若排在前面,不能把排在它后面的
     好指令一起卡住(_iter_run_ids 按 id 排序,'a-bad' 必排在 'z-good' 之前)。"""
@@ -359,6 +372,8 @@ def test_every_deterministic_orchestrator_failure_fails_the_directive(store, mon
     env = store.read_product(f"{run_dir(RUN)}/directive.yaml")
     assert env.status == "failed"
     assert type(exc).__name__ in env.payload["failure"]["reason"]
+    expected = "T3" if isinstance(exc, NeedsHumanError) else "T2"  # 只有该人工介入的才记 T3
+    assert env.payload["failure"]["category"] == expected
 
 
 @pytest.mark.parametrize("exc", [RuntimeError("x"), OSError("disk")], ids=lambda e: type(e).__name__)
