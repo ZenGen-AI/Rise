@@ -1335,4 +1335,4 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
   - 瞬态异常会让 `run_daemon` 退出(已有)。最小修复二选一:`wire.run` 外包一层重启;或在 `reconcile_once` 里按动作隔离,加一个 keyword-only 的 `on_error` 钩子(默认 `None`,原样上抛)。换成真实执行器、长训练之后,它会从已知限制升级为需要修的缺陷。
   - 派发在一个 tick 里是同步的:真实执行器长训练期间,审批与晋级动作会被饿住。
   - 默认桩里写死的 `"tom"` 仍然保留。
-- **两处测试缺口(整支评审修复波的变异检查发现,未修)**:读清单那段 `try` 的异常元组刻意不含 `OSError`(瞬态错误要原样上抛、指令保持 `pending`),但没有测试钉住这一点 —— 把它放宽成接一切 `Exception`,相关 56 个用例全过;确定性失败的分类里,`NeedsHumanError` 记 `T3` 有断言,其余成员记 `T2` 没有 —— 把分类改成一律 `T3`,同样全过。两处都是代码正确、测试没钉住相邻行为,补齐各约十行,留待后续。
+- **两处测试缺口(整支评审修复波的变异检查发现,已在 `572f5e7` 补齐)**:读清单那段 `try` 的异常元组刻意不含 `OSError`(瞬态错误要原样上抛、指令保持 `pending`),先前没有测试钉住 —— 把它放宽成接一切 `Exception`,相关 56 个用例全过;确定性失败的分类里,`NeedsHumanError` 记 `T3` 有断言,其余成员记 `T2` 没有 —— 把分类改成一律 `T3`,同样全过。两处都是代码正确、测试没钉住相邻行为。补法:新增 `test_a_transient_error_while_reading_a_manifest_leaves_the_directive_pending`(monkeypatch `mindtrainer.dispatch.read_manifest` 抛 `OSError`,断言异常原样逃出 `reconcile_once`、指令仍 `pending`);`test_every_deterministic_orchestrator_failure_fails_the_directive` 加断言 `failure["category"]`(`NeedsHumanError` 为 `T3`,其余为 `T2`)。两处变异复查均被新测试抓住;全量 820 passed。
