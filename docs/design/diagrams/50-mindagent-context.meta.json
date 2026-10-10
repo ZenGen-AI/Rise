@@ -1,0 +1,5 @@
+{
+ "title": "MindAgent 上下文",
+ "desc": "调和循环产生 start_agent_round 与 admit_proposal 两个动作,交给组合根注册的 MindAgent 处理器。MindAgent 读模型与正式库、写轮次与提案,经受限直连②向实时环境服务采集部署经验,用 Actio 建实例,可选经外部推理桥接生成技能策略。门②由人工批准提案。",
+ "describe": "**节点**\n\n- factory 组合根:注册两个处理器 / 注入配置与工厂\n- ControlPlane:调和循环 · 产物树 / 动作 start_agent_round · admit_proposal\n- 门② 人工审核:review · approve · reject / 验证结果在场才可批准\n- MindAgent:轮次处理器 · 收录处理器 / 部署 · 分析 · 提案 · 验证 · 打包\n- 实时环境服务:SocialSimulator / gRPC 双向流 · 对手人格\n- Actio:技能库 · 显式记忆 / 每次响应附激活轨迹\n- 外部推理桥接:可选:生成技能策略\n\n**连线**\n\n- factory 组合根 → ControlPlane:注册处理器\n- 门② 人工审核 → ControlPlane:改提案状态\n- factory 组合根 → MindAgent:注入依赖\n- ControlPlane → MindAgent:调用处理器\n- MindAgent → ControlPlane:读写产物\n- MindAgent ↔ 实时环境服务:② 部署会话\n- MindAgent → Actio:instantiate\n- MindAgent → 外部推理桥接:可选"
+}

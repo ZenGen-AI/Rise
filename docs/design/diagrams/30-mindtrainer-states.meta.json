@@ -1,0 +1,5 @@
+{
+ "title": "训练记录与候选的状态",
+ "desc": "训练记录走非审核类状态机:pending 期间可反复回写存点进度,确定性失败到 failed,收尾到 executed。候选由 MindTrainer 以 pending_review 注册,之后的审核与晋级归审核门①与调和循环。",
+ "describe": "**节点**\n\n- pending:运行中 · 可续训 / 回写 checkpoint 进度\n- executed:候选已注册\n- failed:确定性失败 · T2 / 终态,保留\n- consumed:不由 MindTrainer 写\n- pending_review:register_candidate 写入\n- approved:审核门① 人工批准\n- rejected:审核门① 人工拒绝\n- effective:调和循环晋级为 zengen\n\n**连线**\n\n- pending → executed:收尾完成\n- pending → failed:数据或配置坏\n- executed → consumed:下游消费(虚线)\n- pending_review → approved:approve\n- pending_review → rejected:reject\n- approved → effective:promote"
+}

@@ -1,0 +1,5 @@
+{
+ "title": "可观测的三层数据",
+ "desc": "L1 在 git 树里:记账模块写 run_trace 的成本与失败记录。L3 本地日志由命令行桥接写,树里只留引用。L2 指标与计算层 L3 日志留在计算层,只读命令读不到。cost 读 run_trace,trace 列产物与引用可达性,logs 顺引用读日志。",
+ "describe": "**节点**\n\n- controlplane.ledger:record_cost / record_failure\n- run_trace.yaml:cost_records\n- failure-<task>.yaml:category · log_refs\n- CliBridge:每次调用一份日志\n- 本地日志文件:.rismforge/logs/<run>/\n- 计算层任务:训练 · 评测进程\n- 计算层文件:指标流 · 进程日志\n- cost:明细与汇总\n- trace:产物状态 · links / 引用可达性\n- logs:顺 log_refs 读内容\n\n**连线**\n\n- controlplane.ledger → run_trace.yaml\n- controlplane.ledger → failure-<task>.yaml\n- CliBridge → controlplane.ledger:成功后记账\n- CliBridge → 本地日志文件:脱敏写入\n- failure-<task>.yaml → 本地日志文件:log_refs\n- 计算层任务 → 计算层文件:写入\n- run_trace.yaml → cost:读\n- failure-<task>.yaml → trace:读\n- 本地日志文件 → logs:file:// 读\n- 计算层文件 → logs:不可达(虚线)"
+}

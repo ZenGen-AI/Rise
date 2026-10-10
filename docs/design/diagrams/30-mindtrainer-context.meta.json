@@ -1,0 +1,5 @@
+{
+ "title": "MindTrainer 的上下文",
+ "desc": "调和循环把 pending 的训练指令交给 MindTrainer 派发器。MindTrainer 从产物树读数据集清单,InteractTrain 经受限直连①向实时环境服务要 rollout,训练由执行器协议完成,结果以训练记录与候选 checkpoint 写回产物树。",
+ "describe": "**节点**\n\n- 指令作者:人工写入 directive / 或由 TrainScheduler 写入\n- 产物树 control-plane/:directive · dataset_manifest / training_run · candidate_checkpoint\n- ControlPlane 调和循环:dispatch_directive 动作 / 可注入的派发器 Dispatcher\n- 批量数据集:SocialSimulator 生产 / 清单带 sha256\n- MindTrainer:派发器 · 编排器 / 轨迹源 · 奖励 · 执行器\n- 实时环境服务:SocialSimulator · gRPC 双向流 / 一条流一次会话\n- ROLL · vLLM:训练执行器的后端 / 分布式训练 · 推理引擎\n- DataProducer:缺清单时先合成数据 / 由组合根注入\n\n**连线**\n\n- 指令作者 → 产物树 control-plane/:写 directive\n- ControlPlane 调和循环 ↔ 产物树 control-plane/:扫描 / 回写状态\n- ControlPlane 调和循环 → MindTrainer:派发 pending 指令\n- MindTrainer ↔ 产物树 control-plane/:读清单 · 写记录与候选\n- 批量数据集 → 产物树 control-plane/:写清单与 episode\n- MindTrainer ↔ 实时环境服务:① rollout 会话\n- MindTrainer → ROLL · vLLM:TrainingExecutor 协议\n- MindTrainer → DataProducer:produce"
+}

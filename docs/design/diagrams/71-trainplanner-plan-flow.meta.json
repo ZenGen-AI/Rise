@@ -1,0 +1,5 @@
+{
+ "title": "plan() 的重采样流程",
+ "desc": "模板只渲染一次。每次尝试把此前的被拒原因拼进提示交给后端,严格解析,再交校验器。解析失败与校验违规都记一条原因并消耗同一个预算,预算用完抛 PlannerFailedError。渲染错误与后端异常不进重试,原样上抛。",
+ "describe": "**节点**\n\n- 渲染提示:render_prompt / 只做一次\n- 拼入被拒原因:with_feedback / 第 n 次带前 n−1 条\n- 后端给出文本:backend.decide / task_id 每次不同\n- 严格解析:parse_decision\n- 领域校验:validator(decision) / None 即通过\n- 返回 PlannerResult:决策 · 理由 · 模板版本 / 尝试次数 · 后端名\n- 记一条被拒原因:parse error 或 invalid decision\n- 预算还有剩?:总次数 = 1 + max_parse_retries\n- PlannerFailedError:reason · attempts · reasons\n- 原样上抛,不计预算:PromptRenderError / BridgeError 与其他后端异常\n\n**连线**\n\n- 渲染提示 → 拼入被拒原因\n- 拼入被拒原因 → 后端给出文本\n- 后端给出文本 → 严格解析\n- 严格解析 → 领域校验:合格\n- 领域校验 → 返回 PlannerResult:通过\n- 严格解析 → 记一条被拒原因:不合格\n- 领域校验 → 记一条被拒原因:违规\n- 记一条被拒原因 → 预算还有剩?\n- 预算还有剩? → 拼入被拒原因:有,再采样\n- 预算还有剩? → PlannerFailedError:无\n- 渲染提示 → 原样上抛,不计预算:模板缺陷\n- 后端给出文本 → 原样上抛,不计预算:后端异常"
+}

@@ -1,0 +1,5 @@
+{
+ "title": "桥接失败的分类与升级",
+ "desc": "子进程超时、非零退出、空输出是 T1,退避重试耗尽后抛 BridgeError T1;启动阶段的 OSError 是 T2,立即抛。调用方处理器见到任何 BridgeError 都升级为 T3:产物置 failed、写失败记录、等人处理。调用方自身的非桥接瞬态异常原样上抛,产物保持 pending;缺凭证在装配时失败。",
+ "describe": "**节点**\n\n- 子进程失败:超时 · 非零退出 · 空输出\n- 子进程起不来:启动阶段的任何 OSError\n- BridgeError T1:退避重试已耗尽\n- BridgeError T2:确定性,不重试\n- 调用方自身的瞬态异常:OSError 等,非桥接\n- 缺凭证:token_env 指向的变量为空\n- 规划或轮次处理器:按 R18 收口\n- T3:产物置 failed / record_failure 留痕 / 等人处理\n- 保持 pending:产物不变 / 下一轮 tick 重来\n- 装配失败:MissingCredentialError / factory 抛 FactoryConfigError / 此时才有退出码 2,不写树\n\n**连线**\n\n- 子进程失败 → BridgeError T1:重试耗尽\n- 子进程起不来 → BridgeError T2:立即\n- BridgeError T1 → 规划或轮次处理器\n- BridgeError T2 → 规划或轮次处理器\n- 规划或轮次处理器 → T3:任何 BridgeError\n- 调用方自身的瞬态异常 → 保持 pending:原样上抛\n- 缺凭证 → 装配失败:构造时"
+}

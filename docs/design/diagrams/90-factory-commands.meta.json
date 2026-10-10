@@ -1,0 +1,5 @@
+{
+ "title": "命令地图",
+ "desc": "TypeScript 命令行管门控写命令,直接改产物状态并提交。Python 一侧管调和与只读可观测,只读子命令不提交。两侧只经产物树通信。",
+ "describe": "**节点**\n\n- review <id>:按类型打印证据 / 只读\n- status:列出待审与待确认 / 只读\n- approve <id>:证据不在场就拒绝 / pending_review → approved\n- reject <id> [原因]:写 reject_reason / pending_review → rejected\n- confirm <directive-id>:awaiting_confirmation → pending\n- run:一直跑调和循环 / 退出码 0 或 2\n- reconcile --once:跑一轮并打印动作 / 退出码 0 或 2\n- install-defaults:显式写默认资产与配置 · run 与 reconcile 从不自动写\n- trace · cost · logs <run>:只读 · 不提交 · 缺失时退出码 1(cost 除外)\n- git 产物树:control-plane/ · 两侧唯一的通信面\n\n**连线**\n\n- approve <id> → git 产物树:写状态并提交\n- confirm <directive-id> → git 产物树\n- trace · cost · logs <run> → git 产物树:只读"
+}

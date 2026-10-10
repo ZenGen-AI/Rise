@@ -1,0 +1,5 @@
+{
+ "title": "桥接组件与横切记账",
+ "desc": "inference_bridge 由公共类型、命令行桥接、测试替身三个模块组成,只向 controlplane 一个方向依赖。controlplane 里的配置模块管凭证与脱敏,记账模块写成本与失败,观测模块只读,三者都经 GitStore 读写信封。",
+ "describe": "**节点**\n\n- scripted.py:ScriptedBridge / ScriptExhaustedError\n- base.py:BridgeResult · BridgeError / InferenceBridge · 记账函数\n- cli.py:CliBridge · RunOutcome / Runner · subprocess_runner\n- 外部命令行:子进程 / 提示词走标准输入\n- 日志文件:<run>/<task>-<k>.log\n- observe.py:trace · cost / 只读\n- ledger.py:record_cost / record_failure\n- config.py:BackendConfig · 凭证解析 · 脱敏 / 配置信封读写\n- envelope.py · gitstore.py:Envelope · BigRef · GitStore:读写信封并提交\n\n**连线**\n\n- scripted.py → base.py:共用\n- cli.py → base.py:共用\n- base.py → ledger.py:record_cost\n- cli.py → config.py:解析凭证 · 脱敏\n- cli.py → 外部命令行:argv\n- cli.py → 日志文件:写\n- observe.py → envelope.py · gitstore.py:只读\n- ledger.py → envelope.py · gitstore.py:写信封\n- config.py → envelope.py · gitstore.py:读写配置"
+}

@@ -1,0 +1,5 @@
+{
+ "title": "RecipeStore 的模块",
+ "desc": "七个模块分三层:两个处理器在上,检索、增益、战绩与生命周期在中间,id 与校验器在底层;整个包只导入 controlplane。",
+ "describe": "**节点**\n\n- admit:handle_admit_recipe / has_repro_evidence\n- record:handle_record_track / used_as_for\n- library:find_recipes · get_recipe / compare · track_summary\n- track:append_track_entry · verdict / deprecate · deprecated_by\n- gain:compute_gain · GainResult / baseline_run_of\n- ids:recipe_id_for · run_id_of\n- validate:validate_reproducibility / ReproReport · RECIPE_TYPES\n- controlplane:本包之外只导入它:Envelope · GitStore · paths · states · ledger · evidence · Action\n\n**连线**\n\n- admit → track\n- record → track\n- record → gain\n- record → library\n- track → library\n- library → ids:取 run id"
+}

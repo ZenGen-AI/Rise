@@ -1,0 +1,5 @@
+{
+ "title": "提名到入库到战绩回写",
+ "desc": "来源 run 晋级后提名器写配方候选,门③批准后收录处理器写入 recipes/;之后某个 run 复用该配方,走完门①后战绩处理器追加战绩条目,最近一条退化就废弃配方。",
+ "describe": "**节点**\n\n- 提名:TrainScheduler 提名器 / compute_gain · 校验 / 写候选与 repro\n- 门③ 人工审核:review 看 repro / approve / reject\n- 收录处理器:写 recipe · lineage / 写空 track_record / 候选置 effective\n- recipes/recipe-<run>/:配方 effective\n- 规划选中配方:find_recipes 排序 / 指令带 recipe_ref\n- 训练 · 诊断 · 门①:候选到 effective / 或 rejected\n- 战绩处理器:compute_gain · 退化标记 / 追加条目 · verdict\n- 写战绩标记:runs/<run>/recipe_track.yaml / 必要时 deprecate\n\n**连线**\n\n- 提名 → 门③ 人工审核\n- 门③ 人工审核 → 收录处理器:approve\n- 收录处理器 → recipes/recipe-<run>/\n- recipes/recipe-<run>/ → 规划选中配方:可被检索(虚线)\n- 规划选中配方 → 训练 · 诊断 · 门①\n- 训练 · 诊断 · 门① → 战绩处理器\n- 战绩处理器 → 写战绩标记\n- 写战绩标记 → recipes/recipe-<run>/:条目 · 废弃"
+}

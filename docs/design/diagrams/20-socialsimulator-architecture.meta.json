@@ -1,0 +1,5 @@
+{
+ "title": "SocialSimulator 仿真部分的组件",
+ "desc": "三层组件。共享核心是数据模型、后端协议与纯函数运行器。批量模块按需运行,生成情境与人格、产出数据集与清单并落盘;实时模块是由调用方启动的 gRPC 服务端,驱动器在后台线程调用同一个运行器。客户端运行在调用方进程。",
+ "describe": "**节点**\n\n- 情境与人格生成:generators.py / generate_* · load_*\n- 数据集与清单:dataset.py / produce_grouped_dataset\n- 存储适配:store_adapter.py / write_* · read_*\n- 后端协议:backends.py / ModelBackend · GenerationBackend\n- 仿真运行器:runner.py / run_episode\n- 数据模型:datamodel.py / Persona · Scenario · Episode\n- 实时后端:ClientDrivenBackend / TimeoutBackend\n- 会话驱动器:driver.py · SessionDriver / 后台线程 · outbox 队列\n- 会话状态机:session.py / assert_transition\n- 客户端:client.py / EnvironmentServiceClient\n- 服务端:servicer.py · server.py / EnvironmentServicer\n- 校验与编解码:validation.py · codec.py / realtime_env.proto\n\n**连线**\n\n- 情境与人格生成 → 后端协议:GenerationBackend\n- 数据集与清单 → 仿真运行器:每条 rollout 调一次\n- 数据集与清单 → 存储适配:落盘与读回\n- 仿真运行器 → 后端协议:respond\n- 会话驱动器 → 仿真运行器:同一个 run_episode\n- 会话驱动器 → 实时后端:客户端位 · 对手位\n- 会话驱动器 → 会话状态机:状态迁移\n- 实时后端 → 后端协议:实现 ModelBackend\n- 服务端 → 会话驱动器:启动 · 转发提交\n- 服务端 → 校验与编解码:先校验再启动\n- 客户端 ↔ 服务端:gRPC 双向流(接口①②)"
+}

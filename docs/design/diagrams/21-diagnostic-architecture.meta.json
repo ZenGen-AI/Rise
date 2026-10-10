@@ -1,0 +1,5 @@
+{
+ "title": "诊断评测的组件",
+ "desc": "评估器从产物树取资产与基线后调用编排器。编排器是薄协调层,依次调用流水线模块,模块之间不互相调用,箭头是数据流向。统计模块被多处调用,隔离校验器独立暴露,供情境生成路径调用。",
+ "describe": "**节点**\n\n- evaluator · assets:make_diagnostic_evaluator / 资产读写 · 基线解析 · backends\n- orchestrator:run_diagnostic · 只编排,不含统计与决策\n- taxonomy_loader:按档选题 · 变体族\n- someval_adapter:静态轨执行 · 原始输出\n- dynamic_track:动态轨 episode / 题目来自调用方 spec\n- scorer:规则 · judge · 偏差守卫\n- error_classifier:变体族通过模式 / 动态一致性\n- store_adapter:report 组装 · 写产物树\n- regression:退化判定 · 版本可比\n- aggregator:L3 → L2 → L1 · 融合\n- stats:Wilson 区间 · 通过率 / 方差 · 区间相交\n- isolation:污染过滤 · 独立暴露 / 供情境生成路径调用\n\n**连线**\n\n- evaluator · assets → orchestrator:配置 · 基线 · backends\n- orchestrator → taxonomy_loader:按序调用\n- taxonomy_loader → someval_adapter:静态题\n- someval_adapter → scorer\n- dynamic_track → scorer\n- scorer → error_classifier:ItemResult\n- scorer → aggregator:ItemResult\n- aggregator → regression:分数\n- regression → store_adapter:标记\n- error_classifier → store_adapter:ErrorProfile"
+}

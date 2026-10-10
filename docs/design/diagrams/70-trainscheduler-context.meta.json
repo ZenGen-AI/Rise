@@ -1,0 +1,5 @@
+{
+ "title": "TrainScheduler 的上下文",
+ "desc": "调和循环把 plan_next_round 与 nominate_recipe 两种动作交给 TrainScheduler 的处理器。处理器调 TrainPlanner 拿决策,查 RecipeStore 的配方与增益,借 MindTrainer 的两个数据模块校验指令,结果全部写回产物树。人工经命令行确认指令、审核配方候选,也可以直接写指令。",
+ "describe": "**节点**\n\n- MindTrainer 数据模块:training_config · data_spec / 只导入这两个模块\n- ControlPlane 调和循环:读树 · 纯函数算动作 / 注入的处理器执行动作\n- 人工命令行:confirm 指令 · 门③ 审核 / 直接手写指令\n- TrainPlanner:plan(ctx, validator) / 返回结构化决策\n- TrainScheduler:装配上下文 · 领域校验 / 构造指令 · 提名配方\n- RecipeStore:find_recipes · get_recipe / compute_gain · 复现校验\n- 产物树:读:候选 · 诊断 · 模型 · 成本 · 配置 / 写:决策 · 指令 · 提名标记 · 配方候选\n\n**连线**\n\n- ControlPlane 调和循环 → TrainScheduler:Action(run id)\n- TrainScheduler ↔ TrainPlanner:规划\n- TrainScheduler ↔ RecipeStore:查配方与增益\n- TrainScheduler → MindTrainer 数据模块:校验配置\n- TrainScheduler ↔ 产物树:读证据 · 写产物\n- 人工命令行 → 产物树:写状态"
+}

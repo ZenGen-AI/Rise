@@ -1,0 +1,5 @@
+{
+ "title": "产物状态机",
+ "desc": "需审核类产物经人工批准才能生效,可被拒绝,生效后可废弃或被取代。非审核类产物从待执行走到已执行再到已消费,失败是保留记录的终态。",
+ "describe": "**节点**\n\n- draft\n- pending_review\n- approved\n- effective\n- rejected\n- deprecated\n- superseded\n- awaiting_confirmation\n- pending\n- executed\n- consumed\n- failed\n\n**连线**\n\n- draft → pending_review:提交审核\n- pending_review → approved:approve\n- pending_review → rejected:reject\n- approved → effective:收录 / 晋级\n- effective → deprecated:战绩退化\n- effective → superseded:被取代\n- awaiting_confirmation → pending:confirm 命令\n- pending → executed:派发成功\n- executed → consumed:被下游读取\n- pending → failed:确定性失败\n- awaiting_confirmation → failed:人工改文件(虚线)"
+}

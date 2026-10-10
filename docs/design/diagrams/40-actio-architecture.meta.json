@@ -1,0 +1,5 @@
+{
+ "title": "Actio 的模块组成",
+ "desc": "instance 在顶层编排技能路由、推理经验、记忆检索与轨迹组装。技能与经验共用触发谓词语言,谓词语言从信号注册表取信号,信号与记忆共用一处词面切分。箭头指向被导入的模块。errors 与 _check 被各模块导入,不画线。",
+ "describe": "**节点**\n\n- instance.py:instantiate · ActioInstance.respond / decide / GuidedBackend · IgnoreGuidance · render_guidance\n- skills.py:Skill · route · check_library / 排序键 (-priority, -version, id)\n- experience.py:ReasoningExperience / activate · select_tier 三级回退\n- memory.py:MemoryEntry · snapshot / retrieve 词面重叠检索\n- trace.py:build_trace · validate_trace / normalize_library_version\n- triggers.py:五个算子 · 校验 · 求值 / referenced_signals\n- signals.py:SignalRegistry / default_registry · 三个内置信号\n- errors.py · _check.py:ActioDataError · 字段校验 / 被各模块导入\n- text.py:tokens:ASCII 整词 / 汉字相邻二字切分\n- simulator.datamodel:TurnRecord · Persona / Scenario · 唯一的包外导入\n\n**连线**\n\n- instance.py → skills.py\n- instance.py → experience.py\n- instance.py → memory.py\n- instance.py → trace.py\n- skills.py → triggers.py\n- experience.py → triggers.py\n- triggers.py → signals.py\n- signals.py → text.py\n- memory.py → text.py\n- signals.py → simulator.datamodel:TurnRecord"
+}

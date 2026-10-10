@@ -1,0 +1,5 @@
+{
+ "title": "提名处理器的判定",
+ "desc": "提名标记 nomination.yaml 是幂等键。候选已在时只补标记、不改候选。nomination_check 按固定顺序判定:还没到的情形不写标记,终局不提名写 skipped,通过才构造配方候选并写 nominated。",
+ "describe": "**节点**\n\n- 提名标记在吗:nomination.yaml\n- 空操作:标记就是幂等键\n- 配方候选已在吗:recipe_candidates/recipe-<run>\n- 只补 nominated 标记:候选一个字节都不改\n- nomination_check:按固定顺序判定,第一条命中即停\n- 不写标记,返回:还没到,下次触发再判\n- 写 skipped 标记:终局,原因写进 reason\n- build_recipe_candidate:按配方载荷拼候选并附 repro\n- 写配方候选:状态 pending_review,等审核门③\n- 写 nominated 标记:result · reason · gain · 基线 run\n\n**连线**\n\n- 提名标记在吗 → 空操作:在\n- 提名标记在吗 → 配方候选已在吗:不在\n- 配方候选已在吗 → 只补 nominated 标记:在\n- 配方候选已在吗 → nomination_check:不在\n- nomination_check → 不写标记,返回:还没到\n- nomination_check → 写 skipped 标记:终局不提名\n- nomination_check → build_recipe_candidate:提名\n- build_recipe_candidate → 写配方候选\n- 写配方候选 → 写 nominated 标记"
+}

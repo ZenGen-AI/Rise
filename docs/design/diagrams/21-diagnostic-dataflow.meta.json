@@ -1,0 +1,5 @@
+{
+ "title": "一次诊断的双轨数据流",
+ "desc": "静态轨从题库按档选题,经 SoMEval 运行器取 k 个回答,规则式题目重打分。动态轨由调用方给 spec,跑多轮 episode 后由 judge 给候选话语打分。两轨的 ItemResult 分开存放,分别送入错误归类与逐轨聚合,L2 融合后聚到 L1,再与基线比较,最后写报告。",
+ "describe": "**节点**\n\n- 选题:select_items / full 全部 · quick 每 L3 一题\n- 动态 spec:调用方提供 / 题目 · 情境 · 绑定 · 后端\n- SoMEval 执行:run_static_items / 每题 k 个回答\n- 多轮 episode:run_dynamic_item / 取候选角色位的话语\n- 规则重打分:RuleScorer / 只对 rule 模式题\n- judge 打分:LLMJudgeScorer / 先过自评偏差守卫\n- ItemResult:按轨分开存放\n- 错误归类:静态:变体族 / 动态:一致性\n- 逐轨聚合:L3 · L2 各轨分开\n- 融合到 L1:两轨都有的 L2 融合\n- 退化判定:对照基线 · 区间不相交\n- 组装并写入:报告 · 错误画像 / write_report\n\n**连线**\n\n- 选题 → SoMEval 执行:静态题\n- SoMEval 执行 → 规则重打分:原始输出\n- 动态 spec → 多轮 episode\n- 多轮 episode → judge 打分:话语\n- 规则重打分 → ItemResult\n- judge 打分 → ItemResult\n- ItemResult → 错误归类\n- ItemResult → 逐轨聚合:分数\n- 逐轨聚合 → 融合到 L1\n- 融合到 L1 → 退化判定\n- 退化判定 → 组装并写入:标记\n- 错误归类 → 组装并写入:ErrorProfile"
+}

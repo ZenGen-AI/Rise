@@ -1,0 +1,5 @@
+{
+ "title": "TrainPlanner 的上下文",
+ "desc": "TrainScheduler 装配规划上下文并带着领域校验器调用 TrainPlanner,拿回决策或明确的失败。TrainPlanner 只经外部推理桥接调用外部强模型;产物树里它只碰提示模板。组合根负责选后端和安装默认模板。",
+ "describe": "**节点**\n\n- TrainScheduler:装配 PlanningContext / 领域校验 · 写 planner_decision\n- TrainPlanner:打包 · 决策后端 · 严格解析 / 无状态\n- 外部推理桥接:complete(prompt) → 文本 / 退避重试 · 成本记账\n- factory 组合根:选决策后端 / 安装默认模板 PLANNER_V1\n- 外部强模型:命令行进程 / 只返回文本\n- ControlPlane 产物树:config/prompts/planner-<版本>.yaml / runs/<run>/planner_decision.yaml\n\n**连线**\n\n- TrainScheduler → TrainPlanner:上下文 + 校验器\n- TrainPlanner → TrainScheduler:决策或失败\n- TrainPlanner → 外部推理桥接:提示文本\n- 外部推理桥接 → 外部强模型:子进程\n- factory 组合根 → TrainPlanner:注入后端\n- TrainScheduler → ControlPlane 产物树:读上下文 · 写决策\n- factory 组合根 → ControlPlane 产物树:安装模板"
+}

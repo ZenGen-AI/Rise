@@ -1,0 +1,5 @@
+{
+ "title": "诊断评测的上下文",
+ "desc": "ControlPlane 在候选待审时请求诊断,由注入的评估器调用诊断评测并写报告。诊断评测调 SoMEval 运行器与 judge 后端,动态轨复用 SocialSimulator 的运行器。报告写进产物树,由审核门①、规划与配方增益读取。",
+ "describe": "**节点**\n\n- TrainScheduler:装配规划上下文\n- RecipeStore:增益与战绩\n- 审核门①:review 打印报告 / approve 要求报告在场\n- ControlPlane:调和循环 · request_diagnostic\n- 产物树:runs/<run>/diagnostic_report.yaml\n- SocialSimulator 运行器:run_episode · 多轮驱动\n- 诊断评测:src/diagnostic / 双轨评测 · 聚合 · 退化判定\n- 情境生成器:训练情境批量生成\n- SoMEval 运行器:SoMEvalRunner 协议\n- judge 后端:JudgeBackend 协议\n\n**连线**\n\n- 产物树 → TrainScheduler:读分数与退化\n- 产物树 → RecipeStore:读 L1 分\n- 产物树 → 审核门①:读报告\n- ControlPlane → 诊断评测:request_diagnostic\n- 诊断评测 → 产物树:写报告\n- 诊断评测 → SocialSimulator 运行器:动态轨\n- 情境生成器 → 诊断评测:隔离校验\n- 诊断评测 → SoMEval 运行器:静态轨\n- 诊断评测 → judge 后端:judge 打分"
+}

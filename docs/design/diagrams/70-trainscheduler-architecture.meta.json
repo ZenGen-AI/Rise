@@ -1,0 +1,5 @@
+{
+ "title": "TrainScheduler 的模块",
+ "desc": "两个处理器是对外入口。规划处理器串起 run id 分配、上下文装配、动作解析与指令构造;提名处理器只经 recipes_port 用 RecipeStore。对 RecipeStore 的导入全部集中在 recipes_port,对 MindTrainer 只用 training_config 与 data_spec 两个模块。",
+ "describe": "**节点**\n\n- nominate:提名判定 · 配方候选 / make_nominate_handler\n- plan_handler:make_plan_handler / 写入顺序与三条重入规则\n- trainplanner:plan · PlanningContext / PlannerDecision\n- run_ids:分配 run-NNN\n- assemble:装配上下文\n- resolve:校验与解析\n- directive:构造指令\n- mindtrainer:training_config / data_spec\n- recipes_port:对 RecipeStore 的全部导入\n- config:两份配置的严格解析\n- errors:SchedulerError 家族\n- recipestore:gain · ids · library · validate\n\n**连线**\n\n- plan_handler → trainplanner:调用\n- plan_handler → run_ids\n- plan_handler → assemble\n- plan_handler → resolve\n- plan_handler → directive\n- directive → mindtrainer:校验\n- assemble → recipes_port\n- resolve → recipes_port\n- nominate → recipes_port\n- recipes_port → recipestore:唯一导入口"
+}

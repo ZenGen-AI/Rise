@@ -1,0 +1,5 @@
+{
+ "title": "SocialSimulator 仿真部分的上下文",
+ "desc": "仿真部分居中。MindTrainer 经清单读批量数据集,经接口①跑实时会话;诊断评测与 ControlPlane 骨架桩以库调用复用它;它把情境、人格、Episode 与清单写进产物树。MindAgent 经接口②连入会话,Actio 的激活轨迹随每轮回传。",
+ "describe": "**节点**\n\n- MindTrainer:batch:读清单并校验 / interact:实时会话客户端\n- MindAgent:部署经验采集客户端\n- 诊断评测:动态轨直接调用 run_episode\n- SocialSimulator 仿真部分:情境与人格 · 仿真运行器 / 批量数据集 · 实时环境服务\n- ControlPlane 骨架桩:simulator.stubs 调情境生成器\n- 产物树:scenarios/ · personas/ / runs/<run>/episodes/ / dataset_manifest_<阶段>\n- Actio:每轮附带激活轨迹\n\n**连线**\n\n- MindTrainer ↔ SocialSimulator 仿真部分:① gRPC 会话\n- MindAgent ↔ SocialSimulator 仿真部分:② gRPC 会话\n- 诊断评测 → SocialSimulator 仿真部分:库调用\n- ControlPlane 骨架桩 → SocialSimulator 仿真部分:库调用\n- SocialSimulator 仿真部分 ↔ 产物树:写入并读回\n- Actio → SocialSimulator 仿真部分:activation_trace"
+}

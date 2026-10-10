@@ -1,0 +1,5 @@
+{
+ "title": "Actio 的上下文",
+ "desc": "SocialSimulator 的运行器与 MindAgent 的客户端循环都实例化 Actio 并调用 respond。Actio 把技能、经验与记忆渲染成指导语交给模型后端,包外只导入 simulator.datamodel。技能库与记忆库由 MindAgent 读入后传给 Actio,Actio 自己不读产物树。",
+ "describe": "**节点**\n\n- SocialSimulator:仿真运行器 run_episode / 实时环境服务 · episode 落盘\n- MindAgent:部署驱动器的客户端循环 / 分析 · 提案 · 验证\n- Actio:instantiate 组装 ActioInstance / respond 返回三元组与激活轨迹\n- simulator.datamodel:Persona · Scenario · TurnRecord\n- 模型后端:respond 或 respond_guided / 测试用罐头后端\n- 技能库与记忆库:skill_library/ · memory_library/ / 由 MindAgent 读写\n\n**连线**\n\n- SocialSimulator → Actio:runner 把实例当后端\n- MindAgent → Actio:instantiate · respond\n- MindAgent ↔ SocialSimulator:② submit_turn 带轨迹\n- Actio → 模型后端:指导语 + history 副本\n- Actio → simulator.datamodel:唯一的包外导入\n- 技能库与记忆库 → MindAgent:读入条目与库版本"
+}

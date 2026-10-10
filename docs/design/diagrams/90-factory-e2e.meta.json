@@ -1,0 +1,5 @@
+{
+ "title": "端到端测试走的闭环",
+ "desc": "测试先手工登记全错的基线 run-000 与 zengen-v1,再从人工写的 run-001 出发,每一步都经 factory reconcile --once,人工动作用写状态模拟。主链转到第二轮训练与第三条指令;MindAgent 链在同一套装配下并行验证。",
+ "describe": "**节点**\n\n- 登记基线:run-000 全错报告 / zengen-v1\n- run-001 训练:派发 · mock 诊断\n- 门①批准:写状态模拟 approve\n- 晋级 zengen-v2:promote_candidate\n- 提名配方:增益 > min_gain\n- 门③批准并收录:recipe-run-001\n- 规划 run-002:HeuristicBackend clone\n- 确认指令:awaiting → pending\n- 第二轮训练:晋级 zengen-v3\n- 战绩 · 再规划:run-003 待确认\n- 两次轮次 start_agent_round:zengen-v2 空库零提案 · 放基线技能 / zengen-v3 产出 pending_review 提案\n- 门②批准并收录:admit_proposal / 库版本是字符串\n\n**连线**\n\n- 登记基线 → run-001 训练\n- run-001 训练 → 门①批准\n- 门①批准 → 晋级 zengen-v2\n- 晋级 zengen-v2 → 提名配方\n- 提名配方 → 门③批准并收录\n- 门③批准并收录 → 规划 run-002\n- 规划 run-002 → 确认指令\n- 确认指令 → 第二轮训练\n- 第二轮训练 → 战绩 · 再规划\n- 两次轮次 start_agent_round → 门②批准并收录"
+}

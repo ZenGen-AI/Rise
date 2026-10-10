@@ -1,0 +1,5 @@
+{
+ "title": "调度器产物的状态",
+ "desc": "规划决策从 pending 走到 executed 或 failed,规划前就失败时直接以 failed 写出。调度器写的指令按 confirm_directives 取初始状态。配方候选以 pending_review 写出,之后由人与 RecipeStore 推进。",
+ "describe": "**节点**\n\n- 尚无决策\n- 决策 pending\n- executed\n- failed\n- awaiting_confirmation\n- 指令 pending\n- pending_review\n- approved\n- effective\n\n**连线**\n\n- 尚无决策 → 决策 pending:写下 next_run_id\n- 决策 pending → executed:指令已写\n- 决策 pending → failed:确定性失败\n- 尚无决策 → failed:规划前失败\n- awaiting_confirmation → 指令 pending:人工 confirm\n- pending_review → approved:门③ approve\n- approved → effective:RecipeStore 收录"
+}

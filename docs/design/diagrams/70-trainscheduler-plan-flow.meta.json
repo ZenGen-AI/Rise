@@ -1,0 +1,5 @@
+{
+ "title": "规划处理器的步骤与重入",
+ "desc": "处理器先看决策产物的状态:已终态就空操作,pending 就按记下的 run id 续写,不在才完整规划。run id 先落进 pending 决策,再写指令,最后把决策置 executed。任何一步确定性失败都把决策置 failed 并写 T3 失败记录。",
+ "describe": "**节点**\n\n- 决策产物的状态:planner_decision.yaml\n- 空操作:零提交\n- 装配上下文:assemble_context\n- 规划:plan() 带 validator\n- 分配 run id:allocate_run_id\n- 写决策 pending:载荷带 next_run_id\n- 解析动作:resolve_action\n- 写指令:construct_directive\n- 决策置 executed:本轮规划完成\n- 决策置 failed:failure = {T3, reason, attempts} / record_failure 写失败记录 / 正常返回,不上抛\n\n**连线**\n\n- 决策产物的状态 → 空操作:终态\n- 决策产物的状态 → 装配上下文:不在\n- 决策产物的状态 → 解析动作:(a)\n- 决策产物的状态 → 决策置 executed:(b)\n- 装配上下文 → 规划\n- 规划 → 分配 run id\n- 分配 run id → 写决策 pending\n- 写决策 pending → 解析动作\n- 解析动作 → 写指令\n- 写指令 → 决策置 executed\n- 装配上下文 → 决策置 failed:装配失败\n- 规划 → 决策置 failed:耗尽或桥接失败\n- 分配 run id → 决策置 failed:编号冲突\n- 解析动作 → 决策置 failed:解析失败\n- 写指令 → 决策置 failed:构造失败"
+}

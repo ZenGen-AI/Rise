@@ -1,0 +1,5 @@
+{
+ "title": "组合根的装配流程",
+ "desc": "不传 --enable 时只构造 MindTrainer 派发器,与现有入口逐字节相同。传了 --enable 时读配置、校验资产与凭证、构造评估器与处理器,全部在第一个 tick 之前完成;任一步出错打印一行错误、退出码 2,树里不写任何东西。",
+ "describe": "**节点**\n\n- 解析开关:--enable → ENABLE_MAP / 未知开关与空项拒绝\n- 有处理器键吗:handler_keys 非空?\n- 默认路径:只构造 / make_mindtrainer_dispatcher()\n- run_daemon:只传 dispatcher / 不读任何配置\n- 读评估器配置:config/evaluator.yaml / 恰好五个键\n- 校验诊断资产:分类表与题库在树里 / 评估后端注入\n- 构造处理器:DEFAULT_BUILDERS / 桥接 · 凭证 · agent.yaml\n- 注入并启动:dispatcher + 数据生产器 / handlers · evaluator\n- FactoryConfigError:标准错误打印 factory: error: ... / 退出码 2 · 树里不写任何东西\n\n**连线**\n\n- 解析开关 → 有处理器键吗\n- 有处理器键吗 → 默认路径:否\n- 默认路径 → run_daemon\n- 有处理器键吗 → 读评估器配置:是\n- 读评估器配置 → 校验诊断资产\n- 校验诊断资产 → 构造处理器\n- 构造处理器 → 注入并启动\n- 读评估器配置 → FactoryConfigError:缺文件或键\n- 校验诊断资产 → FactoryConfigError:缺资产\n- 构造处理器 → FactoryConfigError:缺角色或凭证"
+}

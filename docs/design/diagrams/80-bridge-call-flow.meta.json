@@ -1,0 +1,5 @@
+{
+ "title": "一次 CliBridge 调用",
+ "desc": "构造时解析凭证,缺凭证直接失败。每次调用先校验路径段,再起子进程并判定结果:T1 且未耗尽则退避后重试,其余情形都先写一份脱敏日志;成功的调用记一条成本后返回结果,失败的抛 BridgeError。",
+ "describe": "**节点**\n\n- 构造 CliBridge:校验 retry_policy / 解析凭证\n- complete():校验 run_id · task_id\n- 起子进程:argv 模板 · 标准输入 / 超时 timeout_s\n- 判定本次尝试:OSError → T2 / 超时 · 非零 · 空输出 → T1 / 其余 → 成功\n- 构造失败:MissingCredentialError / 不是 BridgeError\n- 退避:base × 2^(n-1) 秒 / 最后一次失败后不睡\n- 写日志:每次 complete 一份 · 含各次尝试 / 整体过 redact · 返回 BigRef\n- 记账:external_inference / calls = 本次尝试数\n- 返回 BridgeResult:text 去首尾空白 / token 恒为 None\n- 抛 BridgeError:T1:attempts = max_attempts / T2:立即,不重试\n\n**连线**\n\n- 构造 CliBridge → complete()\n- complete() → 起子进程\n- 起子进程 → 判定本次尝试\n- 构造 CliBridge → 构造失败:缺凭证\n- 判定本次尝试 → 退避:T1 未耗尽\n- 退避 → 起子进程:重试\n- 判定本次尝试 → 写日志:成功 / T1 耗尽 / T2\n- 写日志 → 记账:成功\n- 记账 → 返回 BridgeResult\n- 写日志 → 抛 BridgeError:失败"
+}

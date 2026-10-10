@@ -1,0 +1,5 @@
+{
+ "title": "一次训练的编排",
+ "desc": "派发器校验指令并备好轨迹源,编排器读训练记录判定起点,落盘后加载权重。batch 先对整份 GRPO 数据集预检,再逐步训练并周期存点;最后一步之后存最终点、转换格式、注册候选、记录置 executed。确定性失败把记录写成 failed,其余异常让记录保持 pending。",
+ "describe": "**节点**\n\n- 派发器准备:读并校验 training_config / 构造归因后端与轨迹源\n- 判定起点:decide_resume / noop 返回 · escalate 抛出\n- 起点落盘:写 pending 记录 / 再 executor.load\n- batch 预检:整份 GRPO 数据算奖励 / 校验组大小与组数\n- 逐步训练:phase_at · batch_for_step / sft_step / grpo_opd_step\n- 周期存点:每 checkpoint_every_steps 步 / 回写引用与曲线摘要\n- 最终存点与转换:先回写 pending / 再 converter.convert\n- 注册候选:candidate pending_review / 记录置 executed\n- 确定性失败:记录写 failed · T2 / 异常原样重抛\n- 其余异常:记录保持 pending / 下次派发时续训\n\n**连线**\n\n- 派发器准备 → 判定起点\n- 判定起点 → 起点落盘\n- 起点落盘 → batch 预检\n- batch 预检 → 逐步训练\n- 逐步训练 → 周期存点\n- 周期存点 → 逐步训练\n- 逐步训练 → 最终存点与转换:最后一步之后\n- 最终存点与转换 → 注册候选\n- 逐步训练 → 确定性失败:数据或配置坏(含步骤 4)\n- 逐步训练 → 其余异常:崩溃 · 瞬态"
+}

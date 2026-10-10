@@ -1,0 +1,5 @@
+{
+ "title": "一轮迭代的闭环",
+ "desc": "主链路从写入训练指令开始,经训练、诊断评测、人工审核门①晋级为新基座。晋级之后三条支线并行:规划下一轮并回到起点,提名配方经门③入库,MindAgent 自进化经门②入库。",
+ "describe": "**节点**\n\n- 写入训练指令:人工或调度器写入 / directive\n- 派发并训练:缺清单时先合成数据 / SFT → GRPO + OPD\n- 候选 checkpoint:pending_review / 等待诊断与审核\n- 诊断评测:DiagnosticReport / 编排器 run_diagnostic\n- 门①人工审核:approve / reject / 需要诊断报告在场\n- 晋级 zengen-vN:候选 → effective / 新基座 = 最新 effective 版本\n- 规划下一轮:装配上下文 · 决策 / 写入下一条 directive\n- 提名配方:增益达标且无退化标记 / 写入 recipe_candidate\n- MindAgent 轮次:部署模拟 · 经验分析 / 技能提案 · 离线验证\n- 门③ 配方入库:需要可复现性校验报告\n- RecipeStore 收录:recipe · lineage · track_record\n- 门② 技能记忆纳入:需要验证结果在场\n- 正式技能库与记忆库:library_state 版本递增\n\n**连线**\n\n- 写入训练指令 → 派发并训练\n- 派发并训练 → 候选 checkpoint\n- 候选 checkpoint → 诊断评测\n- 诊断评测 → 门①人工审核\n- 门①人工审核 → 晋级 zengen-vN\n- 晋级 zengen-vN → 规划下一轮\n- 晋级 zengen-vN → 提名配方\n- 晋级 zengen-vN → MindAgent 轮次\n- 规划下一轮 → 写入训练指令:下一轮\n- 提名配方 → 门③ 配方入库\n- 门③ 配方入库 → RecipeStore 收录\n- MindAgent 轮次 → 门② 技能记忆纳入\n- 门② 技能记忆纳入 → 正式技能库与记忆库"
+}

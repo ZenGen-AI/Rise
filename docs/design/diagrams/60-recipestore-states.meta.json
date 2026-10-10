@@ -1,0 +1,5 @@
+{
+ "title": "配方的生命周期",
+ "desc": "配方候选由提名器写成 pending_review,经门③批准后由收录处理器写出 effective 的配方,候选随之置 effective;配方在战绩退化时被战绩处理器废弃,被取代时置 superseded。",
+ "describe": "**节点**\n\n- 候选 pending_review:提名器写入\n- 候选 approved:等待收录\n- 候选 effective:已收录\n- 候选 rejected:保留记录\n- 配方 effective:收录时直接写成\n- 配方 deprecated:最近一条战绩退化\n- 配方 superseded:被新配方取代\n\n**连线**\n\n- 候选 pending_review → 候选 approved:门③ approve\n- 候选 pending_review → 候选 rejected:门③ reject\n- 候选 approved → 配方 effective:收录处理器写配方\n- 候选 approved → 候选 effective:收录最后一步\n- 配方 effective → 配方 deprecated:战绩处理器\n- 配方 effective → 配方 superseded:被取代"
+}

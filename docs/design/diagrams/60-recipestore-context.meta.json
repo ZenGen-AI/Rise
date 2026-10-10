@@ -1,0 +1,5 @@
+{
+ "title": "RecipeStore 的上下文",
+ "desc": "TrainScheduler 写配方候选并调用 RecipeStore 的检索、增益与校验函数;调和循环经两个处理器驱动收录与战绩回写;RecipeStore 只读写产物树里的四类目录。",
+ "describe": "**节点**\n\n- TrainScheduler:提名器 · 规划处理器\n- ControlPlane 调和循环:产生 admit_recipe / record_track 动作\n- factory 组合根:注册两个处理器\n- RecipeStore:校验 · 检索 · 增益 · 战绩 · 生命周期 / 收录处理器 · 战绩处理器\n- recipe_candidates/:配方候选 · 审核类\n- recipes/:配方 · 谱系 · 战绩\n- runs/<run>/:指令 · 候选 · 诊断报告\n- models/:zengen-vN · 只读\n- 门③ 配方入库:repro 在场才可批准\n\n**连线**\n\n- TrainScheduler → RecipeStore:检索 · 增益 · 校验\n- TrainScheduler → recipe_candidates/:提名:写候选\n- factory 组合根 → ControlPlane 调和循环:注册\n- ControlPlane 调和循环 → RecipeStore:调用处理器\n- RecipeStore → recipe_candidates/:读候选 · 置 effective\n- RecipeStore → recipes/:收录 · 战绩 · 废弃\n- RecipeStore → runs/<run>/:读报告 · 写战绩标记\n- RecipeStore → models/:读基线 links\n- 门③ 配方入库 → recipe_candidates/:approve / reject"
+}

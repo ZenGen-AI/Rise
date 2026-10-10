@@ -1,0 +1,5 @@
+{
+ "title": "controlplane 的模块",
+ "desc": "三层模块。驱动层是纯函数 reconcile 与守护进程 daemon;工具层是只读解析、观测、配置函数,以及记账与证据等级;存储层是 GitStore、读取链、信封、路径与状态机。箭头是导入方向。",
+ "describe": "**节点**\n\n- reconcile.py:纯函数 reconcile / TreeState · Action\n- daemon.py:run_daemon · reconcile_once / apply_action · 派发缝\n- simulator.stubs:骨架桩,包级回指\n- models.py:latest_promoted / _checkpoint\n- observe.py:trace · cost / sum_costs\n- config.py:凭证变量名 / 脱敏 redact\n- ledger · evidence:记账 · 证据等级\n- paths.py:目录常量与路径函数\n- states.py:两张迁移表\n- gitstore.py:GitStore · git 子进程 / 逐字节相同不提交\n- 读取链:read_product 入口 / 迁移 → Schema 校验\n- envelope.py:Envelope · BigRef / OwnerRef\n\n**连线**\n\n- daemon.py → reconcile.py:调用\n- daemon.py → simulator.stubs:导入\n- daemon.py → gitstore.py:读写产物\n- models.py → gitstore.py\n- observe.py → gitstore.py\n- ledger · evidence → gitstore.py\n- gitstore.py → paths.py\n- gitstore.py → 读取链\n- 读取链 → envelope.py"
+}

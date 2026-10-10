@@ -1,0 +1,5 @@
+{
+ "title": "TrainPlanner 的三段分离",
+ "desc": "planner.plan 串起三段:上下文打包把 PlanningContext 套进版本化模板,决策后端把打包结果变成文本,输出解析把文本严格变成 PlannerDecision。三种后端都返回文本,走同一条解析路径。包外只依赖 controlplane 与 inference_bridge。",
+ "describe": "**节点**\n\n- planner.plan:一次渲染 · 多次采样 / 共用重试预算 · 耗尽即失败\n- context:PlanningContext 与五种子结构 / 构造即校验 · 严格互逆\n- templates:PLANNER_V1 · install_template / load_template\n- prompt:render_prompt → PackedContext / 占位符白名单\n- BridgeDecisionBackend:packed.prompt 交给桥接\n- HeuristicBackend:只读 packed.context / 输出 JSON 文本\n- ScriptedDecisionBackend:测试用罐头回答\n- decision:parse_decision / DecisionParseError\n- PlannerDecision:七个字段 · 冻结\n- controlplane:Envelope · GitStore · 路径函数\n- inference_bridge:InferenceBridge · BridgeError\n\n**连线**\n\n- planner.plan → prompt:渲染\n- planner.plan → BridgeDecisionBackend:decide\n- planner.plan → decision:解析\n- context → prompt:上下文\n- templates → prompt:模板文本\n- decision → PlannerDecision:合格才构造\n- BridgeDecisionBackend → inference_bridge\n- templates → controlplane"
+}

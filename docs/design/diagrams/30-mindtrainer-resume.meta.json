@@ -1,0 +1,5 @@
+{
+ "title": "续训判定",
+ "desc": "decide_resume 对已有的训练记录按六条规则依次判定,先命中者生效;未知状态直接抛 ValueError。结论只有四种:noop 原样返回,resume 从中间存点续,restart 从基座重来,escalate 交给人。",
+ "describe": "**节点**\n\n- 已 executed 或 consumed?\n- 状态是 failed?\n- resume_attempts ≥ 上限?\n- allow_resume 为假?\n- 有 last_checkpoint_ref?\n- checkpoint_intact 为 True?\n- noop:原样返回已有记录\n- escalate:抛 NeedsHumanError / 派发器记 T3,指令置 failed / 记录本身不改\n- restart:从 base_checkpoint_ref 的 step 0 重来\n- resume:从 checkpoint_step 续训\n\n**连线**\n\n- 已 executed 或 consumed? → 状态是 failed?:否\n- 状态是 failed? → resume_attempts ≥ 上限?:否\n- resume_attempts ≥ 上限? → allow_resume 为假?:否\n- allow_resume 为假? → 有 last_checkpoint_ref?:否\n- 有 last_checkpoint_ref? → checkpoint_intact 为 True?:是\n- 已 executed 或 consumed? → noop:是\n- 状态是 failed? → escalate:是 · 规则 2\n- resume_attempts ≥ 上限? → escalate:是 · 规则 3\n- allow_resume 为假? → escalate:是 · 规则 4\n- 有 last_checkpoint_ref? → restart:否 · 从未存点\n- checkpoint_intact 为 True? → resume:是\n- checkpoint_intact 为 True? → escalate:否 · 损坏或无法确认"
+}
