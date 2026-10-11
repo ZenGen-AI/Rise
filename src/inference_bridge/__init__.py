@@ -8,14 +8,20 @@ from inference_bridge.base import (
     InferenceBridge,
     record_bridge_cost,
 )
+from inference_bridge.cli import DEFAULT_COMMANDS, CliBridge, RunOutcome, Runner, subprocess_runner
 from inference_bridge.scripted import ScriptedBridge, ScriptExhaustedError
 
 __all__ = [
     "BRIDGE_COST_TYPE",
+    "DEFAULT_COMMANDS",
     "BridgeError",
     "BridgeResult",
+    "CliBridge",
     "InferenceBridge",
+    "RunOutcome",
+    "Runner",
     "ScriptExhaustedError",
     "ScriptedBridge",
     "record_bridge_cost",
+    "subprocess_runner",
 ]

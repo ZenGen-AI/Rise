@@ -29,3 +29,8 @@ def test_the_bridge_only_depends_on_controlplane_and_the_stdlib():
     assert files
     for path in files:
         assert not (_imports(path) & other_first_party), path.name
+
+
+def test_the_repo_gitignore_covers_the_default_log_dir():
+    lines = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert ".rismforge/" in lines

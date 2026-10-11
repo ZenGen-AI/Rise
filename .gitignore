@@ -16,6 +16,9 @@ dist/
 *.local.yaml
 secrets/
 
+# 外部推理桥接的 L3 日志(已脱敏,仍不进 git 树;设计 §5.1)
+.rismforge/
+
 # 派生产物
 control-plane/index.sqlite
 .gstack/
