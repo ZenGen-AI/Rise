@@ -16,7 +16,11 @@ REVIEW_TRANSITIONS: dict[str, set[str]] = {
 }
 
 # spec §1.3 非审核类：pending → executed → consumed；pending → failed
+# 闭环集成设计 §3.4(R3):调度器构造的指令先写 awaiting_confirmation,人确认后变 pending;
+# 放弃则 failed。reconcile 不为这个状态产生任何动作。
+# 迁移表按产物种类(非审核类)定义,所以它对所有非审核产物都合法;目前只有指令使用它。
 NONREVIEW_TRANSITIONS: dict[str, set[str]] = {
+    "awaiting_confirmation": {"pending", "failed"},
     "pending": {"executed", "failed"},
     "executed": {"consumed"},
     "consumed": set(),
