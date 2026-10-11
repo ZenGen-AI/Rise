@@ -107,7 +107,7 @@
 7. Ruling: interact 配方必须声明 `nondeterministic: true`,否则是错误;同时恒给一条警告 —— 设计 §4.2 写"interact 恒为 true",§6.1 写"`nondeterministic` 为真"是警告 —— 手写 interact 候选漏写该键(或写成 `false`)会多一条错误;计划 5 的 `build_recipe_candidate` 对 interact 恒写 `true`,不受影响。
 8. Ruling: interact 的"对手 `model_ref` 都是具体 id"解释为:`bindings` 必须是非空列表,且 `model_backend` 不是 `self_play` 的每个 binding 都要有非空、非相对的 `model_ref` —— 与 `simulator.datamodel.RoleBinding` 的约定一致(`self_play` 必须为 None,另两种必填) —— 无。
 9. Ruling: agent_rsi 的"使用桥接时"由载荷里的布尔键 `uses_bridge`(缺省 `false`)表达,为真时 `prompt_template_version` 必填 —— 撰写时设计 §4.2 的 agent_rsi 键表里没有能判定"是否用桥接"的字段(设计现已回写 `uses_bridge`,见 §4.2) —— 这是对 §4.2 载荷的一处新增键,写 agent_rsi 配方候选的一方(计划 7 或后续计划)须写它;不写则按不用桥接处理,漏报缺失的模板版本。
-10. Ruling: `compute_gain` 用 `controlplane.evidence.diagnostic_grade` 给候选与基线两份报告定级,本包不另写等级判断:任一份是 `stub` 返回 `gain=None`;基线是 `mock` 而候选是 `real` 时也返回 `gain=None`,`reason` 写明两边的等级;其余组合(两边同级,或候选 `mock`、基线 `real`)照常相减。证据是否可接受仍由调用方用 `evidence_acceptable` 判 —— 设计 §11"证据等级只有一处实现";R17 默认不让 mock 证据驱动提名,而提名只按候选报告的等级判可接受,real 候选减 mock 基线得到的增益一半来自 mock 分数,照常返回就会在默认配置下驱动提名;候选是 mock 时调用方本来就会按 R17 拒绝或显式接受,不需要在这里再挡。stub 的判法与计划 8 Ruling 11 选基线时相同(同一个 `diagnostic_grade(payload) == "stub"`) —— 后端刚从 mock 切到 real 的那几轮(基线还是 mock 报告)没有可比增益,提名与战绩的 `gain` 都是 `None`,要等基线也换成 real 报告;直接调用 `handle_record_track` 而不经 `reconcile` 时,mock 候选的增益仍会被记进战绩。
+10. Ruling: `compute_gain` 用 `controlplane.evidence.diagnostic_grade` 给候选与基线两份报告定级,本包不另写等级判断:任一份是 `stub` 返回 `gain=None`;基线是 `mock` 而候选是 `real` 时也返回 `gain=None`,`reason` 写明两边的等级;其余组合(两边同级,或候选 `mock`、基线 `real`)照常相减。证据是否可接受仍由调用方用 `evidence_acceptable` 判 —— 设计 §11"证据等级只有一处实现";R17 默认不让 mock 证据驱动提名,而提名只按候选报告的等级判可接受,real 候选减 mock 基线得到的增益一半来自 mock 分数,照常返回就会在默认配置下驱动提名;候选是 mock 时调用方本来就会按 R17 拒绝或显式接受,不需要在这里再挡。stub 的判法与计划 8 Ruling 11 选基线时相同(同一个 `diagnostic_grade(payload) == "stub"`;没有 `backends` 标记的报告也判 stub,设计 DX-12 失败关闭,所以夹具里的 real 报告要显式写 `backends="real"`) —— 后端刚从 mock 切到 real 的那几轮(基线还是 mock 报告)没有可比增益,提名与战绩的 `gain` 都是 `None`,要等基线也换成 real 报告;直接调用 `handle_record_track` 而不经 `reconcile` 时,mock 候选的增益仍会被记进战绩。
 11. Ruling: 基线 run 从基线模型 `links` 里找"`cand-<它>` 也在 `links` 里"的那一项,恰好一项才算数 —— `promote_candidate` 写 `links=[cand-<run>, <run>]`,不靠位置猜 —— 晋级写法改了(例如不再带候选 id)就找不到基线,`gain` 为 `None` 并写明原因。
 12. Ruling: `compute_gain` 另外四种情况也返回 `gain=None`:候选与基线报告 `benchmark_version` 不同、同一维度有多于一条 l1 分数、l1 分数不是有限数(NaN、正负无穷)、基线模型就是本 run 自己产出的 —— 跨版本分数不可比(`diagnostic.benchmark_version` §2.5.8),重复与自比较都不能给出有意义的差值;NaN 与任何数比较都为假,计划 5 的 `gain < min_gain` 会把 NaN 增益当成达标,还会打乱 `_track_key` 的排序 —— 换了题库或分类表之后的第一轮没有可比增益,提名会因此跳过。
 13. Ruling: `regressed` 取"诊断报告里有任意一条退化标记",包括 `g_probe_failure` —— 设计只说"读 diagnostic 的 regression_flags",两种标记都是 `detect_*` 写进来的退化信号 —— G 探针失败也会让配方被 deprecate;若只想看社交退化,改成按 `kind == "social_regression"` 过滤。
@@ -166,6 +166,7 @@ assert failure_record_file('run-1', 't').startswith('control-plane/runs/run-1/')
 assert set(inspect.signature(record_failure).parameters) >= {'store', 'run_id', 'task_id', 'category', 'point', 'retries', 'reason', 'log_ref'}
 assert diagnostic_grade({'stub': True}) == 'stub'
 assert diagnostic_grade({'backends': 'mock', 'dimension_scores': []}) == 'mock'
+assert diagnostic_grade({'dimension_scores': [1]}) == 'stub' and diagnostic_grade({'backends': 'real', 'dimension_scores': [1]}) == 'real'
 assert evidence_acceptable('real', False) and not evidence_acceptable('mock', False) and evidence_acceptable('mock', True)
 assert REVIEW_TRANSITIONS['approved'] == {'effective'} and 'deprecated' in REVIEW_TRANSITIONS['effective']
 print('preflight ok')
@@ -482,7 +483,8 @@ def write_report(
     backends: str | None = "mock",
 ) -> None:
     """按 diagnostic.datamodel.DiagnosticReport.to_dict() 的形状手工写一份诊断报告;
-    stub=True 时写成 simulator.stubs.diagnostic_evaluator_stub 的形状。"""
+    stub=True 时写成 simulator.stubs.diagnostic_evaluator_stub 的形状。
+    backends=None 不写标记,controlplane.evidence 按失败关闭判 stub;要一份 real 报告传 backends="real"。"""
     if stub:
         payload = {"candidate_ref": f"cand-{run_id}", "benchmark_version": benchmark_version,
                    "dimension_count": 0, "stub": True}
@@ -1214,8 +1216,8 @@ def test_a_non_finite_score_is_refused(score):
 
 
 def test_a_real_candidate_against_a_mock_baseline_has_no_gain(store):
-    # 夹具的基线报告是 mock;backends=None 的报告按 controlplane.evidence 判 real
-    write_report(store, "run-002", scores=[l1("tom", 0.62)], baseline_ref="zengen-v1", backends=None)
+    # 夹具的基线报告是 mock;backends="real" 的报告判 real(没有标记的报告判 stub,不是 real)
+    write_report(store, "run-002", scores=[l1("tom", 0.62)], baseline_ref="zengen-v1", backends="real")
     assert compute_gain(store, "run-002", "tom") == GainResult(
         None, "run-001", "baseline run run-001 evidence is mock while run-002 is real; scores are not comparable"
     )
@@ -1224,17 +1226,18 @@ def test_a_real_candidate_against_a_mock_baseline_has_no_gain(store):
 def test_a_real_baseline_is_comparable_to_a_real_or_a_mock_candidate(tmp_path):
     s = make_store(tmp_path)
     write_model(s, 1, "run-001")
-    write_report(s, "run-001", scores=[l1("tom", 0.50)], backends=None)
-    write_report(s, "run-002", scores=[l1("tom", 0.60)], baseline_ref="zengen-v1", backends=None)
+    write_report(s, "run-001", scores=[l1("tom", 0.50)], backends="real")
+    write_report(s, "run-002", scores=[l1("tom", 0.60)], baseline_ref="zengen-v1", backends="real")
     write_report(s, "run-003", scores=[l1("tom", 0.70)], baseline_ref="zengen-v1", backends="mock")
     assert compute_gain(s, "run-002", "tom").gain == pytest.approx(0.10)
     assert compute_gain(s, "run-003", "tom").gain == pytest.approx(0.20)
 
 
 def test_the_grade_comes_from_controlplane_evidence(store):
-    # 没有 stub 键,但 backends 取值不认识:diagnostic_grade 判 stub,这里不另写一份判断
-    write_report(store, "run-002", scores=[l1("tom", 0.6)], baseline_ref="zengen-v1", backends="Real")
-    assert compute_gain(store, "run-002", "tom").reason == "diagnostic report for run-002 is a stub"
+    # 没有 stub 键,但 backends 取值不认识、或没有标记:diagnostic_grade 判 stub(失败关闭),这里不另写一份判断
+    for marker in ("Real", None):
+        write_report(store, "run-002", scores=[l1("tom", 0.6)], baseline_ref="zengen-v1", backends=marker)
+        assert compute_gain(store, "run-002", "tom").reason == "diagnostic report for run-002 is a stub"
 
 
 def test_a_report_without_a_score_list_is_refused():
@@ -1265,7 +1268,8 @@ def test_a_report_written_by_the_diagnostic_package_is_read_correctly(tmp_path):
     # 本包不导入 diagnostic;这条测试用 diagnostic 自己的写法造报告,钉住字段名没有漂移。
     from diagnostic.datamodel import ConsistencySignals, DimensionScore, RegressionFlags
     from diagnostic.report import build_report
-    from diagnostic.store_adapter import write_report as diag_write_report
+    from controlplane.envelope import Envelope, OwnerRef
+    from controlplane.paths import diagnostic_report_file
 
     s = make_store(tmp_path)
     write_model(s, 1, "run-001")
@@ -1279,8 +1283,20 @@ def test_a_report_written_by_the_diagnostic_package_is_read_correctly(tmp_path):
             consistency_signals=ConsistencySignals({}, 0.0), run_id=run_id,
         )
 
-    diag_write_report(s, "run-001", _report("run-001", 0.5, "", []))
-    diag_write_report(s, "run-002", _report("run-002", 0.75, "zengen-v1", [{"kind": "g_probe_failure"}]))
+    def _write(run_id, report):
+        """报告载荷取 DiagnosticReport.to_dict() 并带 backends: real(失败关闭:没有标记的报告判 stub)。
+        不调 diagnostic.store_adapter.write_report:它的 backends 必填参数由计划 8 加入,本计划执行时
+        还没有;计划 8 之后的 write_report 写出的载荷同样是 to_dict() 加这一键,这里钉住的字段名一致。"""
+        s.write_product(
+            diagnostic_report_file(run_id),
+            Envelope(id=report.id, type="diagnostic_report", version=1, created_at="2026-09-27T00:00:00Z",
+                     created_by=OwnerRef(), status="executed", schema_version=1, links=report.links,
+                     payload={**report.to_dict(), "backends": "real"}),
+            f"test: report {run_id}",
+        )
+
+    _write("run-001", _report("run-001", 0.5, "", []))
+    _write("run-002", _report("run-002", 0.75, "zengen-v1", [{"kind": "g_probe_failure"}]))
     assert compute_gain(s, "run-002", "tom") == GainResult(0.25, "run-001", OK)
     assert regression_flags(read_report_payload(s, "run-002")) == [{"kind": "g_probe_failure"}]
 ```
@@ -3254,5 +3270,5 @@ Expected: `grep` 无输出,`exit=1`;`git status --short` 不列出任何 `src/`�
 1. **计划 1 的真实产出。** 计划 1 尚未合并。修订时的拷贝不再用临时桩:在 `0385004` 上原样执行计划 1 任务 19 的两段脚本(路径与 `SUBDIRS`),原样落下任务 21 的 `ledger.py`、`test_ledger.py` 与任务 24 的 `evidence.py`、`test_evidence.py`,再逐任务重放本计划;任务 40 的前置检查打印 `preflight ok`。计划 1 的其余任务(20、22、23、25–27)本计划不用,没有搭。计划 1 合并前若再改这三块的代码块,任务 40 的前置检查或 `tests/test_rs_admit.py` 里读 `payload["category"]`、`payload["point"]`、`payload["reason"]` 的用例会先失败。
 2. **B 的具体值。** 计划 1 会加多少测试未知;各任务写成 B+N,N 是在拷贝里实测的增量。绝对通过数依赖各计划的执行顺序(在本计划之前落地的计划都会改变 B),本计划只保证增量。
 3. **`pyproject.toml` 那一行。** 任务 40 Step 6 的追加式脚本在两种起点(基线四项、已含 `inference_bridge`)上都实测过,重复运行打印 `already listed`;计划 2、4、6 若在本计划之前加了别的包,列表顺序会不同,脚本本身不受影响。
-4. **真实诊断报告的 `backends` 字段与 `baseline_ref` 的取值。** 计划 8 的 `make_diagnostic_evaluator` 还没写;本计划假定它沿用 `DiagnosticConfig.baseline_ref` 写成 `zengen-vN`。若写成别的形状,`compute_gain` 会返回 `gain=None` 并写明 `baseline_ref ... is not a zengen-vN model id`,不会算错。
+4. **真实诊断报告的 `backends` 字段与 `baseline_ref` 的取值。** 计划 8 的 `make_diagnostic_evaluator` 还没写;本计划假定它沿用 `DiagnosticConfig.baseline_ref` 写成 `zengen-vN`。若写成别的形状,`compute_gain` 会返回 `gain=None` 并写明 `baseline_ref ... is not a zengen-vN model id`,不会算错。按设计 DX-12,`diagnostic_grade` 只认 `backends` 为 `real` 的报告为 real:评估器必须写 `backends` 标记,没有标记的报告判 stub,`compute_gain` 返回 `gain=None`。
 5. **提交步骤只在拷贝里跑过。** 拷贝里每个任务提交一次(提交信息用了简写,`git add` 用的是整体暂存而不是逐个文件),任务 48 的 `git diff --stat` 在拷贝里得到 `19 files changed, 2454 insertions(+), 1 deletion(-)` 与 19 个文件名。插入行数只作参考(任务 48 Step 2)。真实仓库里 `git status --short` 还会列出 `cli/package*.json` 与本计划文件之外的既有未提交改动,以实施时为准。

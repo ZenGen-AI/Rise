@@ -53,7 +53,7 @@
 | 5 TrainScheduler | 60 至 68 | `plans/2026-10-09-trainscheduler.md` |
 | 6 Actio | 70 至 78 | `plans/2026-10-09-actio.md` |
 | 7 MindAgent | 80 至 89 | `plans/2026-10-09-mindagent.md` |
-| 8 调和循环扩展 | 90 至 98 | `plans/2026-10-09-reconcile-extension.md` |
+| 8 调和循环扩展 | 90 至 99 | `plans/2026-10-09-reconcile-extension.md` |
 | 9 组合根与端到端 | 100 至 109 | `plans/2026-10-09-factory-and-e2e.md` |
 
 已落地部分的施工记录在同目录下更早的计划里:控制面与工厂模拟器、诊断评测、实时环境服务、MindTrainer 两个部分与它的接线。

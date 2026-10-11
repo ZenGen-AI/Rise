@@ -496,11 +496,11 @@ class CredentialInGitTreeError(Exception): ...
 |---|---|---|
 | `tests/test_config.py` | 8 | [已落地] |
 | `tests/test_observe.py` | 5 | [已落地] |
-| `tests/test_config_backend_cli.py` | 28 | [计划中] |
+| `tests/test_config_backend_cli.py` | 43 | [计划中] |
 | `tests/test_ledger.py` | 33 | [计划中] |
 | `tests/test_bridge_scripted.py` | 15 | [计划中] |
 | `tests/test_bridge_packaging.py` | 3 | [计划中] |
-| `tests/test_bridge_cli.py` | 34 | [计划中] |
+| `tests/test_bridge_cli.py` | 47 | [计划中] |
 
 计划中的用例数是计划数,参数化后可能多于测试函数个数,施工后实跑核对。
 
@@ -515,9 +515,9 @@ class CredentialInGitTreeError(Exception): ...
 | `BackendConfig`、`load_backend_config` | [已落地] | `token_env` 必填,不支持 `command`、`timeout_s` |
 | `resolve_credential`、`redact` | [已落地] | 缺失或为空抛 `MissingCredentialError` |
 | `trace`、`cost` | [已落地] | `trace` 已识别 `log_refs` |
-| `command`、`timeout_s`、`token_env: null` | [计划中] | 工作包 1 任务 22 |
+| `command`、`timeout_s`、`token_env: null`、`env_allowlist`、`workdir` | [计划中] | 工作包 1 任务 22 |
 | `controlplane.ledger` | [计划中] | 工作包 1 任务 21 |
-| `inference_bridge` 包 | [计划中] | 工作包 1 任务 25、26 |
+| `inference_bridge` 包、`DEFAULT_COMMANDS`、白名单环境与空临时目录 | [计划中] | 工作包 1 任务 25、26 |
 | 本代码仓库 `.gitignore` 加 `.rismforge/` | [计划中] | 工作包 1 任务 26 |
 | 按角色装配与 `logs` 子命令 | [计划中] | 工作包 9 任务 101、102 |
 

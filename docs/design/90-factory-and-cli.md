@@ -509,7 +509,7 @@ factory 是最后一个工作包,前八个全部落地后才能施工。
 | 5 | TrainScheduler | 任务 60 至 68 | 2、3、4 | 规划与提名处理器、默认调度配置 |
 | 6 | Actio | 任务 70 至 78 | 无 | 经 MindAgent 间接使用 |
 | 7 | MindAgent | 任务 80 至 89 | 1、6 | 轮次与收录处理器 |
-| 8 | 调和循环扩展 | 任务 90 至 98 | 1 | 注入缝、真实诊断评估器、命令行泛化与 `confirm` |
+| 8 | 调和循环扩展 | 任务 90 至 99 | 1 | 注入缝、真实诊断评估器、命令行泛化与 `confirm` |
 | 9 | 组合根与端到端 | 任务 100 至 109 | 1 至 8 | 本文的 factory 全部内容 |
 
 ### 6.5 首次部署
@@ -591,13 +591,13 @@ factory 是最后一个工作包,前八个全部落地后才能施工。
 | 只读 | `trace`、`cost`、`logs` | 临时仓库 | `tests/test_factory_readonly.py` | 10 [计划中] |
 | 桥接装配 | 角色、凭证不外露 | `sys.executable -c` 假可执行体 | `tests/test_factory_bridges.py` | 14 [计划中] |
 | 评估器装配 | 配置校验、默认资产 | `MockSoMEvalRunner`、`MockJudgeBackend` | `tests/test_factory_evaluation.py` | 12 [计划中] |
-| 组合根与命令行 | 逐字节相同、注入、装配错误、退出码 | 记录调用的假处理器 | `tests/test_factory_wire.py`、`tests/test_factory_cli.py` | 14、8 [计划中] |
+| 组合根与命令行 | 逐字节相同、注入、装配错误、退出码、仓库锁被占用时的退出与只读照常 | 记录调用的假处理器 | `tests/test_factory_wire.py`、`tests/test_factory_cli.py` | 18、9 [计划中] |
 | 端到端框架 | 空闭环一个 tick、mock 证据默认不转 | 假处理器 | `tests/test_factory_e2e_frame.py` | 4 [计划中] |
 | 处理器构造 | 六个构造器、证据开关单一来源、Interact 流超时 | 罐头后端 | `tests/test_factory_handlers.py` | 18 [计划中] |
-| 端到端 | 完整闭环、R5、R18、R19、MindAgent 链 | `HeuristicBackend`、罐头后端 | `tests/test_factory_e2e_loop.py` | 9 [计划中] |
+| 端到端 | 完整闭环、R5、规划等配方入库门、R18、R19、MindAgent 链 | `HeuristicBackend`、罐头后端 | `tests/test_factory_e2e_loop.py` | 10 [计划中] |
 | 跨工作包 | 共享用例表、分层规则、run 编号数值序 | 无 | `tests/test_factory_cross_plan.py`、`tests/test_factory_run_order.py` | 31、3 [计划中] |
 
-计划中的用例共 142 个,按 pytest 收集的参数化展开计。工作包 9 另有一个前置核对脚本 `scripts/check_factory_assumptions.py`,19 行全部 `OK` 才能施工 [计划中]。
+计划中的用例共 148 个,按 pytest 收集的参数化展开计。工作包 9 另有一个前置核对脚本 `scripts/check_factory_assumptions.py`,21 行全部 `OK` 才能施工 [计划中]。
 
 不依赖的外部服务:GPU、外部网络、真实模型、真实 `claude` 与 `codex` 命令行。实时服务端只绑 `127.0.0.1`,在进程内起停。
 
@@ -630,8 +630,8 @@ factory 是最后一个工作包,前八个全部落地后才能施工。
 
 | 未核实项 | 影响 | 核实办法 |
 |---|---|---|
-| 本文计划中部分的签名与用例数(共 142)未实跑,只来自施工计划文本及其在集成拷贝上的重放 | 施工时签名可能微调,用例数可能变化 [计划中] | 工作包 9 落地后,按代码与 `uv run pytest --collect-only -q` 复核 |
-| 前八个工作包的符号名最终是否与本文同名 | 组合根引用的名字可能对不上 [计划中] | 施工前跑 `scripts/check_factory_assumptions.py`,19 行全部 `OK` [计划中] |
+| 本文计划中部分的签名与用例数(共 148)未实跑,只来自施工计划文本及其在集成拷贝上的重放;其中仓库锁与规划等门的 6 个用例是设计修订后补写的,连重放也没做过 | 施工时签名可能微调,用例数可能变化 [计划中] | 工作包 9 落地后,按代码与 `uv run pytest --collect-only -q` 复核 |
+| 前八个工作包的符号名最终是否与本文同名 | 组合根引用的名字可能对不上 [计划中] | 施工前跑 `scripts/check_factory_assumptions.py`,21 行全部 `OK` [计划中] |
 | 外部命令行的参数模板与用量输出 | 成本数字可能缺失,模板可能要调 | 用真实 `claude`、`codex` 各调一次,看输出里有没有用量 |
 | 规划经真实桥接的正向路径 | 带围栏、带说明文字、被截断的输出只在接真实后端时暴露 | 接真实后端,用 `--planner-backend bridge` 跑一圈 |
 | 规划与提案的质量 | 罐头与启发式后端只证明流程与解析 | 接真实后端后人工评审一批决策 |

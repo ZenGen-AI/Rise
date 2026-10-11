@@ -35,8 +35,10 @@
 1. **只做调和循环与命令行的"接口一侧"。** 六个动作的处理器分别属于计划 3、5、7,本计划一个都不实现,测试里一律用假处理器。`factory` 组合根、只读子命令、全闭环端到端属于计划 9。
 2. **`reconcile` 的新逻辑全在 `_closed_loop_actions` 里,追加在既有动作之后。** 既有动作的循环一行不改;`enabled` 为空时直接跳过,所以既有测试与返回值不变。
 3. **视图读取按需。** `read_tree_state(store)` 不传 `enabled` 时走与现在完全相同的代码路径,不多读一个文件。
-4. **评估器的 `backends` 标记由 `write_report` 的可选参数写入**(Ruling 9),报告与标记同一次提交落盘。
+4. **评估器的 `backends` 标记由 `write_report` 的必填关键字参数写入**(Ruling 9、设计 DX-12),报告与标记同一次提交落盘;`run_diagnostic`、`resolve_baseline` 的 `backends` 同样必填。
 5. **命令行把"按 id 找产物"泛化成三类路径**,id 冲突时报歧义,不猜。
+6. **晋级幂等放在本计划(设计 CP-7)。** 晋级以模型产物里的 `promoted_from` 为幂等键,新版本号取现有最大版本号加一;`TreeState` 加带默认值的 `max_model_version`,既有 fixture 不变。归任务 98。
+7. **并发写树的控制放在本计划(设计 CP-12)。** `run_daemon` 取仓库文件锁,所有提交只带本文件,Python 与 TypeScript 两侧一致;命令行不取锁。归任务 98。
 
 **已核实的事实(实现者不要再猜)**
 
@@ -45,7 +47,7 @@
 - `GitStore.write_product` 内容不变时不提交(先 `git diff --cached --quiet`)。资产重复写入是无操作。
 - `DiagnosticReport.from_dict` 只取已知键,多出来的 `backends` 不影响 `read_report`。
 - `run_diagnostic` 的检测退化要求 `(dimension, level, track_provenance)` 三元组对上且置信区间不相交。同一题库、全对对全错时会触发。
-- `simulator.stubs.diagnostic_evaluator_stub` 的载荷有 `stub: True`。计划 1 的 `diagnostic_grade` 对它返回 `stub`;对 `backends: "mock"` 返回 `mock`;对有非空 `dimension_scores` 且没有 `backends` 或 `backends: "real"` 返回 `real`;其余返回 `stub`。
+- `simulator.stubs.diagnostic_evaluator_stub` 的载荷有 `stub: True`。计划 1 的 `diagnostic_grade` 对它返回 `stub`;对 `backends: "mock"` 返回 `mock`;对 `backends: "real"` 且有非空 `dimension_scores` 返回 `real`;其余(含没有 `backends` 标记、取值不认识、没有分数)返回 `stub`(失败关闭,设计 DX-12)。
 - vitest 的 worker 里 `process.chdir()` 抛 `ERR_WORKER_UNSUPPORTED_OPERATION`。测 `main` 时改为 `vi.spyOn(process, "cwd")`。
 - `git ls-files` 的路径模式里 `*` 会跨越 `/`(git pathspec 默认不是 glob 模式)。`control-plane/recipe_candidates/*.yaml` 因此也会匹配子目录里的 yaml。本计划的三类模式各自落在不同的顶层目录,互不串扰;同一目录内的误匹配见「已知限制」第 6 条。
 
@@ -54,7 +56,7 @@
 每个任务的要求都隐含包含本节。
 
 - **依赖方向不变**:`controlplane` 不导入 `diagnostic`、`mindtrainer` 或任何新顶层包;`diagnostic` 不导入 `mindtrainer`(任务 95 有测试)。处理器与评估器在 `controlplane` 里只是两个 `Callable` 类型别名。
-- **默认行为逐字节不变**:不传 `handlers`、`evaluator`、`enabled` 时,调和循环写出的产物、提交日志、返回的动作列表与改动前完全相同。既有测试一行不改,尤其 `tests/test_reconcile.py`、`tests/test_daemon.py`、`tests/test_daemon_dispatcher.py`、`tests/test_e2e_loop.py`、`tests/test_diag_*.py`、`cli/test/commands.test.ts`。
+- **默认行为逐字节不变**:不传 `handlers`、`evaluator`、`enabled` 时,调和循环写出的产物、提交日志、返回的动作列表与改动前完全相同。既有测试一行不改,尤其 `tests/test_reconcile.py`、`tests/test_daemon.py`、`tests/test_daemon_dispatcher.py`、`tests/test_e2e_loop.py`、`cli/test/commands.test.ts`;唯一的例外是七个调用点补传 `backends="mock"`:`tests/test_diag_store_adapter.py` 的五处 `write_report`、`tests/test_diag_orchestrator.py` 的两处 `run_diagnostic`(设计 DX-12:`backends` 必填,任务 94 的步骤 3 改它们),其余 `tests/test_diag_*.py` 一行不改。任务 98 另有三处有意的行为变化(设计 CP-7、CP-12):晋级的新版本号取现有最大版本号加一(没有版本号空洞时与按文件数计数的结果相同),`GitStore.write_product` 与 TypeScript 的 `writeProduct` 的提交只带本文件,`run_daemon` 在第一个 tick 之前取仓库文件锁;三者在既有测试里都不可见,任务 99 的全量回归证明。
 - **新参数全部 keyword-only**:`read_tree_state`、`apply_action`、`reconcile_once`、`run_daemon`、`write_report`、`run_diagnostic`、`make_diagnostic_evaluator`。
 - `src/` 下每个源文件以 `from __future__ import annotations` 开头(模块 docstring 之后的第一条语句也算)。
 - **读产物走 `GitStore.read_product`,写产物用 `Envelope` + `GitStore.write_product`。** 不直接写文件系统。唯一的例外是目录枚举(`_iter_run_ids` 与本计划的 `_read_gate_views`),它只列目录,读内容仍走 `read_product`。
@@ -95,11 +97,12 @@ def run_daemon(store, interval_s, max_ticks=None, *, dispatcher=None, handlers=N
 | `admit_proposal` | 提案 id | `{}` | `GateView.kind == "skill_memory_proposal"` 且状态 `approved` | 提案变为 `effective` |
 | `record_track` | run id | `{"run_id", "recipe_ref"}` | `recipe_ref` 非空;候选 `effective` 或 `rejected`;证据可接受;没有战绩标记 | `recipe_track_note_file(run)` |
 | `nominate_recipe` | run id | `{"run_id"}` | 候选 `effective`;证据可接受;没有提名标记 | `nomination_file(run)` |
-| `plan_next_round` | run id | `{"run_id"}` | 候选 `effective` 或 `rejected`;证据可接受;`planner_decision_status` 为空或 `pending`;**没有在途轮**;该 run 是 `run-<数字>` 里编号最大的 run(按整数比较,`_RUN_ID = ^run-(\d+)$`;不匹配的名字不参与比较;一个 `run-<数字>` 都没有时不触发,刻意失败关闭;Ruling 21) | `planner_decision_file(run)` 为 `executed` 或 `failed` |
+| `plan_next_round` | run id | `{"run_id"}` | 候选 `effective` 或 `rejected`;证据可接受;`planner_decision_status` 为空或 `pending`;**没有在途轮**;**`nominate_recipe` 启用且候选是 `effective` 时,该 run 有提名标记(`has_nomination_note`),且 `gates` 里没有 id 为 `recipe-<run>`、`kind` 为 `recipe_candidate`、状态为 `pending_review` 或 `approved` 的项**(规划等配方入库门,设计 CP-11,Ruling 24);该 run 是 `run-<数字>` 里编号最大的 run(按整数比较,`_RUN_ID = ^run-(\d+)$`;不匹配的名字不参与比较;一个 `run-<数字>` 都没有时不触发,刻意失败关闭;Ruling 21) | `planner_decision_file(run)` 为 `executed` 或 `failed` |
 | `start_agent_round` | 模型 id(`zengen-vN`) | `{"version", "run_id"}` | 版本号(按数字)最大的 `effective` 模型,且 `agent_round_status` 为空或 `pending`(没有轮次产物,或轮次产物读不出,或轮次仍是 `pending`;R19,Ruling 20) | `agent_round_file(model)` 为 `executed` 或 `failed` |
 
 - "证据可接受":`diagnostic_grade` 为 `real`,或为 `mock` 且 `accept_mock_evidence` 为真。没有报告(`None`)与 `stub` 永不可接受。
 - "在途轮"(R4):任何 run 的指令是 `pending` 或 `awaiting_confirmation`,或候选是 `pending_review` 或 `approved`。
+- "配方入库门"(CP-11):只对 `plan_next_round` 生效。`nominate_recipe` 不在 `enabled` 里,或最大 run 的候选是 `rejected`(被拒绝的候选不提名)时,门恒开;否则提名标记在场(`nominated` 与 `skipped` 都写它)且该 run 的配方候选已离开 `pending_review` 与 `approved`(或根本没有配方候选),门才开。
 - 输出顺序固定:既有动作在前(`dispatch_directive`、`request_diagnostic`、`await_review`、`promote_candidate`),然后 `admit_recipe → admit_proposal → record_track → nominate_recipe → plan_next_round → start_agent_round`;同一种动作内按 id 字典序(Ruling 3);`plan_next_round` 每个 tick 至多一条。
 - `start_agent_round` 的 `detail["run_id"]` 取自模型产物 `links[1]`;`links` 不足两项时为 `""`。
 - **轮次处理器的重入契约(给计划 7,R19)**:轮次产物写回终态(`executed` / `failed`)之前,每个 tick 都会再次产生 `start_agent_round`。处理器必须先写 `pending` 的轮次产物作为幂等键,重入时整份重写同一产物(不追加、不另起新 id);已在跑的长任务(部署、会话)要靠这份 `pending` 产物里记下的进度判断是续跑还是跳过,不能每次唤醒都从头跑一遍。轮次产物存在但读不出时视图按"没有轮次"处理,同样会触发;处理器重入时判定确定性损坏,自己写 `failed`。
@@ -118,17 +121,33 @@ def run_daemon(store, interval_s, max_ticks=None, *, dispatcher=None, handlers=N
 # diagnostic.evaluator
 make_diagnostic_evaluator(*, taxonomy_version, item_pool_version, someval_runner, judge_backend,
                           benchmark_version, tier="full", sampling_k=4, backends="mock") -> Evaluator
-resolve_baseline(store, run_id, benchmark_version) -> tuple[str, list[DimensionScore]]
+resolve_baseline(store, run_id, benchmark_version, *, backends: str) -> tuple[str, list[DimensionScore]]
 NO_BASELINE = "none"
 # diagnostic.assets
 write_taxonomy(store, taxonomy) -> str ; read_taxonomy(store, version) -> DiagnosticTaxonomy
 write_item_pool(store, pool) -> str    ; read_item_pool(store, version) -> ItemPool
 TAXONOMY_TYPE = "diagnostic_taxonomy" ; ITEM_POOL_TYPE = "diagnostic_item_pool" ; DiagnosticAssetError
 # diagnostic.store_adapter
-write_report(store, run_id, report, *, backends=None) ; BACKENDS_KEY = "backends" ; BACKENDS_VALUES = ("mock", "real")
+write_report(store, run_id, report, *, backends: str) ; BACKENDS_KEY = "backends" ; BACKENDS_VALUES = ("mock", "real")
 # diagnostic.orchestrator
-run_diagnostic(..., *, baseline_scores, dynamic_specs, backends=None)
+run_diagnostic(..., *, baseline_scores, dynamic_specs, backends: str)
 ```
+
+**晋级幂等与仓库锁(给计划 9)**
+
+```python
+# controlplane.models
+def max_model_version(store) -> int                  # 没有模型为 0;按 zengen-v(\d+).yaml 解析
+# controlplane.reconcile
+TreeState.max_model_version: int | None = None        # 非 None 时 reconcile 用它加一定新版本号,否则沿用 model_count
+# controlplane.lock
+class RepoLockedError(Exception)                      # str(exc) 恰好是锁文件的绝对路径
+def acquire_repo_lock(repo_root: str | Path)          # 上下文管理器;锁文件 <repo_root>/.git/rismforge.lock
+```
+
+- `controlplane.daemon.run_daemon` 在第一个 tick 之前取锁、退出(含异常)时释放;`reconcile_once`、`apply_action` 不取锁。一次性的调用方(计划 9 的 `reconcile_one_tick`)自己用 `acquire_repo_lock` 取同一把锁。
+- `apply_action("promote_candidate")` 以模型产物的 `payload.promoted_from` 为幂等键:已有模型指向该候选就复用它的版本号,只补做候选置 `effective` 与写结果摘要。
+- `GitStore.write_product` 与 `cli/src/gittree.ts` 的 `writeProduct` 的提交只带本文件(`git commit -m <信息> -- <路径>`)。
 
 **命令行(给计划 9 的文档与端到端)**:`rismforge <review|approve|reject|confirm|status> [id] [reason]`。
 
@@ -165,7 +184,7 @@ TypeScript 命令行与 Python 只经 git 树里的文件通信。下表每一�
 6. **Ruling: `RunView` 对每个 run 目录都产生一条,包括没有指令的目录;`recipe_ref` 为 `None` 或非字符串时视为 `""`。** —— 原因:人工或旧代码可能只写了候选;把畸形的 `recipe_ref` 当成"没有配方"不会触发战绩回写,是保守的方向。 —— 判错的代价:畸形 `recipe_ref` 的 run 不回写战绩,而不是报错。
 7. **Ruling: `handlers` 里出现六个动作之外的键,在执行任何动作之前抛 `ValueError`(`apply_action`、`reconcile_once`、`run_daemon` 都检查)。** —— 原因:`{"dispatch_directive": h}` 这类误配若被接受,会让人以为替换了派发器;拼错的键(`"nominate"`)若被静默忽略,对应动作永远不触发且没有任何提示。 —— 判错的代价:组合根不能用 `handlers` 覆盖既有动作;那本来就该用 `dispatcher` 和 `evaluator`。
 8. **Ruling: `enabled` 为空时 `accept_mock_evidence` 不写进 `TreeState`。** —— 原因:任务要求"`enabled` 为空时返回值与现在逐字节相同";没有闭环动作时这个开关无处可用。 —— 判错的代价:无。
-9. **Ruling: `backends` 标记通过扩展 `write_report(store, run_id, report, *, backends=None)` 与 `run_diagnostic(..., *, backends=None)` 写入,而不是在 `run_diagnostic` 之后重写信封。** —— 原因:重写信封会产生两次提交,两次之间树里有一份没有标记、按计划 1 的规则会被判为 `real` 的报告;若进程恰好崩在这里,一份 mock 报告会被当成真证据驱动规划。参数默认 `None` 时载荷不变,既有 `tests/test_diag_*.py` 不受影响。 —— 判错的代价:`run_diagnostic` 多一个参数。
+9. **Ruling: `backends` 标记通过扩展 `write_report(store, run_id, report, *, backends)` 与 `run_diagnostic(..., *, backends)` 的必填关键字参数写入,而不是在 `run_diagnostic` 之后重写信封。** —— 原因:重写信封会产生两次提交,两次之间树里有一份没有标记的报告(失败关闭,判 `stub`,永远不可接受);若进程恰好崩在这里,候选会卡在门前、`review` 只看到 `[STUB]`。参数必填(设计 DX-12):可选参数会让漏传的调用方写出无标记报告;七个既有调用点因此要补传 `backends="mock"`,这是「既有测试一行不改」约束唯一的放宽。 —— 判错的代价:`run_diagnostic`、`write_report`、`resolve_baseline` 多一个必填参数,七个既有调用点要改。
 10. **Ruling: 题库与分类表的产物类型名为 `diagnostic_taxonomy` 与 `diagnostic_item_pool`,状态 `effective`,读写函数放 `diagnostic/assets.py`,信封 id 为 `taxonomy-<version>` 与 `item-pool-<version>`。** —— 原因:`diagnostic.paths` 已经转出这两个路径函数,资产属于诊断包;`effective` 表示"登记即生效",题库变更本身不走审核门(设计没有给它门)。读取时校验信封类型与载荷里的版本号,路径上放错东西会明确报错。 —— 判错的代价:以后要给题库加审核门时,要改成审核类状态并迁移已有资产。
 11. **Ruling: 评估器的基线 = 版本号最大的 `effective` 模型的 `links[1]` 那个 run 的报告;以下情况都视为"无基线",传空列表、`baseline_ref="none"`:没有模型、`links` 不足两项、基线 run 就是被评的 run、基线 run 没有报告、基线报告是 `stub`、基线报告的 `benchmark_version` 与本次不同。** —— 原因:设计 §10.2 只说"基线模型所在 run 的报告";`stub` 报告没有分数;跨版本分数不可比(诊断设计 §2.5.8),与其让 `detect_regressions` 在不可比的分数上打标记,不如明说没有基线。评估器不复用 `controlplane.models.latest_promoted_checkpoint`,因为那个函数在最新模型缺 `checkpoint_ref` 时会抛错,而选基线不需要 checkpoint。 —— 判错的代价:可比性只比较 `benchmark_version`,报告载荷里没有 `item_pool_version`;换题库必须同时换 `benchmark_version`,否则会跨题库比较、在不可比的分数上打退化标记。换了 `benchmark_version` 之后的第一轮没有退化标记,审核人在 `review` 里看到 `baseline_ref=none`。(另见 Ruling 22:没有分数、或证据等级与本次不同的基线也视为无基线。)
 12. **Ruling: 评估器把 `candidate_model_id` 设为候选 id,只跑静态轨(`dynamic_specs=[]`)。** —— 原因:V1 没有动态轨的情境与绑定来源;`candidate_model_id` 只在动态轨里用于 judge 的自评偏差检查。 —— 判错的代价:接动态轨时要换成真正的模型 id,否则自评偏差检查形同虚设。
@@ -180,46 +199,57 @@ TypeScript 命令行与 Python 只经 git 树里的文件通信。下表每一�
 21. **Ruling: `plan_next_round` 的"最大 run"按 `run-<数字>` 的整数比较;不匹配 `^run-[0-9]+$` 的名字不参与;一个都没有时不触发。在途轮(R4)仍看全部 run。** —— 原因:设计 §3.2(已改为数值序)。字符串序下,计划 5 允许的不补零 `run-9` 会压过按数值分配的 `run-011`,规划静默停住;超过 999 轮(`run-1000` < `run-999`)、手工建的 `scratch` 目录同理。树里没有任何 `run-<数字>` 只可能是手工造的目录,此时宁可停住等人写指令,也不去规划一个名字不合约定的 run。`record_track` 与 `nominate_recipe` 的输出顺序仍按 run id 字典序(Ruling 3),它们不选"最大"。同编号只可能来自手工命名,按 `(编号, run_id)` 取最大使结果与输入顺序无关(`run-7` 胜 `run-007`)。 —— 判错的代价:若有人用别的命名(例如 `run_012`)写指令,它永远不会成为规划对象,闭环在它走完后停住;在途时它仍会挡住规划,所以不会并发多轮。
 22. **Ruling: `resolve_baseline` 不假定基线报告有分数;基线报告的证据等级与本次评估的 `backends` 不同时也视为无基线。** —— 原因:`diagnostic_grade` 对 `backends: "mock"` 不看分数就返回 `mock`,一份只有标记、没有 `dimension_scores` 的报告原先会让 `payload["dimension_scores"]` 抛 `KeyError`,守护进程退出;现在 `dimension_scores` 不是非空列表就返回无基线。真分数对假分数(`real` 对 `mock`,或反过来)打退化标记没有意义,所以评估器把自己的 `backends` 以 keyword-only 参数 `backends=` 传给 `resolve_baseline`;不传时(计划 9 的一致性核对就这样调)不比较等级,行为与原来相同。 —— 判错的代价:从 mock 后端切到 real 后端后的第一轮没有退化标记,`baseline_ref=none`。
 23. **Ruling: `_read_run_views` 定诊断等级时"判不出来按最弱算":载荷不是 dict、或报告文件读不出(与轮次产物同一组异常),都记为 `stub`。** —— 原因:`diagnostic_grade` 对非 dict 载荷抛 `TypeError`(计划 1 的有意设计,调用方负责),在读视图时抛出会让守护进程每个 tick 都退出。`stub` 永不可接受,所以一份坏报告只会让规划、提名、战绩不触发,不会被当成证据。正常信封经 `load_product` 的 schema 校验,载荷总是 dict;这条兜底针对校验之外的读法与将来的迁移器。`has_diagnostic` 仍按文件存在判断,`promote_candidate` 的"有诊断才晋级"不受影响。 —— 判错的代价:报告损坏时 `review` 仍会显示它(命令行另有自己的读法),而闭环一侧静默不动;要看 `diagnostic_grade` 为 `stub` 才知道原因。
+24. **Ruling: `plan_next_round` 在 `nominate_recipe` 启用且最大 run 的候选是 `effective` 时,还要等配方入库门(设计 CP-11):该 run 有提名标记(`has_nomination_note`,`nominated` 与 `skipped` 都放行),且 `gates` 里没有 id 为 `recipe-<run>`、`kind` 为 `recipe_candidate`、状态为 `pending_review` 或 `approved` 的项。候选 `rejected`(被拒绝的候选不提名)或没有启用提名时不等。** —— 原因:提名先于规划产生,同一 tick 里提名处理器还没写标记,规划看不到刚提名的配方;不等的话,同一轮提名的配方最早在第 N+2 轮被复用。三道门的先后因此成为树里的状态事实。 —— 判错的代价:每一轮多停一次等人审门③;人手放进树里的候选没有提名标记,规划永不触发,要人手写下一条指令或关掉提名开关。
 24. **Ruling: `confirm` 与 `findGateProduct` 一样收集全部命中,多处命中报 `directive <id> is ambiguous`,不写文件、不提交。** —— 原因:原来用 `.find` 取第一个命中;人手复制 run 目录时同一信封 id 会出现两次,确认哪一条取决于 `git ls-files` 的顺序。与 Ruling 14 同一取舍:歧义报错比"取第一个"安全。 —— 判错的代价:无;歧义时由人删掉多余的那份再确认。
 
 ## 测试计数
 
-Python 用"起点 B 加增量"记账。B 是本计划开始时(计划 1 已落地,也可能已有计划 2–7 落地)的 Python 全量通过数:任务 90 Step 1 先 `BASE=$(git rev-parse HEAD)`,再跑一次全量,把实测的 B 与 `BASE` 写进执行记录。本计划只保证增量;绝对数取决于在它之前落地了哪些计划。括号里是撰写时在 `main`(820)加计划 1 临时桩的拷贝里实测的数(临时桩不加测试,所以那里 B=820)。
+Python 用"起点 B 加增量"记账。B 是本计划开始时(计划 1 已落地,也可能已有计划 2–7 落地)的 Python 全量通过数:任务 90 Step 1 先 `BASE=$(git rev-parse HEAD)`,再跑一次全量,把实测的 B 与 `BASE` 写进执行记录。本计划只保证增量;绝对数取决于在它之前落地了哪些计划。括号里是 820 加累计增量,是推算数,没有逐任务实测(设计修订加入了任务 98、规划等配方入库门与必填 `backends`,原先逐任务实测的数据已不适用);以最终重放的总数为准,见「未验证项」。
 
 命令行测试不受其他计划影响(其他计划都不碰 `cli/`),照写绝对数。
 
-| 任务后 | 本任务 Python 增量 | Python 累计(820 起点实测) | 命令行累计(绝对数) |
+| 任务后 | 本任务 Python 增量 | Python 累计(820 起点) | 命令行累计(绝对数) |
 |---|---|---|---|
-| 90 | +56 | B+56(876) | 18 |
-| 91 | +32 | B+88(908) | 18 |
-| 92 | +20 | B+108(928) | 18 |
-| 93 | +16 | B+124(944) | 18 |
-| 94 | +15 | B+139(959) | 18 |
-| 95 | +21 | B+160(980) | 18 |
-| 96 | 0 | B+160(980) | 53(+35) |
-| 97 | 0 | B+160(980) | 64(+11) |
-| 98 | 0 | B+160(980) | 64 |
+| 90 | +66 | B+66(886) | 18 |
+| 91 | +33 | B+99(919) | 18 |
+| 92 | +20 | B+119(939) | 18 |
+| 93 | +16 | B+135(955) | 18 |
+| 94 | +15 | B+150(970) | 18 |
+| 95 | +21 | B+171(991) | 18 |
+| 96 | 0 | B+171(991) | 53(+35) |
+| 97 | 0 | B+171(991) | 64(+11) |
+| 98 | +44 | B+215(1035) | 68(+4) |
+| 99 | 0 | B+215(1035) | 68 |
 
 ## File Structure
 
 | 文件 | 动作 | 职责 |
 |---|---|---|
-| `src/controlplane/reconcile.py` | 修改(77 → 218 行,+141 −0) | `RunView`、`ModelView`(含 `agent_round_status` 与派生属性 `has_agent_round`)、`GateView`;`TreeState` 五个新字段;`CLOSED_LOOP_ACTIONS`、`has_round_in_flight`、`_latest_numbered_run`、`_closed_loop_actions` |
-| `src/controlplane/daemon.py` | 修改(178 → 359 行,+192 −11) | `Handler`、`Evaluator`;`read_tree_state` 的 `enabled`、`accept_mock_evidence` 与三个视图读取函数;`_agent_round_status`(轮次产物的信封状态,读不出时为 `None`);`_report_grade`(诊断等级,判不出来记 `stub`);`_check_handlers`;三个入口的新参数 |
-| `src/diagnostic/store_adapter.py` | 修改(30 → 44 行) | `BACKENDS_KEY`、`BACKENDS_VALUES`;`write_report` 的 `backends` |
-| `src/diagnostic/orchestrator.py` | 修改(240 → 244 行) | `run_diagnostic` 的 `backends` |
+| `src/controlplane/reconcile.py` | 修改(77 → 237 行,+161 −1) | `RunView`、`ModelView`(含 `agent_round_status` 与派生属性 `has_agent_round`)、`GateView`;`TreeState` 五个新字段;`CLOSED_LOOP_ACTIONS`、`has_round_in_flight`、`_latest_numbered_run`、`_closed_loop_actions` ;`TreeState.max_model_version`(任务 98);`_recipe_gate_open`(规划等配方入库门,任务 90) |
+| `src/controlplane/daemon.py` | 修改(178 → 385 行,+226 −19) | `Handler`、`Evaluator`;`read_tree_state` 的 `enabled`、`accept_mock_evidence` 与三个视图读取函数;`_agent_round_status`(轮次产物的信封状态,读不出时为 `None`);`_report_grade`(诊断等级,判不出来记 `stub`);`_check_handlers`;三个入口的新参数 ;`read_tree_state` 填 `max_model_version`、晋级复用已登记的模型、`run_daemon` 取仓库文件锁(任务 98) |
+| `src/diagnostic/store_adapter.py` | 修改(30 → 43 行) | `BACKENDS_KEY`、`BACKENDS_VALUES`;`write_report` 的必填 `backends` |
+| `src/diagnostic/orchestrator.py` | 修改(240 → 244 行) | `run_diagnostic` 的必填 `backends` |
+| `tests/test_diag_store_adapter.py`、`tests/test_diag_orchestrator.py` | 修改(七个调用点补传 `backends="mock"`) | 既有用例的断言一行不改 |
 | `src/diagnostic/assets.py` | 新建(74 行) | 分类表与题库的信封读写 |
 | `src/diagnostic/evaluator.py` | 新建(111 行) | `make_diagnostic_evaluator`、`resolve_baseline`、`NO_BASELINE` |
 | `cli/src/commands.ts` | 修改(143 → 347 行) | 三类路径查找、按类型的 `review` 与 `approve` 证据规则、`confirm`、新 `status` |
 | `cli/src/index.ts` | 修改(31 → 37 行) | `USAGE`、`confirm` 分发 |
-| `tests/test_reconcile_closed_loop.py` | 新建(88 个用例) | 六个动作的触发与不触发、在途轮、重入(含 `pending` 轮次再次触发)、最大 run 的数值序 |
+| `tests/test_reconcile_closed_loop.py` | 新建(99 个用例) | 六个动作的触发与不触发、在途轮、重入(含 `pending` 轮次再次触发)、最大 run 的数值序 |
 | `tests/test_daemon_closed_loop_views.py` | 新建(20 个用例) | 视图读取(含轮次产物的信封状态与读不出的轮次产物、非 dict 或读不出的诊断报告);`enabled` 为空时与旧形状相同 |
 | `tests/test_daemon_closed_loop_seams.py` | 新建(16 个用例) | 处理器与评估器的注入;不注入时整棵树与提交日志相同 |
 | `tests/test_diag_assets.py` | 新建(15 个用例) | 资产读写、`backends` 标记、`stub` 与 `mock` 的等级 |
 | `tests/test_diag_evaluator.py` | 新建(21 个用例) | 评估器、基线解析(含无分数与证据等级不同的基线)、注入调和循环、`diagnostic` 不导入 `mindtrainer` |
 | `cli/test/gates.test.ts` | 新建(46 个用例) | 新命令行行为 |
+| `src/controlplane/lock.py` | 新建(58 行) | `RepoLockedError`、`acquire_repo_lock`(仓库文件锁) |
+| `src/controlplane/gitstore.py` | 修改(70 → 71 行,+2 −1) | `write_product` 的提交只带本文件(`git commit -m <信息> -- <路径>`,任务 98) |
+| `src/controlplane/models.py` | 修改(51 → 64 行,+13 −0) | `max_model_version`(任务 98) |
+| `cli/src/gittree.ts` | 修改(37 → 38 行,+2 −1) | `writeProduct` 的提交只带本文件(任务 98) |
+| `tests/test_promotion_idempotent.py` | 新建(26 个用例) | 晋级幂等与版本号 |
+| `tests/test_gitstore_commit_scope.py` | 新建(6 个用例) | 提交只带本文件 |
+| `tests/test_repo_lock.py` | 新建(12 个用例) | 仓库文件锁 |
+| `cli/test/gittree.test.ts` | 新建(4 个用例) | `writeProduct` 只提交本文件 |
 
-**不改的文件:** `tests/` 与 `cli/test/` 下所有既有文件;`src/simulator/stubs.py`;`src/controlplane/paths.py`、`states.py`、`evidence.py`、`config.py`(归计划 1);`schemas/`;`pyproject.toml`(没有新增顶层包:`diagnostic` 已在 wheel 列表里);`cli/package.json`、`cli/package-lock.json`。
+**不改的文件:** `tests/` 与 `cli/test/` 下所有既有文件(`tests/test_diag_store_adapter.py`、`tests/test_diag_orchestrator.py` 里七个补传 `backends="mock"` 的调用点除外);`src/simulator/stubs.py`;`src/controlplane/paths.py`、`states.py`、`evidence.py`、`config.py`(归计划 1);`schemas/`;`pyproject.toml`(没有新增顶层包:`diagnostic` 已在 wheel 列表里);`cli/package.json`、`cli/package-lock.json`。
 
 ---
 
@@ -227,7 +257,7 @@ Python 用"起点 B 加增量"记账。B 是本计划开始时(计划 1 已落�
 
 **Files:**
 - Modify: `src/controlplane/reconcile.py`(77 → 178 行,+101 −0)
-- Test: `tests/test_reconcile_closed_loop.py`(新建,本任务 56 个用例)
+- Test: `tests/test_reconcile_closed_loop.py`(新建,本任务 66 个用例)
 
 **Interfaces:**
 - Consumes: 计划 1 产出的 `controlplane.evidence.evidence_acceptable`;计划 1 产出的非审核类状态 `awaiting_confirmation`(本任务只把它当字符串比较)。
@@ -245,6 +275,8 @@ Python 用"起点 B 加增量"记账。B 是本计划开始时(计划 1 已落�
 - **新逻辑只在 `state.enabled` 非空时运行**,而且追加在既有动作之后。既有动作的产生逻辑一行不改。
 - **`_acceptable` 调 `evidence_acceptable`**,不另写"real 或者 mock 且开关打开"的判断。等级为 `None`(没有报告)时直接判不可接受,因为 `evidence_acceptable` 只认三个等级名。
 - **`plan_next_round` 只看编号最大的那个 run**(R5,设计 §3.2,Ruling 21):`_latest_numbered_run` 只让匹配 `^run-([0-9]+)$` 的 run 参与比较,按整数取最大;`scratch` 之类不匹配的名字排最后、不参与;一个 `run-<数字>` 都没有时返回 `None`,不触发(刻意失败关闭)。同编号(`run-7` 与 `run-007`)时 `max` 的键是 `(编号, run_id)`,按 run id 字典序确定性平局,与输入顺序无关(有测试)。只检查这个 run 的条件,满足才产生动作。较早 run 即使满足全部条件也不规划;最大 run 的指令 `failed`、没有候选时,闭环停住等人(有测试)。**在途轮(R4)仍看全部 `RunView`**,包括不匹配的名字(有测试)。不按字符串序:计划 5 允许不补零的 `run-9` 并按数值分配 `run-011`,字符串序下 `run-9` 永远"最大",规划会静默停住;超过 999 轮同理(有测试)。`controlplane` 不能导入 `trainscheduler`,所以这个小辅助在 `reconcile.py` 里自己写。
+- **规划等配方入库门**(设计 CP-11):`_recipe_gate_open(state, run)` 在 `"nominate_recipe" not in state.enabled` 或候选不是 `effective` 时恒为真(没启用提名、或候选被拒绝不提名,规划不等);否则要求 `run.has_nomination_note`(`nominated` 与 `skipped` 都写这份标记,所以都放行),并且 `state.gates` 里不存在 id 为 `f"recipe-{run.run_id}"`、`kind == "recipe_candidate"`、状态为 `pending_review` 或 `approved` 的项。提名标记缺失就等:提名先于规划产生,同一 tick 里提名处理器还没写标记,规划不出现,下一个 tick 才看得到。
+- **既有规划用例改用 `PLAN = frozenset({"plan_next_round"})` 启用集**:这些用例钉的是规划自己的触发条件,不涉及提名;用 `ALL` 会因默认 `has_nomination_note=False` 而被门挡住。门本身有专门的用例(见文件末尾)。
 - **重入行为由纯函数测试钉住**(见「对外契约」的规划处理器重入契约):崩在写指令之前会再次触发,崩在写指令之后不会。
 - **`ModelView` 存轮次产物的信封状态,不存布尔**(R19,Ruling 20):`agent_round_status: str | None` 是第五个字段;`has_agent_round` 改成只读 `@property`,恒等于 `agent_round_status is not None`(有参数化测试),旧读者照用,但它不再是构造参数。
 - 本任务的 `_closed_loop_actions` 只产生 `plan_next_round`;任务 91 换成六个动作的完整版。
@@ -271,7 +303,7 @@ BASE=$(git rev-parse HEAD); echo "BASE=$BASE"
 PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error | tail -1
 ```
 
-Expected: 第一行打印 `BASE=<提交号>`;第二行是 `<B> passed`,无警告。把 `BASE` 与 B 写进执行记录,后面每个任务的全量预期都是 B 加「测试计数」表里的累计增量;任务 98 Step 3 用 `BASE` 核对改动范围。
+Expected: 第一行打印 `BASE=<提交号>`;第二行是 `<B> passed`,无警告。把 `BASE` 与 B 写进执行记录,后面每个任务的全量预期都是 B 加「测试计数」表里的累计增量;任务 99 Step 3 用 `BASE` 核对改动范围。
 
 **若前置检查报 `ImportError` 或 `AssertionError`:停下,报告"计划 1 尚未落地",不要继续本计划。** 在当前 `main`(`0385004`)上实测的输出是 `ImportError: cannot import name 'recipe_candidate_file' from 'controlplane.paths'`。
 
@@ -306,6 +338,7 @@ from controlplane.reconcile import (
 )
 
 ALL = frozenset(CLOSED_LOOP_ACTIONS)
+PLAN = frozenset({"plan_next_round"})  # 规划自己的触发条件;不启用提名,所以不涉及配方入库门(CP-11)
 
 
 def _run(run_id="run-001", **kw) -> RunView:
@@ -401,14 +434,14 @@ def test_plan_triggers_on_a_terminal_candidate_with_real_evidence(candidate_stat
 
 @pytest.mark.parametrize("candidate_status", ["pending_review", "approved", "draft", "deprecated", None])
 def test_plan_does_not_trigger_before_the_candidate_is_terminal(candidate_status):
-    state = TreeState(runs=[_run(candidate_status=candidate_status)], enabled=ALL)
+    state = TreeState(runs=[_run(candidate_status=candidate_status)], enabled=PLAN)
     assert _plan(state) == []
 
 
 def test_a_failed_directive_does_not_trigger_planning():
     # R5:指令失败,没有候选,闭环停住等人
     state = TreeState(runs=[_run(directive_status="failed", candidate_status=None,
-                                 has_diagnostic=False, diagnostic_grade=None)], enabled=ALL)
+                                 has_diagnostic=False, diagnostic_grade=None)], enabled=PLAN)
     assert reconcile(state) == []
 
 
@@ -418,29 +451,29 @@ def test_plan_never_triggers_on_stub_or_missing_evidence(grade, candidate_status
     for accept in (False, True):
         state = TreeState(runs=[_run(diagnostic_grade=grade, has_diagnostic=grade is not None,
                                      candidate_status=candidate_status)],
-                          enabled=ALL, accept_mock_evidence=accept)
+                          enabled=PLAN, accept_mock_evidence=accept)
         assert _plan(state) == []
 
 
 def test_mock_evidence_needs_the_explicit_switch():
     run = _run(diagnostic_grade="mock")
-    assert _plan(TreeState(runs=[run], enabled=ALL)) == []
-    assert [a.target_id for a in _plan(TreeState(runs=[run], enabled=ALL, accept_mock_evidence=True))] == ["run-001"]
+    assert _plan(TreeState(runs=[run], enabled=PLAN)) == []
+    assert [a.target_id for a in _plan(TreeState(runs=[run], enabled=PLAN, accept_mock_evidence=True))] == ["run-001"]
 
 
 @pytest.mark.parametrize("decision", ["executed", "failed"])
 def test_a_finished_planner_decision_is_the_idempotency_key(decision):
-    state = TreeState(runs=[_run(planner_decision_status=decision)], enabled=ALL)
+    state = TreeState(runs=[_run(planner_decision_status=decision)], enabled=PLAN)
     assert _plan(state) == []
 
 
 def test_a_pending_planner_decision_still_triggers():
-    state = TreeState(runs=[_run(planner_decision_status="pending")], enabled=ALL)
+    state = TreeState(runs=[_run(planner_decision_status="pending")], enabled=PLAN)
     assert _plan(state) == [Action(kind="plan_next_round", target_id="run-001", detail={"run_id": "run-001"})]
 
 
 def test_only_the_largest_run_id_is_planned():
-    state = TreeState(runs=[_run("run-003"), _run("run-001"), _run("run-002")], enabled=ALL)
+    state = TreeState(runs=[_run("run-003"), _run("run-001"), _run("run-002")], enabled=PLAN)
     assert [a.target_id for a in _plan(state)] == ["run-003"]
 
 
@@ -449,44 +482,44 @@ def test_an_earlier_finished_run_is_not_planned_when_a_larger_run_exists():
     newer_without_evidence = _run("run-002", candidate_status="rejected", has_diagnostic=False, diagnostic_grade=None)
     newer_already_planned = _run("run-002", planner_decision_status="executed")
     for newer in (newer_without_evidence, newer_already_planned):
-        assert _plan(TreeState(runs=[_run("run-001"), newer], enabled=ALL)) == []
+        assert _plan(TreeState(runs=[_run("run-001"), newer], enabled=PLAN)) == []
 
 
 def test_the_largest_run_is_chosen_by_numeric_order():
     # 数值序:run-1000 大于 run-999(字符串序会选 run-999)
-    state = TreeState(runs=[_run("run-999"), _run("run-1000"), _run("run-010")], enabled=ALL)
+    state = TreeState(runs=[_run("run-999"), _run("run-1000"), _run("run-010")], enabled=PLAN)
     assert [a.target_id for a in _plan(state)] == ["run-1000"]
 
 
 def test_an_unpadded_run_id_does_not_shadow_a_larger_padded_one():
     # 计划 5 允许不补零的 run-9,并按数值分配 run-011;字符串序下 run-9 永远"最大",规划会静默停住
-    state = TreeState(runs=[_run("run-9", planner_decision_status="executed"), _run("run-011")], enabled=ALL)
+    state = TreeState(runs=[_run("run-9", planner_decision_status="executed"), _run("run-011")], enabled=PLAN)
     assert [a.target_id for a in _plan(state)] == ["run-011"]
 
 
 @pytest.mark.parametrize("order", [("run-7", "run-007"), ("run-007", "run-7")])
 def test_a_tie_on_the_run_number_is_broken_by_run_id_regardless_of_order(order):
     # 手工命名才会出现的同编号:按 run id 字典序取最大("run-7" > "run-007"),不看输入顺序
-    state = TreeState(runs=[_run(r) for r in order], enabled=ALL)
+    state = TreeState(runs=[_run(r) for r in order], enabled=PLAN)
     assert [a.target_id for a in _plan(state)] == ["run-7"]
 
 
 def test_a_non_numbered_directory_does_not_block_planning():
     state = TreeState(runs=[_run("run-001"), _run("scratch", candidate_status=None, has_diagnostic=False,
-                                                  diagnostic_grade=None)], enabled=ALL)
+                                                  diagnostic_grade=None)], enabled=PLAN)
     assert [a.target_id for a in _plan(state)] == ["run-001"]
 
 
 def test_no_numbered_run_means_no_planning():
     # 刻意失败关闭:树里一个 run-<数字> 都没有(只可能是手工造的目录)时不规划
-    state = TreeState(runs=[_run("scratch"), _run("run-abc"), _run("run-")], enabled=ALL)
+    state = TreeState(runs=[_run("scratch"), _run("run-abc"), _run("run-")], enabled=PLAN)
     assert _plan(state) == []
 
 
 def test_a_non_numbered_directory_still_counts_as_a_round_in_flight():
     # R4 仍看全部 run:不参与"最大"的比较,不等于不算在途
     state = TreeState(runs=[_run("run-001"), _run("scratch", directive_status="pending", candidate_status=None,
-                                                  has_diagnostic=False, diagnostic_grade=None)], enabled=ALL)
+                                                  has_diagnostic=False, diagnostic_grade=None)], enabled=PLAN)
     assert _plan(state) == []
 
 
@@ -494,14 +527,14 @@ def test_a_failed_largest_directive_without_a_candidate_stops_planning():
     """R5:最大 run 的指令 failed、没有候选 → 不触发,即使较早的 run 满足全部条件。"""
     failed = _run("run-002", directive_status="failed", candidate_status=None,
                   has_diagnostic=False, diagnostic_grade=None)
-    assert _plan(TreeState(runs=[_run("run-001"), failed], enabled=ALL)) == []
+    assert _plan(TreeState(runs=[_run("run-001"), failed], enabled=PLAN)) == []
 
 
 def test_a_round_in_flight_blocks_planning_anywhere():
     state = TreeState(
         runs=[_run("run-001"), _run("run-002", directive_status="pending", candidate_status=None,
                                     has_diagnostic=False, diagnostic_grade=None)],
-        enabled=ALL,
+        enabled=PLAN,
     )
     assert _plan(state) == []
 
@@ -511,7 +544,7 @@ def test_reentry_after_a_crash_before_the_directive_retriggers_the_source_run():
     崩在"决策 pending、指令未写":来源 run 仍是最大 run,决策 pending → 再次触发;
     处理器复用已记下的 next_run_id 续写指令(对外契约,见计划正文)。"""
     src = _run("run-001", planner_decision_status="pending")
-    assert _plan(TreeState(runs=[_run("run-000", planner_decision_status="executed"), src], enabled=ALL)) == [
+    assert _plan(TreeState(runs=[_run("run-000", planner_decision_status="executed"), src], enabled=PLAN)) == [
         Action(kind="plan_next_round", target_id="run-001", detail={"run_id": "run-001"})
     ]
 
@@ -523,10 +556,10 @@ def test_reentry_after_a_crash_after_the_directive_does_not_retrigger_the_source
     src = _run("run-001", planner_decision_status="pending")
     in_flight = _run("run-002", directive_status="awaiting_confirmation", candidate_status=None,
                      has_diagnostic=False, diagnostic_grade=None)
-    assert _plan(TreeState(runs=[src, in_flight], enabled=ALL)) == []
+    assert _plan(TreeState(runs=[src, in_flight], enabled=PLAN)) == []
 
     finished = _run("run-002", candidate_status="rejected")
-    assert _plan(TreeState(runs=[src, finished], enabled=ALL)) == [
+    assert _plan(TreeState(runs=[src, finished], enabled=PLAN)) == [
         Action(kind="plan_next_round", target_id="run-002", detail={"run_id": "run-002"})
     ]
 
@@ -537,11 +570,67 @@ def test_plan_needs_its_own_name_enabled():
 
 
 def test_reconcile_with_closed_loop_views_is_still_pure():
-    state = TreeState(runs=[_run("run-002"), _run("run-001")], enabled=ALL)
+    state = TreeState(runs=[_run("run-002"), _run("run-001")], enabled=PLAN)
     first, second = reconcile(state), reconcile(state)
     assert first == second
     assert [a.target_id for a in _plan(state)] == ["run-002"]
     assert [r.run_id for r in state.runs] == ["run-002", "run-001"]  # 入参未被排序
+
+
+# ---- 规划等配方入库门(设计 CP-11) ----
+
+PLAN_AND_NOMINATE = frozenset({"plan_next_round", "nominate_recipe"})
+
+
+def _gate(status, run_id="run-001", kind="recipe_candidate"):
+    return GateView(f"recipe-{run_id}", kind, status)
+
+
+@pytest.mark.parametrize("gate_status", ["pending_review", "approved"])
+def test_planning_waits_while_the_recipe_candidate_is_unfinished(gate_status):
+    state = TreeState(runs=[_run(has_nomination_note=True)], gates=[_gate(gate_status)], enabled=PLAN_AND_NOMINATE)
+    assert _plan(state) == []
+
+
+@pytest.mark.parametrize("gate_status", ["effective", "rejected"])
+def test_planning_goes_ahead_once_the_recipe_candidate_has_left_the_gate(gate_status):
+    state = TreeState(runs=[_run(has_nomination_note=True)], gates=[_gate(gate_status)], enabled=PLAN_AND_NOMINATE)
+    assert [a.target_id for a in _plan(state)] == ["run-001"]
+
+
+def test_planning_goes_ahead_when_the_run_nominated_nothing():
+    # 提名写了 skipped 标记,没有配方候选:规划不等
+    state = TreeState(runs=[_run(has_nomination_note=True)], gates=[], enabled=PLAN_AND_NOMINATE)
+    assert [a.target_id for a in _plan(state)] == ["run-001"]
+
+
+def test_planning_waits_for_the_nomination_note():
+    state = TreeState(runs=[_run(has_nomination_note=False)], enabled=PLAN_AND_NOMINATE)
+    assert _plan(state) == []
+    later = dataclasses.replace(state, runs=[_run(has_nomination_note=True)])
+    assert [a.target_id for a in _plan(later)] == ["run-001"]
+
+
+def test_a_rejected_candidate_is_never_nominated_so_planning_does_not_wait():
+    state = TreeState(runs=[_run(candidate_status="rejected", has_nomination_note=False)], enabled=PLAN_AND_NOMINATE)
+    assert [a.target_id for a in _plan(state)] == ["run-001"]
+
+
+def test_planning_does_not_wait_when_nomination_is_not_enabled():
+    state = TreeState(runs=[_run(has_nomination_note=False)], gates=[_gate("pending_review")], enabled=PLAN)
+    assert [a.target_id for a in _plan(state)] == ["run-001"]
+
+
+def test_another_runs_unfinished_recipe_candidate_does_not_block_this_run():
+    state = TreeState(runs=[_run("run-002", has_nomination_note=True)],
+                      gates=[_gate("pending_review", "run-001")], enabled=PLAN_AND_NOMINATE)
+    assert [a.target_id for a in _plan(state)] == ["run-002"]
+
+
+def test_a_skill_proposal_with_the_same_id_does_not_count_as_the_recipe_gate():
+    state = TreeState(runs=[_run(has_nomination_note=True)],
+                      gates=[_gate("pending_review", kind="skill_memory_proposal")], enabled=PLAN_AND_NOMINATE)
+    assert [a.target_id for a in _plan(state)] == ["run-001"]
 ```
 
 - [ ] **Step 3: 运行,确认失败**
@@ -623,7 +712,7 @@ git apply <<'PATCH'
  
  
  @dataclass(frozen=True)
-@@ -35,6 +81,59 @@
+@@ -35,6 +81,74 @@
      detail: dict
  
  
@@ -665,6 +754,20 @@ git apply <<'PATCH'
 +    )
 +
 +
++def _recipe_gate_open(state: TreeState, run: RunView) -> bool:
++    """规划是否可以越过配方入库门(设计 CP-11)。没启用提名、或候选被拒绝(被拒绝的候选不提名)时恒为真;
++    否则要求提名标记在场(nominated 与 skipped 都写它),且这个 run 的配方候选不在门前。"""
++    if "nominate_recipe" not in state.enabled or run.candidate_status != "effective":
++        return True
++    if not run.has_nomination_note:
++        return False
++    recipe_id = f"recipe-{run.run_id}"
++    return not any(
++        g.id == recipe_id and g.kind == "recipe_candidate" and g.status in _IN_FLIGHT_CANDIDATE
++        for g in state.gates
++    )
++
++
 +def _closed_loop_actions(state: TreeState) -> list[Action]:
 +    """闭环动作。本任务只有 plan_next_round;其余五个由任务 91 加入。"""
 +    on = state.enabled
@@ -675,7 +778,8 @@ git apply <<'PATCH'
 +        # 闭环停住等人写新指令;一个 run-<数字> 都没有时也不规划。
 +        latest = _latest_numbered_run(state.runs)
 +        if (latest is not None and latest.candidate_status in _TERMINAL_CANDIDATE
-+                and _acceptable(state, latest) and latest.planner_decision_status in (None, "pending")):
++                and _acceptable(state, latest) and latest.planner_decision_status in (None, "pending")
++                and _recipe_gate_open(state, latest)):
 +            out.append(Action(kind="plan_next_round", target_id=latest.run_id, detail={"run_id": latest.run_id}))
 +    return out
 +
@@ -683,7 +787,7 @@ git apply <<'PATCH'
  def reconcile(state: TreeState) -> list[Action]:
      """纯函数：给定 git 树当前状态，返回下一步动作列表。不做任何 IO、不修改入参。
  
-@@ -74,4 +173,6 @@
+@@ -74,4 +188,6 @@
                      detail={"run_id": c.run_id, "model_version": next_model_version},
                  )
              )
@@ -696,12 +800,12 @@ PATCH
 - [ ] **Step 5: 运行,确认通过**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error tests/test_reconcile_closed_loop.py tests/test_reconcile.py`
-Expected: `70 passed`(新 56 个,既有 14 个)。
+Expected: `80 passed`(新 66 个,既有 14 个)。
 
 - [ ] **Step 6: 全量回归**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error`
-Expected: `B+56 passed`(820 起点实测 `876 passed`),无警告。再跑 `git status --short`:除原本就有的 `cli/package*.json` 与未跟踪的文档外,只应有 `src/controlplane/reconcile.py` 和 `tests/test_reconcile_closed_loop.py`(补丁走标准输入,仓库根目录不会多出补丁文件)。
+Expected: `B+66 passed`(820 起点推算 `886 passed`),无警告。再跑 `git status --short`:除原本就有的 `cli/package*.json` 与未跟踪的文档外,只应有 `src/controlplane/reconcile.py` 和 `tests/test_reconcile_closed_loop.py`(补丁走标准输入,仓库根目录不会多出补丁文件)。
 
 - [ ] **Step 7: 提交**
 
@@ -717,7 +821,7 @@ git commit -m "feat: closed-loop views in reconcile and the plan_next_round trig
 
 **Files:**
 - Modify: `src/controlplane/reconcile.py`(178 → 218 行,+41 −1)
-- Test: `tests/test_reconcile_closed_loop.py`(追加,本任务 32 个用例,文件共 88 个)
+- Test: `tests/test_reconcile_closed_loop.py`(追加,本任务 33 个用例,文件共 99 个)
 
 **Interfaces:**
 - Consumes: 任务 90 的视图与 `has_round_in_flight`、`_acceptable`。
@@ -913,12 +1017,19 @@ def test_enabling_names_does_not_change_the_existing_actions():
     legacy = reconcile(TreeState(**base))
     extended = reconcile(TreeState(**base, enabled=ALL))
     assert extended[: len(legacy)] == legacy
+
+
+def test_the_nomination_and_the_planning_that_waits_for_it_are_never_in_the_same_tick():
+    state = TreeState(runs=[_run(has_nomination_note=False)], enabled=PLAN_AND_NOMINATE)
+    assert [a.kind for a in reconcile(state)] == ["nominate_recipe"]
+    later = dataclasses.replace(state, runs=[_run(has_nomination_note=True)])
+    assert [a.kind for a in reconcile(later)] == ["plan_next_round"]
 ```
 
 - [ ] **Step 2: 运行,确认失败**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error tests/test_reconcile_closed_loop.py`
-Expected: `13 failed, 75 passed`。失败的是各动作"会触发"的用例(含 `pending` 轮次再次触发)与组合顺序用例;"不触发"的用例在只有 `plan_next_round` 的实现上本来就成立。
+Expected: `14 failed, 85 passed`。失败的是各动作"会触发"的用例(含 `pending` 轮次再次触发)与组合顺序用例;"不触发"的用例在只有 `plan_next_round` 的实现上本来就成立。
 
 - [ ] **Step 3: 写实现**
 
@@ -928,7 +1039,7 @@ Expected: `13 failed, 75 passed`。失败的是各动作"会触发"的用例(含
 git apply <<'PATCH'
 --- a/src/controlplane/reconcile.py
 +++ b/src/controlplane/reconcile.py
-@@ -120,9 +120,37 @@
+@@ -134,9 +134,37 @@
  
  
  def _closed_loop_actions(state: TreeState) -> list[Action]:
@@ -967,9 +1078,10 @@ git apply <<'PATCH'
      if "plan_next_round" in on and not has_round_in_flight(state):
          # R5:只看 run-<数字> 里数值最大的那个 run(在途轮仍看全部 run)。较早 run 的候选即使
          # 到了终态、证据可接受,也不会被(重复)规划;最大 run 的指令 failed、没有候选时,
-@@ -131,6 +159,18 @@
+@@ -145,7 +173,19 @@
          if (latest is not None and latest.candidate_status in _TERMINAL_CANDIDATE
-                 and _acceptable(state, latest) and latest.planner_decision_status in (None, "pending")):
+                 and _acceptable(state, latest) and latest.planner_decision_status in (None, "pending")
+                 and _recipe_gate_open(state, latest)):
              out.append(Action(kind="plan_next_round", target_id=latest.run_id, detail={"run_id": latest.run_id}))
 +    if "start_agent_round" in on:
 +        effective = [m for m in state.models if m.status == "effective"]
@@ -992,12 +1104,12 @@ PATCH
 - [ ] **Step 4: 运行,确认通过**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error tests/test_reconcile_closed_loop.py tests/test_reconcile.py`
-Expected: `102 passed`。
+Expected: `113 passed`。
 
 - [ ] **Step 5: 全量回归**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error`
-Expected: `B+88 passed`(820 起点实测 `908 passed`),无警告。
+Expected: `B+99 passed`(820 起点推算 `919 passed`),无警告。
 
 - [ ] **Step 6: 提交**
 
@@ -1081,7 +1193,8 @@ def _report(store, run_id, payload):
     _put(store, diagnostic_report_file(run_id), _env(f"diag-{run_id}", "diagnostic_report", "executed", payload, [run_id]))
 
 
-REAL = {"dimension_scores": [{"dimension": "tom", "level": "l1", "score": 0.5}], "regression_flags": {"flags": []}}
+REAL = {"backends": "real", "dimension_scores": [{"dimension": "tom", "level": "l1", "score": 0.5}],
+        "regression_flags": {"flags": []}}  # 失败关闭(DX-12):只有带 backends: real 才判 real
 MOCK = {**REAL, "backends": "mock"}
 STUB = {"candidate_ref": "cand", "benchmark_version": "bench-v1", "dimension_count": 0, "stub": True}
 
@@ -1459,7 +1572,7 @@ Expected: `42 passed`(新 20 个,既有 22 个)。
 - [ ] **Step 5: 全量回归**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error`
-Expected: `B+108 passed`(820 起点实测 `928 passed`),无警告。
+Expected: `B+119 passed`(820 起点推算 `939 passed`),无警告。
 
 - [ ] **Step 6: 提交**
 
@@ -1859,7 +1972,7 @@ Expected: `62 passed`。
 - [ ] **Step 5: 全量回归**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error`
-Expected: `B+124 passed`(820 起点实测 `944 passed`),无警告。
+Expected: `B+135 passed`(820 起点推算 `955 passed`),无警告。
 
 - [ ] **Step 6: 提交**
 
@@ -1877,20 +1990,21 @@ git commit -m "feat: inject closed-loop handlers and a diagnostic evaluator into
 - Create: `src/diagnostic/assets.py`(74 行)
 - Modify: `src/diagnostic/store_adapter.py`(30 → 44 行)、`src/diagnostic/orchestrator.py`(240 → 244 行)(合计 +22 −4)
 - Test: `tests/test_diag_assets.py`(新建,15 个用例)
+- Modify: `tests/test_diag_store_adapter.py`、`tests/test_diag_orchestrator.py`(七个调用点补传 `backends="mock"`)
 
 **Interfaces:**
 - Consumes: `diagnostic.paths.taxonomy_file`、`item_pool_file`(现有,转出自 `controlplane.paths`);`DiagnosticTaxonomy.to_dict/from_dict`、`ItemPool.to_dict/from_dict`;计划 1 的 `diagnostic_grade`(只在测试里用)。
 - Produces:
   - `diagnostic.assets`:`TAXONOMY_TYPE = "diagnostic_taxonomy"`、`ITEM_POOL_TYPE = "diagnostic_item_pool"`、`DiagnosticAssetError`、`write_taxonomy(store, taxonomy) -> str`、`read_taxonomy(store, version) -> DiagnosticTaxonomy`、`write_item_pool(store, pool) -> str`、`read_item_pool(store, version) -> ItemPool`。
-  - `diagnostic.store_adapter`:`BACKENDS_KEY = "backends"`、`BACKENDS_VALUES = ("mock", "real")`、`write_report(store, run_id, report, *, backends=None)`。
-  - `diagnostic.orchestrator.run_diagnostic(..., *, baseline_scores, dynamic_specs, backends=None)`。
+  - `diagnostic.store_adapter`:`BACKENDS_KEY = "backends"`、`BACKENDS_VALUES = ("mock", "real")`、`write_report(store, run_id, report, *, backends: str)`。
+  - `diagnostic.orchestrator.run_diagnostic(..., *, baseline_scores, dynamic_specs, backends: str)`。
 
 **设计要点:**
 - **资产是信封产物**(Ruling 10):状态 `effective`,载荷就是数据类的 `to_dict()`。写函数返回路径,方便调用方记录;重复写入相同内容不产生提交(`GitStore.write_product` 的既有行为,有测试)。
 - **读取时校验**:文件不存在、信封类型不对、载荷里的版本号与路径里的版本号不一致,都抛 `DiagnosticAssetError` 并写明路径。
-- **`backends` 进 `write_report` 的可选参数**(Ruling 9):`None` 时载荷与以前逐字节相同(有测试直接比较 `payload == report.to_dict()`);非法取值在写之前抛 `ValueError`,树里什么都不留。
+- **`backends` 进 `write_report` 的必填关键字参数**(Ruling 9、设计 DX-12):缺参数直接 `TypeError`,载荷一定带标记;非法取值在写之前抛 `ValueError`,树里什么都不留。既有七个调用点补传 `backends="mock"`(步骤 3 的第二段脚本),其余既有诊断测试一行不改。
 - **`read_report` 不变**:`DiagnosticReport.from_dict` 只取已知键,多出的 `backends` 被忽略。
-- **两个等级测试**:`run_diagnostic` 不传 `backends` 时报告按计划 1 的规则是 `real`(有分数、无标记);传 `mock` 是 `mock`;既有桩报告是 `stub`。
+- **等级测试**:`run_diagnostic` 传 `mock` 是 `mock`、传 `real` 是 `real`;既有桩报告是 `stub`;不传 `backends` 直接 `TypeError`(失败关闭下没有「无标记的真报告」)。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -1998,11 +2112,10 @@ def test_a_version_mismatch_inside_the_asset_is_refused(store):
 
 # ---- write_report 的 backends 参数 ----
 
-def test_write_report_without_backends_is_unchanged(store):
-    write_report(store, "run-1", _report_obj())
-    payload = store.read_product(diagnostic_report_file("run-1")).payload
-    assert payload == _report_obj().to_dict()
-    assert "backends" not in payload
+def test_write_report_requires_the_backends_marker(store):
+    with pytest.raises(TypeError, match="backends"):
+        write_report(store, "run-1", _report_obj())  # 失败关闭:没有标记就没有真证据
+    assert not store.exists(diagnostic_report_file("run-1"))
 
 
 @pytest.mark.parametrize("backends", ["mock", "real"])
@@ -2028,16 +2141,24 @@ def test_the_marker_key_and_values_are_fixed():
     assert (BACKENDS_KEY, BACKENDS_VALUES) == ("backends", ("mock", "real"))
 
 
-@pytest.mark.parametrize("backends,grade", [(None, "real"), ("mock", "mock"), ("real", "real")])
-def test_run_diagnostic_passes_the_marker_through(store, backends, grade):
+@pytest.mark.parametrize("backends", ["mock", "real"])
+def test_run_diagnostic_passes_the_marker_through(store, backends):
     someval = MockSoMEvalRunner(fixed={"i1": ["B"] * 4, "i1v": ["C"] * 4})
     cfg = DiagnosticConfig("run-1", "cand-1", "cand-model", "none", "full", 4, "bench-v1")
-    kw = {} if backends is None else {"backends": backends}
     run_diagnostic(cfg, TAX, POOL, someval, MockJudgeBackend("external-judge", {}), store,
-                   baseline_scores=[], dynamic_specs=[], **kw)
+                   baseline_scores=[], dynamic_specs=[], backends=backends)
     payload = store.read_product(diagnostic_report_file("run-1")).payload
-    assert payload.get("backends") == backends
-    assert diagnostic_grade(payload) == grade
+    assert payload["backends"] == backends
+    assert diagnostic_grade(payload) == backends
+
+
+def test_run_diagnostic_requires_the_backends_marker(store):
+    someval = MockSoMEvalRunner(fixed={"i1": ["B"] * 4, "i1v": ["C"] * 4})
+    cfg = DiagnosticConfig("run-1", "cand-1", "cand-model", "none", "full", 4, "bench-v1")
+    with pytest.raises(TypeError, match="backends"):
+        run_diagnostic(cfg, TAX, POOL, someval, MockJudgeBackend("external-judge", {}), store,
+                       baseline_scores=[], dynamic_specs=[])
+    assert not store.exists(diagnostic_report_file("run-1"))
 
 
 def test_the_existing_stub_report_still_grades_stub():
@@ -2136,7 +2257,7 @@ def read_item_pool(store: GitStore, version: str) -> ItemPool:
 git apply <<'PATCH'
 --- a/src/diagnostic/store_adapter.py
 +++ b/src/diagnostic/store_adapter.py
-@@ -7,8 +7,22 @@
+@@ -7,8 +7,21 @@
  
  _NOW = "2026-09-27T00:00:00Z"
  
@@ -2148,19 +2269,18 @@ git apply <<'PATCH'
 -def write_report(store: GitStore, run_id: str, report: DiagnosticReport) -> None:
 +
 +def write_report(
-+    store: GitStore, run_id: str, report: DiagnosticReport, *, backends: str | None = None
++    store: GitStore, run_id: str, report: DiagnosticReport, *, backends: str
 +) -> None:
-+    """backends 为 None 时载荷与以前逐字节相同;否则在载荷里加 backends 键("mock" 或 "real")。
++    """backends("mock" 或 "real")必填,写进载荷的 backends 键:没有标记的报告按失败关闭判 stub。
 +    标记与报告在同一次写入里落盘,不存在"报告已写、标记未写"的窗口。"""
++    if backends not in BACKENDS_VALUES:
++        raise ValueError(f"backends must be one of {BACKENDS_VALUES}, got {backends!r}")
 +    payload = report.to_dict()
-+    if backends is not None:
-+        if backends not in BACKENDS_VALUES:
-+            raise ValueError(f"backends must be one of {BACKENDS_VALUES}, got {backends!r}")
-+        payload[BACKENDS_KEY] = backends
++    payload[BACKENDS_KEY] = backends
      env = Envelope(
          id=report.id,
          type="diagnostic_report",
-@@ -18,7 +32,7 @@
+@@ -18,7 +31,7 @@
          status="executed",
          schema_version=CURRENT_SCHEMA_VERSION,
          links=report.links,
@@ -2175,13 +2295,13 @@ git apply <<'PATCH'
      *,
      baseline_scores: list[DimensionScore],
      dynamic_specs: list[dict],
-+    backends: str | None = None,
++    backends: str,
  ) -> DiagnosticReport:
 -    """Run one full diagnostic pass and persist the resulting report."""
 +    """Run one full diagnostic pass and persist the resulting report.
  
-+    backends ("mock" | "real" | None) is written into the persisted payload by
-+    write_report in the same write (R17); None keeps the payload unchanged."""
++    backends ("mock" | "real") is written into the persisted payload by
++    write_report in the same write (R17); required, no default (DX-12)."""
 +
      # 1. Select items for this run's tier.
      selected_items = select_items(pool, cfg.tier)
@@ -2198,12 +2318,31 @@ git apply <<'PATCH'
 PATCH
 ```
 
+再把七个既有调用点补传 `backends="mock"`(`backends` 现在必填,不补传这些既有用例会 `TypeError`;这是「既有测试不改」约束唯一的放宽)。在仓库根目录运行:
+
+```bash
+python3 - <<'PYEOF'
+from pathlib import Path
+
+for rel, old, new, expected in (
+    ("tests/test_diag_store_adapter.py", 'write_report(store, "run-1", _report())',
+     'write_report(store, "run-1", _report(), backends="mock")', 5),
+    ("tests/test_diag_orchestrator.py", "baseline_scores=[], dynamic_specs=[])",
+     'baseline_scores=[], dynamic_specs=[], backends="mock")', 2),
+):
+    p = Path(rel)
+    s = p.read_text(encoding="utf-8")
+    assert s.count(old) == expected, (rel, s.count(old))
+    p.write_text(s.replace(old, new), encoding="utf-8")
+PYEOF
+```
+
 - [ ] **Step 4: 运行,确认通过**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error tests/test_diag_assets.py`
 Expected: `15 passed`。
 
-再跑既有诊断测试,确认一行不改仍通过:
+再跑既有诊断测试(七个调用点已补传 `backends`,其余一行不改):
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error tests/test_diag_*.py`
 Expected: `96 passed`(既有 81 个,新 15 个)。
@@ -2211,7 +2350,7 @@ Expected: `96 passed`(既有 81 个,新 15 个)。
 - [ ] **Step 5: 全量回归**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error`
-Expected: `B+139 passed`(820 起点实测 `959 passed`),无警告。
+Expected: `B+150 passed`(820 起点推算 `970 passed`),无警告。
 
 - [ ] **Step 6: 提交**
 
@@ -2220,7 +2359,9 @@ git add src/diagnostic/assets.py
 git add src/diagnostic/store_adapter.py
 git add src/diagnostic/orchestrator.py
 git add tests/test_diag_assets.py
-git commit -m "feat: diagnostic taxonomy and item pool as envelope products; diagnostic reports can carry a backends marker"
+git add tests/test_diag_store_adapter.py
+git add tests/test_diag_orchestrator.py
+git commit -m "feat: diagnostic taxonomy and item pool as envelope products; diagnostic reports must carry a backends marker"
 ```
 
 ---
@@ -2233,7 +2374,7 @@ git commit -m "feat: diagnostic taxonomy and item pool as envelope products; dia
 
 **Interfaces:**
 - Consumes: 任务 94 的 `read_taxonomy`、`read_item_pool`、`BACKENDS_VALUES`、`run_diagnostic(..., backends=...)`;任务 93 的 `reconcile_once(..., evaluator=...)`(只在测试里用);计划 1 的 `diagnostic_grade`。
-- Produces: `make_diagnostic_evaluator(*, taxonomy_version, item_pool_version, someval_runner, judge_backend, benchmark_version, tier="full", sampling_k=4, backends="mock") -> Callable[[GitStore, str, str], None]`(形状即 `controlplane.daemon.Evaluator`);`resolve_baseline(store, run_id, benchmark_version, *, backends=None) -> tuple[str, list[DimensionScore]]`(前三个位置参数与原来相同,`backends` 是新增的 keyword-only 参数,默认不比较证据等级);`NO_BASELINE = "none"`。
+- Produces: `make_diagnostic_evaluator(*, taxonomy_version, item_pool_version, someval_runner, judge_backend, benchmark_version, tier="full", sampling_k=4, backends="mock") -> Callable[[GitStore, str, str], None]`(形状即 `controlplane.daemon.Evaluator`);`resolve_baseline(store, run_id, benchmark_version, *, backends: str) -> tuple[str, list[DimensionScore]]`(前三个位置参数与原来相同,`backends` 是新增的 keyword-only 参数,默认不比较证据等级);`NO_BASELINE = "none"`。
 
 **设计要点:**
 - **返回值的类型写成 `Callable[[GitStore, str, str], None]`**,不导入 `controlplane.daemon.Evaluator`:`controlplane.daemon` 导入 `simulator.stubs`,`diagnostic` 本来就依赖 `simulator`,导入并不会成环;但只为一个类型别名把整个守护模块拉进来不值得。形状相同即可注入。
@@ -2387,7 +2528,7 @@ def test_no_comparable_baseline_reads_as_none(seeded, case):
                                   someval_runner=_someval(), judge_backend=_judge(),
                                   benchmark_version="bench-v0")(seeded, "run-001", "cand-run-001")
         _promote(seeded, 1, "run-001")
-    assert resolve_baseline(seeded, "run-002", "bench-v1") == (NO_BASELINE, [])
+    assert resolve_baseline(seeded, "run-002", "bench-v1", backends="mock") == (NO_BASELINE, [])
 
 
 @pytest.mark.parametrize("payload", [
@@ -2401,8 +2542,8 @@ def test_a_baseline_report_without_scores_reads_as_none(seeded, payload):
                    created_by=OwnerRef(), status="executed", schema_version=1, links=["run-001"], payload=payload)
     seeded.write_product(diagnostic_report_file("run-001"), env, "seed odd baseline")
     _promote(seeded, 1, "run-001")
-    assert resolve_baseline(seeded, "run-002", "bench-v1") == (NO_BASELINE, [])
     assert resolve_baseline(seeded, "run-002", "bench-v1", backends="mock") == (NO_BASELINE, [])
+    assert resolve_baseline(seeded, "run-002", "bench-v1", backends="real") == (NO_BASELINE, [])
 
 
 @pytest.mark.parametrize("baseline,current", [("real", "mock"), ("mock", "real")])
@@ -2421,7 +2562,7 @@ def test_the_highest_effective_version_wins_numerically(seeded):
     _evaluator()(seeded, "run-009", "cand-run-009")
     _promote(seeded, 9, "run-009")
     _promote(seeded, 10, "run-001")
-    assert resolve_baseline(seeded, "run-011", "bench-v1")[0] == "zengen-v10"
+    assert resolve_baseline(seeded, "run-011", "bench-v1", backends="mock")[0] == "zengen-v10"
 
 
 def test_injected_into_the_loop_it_replaces_the_stub_diagnostic(seeded):
@@ -2501,15 +2642,15 @@ def _latest_effective_model(store: GitStore):
 
 
 def resolve_baseline(
-    store: GitStore, run_id: str, benchmark_version: str, *, backends: str | None = None
+    store: GitStore, run_id: str, benchmark_version: str, *, backends: str
 ) -> tuple[str, list[DimensionScore]]:
     """基线 = 最新已晋级模型所在 run 的诊断报告。返回 (baseline_ref, baseline_scores)。
 
     以下情况都没有可比基线,返回 ("none", []):没有已晋级模型;模型的 links 里没有 run id
     (promote_candidate 写的是 [候选 id, run id]);那个 run 就是本次被评的 run;那个 run 没有报告;
     报告等级是 stub(没有分数);报告的 dimension_scores 不是非空列表(mock 报告可能只带 backends
-    标记而没有分数);报告的 benchmark_version 与本次不同(跨版本分数不可比);给了 backends 时,
-    报告的证据等级与它不同(real 对 mock,真分数与假分数不可比)。
+    标记而没有分数);报告的 benchmark_version 与本次不同(跨版本分数不可比);报告的证据等级与本次 backends 不同
+    (real 对 mock,真分数与假分数不可比)。
     可比性只看 benchmark_version:报告载荷里没有题库版本,换题库必须同时换 benchmark_version。"""
     model = _latest_effective_model(store)
     if model is None or len(model.links) < 2:
@@ -2525,7 +2666,7 @@ def resolve_baseline(
     grade = diagnostic_grade(payload)
     if grade == "stub" or payload.get("benchmark_version") != benchmark_version:
         return NO_BASELINE, []
-    if backends is not None and grade != backends:
+    if grade != backends:
         return NO_BASELINE, []
     # diagnostic_grade 对 backends:"mock" 不看分数就返回 mock,所以这里不能假定键在
     scores = payload.get("dimension_scores")
@@ -2580,7 +2721,7 @@ Expected: `117 passed`(既有 81 个,任务 94 的 15 个,本任务 21 个)。
 - [ ] **Step 5: 全量回归**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error`
-Expected: `B+160 passed`(820 起点实测 `980 passed`),无警告。再跑 `grep -rn "mindtrainer" src/diagnostic`:只命中 `evaluator.py` 模块说明里的一句"不导入 mindtrainer"。
+Expected: `B+171 passed`(820 起点推算 `991 passed`),无警告。再跑 `grep -rn "mindtrainer" src/diagnostic`:只命中 `evaluator.py` 模块说明里的一句"不导入 mindtrainer"。
 
 - [ ] **Step 6: 提交**
 
@@ -3513,45 +3654,1013 @@ git commit -m "feat: cli confirm for awaiting_confirmation directives; status li
 
 ---
 
-### Task 98: 全量回归与改动范围检查
+### Task 98: 晋级幂等、仓库文件锁与只带本文件提交
+
+**Files:**
+- Create: `src/controlplane/lock.py`(58 行)
+- Modify: `src/controlplane/models.py`、`src/controlplane/reconcile.py`、`src/controlplane/daemon.py`、`src/controlplane/gitstore.py`、`cli/src/gittree.ts`
+- Test: `tests/test_promotion_idempotent.py`(新建,26 个用例)、`tests/test_gitstore_commit_scope.py`(新建,6 个用例)、`tests/test_repo_lock.py`(新建,12 个用例)、`cli/test/gittree.test.ts`(新建,4 个用例);任务 92 的 `tests/test_daemon_closed_loop_views.py` 里一条等值断言要带上新字段(步骤 3 的脚本一并改)
+
+**Interfaces:**
+- Consumes: 任务 92 的 `read_tree_state`;任务 93 的 `run_daemon`、`reconcile_once`;现有的 `GitStore.write_product`、`controlplane.models.latest_promoted_checkpoint`。
+- Produces(计划 9 依赖后三项):`controlplane.models.max_model_version(store) -> int`;`TreeState.max_model_version: int | None = None`;`controlplane.lock.RepoLockedError`、`acquire_repo_lock(repo_root)`(上下文管理器,`str(RepoLockedError)` 恰好是锁文件的绝对路径);`run_daemon` 在第一个 tick 之前取锁;`GitStore.write_product` 与 `cli/src/gittree.ts` 的 `writeProduct` 只提交本文件。
+
+**设计要点:**
+- **晋级的幂等键是模型产物里的 `payload.promoted_from`(设计 CP-7)。** `apply_action("promote_candidate")` 先扫 `models/`,找 `promoted_from` 等于动作 `target_id` 的模型:找到就复用它的版本号,找不到才按 `reconcile` 给的 `model_version` 新登记。崩在"模型已写、候选还没置 `effective`"之后重放,不会多登记一个版本。
+- **新版本号取现有最大版本号加一,不数文件个数。** `max_model_version(store)` 按文件名 `zengen-v(\d+).yaml` 取最大,没有模型为 0。`TreeState` 新增 `max_model_version: int | None = None`:非 `None` 时 `reconcile` 用它加一,`None` 时沿用 `model_count`,所以只传 `model_count` 的既有 fixture 与既有测试不变;`read_tree_state` 的两条返回路径都填它。人工删掉中间的版本文件会留下版本号空洞,但新号不会撞上用过的号。
+- **复用模型时,那一次写入也照发。** 内容与已提交的逐字节相同时 `write_product` 什么都不做;若上次崩在 `git add` 与 `git commit` 之间,模型文件还停在暂存区,这一次的写入把它提交掉(有测试)。
+- **提交只带本文件(设计 CP-12)。** `GitStore.write_product` 与 TypeScript 的 `writeProduct` 改成 `git commit -m <信息> -- <路径>`:别的文件若已在暂存区(命令行写到一半,或别的进程暂存的),不被卷进这次提交,也不丢。「内容相同不提交」的既有检查保留。
+- **仓库文件锁(设计 CP-12)。** 锁文件是 `<repo_root>/.git/rismforge.lock`:在 `.git/` 下,git 不追踪,`git status` 看不到。POSIX 用 `fcntl.flock(LOCK_EX | LOCK_NB)`,Windows 用 `msvcrt.locking`(Windows 未验证)。被占用时立刻抛 `RepoLockedError`,不等待。锁是内核级的:持锁进程崩溃,系统随进程收回,不留死锁;锁文件本身不删。
+- **`run_daemon` 在第一个 tick 之前取锁,退出(含异常)时释放;`reconcile_once` 与 `apply_action` 不取锁。** 一次性的调用方(计划 9 的 `reconcile_one_tick`)自己用 `acquire_repo_lock` 取同一把锁。锁被占用时 `run_daemon` 一个产物都不写。`mindtrainer/wire.py` 与 `scripts/run_controlplane.py` 一个字不改,但它们调 `run_daemon`,同样被保护。TypeScript 命令行不取锁,它靠"只带本文件"与守护进程共存。
+- **既有测试一行不改。** 任务 92 的 `tests/test_daemon_closed_loop_views.py` 是本计划自己的文件,里面那条 `state == TreeState(...)` 的等值断言要带上 `max_model_version=1`,因为 `read_tree_state` 现在会填它;仓库里既有的测试不受影响(步骤 6 的全量回归证明)。
+
+- [ ] **Step 1: 写失败测试**
+
+新建 `tests/test_promotion_idempotent.py`:
+
+```python
+"""晋级幂等(控制面 CP-7):新版本号取 models/ 下现有最大版本加一;晋级中途崩溃后重放,复用已登记的模型。"""
+import re
+
+import pytest
+
+from controlplane import models
+from controlplane.daemon import apply_action, read_tree_state, reconcile_once
+from controlplane.envelope import Envelope, OwnerRef
+from controlplane.gitstore import GitStore
+from controlplane.paths import (
+    CONTROL_PLANE_ROOT,
+    candidate_checkpoint_file,
+    diagnostic_report_file,
+    model_file,
+    run_dir,
+)
+from controlplane.reconcile import CLOSED_LOOP_ACTIONS, Action, CandidateView, TreeState, reconcile
+
+
+def _env(env_id, env_type, status, payload=None, links=None):
+    return Envelope(
+        id=env_id, type=env_type, version=1, created_at="2026-10-09T00:00:00Z",
+        created_by=OwnerRef(), status=status, schema_version=1,
+        links=links or [], payload=payload or {},
+    )
+
+
+@pytest.fixture
+def store(tmp_path):
+    s = GitStore(str(tmp_path))
+    s.init()
+    return s
+
+
+def _seed_model(store, version):
+    store.write_product(
+        model_file(version),
+        _env(f"zengen-v{version}", "zengen_model", "effective", {"promoted_from": f"cand-old-{version}"}),
+        f"seed: zengen-v{version}",
+    )
+
+
+def _seed_approved(store, run_id):
+    """一个已批准、诊断报告就位、等待晋级的候选(候选 id 为 cand-<run_id>)。"""
+    store.write_product(
+        f"{run_dir(run_id)}/directive.yaml",
+        _env(run_id, "directive", "executed", {"target_dimension": "tom", "recipe_ref": ""}),
+        f"seed: directive {run_id}",
+    )
+    store.write_product(
+        candidate_checkpoint_file(run_id),
+        _env(f"cand-{run_id}", "candidate_checkpoint", "approved",
+             {"checkpoint_ref": {"uri": f"s3://ckpt/{run_id}", "sha256": "ab" * 32}}),
+        f"seed: candidate {run_id}",
+    )
+    store.write_product(
+        diagnostic_report_file(run_id),
+        _env(f"diag-{run_id}", "diagnostic_report", "executed", {"backends": "mock"}),
+        f"seed: diagnostic {run_id}",
+    )
+
+
+def _versions(store):
+    found = []
+    for rel in store.list_products(f"{CONTROL_PLANE_ROOT}/models"):
+        match = re.search(r"zengen-v(\d+)\.yaml$", rel)
+        if match:
+            found.append(int(match.group(1)))
+    return sorted(found)
+
+
+def _promotions(actions):
+    return [a for a in actions if a.kind == "promote_candidate"]
+
+
+@pytest.mark.parametrize(
+    ("names", "expected"),
+    [
+        ([], 0),
+        (["zengen-v1"], 1),
+        (["zengen-v9", "zengen-v10"], 10),
+        (["zengen-v2", "zengen-v7", "zengen-v4"], 7),
+        (["notes", "zengen-v3"], 3),
+        (["notes", "zengen-v-final"], 0),
+    ],
+)
+def test_max_model_version_reads_the_version_numbers_in_the_file_names(store, names, expected):
+    models_dir = store.repo_root / CONTROL_PLANE_ROOT / "models"
+    models_dir.mkdir(parents=True, exist_ok=True)
+    for name in names:
+        (models_dir / f"{name}.yaml").write_text("id: x\n", encoding="utf-8")
+    assert models.max_model_version(store) == expected
+
+
+def test_tree_state_max_model_version_defaults_to_none():
+    assert TreeState().max_model_version is None
+
+
+@pytest.mark.parametrize(
+    ("model_count", "max_version", "expected"),
+    [(2, None, 3), (1, 5, 6), (3, 0, 1), (0, None, 1)],
+)
+def test_reconcile_starts_numbering_from_the_max_version_when_it_is_known(model_count, max_version, expected):
+    state = TreeState(
+        candidates=[CandidateView(id="cand-run-001", status="approved", run_id="run-001", has_diagnostic=True)],
+        model_count=model_count,
+        max_model_version=max_version,
+    )
+    (action,) = reconcile(state)
+    assert action.detail["model_version"] == expected
+
+
+@pytest.mark.parametrize("enabled", [frozenset(), frozenset(CLOSED_LOOP_ACTIONS)])
+def test_read_tree_state_fills_max_model_version_on_both_return_paths(store, enabled):
+    assert read_tree_state(store, enabled=enabled).max_model_version == 0
+    _seed_model(store, 2)
+    _seed_model(store, 5)
+    state = read_tree_state(store, enabled=enabled)
+    assert (state.model_count, state.max_model_version) == (2, 5)
+
+
+@pytest.mark.parametrize(
+    ("existing", "expected"),
+    [([], 1), ([1], 2), ([1, 2, 3], 4), ([1, 3], 4), ([2], 3), ([5], 6)],
+)
+def test_the_new_version_is_the_existing_maximum_plus_one(store, existing, expected):
+    for version in existing:
+        _seed_model(store, version)
+    _seed_approved(store, "run-001")
+    (action,) = _promotions(reconcile_once(store))
+    assert action.detail["model_version"] == expected
+    assert _versions(store) == sorted([*existing, expected])
+    assert store.read_product(model_file(expected)).payload["promoted_from"] == "cand-run-001"
+
+
+def test_deleting_a_middle_version_leaves_a_hole_and_never_repeats_a_number(store):
+    for n in (1, 2, 3):
+        _seed_approved(store, f"run-00{n}")
+        reconcile_once(store)
+    assert _versions(store) == [1, 2, 3]
+    store._git("rm", "-q", model_file(2))
+    store._git("commit", "-q", "-m", "human: drop zengen-v2")
+    _seed_approved(store, "run-004")
+    reconcile_once(store)
+    assert _versions(store) == [1, 3, 4]
+    assert store.read_product(model_file(3)).payload["promoted_from"] == "cand-run-003"
+    assert store.read_product(model_file(4)).payload["promoted_from"] == "cand-run-004"
+
+
+@pytest.mark.parametrize(
+    ("existing", "expected"),
+    [([], [1, 2]), ([1], [2, 3]), ([1, 3], [4, 5])],
+)
+def test_two_candidates_in_one_tick_get_different_versions(store, existing, expected):
+    for version in existing:
+        _seed_model(store, version)
+    _seed_approved(store, "run-001")
+    _seed_approved(store, "run-002")
+    actions = _promotions(reconcile_once(store))
+    assert [a.detail["model_version"] for a in actions] == expected
+    assert _versions(store) == sorted([*existing, *expected])
+    promoted = {store.read_product(model_file(v)).payload["promoted_from"] for v in expected}
+    assert promoted == {"cand-run-001", "cand-run-002"}
+
+
+class _CrashWhenCandidateTurnsEffective(GitStore):
+    """模拟"模型已登记、候选还没置 effective"时进程崩溃:写候选 effective 这一步抛错。"""
+
+    def write_product(self, rel_path, env, message):
+        if rel_path.endswith("candidate_checkpoint.yaml") and env.status == "effective":
+            raise RuntimeError("simulated crash after the model was written")
+        super().write_product(rel_path, env, message)
+
+
+def _crash_after_the_model_was_written(store):
+    crashing = _CrashWhenCandidateTurnsEffective(str(store.repo_root))
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        reconcile_once(crashing)
+
+
+def test_replaying_a_promotion_that_crashed_after_the_model_write_reuses_that_model(store):
+    _seed_approved(store, "run-001")
+    _crash_after_the_model_was_written(store)
+    assert _versions(store) == [1]
+    assert store.read_product(candidate_checkpoint_file("run-001")).status == "approved"
+    assert not store.exists(f"{run_dir('run-001')}/outcome.yaml")
+    model_commits = store._git("log", "--format=%s", "--", model_file(1)).splitlines()
+
+    reconcile_once(store)  # 重放
+
+    assert _versions(store) == [1]
+    assert store.read_product(candidate_checkpoint_file("run-001")).status == "effective"
+    outcome = store.read_product(f"{run_dir('run-001')}/outcome.yaml")
+    assert outcome.payload["promoted_model"] == "zengen-v1"
+    assert outcome.links == ["cand-run-001", "zengen-v1"]
+    assert store._git("log", "--format=%s", "--", model_file(1)).splitlines() == model_commits
+    assert reconcile_once(store) == []
+
+
+def test_apply_action_reuses_the_recorded_model_even_when_the_action_carries_another_version(store):
+    _seed_approved(store, "run-001")
+    _crash_after_the_model_was_written(store)
+    stale = Action(
+        kind="promote_candidate", target_id="cand-run-001",
+        detail={"run_id": "run-001", "model_version": 9},
+    )
+    apply_action(store, stale)
+    assert _versions(store) == [1]
+    assert not store.exists(model_file(9))
+    assert store.read_product(candidate_checkpoint_file("run-001")).status == "effective"
+    outcome = store.read_product(f"{run_dir('run-001')}/outcome.yaml")
+    assert outcome.payload["promoted_model"] == "zengen-v1"
+
+
+class _CrashBetweenAddAndCommitOfTheModel(GitStore):
+    """模拟 write_product 崩在 git add 之后、git commit 之前:模型文件留在暂存区,没有提交。"""
+
+    def _git(self, *args):
+        if args[:1] == ("commit",) and model_file(1) in args:
+            raise RuntimeError("simulated crash between git add and git commit")
+        return super()._git(*args)
+
+
+def test_replaying_a_promotion_that_crashed_between_add_and_commit_commits_the_staged_model(store):
+    _seed_approved(store, "run-001")
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        reconcile_once(_CrashBetweenAddAndCommitOfTheModel(str(store.repo_root)))
+    assert store._git("diff", "--cached", "--name-only").split() == [model_file(1)]
+    assert store._git("log", "--format=%s", "--", model_file(1)) == ""
+
+    reconcile_once(store)  # 重放
+
+    assert _versions(store) == [1]
+    assert store._git("status", "--porcelain") == ""
+    assert store._git("log", "--format=%s", "--", model_file(1)).splitlines() == ["reconcile: promote zengen-v1"]
+    assert store.read_product(candidate_checkpoint_file("run-001")).status == "effective"
+    assert store.exists(f"{run_dir('run-001')}/outcome.yaml")
+```
+
+新建 `tests/test_gitstore_commit_scope.py`:
+
+```python
+"""write_product 的提交只带本文件(控制面 CP-12):别的已暂存文件不被卷进提交,也不丢。"""
+import pytest
+
+from controlplane.envelope import Envelope, OwnerRef
+from controlplane.gitstore import GitStore
+
+A = "control-plane/runs/run-001/directive.yaml"
+B = "control-plane/runs/run-002/directive.yaml"
+
+
+def _env(pid, status="pending"):
+    return Envelope(
+        id=pid, type="directive", version=1, created_at="2026-09-26T00:00:00Z",
+        created_by=OwnerRef(), status=status, schema_version=1,
+    )
+
+
+@pytest.fixture
+def store(tmp_path):
+    s = GitStore(str(tmp_path))
+    s.init()
+    s.write_product(A, _env("run-001"), "add run-001")
+    return s
+
+
+def _stage_something_else(store, how):
+    """把"别的文件"放进暂存区,返回它的路径。"""
+    root = store.repo_root
+    if how == "new_file":
+        (root / "notes.txt").write_text("hello\n", encoding="utf-8")
+        store._git("add", "notes.txt")
+        return "notes.txt"
+    if how == "modified_tracked":
+        (root / A).write_text((root / A).read_text(encoding="utf-8") + "# edited by hand\n", encoding="utf-8")
+        store._git("add", A)
+        return A
+    if how == "deleted_tracked":
+        store._git("rm", "-q", A)
+        return A
+    raise AssertionError(how)
+
+
+def _staged(store):
+    return store._git("diff", "--cached", "--name-only").split()
+
+
+def _commit_count(store):
+    return int(store._git("rev-list", "--count", "HEAD"))
+
+
+def test_the_first_commit_in_a_fresh_repo_still_works(tmp_path):
+    s = GitStore(str(tmp_path))
+    s.init()
+    s.write_product(A, _env("run-001"), "add run-001")
+    assert _commit_count(s) == 1
+    assert s._git("show", "--name-only", "--format=", "HEAD").split() == [A]
+
+
+@pytest.mark.parametrize("how", ["new_file", "modified_tracked", "deleted_tracked"])
+def test_another_staged_file_is_not_swept_into_the_commit(store, how):
+    other = _stage_something_else(store, how)
+    store.write_product(B, _env("run-002"), "add run-002")
+    assert store._git("show", "--name-only", "--format=", "HEAD").split() == [B]
+    assert store._git("log", "-1", "--format=%s").strip() == "add run-002"
+    assert _staged(store) == [other]
+
+
+@pytest.mark.parametrize("other_staged", [False, True])
+def test_identical_content_still_does_not_commit(store, other_staged):
+    if other_staged:
+        _stage_something_else(store, "new_file")
+    before = _commit_count(store)
+    store.write_product(A, _env("run-001"), "same again")
+    assert _commit_count(store) == before
+    assert _staged(store) == (["notes.txt"] if other_staged else [])
+```
+
+新建 `tests/test_repo_lock.py`:
+
+```python
+"""仓库文件锁(控制面 CP-12):同一棵树同一时刻只许一个守护进程写。"""
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+import controlplane
+from controlplane.daemon import apply_action, reconcile_once, run_daemon, stub_dispatcher
+from controlplane.envelope import Envelope, OwnerRef
+from controlplane.gitstore import GitStore
+from controlplane.lock import RepoLockedError, acquire_repo_lock
+from controlplane.paths import candidate_checkpoint_file, run_dir
+from controlplane.reconcile import Action
+
+DIRECTIVE = f"{run_dir('run-001')}/directive.yaml"
+
+
+@pytest.fixture
+def store(tmp_path):
+    s = GitStore(str(tmp_path))
+    s.init()
+    return s
+
+
+def _lock_path(root):
+    return str(Path(root).absolute() / ".git" / "rismforge.lock")
+
+
+def _put_directive(store):
+    env = Envelope(
+        id="run-001", type="directive", version=1, created_at="2026-09-26T00:00:00Z",
+        created_by=OwnerRef(), status="pending", schema_version=1,
+        payload={"target_dimension": "tom", "recipe_ref": ""},
+    )
+    store.write_product(DIRECTIVE, env, "human: write directive")
+
+
+@pytest.mark.parametrize("as_type", [str, Path])
+def test_a_second_acquire_fails_and_the_message_is_the_lock_file_path(store, as_type):
+    root = as_type(store.repo_root)
+    with acquire_repo_lock(root):
+        with pytest.raises(RepoLockedError) as exc:
+            with acquire_repo_lock(root):
+                pytest.fail("the second acquire must not succeed")
+    assert str(exc.value) == _lock_path(store.repo_root)
+
+
+def test_a_relative_repo_root_is_reported_as_an_absolute_lock_path(store, monkeypatch):
+    monkeypatch.chdir(store.repo_root)
+    with acquire_repo_lock("."):
+        with pytest.raises(RepoLockedError) as exc:
+            with acquire_repo_lock("."):
+                pytest.fail("the second acquire must not succeed")
+    message = str(exc.value)
+    assert os.path.isabs(message)
+    assert Path(message).samefile(store.repo_root / ".git" / "rismforge.lock")
+
+
+@pytest.mark.parametrize("body_raises", [False, True])
+def test_the_lock_is_released_when_the_with_block_exits(store, body_raises):
+    if body_raises:
+        with pytest.raises(ValueError):
+            with acquire_repo_lock(store.repo_root):
+                raise ValueError("boom")
+    else:
+        with acquire_repo_lock(store.repo_root):
+            pass
+    with acquire_repo_lock(store.repo_root):
+        pass
+
+
+def test_the_lock_file_lives_under_dot_git_and_git_does_not_track_it(store):
+    _put_directive(store)
+    with acquire_repo_lock(store.repo_root):
+        assert (store.repo_root / ".git" / "rismforge.lock").is_file()
+        assert "rismforge.lock" not in store._git("ls-files")
+        assert store._git("status", "--porcelain") == ""
+
+
+def test_run_daemon_refuses_to_start_while_the_lock_is_held_and_writes_nothing(store):
+    _put_directive(store)
+    commits = store._git("rev-list", "--count", "HEAD")
+    with acquire_repo_lock(store.repo_root):
+        with pytest.raises(RepoLockedError) as exc:
+            run_daemon(store, 0, max_ticks=3)
+    assert str(exc.value) == _lock_path(store.repo_root)
+    assert store.read_product(DIRECTIVE).status == "pending"
+    assert not store.exists(candidate_checkpoint_file("run-001"))
+    assert store._git("rev-list", "--count", "HEAD") == commits
+    assert store._git("status", "--porcelain") == ""
+
+
+@pytest.mark.parametrize("tick_raises", [False, True])
+def test_run_daemon_holds_the_lock_while_ticking_and_releases_it_afterwards(store, tick_raises):
+    _put_directive(store)
+    seen = []
+
+    def dispatcher(s, directive):
+        try:
+            with acquire_repo_lock(s.repo_root):
+                seen.append("acquired")
+        except RepoLockedError:
+            seen.append("locked")
+        if tick_raises:
+            raise RuntimeError("tick failed")
+        stub_dispatcher(s, directive)
+
+    if tick_raises:
+        with pytest.raises(RuntimeError, match="tick failed"):
+            run_daemon(store, 0, max_ticks=1, dispatcher=dispatcher)
+    else:
+        run_daemon(store, 0, max_ticks=1, dispatcher=dispatcher)
+    assert seen == ["locked"]
+    with acquire_repo_lock(store.repo_root):
+        pass
+
+
+@pytest.mark.parametrize("entry", ["reconcile_once", "apply_action"])
+def test_reconcile_once_and_apply_action_do_not_take_the_lock(store, entry):
+    _put_directive(store)
+    with acquire_repo_lock(store.repo_root):
+        if entry == "reconcile_once":
+            assert [a.kind for a in reconcile_once(store)] == ["dispatch_directive"]
+        else:
+            apply_action(store, Action(kind="dispatch_directive", target_id="run-001", detail={}))
+    assert store.read_product(DIRECTIVE).status == "executed"
+
+
+_HOLDER = (
+    "import sys\n"
+    "from controlplane.lock import acquire_repo_lock\n"
+    "with acquire_repo_lock(sys.argv[1]):\n"
+    "    print('held', flush=True)\n"
+    "    sys.stdin.read()\n"
+)
+
+
+def test_a_lock_held_by_another_process_blocks_us_and_dies_with_that_process(store):
+    src = str(Path(controlplane.__file__).resolve().parent.parent)
+    env = {**os.environ, "PYTHONPATH": src, "PYTHONDONTWRITEBYTECODE": "1"}
+    with subprocess.Popen(
+        [sys.executable, "-c", _HOLDER, str(store.repo_root)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env=env,
+    ) as proc:
+        assert proc.stdout.readline().strip() == "held"
+        with pytest.raises(RepoLockedError):
+            with acquire_repo_lock(store.repo_root):
+                pytest.fail("the other process still holds the lock")
+        proc.kill()  # 持锁进程崩溃:内核随进程收回 flock,不留死锁
+        proc.wait()
+    with acquire_repo_lock(store.repo_root):
+        pass
+```
+
+新建 `cli/test/gittree.test.ts`:
+
+```typescript
+import { describe, it, expect, beforeEach } from "vitest";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { Envelope, readProduct, writeProduct } from "../src/gittree.js";
+
+const A = "control-plane/runs/run-001/directive.yaml";
+const B = "control-plane/runs/run-002/directive.yaml";
+
+function git(root: string, ...args: string[]): string {
+  return execFileSync("git", ["-C", root, ...args], { encoding: "utf-8" });
+}
+
+function env(id: string, status: string): Envelope {
+  return {
+    id,
+    type: "directive",
+    version: 1,
+    created_at: "2026-09-26T00:00:00Z",
+    created_by: { owner: "", visibility: "private" },
+    status,
+    schema_version: 1,
+    links: [],
+    payload: {},
+  };
+}
+
+describe("writeProduct commit scope", () => {
+  let root: string;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "gt-"));
+    git(root, "init");
+    git(root, "config", "user.email", "t@e.com");
+    git(root, "config", "user.name", "t");
+    mkdirSync(join(root, dirname(A)), { recursive: true });
+    mkdirSync(join(root, dirname(B)), { recursive: true });
+    writeProduct(root, A, env("run-001", "pending"), "add run-001");
+  });
+
+  it("commits the written file with the given message and the content reads back", () => {
+    writeProduct(root, B, env("run-002", "pending"), "add run-002");
+    expect(git(root, "log", "-1", "--format=%s").trim()).toBe("add run-002");
+    expect(readProduct(root, B).status).toBe("pending");
+  });
+
+  it.each(["new_file", "modified_tracked", "deleted_tracked"])(
+    "does not sweep another staged file into the commit (%s)",
+    (how) => {
+      let other: string;
+      if (how === "new_file") {
+        writeFileSync(join(root, "notes.txt"), "hello\n");
+        git(root, "add", "notes.txt");
+        other = "notes.txt";
+      } else if (how === "modified_tracked") {
+        writeFileSync(join(root, A), readFileSync(join(root, A), "utf-8") + "# edited by hand\n");
+        git(root, "add", A);
+        other = A;
+      } else {
+        git(root, "rm", "-q", A);
+        other = A;
+      }
+      writeProduct(root, B, env("run-002", "pending"), "add run-002");
+      expect(git(root, "show", "--name-only", "--format=", "HEAD").trim().split("\n")).toEqual([B]);
+      expect(git(root, "diff", "--cached", "--name-only").trim().split("\n")).toEqual([other]);
+    },
+  );
+});
+```
+
+- [ ] **Step 2: 运行,确认失败**
+
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error tests/test_repo_lock.py`
+Expected: 收集阶段报错 `ModuleNotFoundError: No module named 'controlplane.lock'`,`1 error`。
+
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error tests/test_promotion_idempotent.py tests/test_gitstore_commit_scope.py`
+Expected: `24 failed, 8 passed`。失败的是:`max_model_version` 与新字段不存在、版本号仍按文件数算、重放多登记了一个版本、别的已暂存文件被卷进提交;通过的 8 条是:版本号没有空洞、按文件数与按最大版本号结果恰好相同的 5 个参数化项,以及首次提交与内容相同不提交的 3 条。
+
+Run: `cd cli && npx vitest run test/gittree.test.ts`
+Expected: `3 failed, 1 passed`。三个参数化用例失败(`expected [ …(2) ] to deeply equal [ Array(1) ]` 一类:提交把别的暂存文件卷了进去),只提交本文件的基本用例通过。
+
+- [ ] **Step 3: 写实现**
+
+新建 `src/controlplane/lock.py`:
+
+```python
+"""仓库文件锁(控制面 CP-12):同一棵 git 树同一时刻只许一个守护进程写。
+
+锁文件是 <repo_root>/.git/rismforge.lock:放在 .git 下,git 不追踪它,也不会出现在 status 里。
+POSIX 用 fcntl.flock(LOCK_EX | LOCK_NB),Windows 用 msvcrt.locking(Windows 未验证)。两者都是
+内核级锁:持锁进程退出或崩溃,系统随进程收回,不会留下死锁。锁文件本身不删(删了会和并发的
+取锁竞争)。
+"""
+from __future__ import annotations
+
+import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
+
+if sys.platform == "win32":  # pragma: no cover - Windows 未验证
+    import msvcrt
+
+    _BUSY: type[OSError] = OSError  # msvcrt.locking 失败一律是 OSError
+
+    def _try_lock(fh) -> None:
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+
+    def _unlock(fh) -> None:
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+else:
+    import fcntl
+
+    _BUSY = BlockingIOError  # flock(LOCK_NB) 被占用时抛它;别的 OSError(如 ENOLCK)不是"被锁"
+
+    def _try_lock(fh) -> None:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def _unlock(fh) -> None:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
+class RepoLockedError(Exception):
+    """另一个进程已持有这棵树的写锁。str(exc) 恰好是锁文件的绝对路径。"""
+
+
+@contextmanager
+def acquire_repo_lock(repo_root: str | Path) -> Iterator[None]:
+    """取仓库写锁;被占用时立刻抛 RepoLockedError(不等待),退出上下文时释放。"""
+    lock_path = Path(repo_root).absolute() / ".git" / "rismforge.lock"
+    fh = open(lock_path, "a+b")
+    try:
+        try:
+            _try_lock(fh)
+        except _BUSY as exc:
+            raise RepoLockedError(str(lock_path)) from exc
+        try:
+            yield
+        finally:
+            _unlock(fh)
+    finally:
+        fh.close()
+```
+
+再在仓库根目录运行下面的脚本。它是对既有文件的逐处替换,每处 `old` 必须恰好出现一次,否则断言失败、不写文件:
+
+```bash
+python3 - <<'PYEOF'
+from pathlib import Path
+
+EDITS = {
+    "src/controlplane/models.py": [
+        (r'''        return PromotedBase(model_id=env.id, version=version, checkpoint_ref=BigRef.from_dict(raw))
+    return None
+''',
+         r'''        return PromotedBase(model_id=env.id, version=version, checkpoint_ref=BigRef.from_dict(raw))
+    return None
+
+
+def max_model_version(store: GitStore) -> int:
+    """models/ 下最大的 zengen 版本号;没有模型返回 0。
+
+    新模型的版本号是它加一,不数文件个数:手工删掉中间的版本会留下空洞,但新号绝不会撞上
+    已经用过的号。"""
+    versions = [
+        int(match.group(1))
+        for rel in store.list_products(f"{CONTROL_PLANE_ROOT}/models")
+        if (match := _MODEL_FILE.search(rel))
+    ]
+    return max(versions, default=0)
+'''),
+    ],
+    "src/controlplane/reconcile.py": [
+        (r'''    gates: list[GateView] = field(default_factory=list)
+    enabled: frozenset[str] = frozenset()
+    accept_mock_evidence: bool = False
+
+
+@dataclass(frozen=True)''',
+         r'''    gates: list[GateView] = field(default_factory=list)
+    enabled: frozenset[str] = frozenset()
+    accept_mock_evidence: bool = False
+    # 控制面 CP-7:models/ 下最大的 zengen 版本号。None 表示调用方没填,版本号起点退回 model_count
+    max_model_version: int | None = None
+
+
+@dataclass(frozen=True)'''),
+        (r'''      （这只保证证据在场，不证明有人读过。）
+    """
+    actions: list[Action] = []
+    next_model_version = state.model_count
+    for d in state.directives:
+        if d.status == "pending":
+            actions.append(Action(kind="dispatch_directive", target_id=d.id, detail={}))''',
+         r'''      （这只保证证据在场，不证明有人读过。）
+    """
+    actions: list[Action] = []
+    next_model_version = (
+        state.max_model_version if state.max_model_version is not None else state.model_count
+    )
+    for d in state.directives:
+        if d.status == "pending":
+            actions.append(Action(kind="dispatch_directive", target_id=d.id, detail={}))'''),
+    ],
+    "src/controlplane/daemon.py": [
+        (r'''from controlplane.envelope import Envelope, OwnerRef
+from controlplane.evidence import diagnostic_grade
+from controlplane.gitstore import GitStore
+from controlplane.migration import UnknownSchemaVersionError
+from controlplane.paths import (
+    CONTROL_PLANE_ROOT,
+    agent_round_file,''',
+         r'''from controlplane.envelope import Envelope, OwnerRef
+from controlplane.evidence import diagnostic_grade
+from controlplane.gitstore import GitStore
+from controlplane.lock import acquire_repo_lock
+from controlplane.migration import UnknownSchemaVersionError
+from controlplane.models import max_model_version
+from controlplane.paths import (
+    CONTROL_PLANE_ROOT,
+    agent_round_file,'''),
+        (r'''                )
+            )
+    model_count = len(store.list_products(f"{CONTROL_PLANE_ROOT}/models"))
+    if not enabled:
+        return TreeState(directives=directives, candidates=candidates, model_count=model_count)
+    return TreeState(
+        directives=directives, candidates=candidates, model_count=model_count,
+        runs=_read_run_views(store), models=_read_model_views(store), gates=_read_gate_views(store),
+        enabled=frozenset(enabled), accept_mock_evidence=accept_mock_evidence,
+    )''',
+         r'''                )
+            )
+    model_count = len(store.list_products(f"{CONTROL_PLANE_ROOT}/models"))
+    top_version = max_model_version(store)
+    if not enabled:
+        return TreeState(
+            directives=directives, candidates=candidates, model_count=model_count,
+            max_model_version=top_version,
+        )
+    return TreeState(
+        directives=directives, candidates=candidates, model_count=model_count,
+        max_model_version=top_version,
+        runs=_read_run_views(store), models=_read_model_views(store), gates=_read_gate_views(store),
+        enabled=frozenset(enabled), accept_mock_evidence=accept_mock_evidence,
+    )'''),
+        (r'''    return frozenset(handlers)
+
+
+def apply_action(
+    store: GitStore,
+    action: Action,''',
+         r'''    return frozenset(handlers)
+
+
+def _recorded_model_version(store: GitStore, candidate_id: str) -> int | None:
+    """models/ 下已经登记过这个候选的模型的版本号;没有返回 None(控制面 CP-7)。
+    晋级在"模型已写、候选还没置 effective"时崩溃,重放就靠它认出上一次写下的那个模型。"""
+    for rel in store.list_products(f"{CONTROL_PLANE_ROOT}/models"):
+        match = _MODEL_FILE.search(rel)
+        if match and store.read_product(rel).payload.get("promoted_from") == candidate_id:
+            return int(match.group(1))
+    return None
+
+
+def apply_action(
+    store: GitStore,
+    action: Action,'''),
+        (r'''        )
+    elif action.kind == "promote_candidate":
+        run_id = action.detail["run_id"]
+        version = action.detail["model_version"]
+        cand = store.read_product(f"{run_dir(run_id)}/candidate_checkpoint.yaml")
+        # 1) 登记 ZenGen 版本产物（仅引用）。把候选的 checkpoint_ref 带过来：
+        # 下一轮训练的基座要从"最新已晋级模型"解析（controlplane.models），''',
+         r'''        )
+    elif action.kind == "promote_candidate":
+        run_id = action.detail["run_id"]
+        # 崩溃重放(CP-7):这个候选已经登记过模型,就复用它的版本号(不再登记新版本);
+        # 找不到才按 reconcile 给的版本号新登记。
+        recorded = _recorded_model_version(store, action.target_id)
+        version = action.detail["model_version"] if recorded is None else recorded
+        cand = store.read_product(f"{run_dir(run_id)}/candidate_checkpoint.yaml")
+        # 1) 登记 ZenGen 版本产物（仅引用）。把候选的 checkpoint_ref 带过来：
+        # 下一轮训练的基座要从"最新已晋级模型"解析（controlplane.models），'''),
+        (r'''            links=[action.target_id, run_id],
+            payload=model_payload,
+        )
+        store.write_product(model_file(version), model, f"reconcile: promote zengen-v{version}")
+        # 2) 候选 approved → effective
+        assert_transition("review", cand.status, "effective")''',
+         r'''            links=[action.target_id, run_id],
+            payload=model_payload,
+        )
+        # 复用时这一次写也照发:内容与已提交的逐字节相同,write_product 什么都不做;
+        # 若上次崩在 git add 与 git commit 之间,模型文件还停在暂存区,这一次把它提交掉
+        # (提交只带本文件,不会有别的提交替它收尾)。
+        store.write_product(model_file(version), model, f"reconcile: promote zengen-v{version}")
+        # 2) 候选 approved → effective
+        assert_transition("review", cand.status, "effective")'''),
+        (r'''    evaluator: Evaluator | None = None,
+    accept_mock_evidence: bool = False,
+) -> None:
+    """轮询守护进程（spec 补充 B.1：轮询而非 inotify）。max_ticks 供测试限次。"""
+    _check_handlers(handlers)
+    ticks = 0
+    while max_ticks is None or ticks < max_ticks:
+        reconcile_once(
+            store, dispatcher=dispatcher, handlers=handlers, evaluator=evaluator,
+            accept_mock_evidence=accept_mock_evidence,
+        )
+        ticks += 1
+        if max_ticks is not None and ticks >= max_ticks:
+            break
+        time.sleep(interval_s)
+''',
+         r'''    evaluator: Evaluator | None = None,
+    accept_mock_evidence: bool = False,
+) -> None:
+    """轮询守护进程（spec 补充 B.1：轮询而非 inotify）。max_ticks 供测试限次。
+    同一棵树只许一个守护进程写(控制面 CP-12):第一个 tick 之前取仓库文件锁,
+    已被占用就抛 RepoLockedError,一个产物都不写;退出(含异常)时释放。"""
+    _check_handlers(handlers)
+    with acquire_repo_lock(store.repo_root):
+        ticks = 0
+        while max_ticks is None or ticks < max_ticks:
+            reconcile_once(
+                store, dispatcher=dispatcher, handlers=handlers, evaluator=evaluator,
+                accept_mock_evidence=accept_mock_evidence,
+            )
+            ticks += 1
+            if max_ticks is not None and ticks >= max_ticks:
+                break
+            time.sleep(interval_s)
+'''),
+    ],
+    "src/controlplane/gitstore.py": [
+        (r'''        )
+        if staged_check.returncode == 0:
+            return
+        self._git("commit", "-m", message)
+
+    def read_product(self, rel_path: str) -> Envelope:
+        abs_path = self.repo_root / rel_path''',
+         r'''        )
+        if staged_check.returncode == 0:
+            return
+        # 只提交本文件(控制面 CP-12):别的文件若已在暂存区,不被卷进这次提交,也不丢。
+        self._git("commit", "-m", message, "--", rel_path)
+
+    def read_product(self, rel_path: str) -> Envelope:
+        abs_path = self.repo_root / rel_path'''),
+    ],
+    "tests/test_daemon_closed_loop_views.py": [
+        (r'''def test_with_nothing_enabled_the_state_equals_the_legacy_shape(store):
+    _seed_everything(store)
+    state = read_tree_state(store)
+    assert state == TreeState(directives=state.directives, candidates=state.candidates, model_count=1)
+    assert (state.runs, state.models, state.gates) == ([], [], [])
+    assert read_tree_state(store, enabled=frozenset(), accept_mock_evidence=True) == state
+''',
+         r'''def test_with_nothing_enabled_the_state_equals_the_legacy_shape(store):
+    _seed_everything(store)
+    state = read_tree_state(store)
+    assert state == TreeState(
+        directives=state.directives, candidates=state.candidates, model_count=1, max_model_version=1,
+    )
+    assert (state.runs, state.models, state.gates) == ([], [], [])
+    assert read_tree_state(store, enabled=frozenset(), accept_mock_evidence=True) == state
+'''),
+    ],
+}
+
+for rel, pairs in EDITS.items():
+    p = Path(rel)
+    s = p.read_text(encoding="utf-8")
+    for old, new in pairs:
+        assert s.count(old) == 1, (rel, old[:50])
+        s = s.replace(old, new)
+    p.write_text(s, encoding="utf-8")
+PYEOF
+```
+
+最后改 TypeScript 一侧的 `writeProduct`(同样的写法):
+
+```bash
+python3 - <<'PYEOF'
+from pathlib import Path
+
+EDITS = {
+    "cli/src/gittree.ts": [
+        (r'''): void {
+  writeFileSync(join(repoRoot, relPath), dump(env, { sortKeys: false }));
+  execFileSync("git", ["-C", repoRoot, "add", relPath]);
+  execFileSync("git", ["-C", repoRoot, "commit", "-m", message]);
+}
+''',
+         r'''): void {
+  writeFileSync(join(repoRoot, relPath), dump(env, { sortKeys: false }));
+  execFileSync("git", ["-C", repoRoot, "add", relPath]);
+  // 只提交本文件:别的文件若已在暂存区,不被卷进这次提交,也不丢
+  execFileSync("git", ["-C", repoRoot, "commit", "-m", message, "--", relPath]);
+}
+'''),
+    ],
+}
+
+for rel, pairs in EDITS.items():
+    p = Path(rel)
+    s = p.read_text(encoding="utf-8")
+    for old, new in pairs:
+        assert s.count(old) == 1, (rel, old[:50])
+        s = s.replace(old, new)
+    p.write_text(s, encoding="utf-8")
+PYEOF
+```
+
+- [ ] **Step 4: 运行,确认通过**
+
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error tests/test_promotion_idempotent.py tests/test_gitstore_commit_scope.py tests/test_repo_lock.py tests/test_daemon_closed_loop_views.py tests/test_gitstore.py tests/test_daemon.py tests/test_daemon_dispatcher.py tests/test_daemon_promote_checkpoint_ref.py tests/test_e2e_loop.py tests/test_reconcile.py tests/test_reconcile_closed_loop.py tests/test_mt_wire.py`
+Expected: `211 passed`(新 44 个、本计划任务 90 至 93 的既有用例,与 `test_gitstore.py`、`test_daemon*.py`、`test_e2e_loop.py`、`test_reconcile.py`、`test_mt_wire.py` 一行未改)。
+
+Run: `cd cli && npx tsc --noEmit && npx vitest run`
+Expected: `tsc` 无输出;`Test Files  4 passed (4)`、`Tests  68 passed (68)`(任务 97 之后是 3 个文件、64 个用例,这一任务加 1 个文件、4 个用例)。
+
+- [ ] **Step 5: 全量回归**
+
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error`
+Expected: `B+215 passed`(820 起点推算为 `1035 passed`,没有单独实测),无警告。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add src/controlplane/lock.py
+git add src/controlplane/models.py
+git add src/controlplane/reconcile.py
+git add src/controlplane/daemon.py
+git add src/controlplane/gitstore.py
+git add cli/src/gittree.ts
+git add tests/test_promotion_idempotent.py
+git add tests/test_gitstore_commit_scope.py
+git add tests/test_repo_lock.py
+git add tests/test_daemon_closed_loop_views.py
+git add cli/test/gittree.test.ts
+git commit -m "feat: idempotent promotion (max version plus one), a repository lock for the daemon, and commits that carry only their own file"
+```
+
+---
+
+### Task 99: 全量回归与改动范围检查
 
 **Files:** 无改动。
 
 - [ ] **Step 1: Python 全量**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error`
-Expected: `B+160 passed`(820 起点实测 `980 passed`),无警告。
+Expected: `B+215 passed`(820 起点推算 `1035 passed`),无警告。
 
 - [ ] **Step 2: 命令行全量与类型检查**
 
 Run: `cd cli && npx tsc --noEmit && npx vitest run`
-Expected: `tsc` 无输出;`Test Files  3 passed (3)`、`Tests  64 passed (64)`。
+Expected: `tsc` 无输出;`Test Files  4 passed (4)`、`Tests  68 passed (68)`。
 
 - [ ] **Step 3: 改动范围**
 
-Run: `git diff --stat "$BASE"..HEAD`(`BASE` 是任务 90 Step 1 记下的提交号)。若执行中途换了 shell、`BASE` 丢失,先从执行记录里取回;记录也没有时退路是 `git diff --stat HEAD~8..HEAD`(本计划恰好 8 个提交,前提是期间没有别的提交混进来)。
+Run: `git diff --stat "$BASE"..HEAD`(`BASE` 是任务 90 Step 1 记下的提交号)。若执行中途换了 shell、`BASE` 丢失,先从执行记录里取回;记录也没有时退路是 `git diff --stat HEAD~9..HEAD`(本计划恰好 9 个提交,前提是期间没有别的提交混进来)。
 
-Expected: 恰好 14 个文件,都在 File Structure 表里(撰写时在拷贝里实测的输出;R19 与审计修订后各文件的数字重新实测,`+` 号条的长度未重画):
+Expected: 恰好 24 个文件,都在 File Structure 表里(在 `main@0385004` 上按序重放计划 1 至 7 并提交,再重放本计划得到的输出;`+` 号条是 `git diff --stat` 自己画的):
 
 ```
- cli/src/commands.ts                    | 268 +++++++++++++++++++---
+ cli/src/commands.ts                    | 268 +++++++++++++++---
+ cli/src/gittree.ts                     |   3 +-
  cli/src/index.ts                       |  10 +-
- cli/test/gates.test.ts                 | 400 ++++++++++++++++++++++++++++++++
- src/controlplane/daemon.py             | 203 +++++++++++++-
- src/controlplane/reconcile.py          | 141 ++++++++++
- src/diagnostic/assets.py               |  74 +++++++
- src/diagnostic/evaluator.py            | 111 +++++++++
+ cli/test/gates.test.ts                 | 400 ++++++++++++++++++++++++++
+ cli/test/gittree.test.ts               |  69 +++++
+ src/controlplane/daemon.py             | 245 ++++++++++++++--
+ src/controlplane/gitstore.py           |   3 +-
+ src/controlplane/lock.py               |  58 ++++
+ src/controlplane/models.py             |  13 +
+ src/controlplane/reconcile.py          | 162 ++++++++++-
+ src/diagnostic/assets.py               |  74 +++++
+ src/diagnostic/evaluator.py            | 111 ++++++++
  src/diagnostic/orchestrator.py         |   8 +-
- src/diagnostic/store_adapter.py        |  18 +-
- tests/test_daemon_closed_loop_seams.py | 217 +++++++++++++++++++
- tests/test_daemon_closed_loop_views.py | 221 +++++++++++++++
- tests/test_diag_assets.py              | 145 +++++++++++++
- tests/test_diag_evaluator.py           | 199 +++++++++++++++
- tests/test_reconcile_closed_loop.py    | 432 +++++++++++++++++++++++++++++++++
- 14 files changed, 2398 insertions(+), 49 deletions(-)
+ src/diagnostic/store_adapter.py        |  17 +-
+ tests/test_daemon_closed_loop_seams.py | 217 +++++++++++++++
+ tests/test_daemon_closed_loop_views.py | 224 +++++++++++++++
+ tests/test_diag_assets.py              | 152 ++++++++++
+ tests/test_diag_evaluator.py           | 199 +++++++++++++
+ tests/test_diag_orchestrator.py        |   4 +-
+ tests/test_diag_store_adapter.py       |  10 +-
+ tests/test_gitstore_commit_scope.py    |  75 +++++
+ tests/test_promotion_idempotent.py     | 237 ++++++++++++++++
+ tests/test_reconcile_closed_loop.py    | 496 +++++++++++++++++++++++++++++++++
+ tests/test_repo_lock.py                | 154 ++++++++++
+ 24 files changed, 3142 insertions(+), 67 deletions(-)
 ```
 
-**不得**出现 `cli/package.json`、`cli/package-lock.json`、`src/controlplane/paths.py`、`states.py`、`evidence.py`、`pyproject.toml`、`schemas/`、任何既有测试文件。
+**不得**出现 `cli/package.json`、`cli/package-lock.json`、`src/controlplane/paths.py`、`states.py`、`evidence.py`、`pyproject.toml`、`schemas/`、除 `tests/test_diag_store_adapter.py` 与 `tests/test_diag_orchestrator.py` 之外的任何既有测试文件。
 
 - [ ] **Step 4: 依赖方向**
 
@@ -3560,19 +4669,21 @@ Expected: 无输出。
 
 - [ ] **Step 5: `from __future__` 检查**
 
-Run: `for f in src/diagnostic/assets.py src/diagnostic/evaluator.py; do python3 -c "import ast,sys; t=ast.parse(open('$f').read()); b=t.body; i=1 if isinstance(b[0],ast.Expr) and isinstance(b[0].value,ast.Constant) else 0; assert isinstance(b[i],ast.ImportFrom) and b[i].module=='__future__', '$f'; print('$f ok')"; done`
-Expected: 两行 `... ok`。
+Run: `for f in src/diagnostic/assets.py src/diagnostic/evaluator.py src/controlplane/lock.py; do python3 -c "import ast,sys; t=ast.parse(open('$f').read()); b=t.body; i=1 if isinstance(b[0],ast.Expr) and isinstance(b[0].value,ast.Constant) else 0; assert isinstance(b[i],ast.ImportFrom) and b[i].module=='__future__', '$f'; print('$f ok')"; done`
+Expected: 三行 `... ok`。
 
 本任务不提交。
 
 ## 完成标准
 
-- Python 全量 `B+160 passed`(820 起点实测 `980 passed`),无警告;命令行 `64 passed`,`tsc --noEmit` 无输出。
-- `tests/test_reconcile.py`、`tests/test_daemon.py`、`tests/test_daemon_dispatcher.py`、`tests/test_e2e_loop.py`、`tests/test_diag_*.py`(既有 15 个文件)、`cli/test/commands.test.ts` 一行未改。
+- Python 全量 `B+215 passed`(820 起点推算 `1035 passed`),无警告;命令行 `68 passed`,`tsc --noEmit` 无输出。
+- `tests/test_reconcile.py`、`tests/test_daemon.py`、`tests/test_daemon_dispatcher.py`、`tests/test_e2e_loop.py`、`cli/test/commands.test.ts` 与 `tests/test_diag_*.py`(既有 15 个文件)一行未改,唯一的例外是七个补传 `backends="mock"` 的调用点。
 - 不注入任何东西时,从指令到晋级的整棵 `control-plane/` 与 `git log` 与改动前相同(`test_explicit_empty_injection_leaves_tree_log_and_actions_identical`)。
 - 六个动作各有触发与不触发的纯函数测试;"决策 pending、指令已写"的重入行为有测试钉住;`start_agent_round` 对 `pending` 轮次再次触发、对 `executed` / `failed` 不触发(R19),`ModelView.agent_round_status` 读的是轮次产物的信封状态,读不出的轮次产物视为没有轮次;`plan_next_round` 按 `run-<数字>` 的数值序选最大 run(`run-9` 与 `run-011`、`scratch` 目录、没有任何编号 run 三种情形有测试,外加同编号 `run-7` / `run-007` 与输入顺序无关);`resolve_baseline` 对没有分数或证据等级不同的基线返回无基线;非 dict 的诊断载荷记为 `stub`;`confirm` 对多处命中报歧义。
-- `make_diagnostic_evaluator` 写出的报告 `diagnostic_grade == "mock"`;既有桩报告仍是 `stub`。
-- `git diff --stat` 只涉及 File Structure 表里的 14 个文件;工作区里没有遗留的补丁文件。
+- `make_diagnostic_evaluator` 写出的报告 `diagnostic_grade == "mock"`;既有桩报告仍是 `stub`;不带 `backends` 的报告判 `stub`,`write_report`、`run_diagnostic`、`resolve_baseline` 缺 `backends` 直接 `TypeError`。
+- 规划等配方入库门有测试钉住:启用提名且候选 `effective` 时,提名标记缺失、配方候选 `pending_review` 或 `approved` 都不规划,离开门之后才规划;候选 `rejected` 或没启用提名时不等。
+- 晋级崩在"模型已写"之后重放,`models/` 里只有一个模型、候选 `effective`、结果摘要在、版本号不变;新版本号取现有最大版本号加一,人工删文件只留空洞。`write_product` 的提交只带本文件;`run_daemon` 取仓库文件锁,锁被占用时不写任何产物。
+- `git diff --stat` 只涉及 File Structure 表里的 24 个文件;工作区里没有遗留的补丁文件。
 
 ## 已知限制
 
@@ -3587,15 +4698,17 @@ Expected: 两行 `... ok`。
 9. **配方候选与提案的载荷形状由计划 5、7 写入。** 本计划按设计 §4.2 读;若那两份计划改了键名,`review` 会打印 `UNREADABLE`,`approve` 会拒绝,不会静默放行。
 10. **"模型 → 产出 run"有两种判法。** 本计划的 `_read_model_views` 与 `resolve_baseline` 取 `links[1]`;计划 3 的 `recipestore.gain.baseline_run_of` 取"`cand-<x>` 也在 `links` 里的那一项"。两种判法目前一致(`promote_candidate` 写的是 `[cand-<run>, <run>]`),计划 9 的一致性核对会加测试钉住;改晋级写法时三处要一起改。
 11. **同编号的 run 只按 run id 字典序平局。** `run-7` 与 `run-007` 都解析为编号 7;`_latest_numbered_run` 取 `(编号, run_id)` 最大的那个(这里是 `run-7`),结果确定、与输入顺序无关,但不代表哪一个"更新"。这种命名只会来自手工,计划 5 分配的 run id 不会撞号。
+12. **git 索引锁冲突仍会让一方失败。** 仓库锁只挡守护进程对守护进程,不挡命令行对守护进程:两边同时 `git commit` 仍会撞 git 的 `index.lock`。实测(同一仓库六个线程各 15 次、共 90 次 `write_product`):62 次抛出子进程调用失败,其中 60 次是 `index.lock` 已存在,2 次是 `cannot lock ref 'HEAD'`。守护进程遇到时异常上抛、进程退出,与其他瞬态异常相同,需要外部监督者重启;命令行一侧 `execFileSync` 抛错,用户重跑即可。提交只带本文件,保证重试不会卷进别人暂存的内容。
 
 ## 未验证项
 
-1. **计划 1 的真实产物。** 验证时计划 1 尚未落地,用的是临时桩(任务 90 Step 1 所列)。`evidence.py` 的桩与计划 1 文档任务 24 的代码块逐字相同;六个路径函数的返回值与计划 1 文档任务 19 逐一核对过;`awaiting_confirmation` 那一行与计划 1 任务 20 相同。**绝对通过数依赖执行顺序**(哪些计划先落地),本计划只保证增量:820 起点下的绝对数是实测,B 起点下的绝对数没有实跑。
-2. **与计划 1 完整改动的叠加运行没有做成。** 原打算把本计划的改动叠到计划 1 撰写者的临时拷贝上跑一次全量,但那份拷贝在撰写期间已被删除。计划 1 文档声明它不改 `reconcile.py`、`daemon.py`、`cli/`,`diagnostic` 也不在它的文件表里,所以预期没有文本冲突;语义上唯一的交点是 `evidence.py`,已逐字比对。
+1. **在九份计划按序重放的拷贝上验证(最终文本)。** 在 `main@0385004`(全量 820 通过)的拷贝上按设计 §12 的顺序重放计划 1 至 9:新建、整体替换、末尾追加、`git apply` 补丁块与改文件的脚本都按文档顺序放过。收集数:计划 1 至 7 放完后 2144,本计划放完后 2359(+215,与「测试计数」表一致),计划 9 放完后 2507;全量实跑 2507 passed(`-W error` 下无警告)。命令行:单放本计划(含 `cli/`)之后 `tsc --noEmit` 无输出,vitest 4 个文件 68 个用例通过。任务 98 步骤 4 的聚焦集合在这份拷贝里实测 211 passed。逐任务的累计数(B+66、B+99 等)由增量推算,没有逐任务重放;各任务内部「先失败、后通过」的输出只对任务 98 逐条实跑过。
+2. **与计划 1、3、5、9 的叠加运行已做。** 本计划与计划 1 在 `evidence.py`、`store_adapter.py`、`orchestrator.py`、`daemon.py` 上有交点(失败关闭的等级规则、必填的 `backends`),九份计划按序重放时它们互相叠加,没有文本冲突;计划 3、5 的夹具已按失败关闭改过(`backends="real"` 表示真报告)。计划 9 对 `controlplane.lock` 与 `max_model_version` 的依赖在它的核对脚本里有 A8-1、A8-2 两行,21 行全部 `OK`。
 3. **计划 3、5、7 的真实处理器。** 本计划所有处理器都是假的;处理器是否真的写下了幂等键、是否遵守重入契约,要到计划 9 的端到端才能验证。
 4. **真实 SoMEval、真实 judge 与 `backends: "real"`。** 只用 `MockSoMEvalRunner` 与 `MockJudgeBackend` 跑过;`backends="real"` 只验证了标记与等级,没有真实后端。
 5. **命令行的进程级行为。** `main` 只在 vitest 里用桩掉的 `process.cwd()` 调过;没有构建 `dist/` 并以 `node dist/index.js confirm ...` 的形式实跑,也没有验证退出码。
-6. **`git apply` 的补丁**:每份 `git apply <<'PATCH'` 块里的差异都在一份干净拷贝上按任务 90→97 依次应用过,应用后的树与验证用的树逐字节相同(`git diff` 为空)。补丁以 `a/`、`b/` 前缀生成,需在仓库根目录执行;差异从标准输入读,不在工作区留下补丁文件。
+6. **`git apply` 的补丁**:每份 `git apply <<'PATCH'` 块里的差异都在九份计划按序重放的拷贝上按任务 90→98 依次应用过,重放脚本没有报任何补丁失败;每个补丁块的 hunk 头行数已用脚本重算,与正文一致。补丁以 `a/`、`b/` 前缀生成,需在仓库根目录执行;差异从标准输入读,不在工作区留下补丁文件。
+7. **Windows 上的仓库锁没有验证。** `controlplane.lock` 在 Windows 用 `msvcrt.locking`;只有 POSIX 路径(`fcntl.flock`)在 macOS 上跑过。锁的互斥用例靠另起子进程持锁,在 Windows 上要另验。
 
 ## 不在本计划内的事
 

@@ -45,11 +45,12 @@
 - **Ruling: `record_cost` 同一 `(task_id, cost_type)` 先到者为准,重复调用什么都不写(不改文件、不提交);每条记录额外带 `calls`(已知时)与 `recorded_at`;`run_trace` 首次创建时 id 为 `trace-<run>`、`type: run_trace`、状态 `executed`、`links: [run_id]`,已存在时只改 `cost_records`,其余字段与状态原样保留。** —— 原因:设计 §5.2 要求幂等;"更新"会让崩溃重放写出与第一次不同的数,`run_trace` 的状态按设计 §4.1 是 `executed`,而现有测试 fixture 用的是 `effective`,不能覆盖。 —— 判错的代价:同一任务想补记更准确的 token 数时做不到,只能换 `task_id`。
 - **Ruling: `record_cost` 与 `record_failure` 对明显写错的入参抛 `ValueError` 且什么都不写:`run_id`、`task_id` 都必须是单个非空路径段(不含 `/`、`\`,不是 `.`、`..`);`cost_type` 为空;数值为负、为 NaN 或无穷、为 `bool`,或 `tokens`、`calls` 不是 `int`;`category` 不在 `T1/T2/T3`;`retries` 不是非负 `int`。** —— 原因:`run_id` 拼进目录 `runs/<run>/`,为空时 `run_trace` 会写到 `control-plane/runs/` 本身,`../x` 会越出 runs 目录,任意 id 还会新建 run 目录、干扰 `_iter_run_ids` 的枚举,进而影响"最大 run"的判定(设计 §3.2,按 run 编号的数值序);`task_id` 拼进文件名 `failure-<task>.yaml`;`tokens=True` 能通过 `sum_costs` 却是错数。 —— 判错的代价:调用方传 `numpy` 整数之类会被拒,要先转 `int`。
 - **Ruling: `FailureRecord` 的载荷字段为 `run_id、task_id、category、point、retries、reason、log_refs、recorded_at`;L3 引用存成 `log_refs` 列表(没有日志时为空列表),不是单个 `log_ref` 键;同一 `(run_id, task_id)` 只写一次,已存在则原样返回路径。产物 id 为 `failure-<run>-<task>`,状态 `executed`,`links: [run_id]`。** —— 原因:补充 E.5 的"失败类别、失败点、已重试次数、最终判定、原始错误 L3 引用、时刻"逐项对应;`observe.trace` 只认识 `payload["log_refs"]`,存成列表 `trace` 才会打印引用可达性(有测试)。失败记录是留痕,不该被后来的重试覆盖。 —— 判错的代价:读方若按单数 `log_ref` 取会拿不到;同一任务二次失败要换 `task_id`(如 `plan-1-retry2`)才能留第二份。
-- **Ruling: `BackendConfig` 的 `token_env` 键仍必须在场(缺键照旧 `KeyError`),值可以是变量名或显式 `null`;空串或非字符串抛 `ValueError`。`command` 必须是非空、元素为非空字符串的列表;`timeout_s` 必须是正数(`bool` 不算),缺省 `120.0`,一律转成 `float`。凭证值字段仍按现有 `_FORBIDDEN_SECRET_KEYS` 检查顶层,字段名比较改为 `k.lower()`(`Token`、`API_KEY` 也被拒);`timeout_s` 拒绝 NaN 与无穷。** —— 原因:设计 R15 写的是"允许显式 `null`",显式比"漏写就当自带登录态"安全;现有 `tests/test_config.py` 不改仍通过。 —— 判错的代价:老配置漏写 `token_env` 的会继续报 `KeyError`,要显式写 `token_env: null`。
+- **Ruling: `BackendConfig` 的 `token_env` 键仍必须在场(缺键照旧 `KeyError`),值可以是变量名或显式 `null`;空串或非字符串抛 `ValueError`。`command` 必须是非空、元素为非空字符串的列表;`timeout_s` 必须是正数(`bool` 不算),缺省 `120.0`,一律转成 `float`。凭证值字段仍按现有 `_FORBIDDEN_SECRET_KEYS` 检查顶层,字段名比较改为 `k.lower()`(`Token`、`API_KEY` 也被拒);`timeout_s` 拒绝 NaN 与无穷;`env_allowlist` 缺省 `None`(用模块常量 `DEFAULT_ENV_ALLOWLIST`),给了就必须是元素为非空字符串的 `list`,空 `list` 合法;`workdir` 缺省且只接受 `"empty_tmp"`。** —— 原因:设计 R15 写的是"允许显式 `null`",显式比"漏写就当自带登录态"安全;现有 `tests/test_config.py` 不改仍通过。 —— 判错的代价:老配置漏写 `token_env` 的会继续报 `KeyError`,要显式写 `token_env: null`。
 - **Ruling: 配置信封:`write_config` 写 `type: config`、状态 `effective`,载荷相同且 id 相同时不写不提交,否则 `version` 加一;路径必须在 `control-plane/config/` 下且以 `.yaml` 结尾;路径先 `posixpath.normpath`,规范化前后必须一致且不含 `..` 段(`control-plane/config/../runs/x.yaml` 被拒);`config_id` 不能为空;目标位置已有非 `config` 信封时拒绝覆盖(`ConfigTypeError`);写前与读后都**递归**检查凭证值字段名(按小写比较),命中抛 `CredentialInGitTreeError`(只报键路径,不报值)。`read_config` 返回载荷的深拷贝,文件缺失抛 `FileNotFoundError`。** —— 原因:配置是"进 git 树的 L-A 层",递归检查挡住把凭证塞进嵌套配置;`planner_prompt_file` 在 `config/prompts/` 下但类型是 `prompt_template`,拒绝覆盖非配置信封,防止配置写方误盖模板。 —— 判错的代价:某份配置若真有名为 `token`、`secret` 之类的合法键,会被拒,要改键名。
-- **Ruling: `diagnostic_grade` 对 `stub` 字段按真值判定;`backends` 取 `mock` 以外不认识的值(含 `null`)、`dimension_scores` 不是非空列表,都判 `stub`;载荷不是 `dict` 抛 `TypeError`。`evidence_acceptable` 收到 `GRADES` 以外的等级抛 `ValueError`。** —— 原因:任务说明的规则原样实现;"无法判断就按最弱证据算"能保证判错时闭环停住而不是被假证据推着走。现有 `run_diagnostic` 的报告没有 `backends` 字段,有分数,判 `real`(R17 的 `mock` 标记由计划 8 的评估器写上)。 —— 判错的代价:有人写 `backends: "Real"` 之类会被当成 `stub`,闭环不转,要人改报告。
+- **Ruling: `diagnostic_grade` 对 `stub` 字段按真值判定;只有 `backends` 为 `real` 且 `dimension_scores` 是非空列表才判 `real`;没有 `backends` 标记、取值不认识(含 `null`)、没有分数,都判 `stub`(失败关闭,设计 DX-12);载荷不是 `dict` 抛 `TypeError`。`evidence_acceptable` 收到 `GRADES` 以外的等级抛 `ValueError`。** —— 原因:任务说明的规则原样实现;"无法判断就按最弱证据算"能保证判错时闭环停住而不是被假证据推着走。现有 `run_diagnostic` 的报告没有 `backends` 标记,判 `stub`;计划 8 让 `write_report`、`run_diagnostic`、`resolve_baseline` 的 `backends` 成为必填关键字参数(设计 DX-12),之后写出的报告都带标记。 —— 判错的代价:手写的或旧版编排器写出的无标记报告永远不可接受,有人写 `backends: "Real"` 之类也会被当成 `stub`,闭环不转,要人补上或改正标记。
 - **Ruling: 桥接日志默认放 `<store.repo_root>/.rismforge/logs/<run_id>/<task_id>-<k>.log`(`k` 从 1 递增,不覆盖);首次写日志时在日志根目录放一个内容为 `*` 的 `.gitignore`,另在本仓库 `.gitignore` 加 `.rismforge/`;构造时可用 `log_dir` 改到任意位置;既没有 `store` 也没有 `log_dir` 时不写日志,`log_ref` 为 `None`。** —— 原因:设计 §5.1 的原文要"仓库外的日志目录,加进 `.gitignore`"(设计现已按本 Ruling 收窄,见设计 §5.1)。控制面仓库是 `GitStore` 指向的那个 git 仓库,不是本代码仓库,改它的 `.gitignore` 等于写一个被追踪的文件;日志根目录自带 `*` 的 `.gitignore` 不需要碰任何被追踪的文件,也不受仓库自身 `.gitignore` 是否存在影响(有测试用 `git status --porcelain --untracked-files=all` 与 `git ls-files` 证明)。 —— 判错的代价:日志实际在控制面仓库的工作区里,只是对 git 不可见;有人 `git add -f` 仍能加进去。要真正放到仓库外,构造时传 `log_dir`。
 - **Ruling: `CliBridge` 的失败分类:超时、非零退出、去掉空白后为空的输出算 T1 并重试;子进程启动阶段的任何 `OSError`(不存在、无权限、`NotADirectoryError`、无 shebang 脚本的 ENOEXEC、参数过长的 E2BIG……)算 T2,立即抛,不重试;子进程输出按 `encoding="utf-8", errors="replace"` 解码,不会因非 UTF-8 输出抛 `UnicodeDecodeError`;缺凭证在**构造时**抛现有的 `MissingCredentialError`(只报变量名),不是 `BridgeError`。退避是 `backoff_base_s * 2**(attempt-1)`,只在两次尝试之间睡,`retry_policy` 缺键时取 `max_attempts=3`、`backoff_base_s=1.0`,非法值在构造时抛 `ValueError`。** —— 原因:设计 §5.1 只列了三种 T1;起不来的可执行文件重试多少次都一样,按 E.2 是 T2;若让普通 `OSError` 或 `UnicodeDecodeError` 原样上抛,按 R18 会被当瞬态,守护循环退出、重启后又撞上同一处,形成循环;缺凭证是配置问题,早失败比等到第一次调用好。 —— 判错的代价:如果外部工具在 PATH 上是被异步装上的(罕见),第一次调用会直接 T2。
+- **Ruling: `CliBridge` 默认隔离子进程:环境变量只传「白名单 ∪ `{token_env}`」与 `CliBridge` 持有的环境的交集(白名单取 `BackendConfig.env_allowlist`,为 `None` 才用 `DEFAULT_ENV_ALLOWLIST`,给了空 `list` 就只传 `token_env`;`token_env` 为 `None` 时不传任何凭证变量);工作目录是每次 `complete` 调用新建的空临时目录,同一次调用的所有尝试共用它,调用结束(成功、T1 耗尽、T2)一律删除;`CliBridge` 自己持有的完整环境不变,只用于解析 `token_env` 与脱敏。`DEFAULT_COMMANDS`(`claude` 关闭全部工具、`codex` 开只读沙箱)只是放在 `inference_bridge` 里的常量,不自动写进任何配置。** —— 原因:设计 §5.1 与 BR-8 要「外部推理只产出文本」由配置强制而不是靠约定;整份环境交给子进程会把守护进程里的其他凭证一起交给外部工具,而脱敏只认 `token_env` 那一个值。 —— 判错的代价:白名单不含 `PATH` 时子进程按它自己的环境找可执行文件,找不到就是 T2;工具的登录态依赖白名单之外的变量时调用失败,要把变量名加进 `env_allowlist`;空临时目录不阻止工具按绝对路径读写 `HOME` 下的文件。
 - **Ruling: `BridgeError` 的构造签名为 `BridgeError(category, reason="", *, attempts=0, log_ref=None)`,`str(exc)` 为 `"<category>: <reason>"`;`category` 只能是 `T1`、`T2`。`CliBridge` 从不解析外部工具的输出,`BridgeResult.input_tokens`、`output_tokens` 恒为 `None`,`text` 是去掉首尾空白的标准输出;记账的 `calls` 是本次成功用掉的尝试次数,`tokens` 省略。异常信息里带脱敏后的 stderr 末尾 300 个字符;启动失败时只在 `except` 块里算出脱敏后的原因,出块后再抛 `BridgeError`,所以它的 `__cause__` 与 `__context__` 都是 `None`。** —— 原因:设计 §14 第 1 条说不知道 JSON 输出里有没有用量,所以不猜;原异常(如 `PermissionError` 的 `strerror`)可能带凭证,`raise ... from None` 只断 `__cause__`,`__context__` 仍挂着原异常,在块外抛才能让异常链上一个原异常都不挂。 —— 判错的代价:成本表里外部推理的 token 一直是 0,只有调用次数;以后确认了输出格式,要在 `CliBridge` 里加一个可选的用量解析器。
 - **Ruling: `ScriptedBridge(script, *, model="scripted", store=None)`:脚本项可以是字符串、`BridgeResult` 或 `BridgeError`;构造时传了 `store` 也照 `CliBridge` 一样记账;脚本用完再调用抛 `ScriptExhaustedError`,它**不是** `BridgeError` 的子类;`run_id`、`task_id` 的路径段校验与 `CliBridge` 共用 `inference_bridge.base._check_segment`,不合法时抛 `ValueError` 且不消耗脚本。** —— 原因:测试替身要能替代真桥接走完记账路径;脚本用完是测试写错,不能被调用方当 T1/T2 吞掉。 —— 判错的代价:无。
 - **Ruling: `awaiting_confirmation` 只是初始状态,没有任何状态迁入它;它的出口是 `pending`(人确认)与 `failed`(人放弃)。证明 `reconcile` 不为它产生动作,用的是现有代码路径:`reconcile` 只对 `status == "pending"` 的指令产生动作,所以不需要改 `reconcile.py`。迁移表按产物种类定义,所以 `awaiting_confirmation` 对所有非审核产物都合法,目前只有指令使用它。** —— 原因:设计 §3.4。 —— 判错的代价:无。
@@ -67,7 +68,7 @@
 - **`git add` 逐个文件**,不用 `git add .` / `-A`。
 - **提交信息不加 `Co-Authored-By` 行**(用户明确要求)。
 - **测试命令**一律是 `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error ...`,下文简写里出现的命令都是这条的完整形式。
-- **测试基线自适应(起点 B 加增量)**:任务 19 的 Step 0 记下 `BASE=$(git rev-parse HEAD)` 并实测全量通过数 B,两个值写进执行记录。各任务增量依次为 +20、+6、+33、+28、+24、+29、+17、+35、+0;各任务后的全量为 **B+20、B+26、B+59、B+87、B+111、B+140、B+157、B+192、B+192**,都不得出现警告。(以 820 为起点实测为 840、846、879、907、931、960、977、1012、1012,每个数都是在一份仓库拷贝里按本计划逐步执行后真实跑出来的,只作参考;别的计划先落地时 B 会更大,只核对增量。)
+- **测试基线自适应(起点 B 加增量)**:任务 19 的 Step 0 记下 `BASE=$(git rev-parse HEAD)` 并实测全量通过数 B,两个值写进执行记录。各任务增量依次为 +20、+6、+33、+43、+24、+30、+17、+48、+0;各任务后的全量为 **B+20、B+26、B+59、B+102、B+126、B+156、B+173、B+221、B+221**,都不得出现警告。(以 820 为起点为 840、846、879、922、946、976、993、1041、1041,只作参考:最后一个数在一份仓库拷贝里按本计划逐步执行后实测,任务 22 起的中间数由实测增量推算,没有逐任务重跑;别的计划先落地时 B 会更大,只核对增量。)
 
 ## File Structure
 
@@ -76,23 +77,23 @@
 | `src/controlplane/paths.py` | 修改(61 → 149 行) | `SUBDIRS` 追加四个目录;18 个新路径函数 |
 | `src/controlplane/states.py` | 修改(49 → 53 行) | 非审核类加 `awaiting_confirmation: {pending, failed}` |
 | `src/controlplane/ledger.py` | 新建(137 行) | `record_cost`、`record_failure` |
-| `src/controlplane/config.py` | 修改(65 → 208 行;任务 22 后 108 行) | `BackendConfig` 加 `command`、`timeout_s`,`token_env` 可为 `None`;`read_config`、`write_config`、`ConfigTypeError` |
+| `src/controlplane/config.py` | 修改(65 → 236 行;任务 22 后 136 行) | `BackendConfig` 加 `command`、`timeout_s`、`env_allowlist`、`workdir`,`token_env` 可为 `None`;`DEFAULT_ENV_ALLOWLIST`;`read_config`、`write_config`、`ConfigTypeError` |
 | `src/controlplane/evidence.py` | 新建(37 行) | `diagnostic_grade`、`evidence_acceptable` |
-| `src/inference_bridge/__init__.py` | 新建(任务 25 为 21 行,任务 26 改为 26 行) | 公共导出 |
+| `src/inference_bridge/__init__.py` | 新建(任务 25 为 21 行,任务 26 改为 27 行) | 公共导出 |
 | `src/inference_bridge/base.py` | 新建(62 行) | `BridgeResult`、`BridgeError`、`InferenceBridge`、`record_bridge_cost`、两个桥接共用的 `_check_segment` |
 | `src/inference_bridge/scripted.py` | 新建(48 行) | `ScriptedBridge`、`ScriptExhaustedError` |
-| `src/inference_bridge/cli.py` | 新建(180 行) | `CliBridge`、`RunOutcome`、`Runner`、`subprocess_runner` |
+| `src/inference_bridge/cli.py` | 新建(203 行) | `CliBridge`、`RunOutcome`、`Runner`、`subprocess_runner`、`DEFAULT_COMMANDS` |
 | `pyproject.toml` | 修改(1 行) | wheel 包列表末尾追加 `src/inference_bridge`(正则定位,已有则不动) |
 | `.gitignore` | 修改(+3 行) | 忽略 `.rismforge/` |
 | `tests/test_paths.py` | 修改(4 → 24 个用例) | `SUBDIRS` 精确相等断言同步;新路径;`init` 建目录 |
 | `tests/test_awaiting_confirmation.py` | 新建(6 个用例) | 新状态的迁移;`reconcile` 与调和循环不动它 |
 | `tests/test_ledger.py` | 新建(33 个用例) | 记账与失败留痕 |
-| `tests/test_config_backend_cli.py` | 新建(28 个用例) | `BackendConfig` 扩展 |
+| `tests/test_config_backend_cli.py` | 新建(43 个用例) | `BackendConfig` 扩展 |
 | `tests/test_config_envelope.py` | 新建(24 个用例) | 配置信封读写 |
-| `tests/test_evidence.py` | 新建(29 个用例) | 证据等级 |
+| `tests/test_evidence.py` | 新建(30 个用例) | 证据等级 |
 | `tests/test_bridge_scripted.py` | 新建(15 个用例) | 公共类型与 `ScriptedBridge` |
 | `tests/test_bridge_packaging.py` | 新建(任务 25 为 2 个用例,任务 26 加到 3 个) | 依赖方向、`.gitignore` |
-| `tests/test_bridge_cli.py` | 新建(34 个用例) | `CliBridge`(注入 runner 与真子进程) |
+| `tests/test_bridge_cli.py` | 新建(47 个用例) | `CliBridge`(注入 runner 与真子进程) |
 | `docs/superpowers/plans/2026-10-09-bridge-and-foundations.md` | 新建 | 本计划 |
 
 ---
@@ -878,19 +879,22 @@ git commit -m "feat: add the ledger (idempotent cost records and write-once fail
 ### Task 22: BackendConfig 的命令行扩展
 
 **Files:**
-- Modify: `src/controlplane/config.py`(65 → 108 行)
-- Test: `tests/test_config_backend_cli.py`(新建,28 个用例);`tests/test_config.py` **一行不改**
+- Modify: `src/controlplane/config.py`(65 → 136 行)
+- Test: `tests/test_config_backend_cli.py`(新建,43 个用例);`tests/test_config.py` **一行不改**
 
 **Interfaces:**
 - Consumes: 现有 `BackendConfig`、`load_backend_config`、`resolve_credential`、`_FORBIDDEN_SECRET_KEYS`。
 - Produces(任务 26 的 `CliBridge` 依赖):
   - `BackendConfig.token_env: str | None`、`BackendConfig.command: list[str] | None = None`、`BackendConfig.timeout_s: float = 120.0`
+  - `BackendConfig.env_allowlist: list[str] | None = None`、`BackendConfig.workdir: str = "empty_tmp"`(任务 26 的 `CliBridge` 据此限定子进程的环境变量与工作目录)
+  - `DEFAULT_ENV_ALLOWLIST`:模块级元组,`env_allowlist` 为 `None` 时的默认白名单
   - `resolve_credential(cfg, env) -> str | None`:`token_env` 为 `None` 时返回 `None`,不读环境;否则行为与现在相同(缺失或为空抛 `MissingCredentialError`,信息里只有变量名)。
 
 **设计要点:**
 - **新字段放在末尾且带默认值。** 现有用关键字构造 `BackendConfig` 的地方(仓库里只有 `load_backend_config` 一处)不受影响;`tests/test_config.py` 的 8 个用例原样通过。
 - **`command` 是 argv 列表,不经 shell。** `"claude -p"` 这种字符串被拒(防止有人以为会按空格切分);载入时拷贝一份,调用方之后改原列表不影响配置。
 - **凭证检查不放宽,反而收紧大小写。** 带着新字段、`token_env: null` 时,六个凭证值字段名仍然一个都不许出现;字段名按 `k.lower()` 比较,`Token`、`API_KEY` 也被拒(参数化测试)。比较逻辑收进 `_is_secret_key`,任务 23 的递归检查复用它。配置对象的字段集合被钉死,没有存放凭证值的位置。
+- **子进程隔离的两个字段只存名字与模式,不存值。** `env_allowlist` 是环境变量名列表:`None` 用模块常量 `DEFAULT_ENV_ALLOWLIST`,给了就必须是元素为非空字符串的 `list`(空 `list` 合法,含义是只传 `token_env`),载入时拷贝一份;`workdir` 目前只接受 `"empty_tmp"`(每次调用一个空临时目录,由任务 26 实现),缺省即它。校验函数 `_load_env_allowlist`、`_load_workdir` 照 `_load_command`、`_load_timeout` 的写法。凭证字段检查不放宽,`BackendConfig` 仍没有存放凭证值的字段(字段集合的测试同步钉死)。
 - 校验细节见头部 Ruling。
 
 - [ ] **Step 1: 写失败测试**
@@ -992,14 +996,60 @@ def test_the_config_object_has_no_field_for_a_credential_value():
     names = set(BackendConfig.__dataclass_fields__)
     assert names == {
         "backend", "invocation_form", "model_name", "prompt_template_version",
-        "token_env", "retry_policy", "command", "timeout_s",
+        "token_env", "retry_policy", "command", "timeout_s", "env_allowlist", "workdir",
     }
+
+
+def test_old_style_config_gets_the_default_isolation_settings():
+    cfg = load_backend_config(_raw())
+    assert cfg.env_allowlist is None
+    assert cfg.workdir == "empty_tmp"
+
+
+def test_the_default_env_allowlist_is_the_documented_set():
+    from controlplane.config import DEFAULT_ENV_ALLOWLIST  # 放在用例里:它缺失时不拖垮整个文件的收集
+
+    assert DEFAULT_ENV_ALLOWLIST == (
+        "PATH", "HOME", "USERPROFILE", "SYSTEMROOT", "TMPDIR", "TEMP", "TMP",
+        "LANG", "LC_ALL", "TERM", "CODEX_HOME", "CLAUDE_CONFIG_DIR",
+    )
+
+
+@pytest.mark.parametrize("allowlist", [None, ["PATH", "HOME"], []], ids=["none", "names", "empty"])
+def test_a_valid_env_allowlist_is_loaded(allowlist):
+    assert load_backend_config(_raw(env_allowlist=allowlist)).env_allowlist == allowlist
+
+
+def test_the_loaded_env_allowlist_is_a_copy_of_the_raw_list():
+    raw = _raw(env_allowlist=["PATH"])
+    cfg = load_backend_config(raw)
+    raw["env_allowlist"].append("EVIL")
+    assert cfg.env_allowlist == ["PATH"]
+
+
+@pytest.mark.parametrize(
+    "allowlist", ["PATH", ["PATH", 3], ["PATH", ""], ("PATH", "HOME")],
+    ids=["string", "non-string-item", "empty-name", "tuple"],
+)
+def test_a_malformed_env_allowlist_is_rejected(allowlist):
+    with pytest.raises(ValueError, match="env_allowlist"):
+        load_backend_config(_raw(env_allowlist=allowlist))
+
+
+def test_workdir_empty_tmp_is_accepted_explicitly():
+    assert load_backend_config(_raw(workdir="empty_tmp")).workdir == "empty_tmp"
+
+
+@pytest.mark.parametrize("workdir", ["inherit", "/tmp", "", None])
+def test_an_unknown_workdir_is_rejected(workdir):
+    with pytest.raises(ValueError, match="workdir"):
+        load_backend_config(_raw(workdir=workdir))
 ```
 
 - [ ] **Step 2: 运行,确认失败**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error tests/test_config_backend_cli.py`
-Expected: `20 failed, 8 passed`(新字段不存在报 `AttributeError`,非法 `command`、`timeout_s`(含 NaN、无穷)、`token_env` 不报错,`Token`、`API_KEY` 没被拒,`token_env=None` 时 `resolve_credential` 查 `env.get(None)` 抛 `MissingCredentialError`;通过的 8 条是缺 `token_env` 键、缺凭证、小写凭证字段被拒这些现有行为)。
+Expected: `35 failed, 8 passed`(新字段不存在报 `AttributeError`,非法 `command`、`timeout_s`(含 NaN、无穷)、`token_env` 不报错,`Token`、`API_KEY` 没被拒,`token_env=None` 时 `resolve_credential` 查 `env.get(None)` 抛 `MissingCredentialError`;通过的 8 条是缺 `token_env` 键、缺凭证、小写凭证字段被拒这些现有行为;新增的 `env_allowlist`、`workdir` 用例全部失败:字段不存在,非法值不报错,用例里导入 `DEFAULT_ENV_ALLOWLIST` 报 `ImportError`)。
 
 - [ ] **Step 3: 写实现**
 
@@ -1046,6 +1096,9 @@ new2 = '''    # 环境变量名，如 "ANTHROPIC_API_KEY"。显式 None 表示�
     # 命令行形态的参数模板（argv 列表，不经 shell）。None 表示没有命令行形态。
     command: list[str] | None = field(default=None)
     timeout_s: float = 120.0
+    # 子进程隔离(任务 26 用):env_allowlist 为 None 时用 DEFAULT_ENV_ALLOWLIST;workdir 目前只有 "empty_tmp"。
+    env_allowlist: list[str] | None = None
+    workdir: str = "empty_tmp"
 
 
 def _load_command(raw: dict) -> list[str] | None:
@@ -1073,6 +1126,22 @@ def _load_timeout(raw: dict) -> float:
     return float(timeout)
 
 
+def _load_env_allowlist(raw: dict) -> list[str] | None:
+    allowlist = raw.get("env_allowlist")
+    if allowlist is None:
+        return None  # 用 DEFAULT_ENV_ALLOWLIST
+    if not isinstance(allowlist, list) or not all(isinstance(n, str) and n for n in allowlist):
+        raise ValueError(f"env_allowlist must be null or a list of non-empty strings, got {allowlist!r}")
+    return list(allowlist)
+
+
+def _load_workdir(raw: dict) -> str:
+    workdir = raw.get("workdir", "empty_tmp")
+    if workdir != "empty_tmp":
+        raise ValueError(f"workdir must be 'empty_tmp', got {workdir!r}")
+    return workdir
+
+
 def _is_secret_key(key: object) -> bool:
     """凭证值字段名按小写比较:Token、API_KEY 与 token、api_key 一样被拒。"""
     return isinstance(key, str) and key.lower() in _FORBIDDEN_SECRET_KEYS
@@ -1097,6 +1166,8 @@ def load_backend_config(raw: dict) -> BackendConfig:
         retry_policy=raw.get("retry_policy", {}),
         command=_load_command(raw),
         timeout_s=_load_timeout(raw),
+        env_allowlist=_load_env_allowlist(raw),
+        workdir=_load_workdir(raw),
     )
 
 
@@ -1106,7 +1177,18 @@ def resolve_credential(cfg: BackendConfig, env: dict[str, str]) -> str | None:
     if cfg.token_env is None:
         return None
     value = env.get(cfg.token_env)'''
-for o, n in ((old1, new1), (old2, new2)):
+old3 = '''_REDACTED = "***REDACTED***"
+'''
+new3 = '''_REDACTED = "***REDACTED***"
+
+# 子进程默认能看到的环境变量名;BackendConfig.env_allowlist 为 None 时用它(设计 BR-8)。
+# 凭证变量不在其中,由 token_env 单独加入。
+DEFAULT_ENV_ALLOWLIST = (
+    "PATH", "HOME", "USERPROFILE", "SYSTEMROOT", "TMPDIR", "TEMP", "TMP",
+    "LANG", "LC_ALL", "TERM", "CODEX_HOME", "CLAUDE_CONFIG_DIR",
+)
+'''
+for o, n in ((old1, new1), (old2, new2), (old3, new3)):
     assert s.count(o) == 1, o[:40]
     s = s.replace(o, n)
 p.write_text(s, encoding="utf-8")
@@ -1116,13 +1198,13 @@ PYEOF
 - [ ] **Step 4: 运行,确认通过**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error tests/test_config_backend_cli.py tests/test_config.py`
-Expected: `36 passed`。
+Expected: `51 passed`。
 
 Run: `git diff --stat tests/test_config.py`
 Expected: 无输出(现有测试一行未改)。
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error`
-Expected: `B+87 passed`(以 820 为起点为 907),无警告。
+Expected: `B+102 passed`(以 820 为起点为 922),无警告。
 
 - [ ] **Step 5: 提交**
 
@@ -1137,7 +1219,7 @@ git commit -m "feat: backend config gets a cli command template, a timeout, and 
 ### Task 23: 配置信封读写 `read_config` / `write_config`
 
 **Files:**
-- Modify: `src/controlplane/config.py`(108 → 208 行)
+- Modify: `src/controlplane/config.py`(136 → 236 行)
 - Test: `tests/test_config_envelope.py`(新建,24 个用例)
 
 **Interfaces:**
@@ -1459,10 +1541,10 @@ PYEOF
 - [ ] **Step 4: 运行,确认通过**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error tests/test_config_envelope.py tests/test_config_backend_cli.py tests/test_config.py`
-Expected: `60 passed`。
+Expected: `75 passed`。
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error`
-Expected: `B+111 passed`(以 820 为起点为 931),无警告。
+Expected: `B+126 passed`(以 820 为起点为 946),无警告。
 
 - [ ] **Step 5: 提交**
 
@@ -1478,18 +1560,18 @@ git commit -m "feat: config files are envelopes (read_config / write_config with
 
 **Files:**
 - Create: `src/controlplane/evidence.py`(37 行)
-- Test: `tests/test_evidence.py`(新建,29 个用例)
+- Test: `tests/test_evidence.py`(新建,30 个用例)
 
 **Interfaces:**
 - Consumes: `simulator.stubs.diagnostic_evaluator_stub`(只在测试里用)。`evidence.py` 本身不导入任何模块。
 - Produces(补充契约;计划 3 的提名、计划 5 的规划处理器、计划 8 的 `reconcile` 扩展都调它,不得另写一份):
-  - `diagnostic_grade(payload: dict) -> str`(`"stub" | "mock" | "real"`)
+  - `diagnostic_grade(payload: dict) -> str`(`"stub" | "mock" | "real"`;非 `dict` 抛 `TypeError`;失败关闭:只有 `backends == "real"` 且 `dimension_scores` 是非空 `list` 才判 `real`,没有 `backends` 标记判 `stub`)
   - `evidence_acceptable(grade: str, accept_mock: bool) -> bool`
   - `GRADES = ("stub", "mock", "real")`
 
 **设计要点:**
-- **规则按顺序判**:`payload.get("stub")` 为真 → `stub`;`backends == "mock"` → `mock`;`dimension_scores` 是非空列表且(没有 `backends` 键或 `backends == "real"`)→ `real`;其余 → `stub`。
-- **现有两种报告的等级**:`diagnostic_evaluator_stub` 的载荷带 `stub: True`,判 `stub`(测试直接用它);`diagnostic.orchestrator.run_diagnostic` 写的 `DiagnosticReport.to_dict()` 有 `dimension_scores`、没有 `backends`,有分数时判 `real`。R17 的 `backends: mock` 由计划 8 的评估器写上。
+- **规则按顺序判,失败关闭(设计 DX-12)**:`payload.get("stub")` 为真 → `stub`;`backends == "mock"` → `mock`;`backends == "real"` 且 `dimension_scores` 是非空列表 → `real`;其余(含没有 `backends` 键)→ `stub`。
+- **现有两种报告的等级**:`diagnostic_evaluator_stub` 的载荷带 `stub: True`,判 `stub`(测试直接用它);`diagnostic.orchestrator.run_diagnostic` 今天写的 `DiagnosticReport.to_dict()` 有 `dimension_scores`、没有 `backends`,判 `stub`。计划 8 让 `run_diagnostic`、`write_report`、`resolve_baseline` 的 `backends` 成为必填关键字参数之后,每份新报告都带标记;在那之前不要用 mock 后端写报告。
 - **纯函数,不改入参**(有测试)。
 
 - [ ] **Step 1: 写失败测试**
@@ -1517,9 +1599,10 @@ def test_the_stub_report_is_graded_stub():
         ({"backends": "mock", "dimension_scores": _SCORES}, "mock"),
         ({"backends": "mock", "dimension_scores": []}, "mock"),
         ({"stub": False, "backends": "mock", "dimension_scores": _SCORES}, "mock"),
-        ({"dimension_scores": _SCORES}, "real"),  # 现有 run_diagnostic 报告:没有 backends 字段
+        ({"dimension_scores": _SCORES}, "stub"),  # 现有 run_diagnostic 报告:没有 backends 标记,失败关闭
         ({"backends": "real", "dimension_scores": _SCORES}, "real"),
-        ({"stub": False, "dimension_scores": _SCORES}, "real"),
+        ({"stub": False, "backends": "real", "dimension_scores": _SCORES}, "real"),
+        ({"stub": False, "dimension_scores": _SCORES}, "stub"),
         ({}, "stub"),
         ({"dimension_scores": []}, "stub"),
         ({"backends": "real", "dimension_scores": []}, "stub"),
@@ -1590,8 +1673,8 @@ def diagnostic_grade(payload: dict) -> str:
 
     - payload["stub"] 为真 → "stub"(占位报告,优先于其余字段)
     - payload["backends"] == "mock" → "mock"
-    - dimension_scores 是非空列表,且没有 backends 字段或 backends == "real" → "real"
-    - 其余(空报告、backends 取值不认识、无法判断)→ "stub":判不出来就按最弱的证据算
+    - backends == "real" 且 dimension_scores 是非空列表 → "real"
+    - 其余(没有 backends 标记、取值不认识、没有分数、空报告)→ "stub":失败关闭,判不出来就按最弱的证据算
     """
     if not isinstance(payload, dict):
         raise TypeError(f"diagnostic payload must be a mapping, got {type(payload).__name__}")
@@ -1601,7 +1684,7 @@ def diagnostic_grade(payload: dict) -> str:
         return "mock"
     scores = payload.get("dimension_scores")
     has_scores = isinstance(scores, list) and len(scores) > 0
-    if has_scores and ("backends" not in payload or payload["backends"] == "real"):
+    if has_scores and payload.get("backends") == "real":
         return "real"
     return "stub"
 
@@ -1620,10 +1703,10 @@ def evidence_acceptable(grade: str, accept_mock: bool) -> bool:
 - [ ] **Step 4: 运行,确认通过**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error tests/test_evidence.py`
-Expected: `29 passed`。
+Expected: `30 passed`。
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error`
-Expected: `B+140 passed`(以 820 为起点为 960),无警告。
+Expected: `B+156 passed`(以 820 为起点为 976),无警告。
 
 - [ ] **Step 5: 提交**
 
@@ -1638,7 +1721,7 @@ git commit -m "feat: add the single evidence-grade implementation (stub, mock, r
 ### Task 25: 新包 `inference_bridge` 的公共类型与 ScriptedBridge
 
 **Files:**
-- Create: `src/inference_bridge/__init__.py`(21 行;任务 26 改为 26 行)
+- Create: `src/inference_bridge/__init__.py`(21 行;任务 26 改为 27 行)
 - Create: `src/inference_bridge/base.py`(62 行)
 - Create: `src/inference_bridge/scripted.py`(48 行)
 - Modify: `pyproject.toml`(wheel 包列表末尾追加 `src/inference_bridge`,不假设列表现有几项)
@@ -1991,7 +2074,7 @@ Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider
 Expected: `19 passed`。
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error`
-Expected: `B+157 passed`(以 820 为起点为 977),无警告。
+Expected: `B+173 passed`(以 820 为起点为 993),无警告。
 
 - [ ] **Step 5: 提交**
 
@@ -2010,29 +2093,32 @@ git commit -m "feat: add the inference_bridge package (result, error, protocol, 
 ### Task 26: CliBridge
 
 **Files:**
-- Create: `src/inference_bridge/cli.py`(180 行)
-- Modify: `src/inference_bridge/__init__.py`(21 → 26 行,导出 `CliBridge`、`RunOutcome`、`Runner`、`subprocess_runner`)
+- Create: `src/inference_bridge/cli.py`(203 行)
+- Modify: `src/inference_bridge/__init__.py`(21 → 27 行,导出 `CliBridge`、`RunOutcome`、`Runner`、`subprocess_runner`、`DEFAULT_COMMANDS`)
 - Modify: `.gitignore`(+3 行,忽略 `.rismforge/`)
-- Test: `tests/test_bridge_cli.py`(新建,34 个用例)、`tests/test_bridge_packaging.py`(加 1 个用例,共 3 个)
+- Test: `tests/test_bridge_cli.py`(新建,47 个用例)、`tests/test_bridge_packaging.py`(加 1 个用例,共 3 个)
 
 **Interfaces:**
-- Consumes: `BackendConfig`(含任务 22 的 `command`、`timeout_s`、可空 `token_env`)、`resolve_credential`、`redact`;`BigRef`;`GitStore.repo_root`;`record_bridge_cost`、`BridgeError`、`BridgeResult`(任务 25)。
+- Consumes: `BackendConfig`(含任务 22 的 `command`、`timeout_s`、可空 `token_env`、`env_allowlist`、`workdir`)、`DEFAULT_ENV_ALLOWLIST`、`resolve_credential`、`redact`;`BigRef`;`GitStore.repo_root`;`record_bridge_cost`、`BridgeError`、`BridgeResult`(任务 25)。
 - Produces:
   - `CliBridge(config, *, store=None, log_dir=None, env=None, runner=subprocess_runner, sleep=time.sleep)`,满足 `InferenceBridge`
   - `RunOutcome(returncode: int | None, stdout: str, stderr: str, timed_out: bool = False)`
-  - `Runner = Callable[[list[str], str, float, Mapping[str, str]], RunOutcome]`(argv、标准输入、超时秒数、子进程环境)
-  - `subprocess_runner`:默认 runner,真起子进程;超时由 `subprocess.run(timeout=...)` 杀掉子进程,返回 `timed_out=True`
+  - `Runner = Callable[[list[str], str, float, Mapping[str, str], str], RunOutcome]`(argv、标准输入、超时秒数、子进程环境、工作目录)
+  - `subprocess_runner`:默认 runner,真起子进程,工作目录是第五个参数 `cwd`;超时由 `subprocess.run(timeout=...)` 杀掉子进程,返回 `timed_out=True`
+  - `DEFAULT_COMMANDS: dict[str, list[str]]`:`claude`、`codex` 两个工具的默认 argv 模板(定义在 `cli.py`,由包的 `__init__` 再导出)
   - `LOG_SUBDIR = ".rismforge/logs"`
 
 **设计要点:**
 - **提示词经标准输入传。** argv 来自 `BackendConfig.command`,模板里的 `{model}` 换成 `model_name`,其余原样;不经 shell。
-- **凭证只走环境变量。** `env` 缺省取 `os.environ` 的拷贝,整份传给子进程;凭证值在构造时经 `resolve_credential` 取出,只用于脱敏。有测试断言凭证不在 argv 里。
+- **凭证只走环境变量,而且子进程只拿白名单里的那些。** `env` 缺省取 `os.environ` 的拷贝(`self._env`,完整环境,保留不动);凭证值在构造时经 `resolve_credential` 取出,只用于脱敏。传给子进程的是过滤后的另一份:`allowed = 白名单 ∪ {token_env}`,`child_env = {k: v for k, v in self._env.items() if k in allowed}`;`env_allowlist` 为 `None` 才用 `DEFAULT_ENV_ALLOWLIST`,空 `list` 就只传 `token_env`,`token_env` 为 `None` 时不传任何凭证变量。有测试断言凭证不在 argv 里、凭证变量到得了子进程、白名单外的变量到不了。
+- **每次调用一个空临时目录。** `complete` 用 `tempfile.TemporaryDirectory()` 建目录,作为这次调用所有尝试的工作目录(runner 的第五个参数 `cwd`);`with` 保证成功、T1 耗尽、T2 都会把它删掉,同一次调用的重试共用同一个目录。
+- **默认参数模板是常量。** `DEFAULT_COMMANDS`(`claude`、`codex` 两项)定义在 `cli.py`、由包的 `__init__` 再导出:claude 关闭全部工具、不落会话文件,codex 只读沙箱、不要求在 git 仓库里、不落会话文件。它只是现成的 argv 模板,不自动写进任何配置。
 - **失败分类与重试**:超时、非零退出、空输出 → T1,`sleep(backoff_base_s * 2**(attempt-1))` 后重试;耗尽抛 `BridgeError("T1", ..., attempts=max_attempts)`,`reason` 带最后一次的原因和脱敏后的 stderr 末尾。子进程启动阶段的任何 `OSError` → 立即 `BridgeError("T2")`(参数化测试覆盖 `NotADirectoryError`、ENOEXEC、E2BIG;另有一条真起一个不带 shebang 的可执行文件)。退避测试断言 `sleep` 收到的序列(`[0.5, 1.0]`),最后一次失败后不睡。
 - **成功后记账**:构造时传了 `store`,就 `record_bridge_cost(..., calls=本次用掉的尝试次数)`,`tokens` 省略;失败不记。
 - **日志**:每次 `complete` 写一份日志(成功或失败都写),内容是后端名、模型、argv、`run_id`、`task_id`、提示词、每次尝试的 stdout/stderr,**整体过 `redact`**;路径 `<日志根>/<run_id>/<task_id>-<k>.log`;返回或异常里带 `BigRef(uri="file://<绝对路径>", sha256, size_bytes)`。日志根缺省是 `<store.repo_root>/.rismforge/logs`,首次写入时放一个内容为 `*` 的 `.gitignore`。`run_id`、`task_id` 会拼进路径,必须是不含分隔符的非空段,`.`、`..` 也拒绝。
 - **凭证不外泄,用测试证明**:日志全文不含凭证;`str(exc)`、`exc.reason`、`exc.args` 不含凭证;`PermissionError` 的信息里带凭证时也被脱敏,且 `BridgeError` 在 `except` 块外抛出,`__cause__` 与 `__context__` 都是 `None`;一次真实调用之后,控制面仓库里 `git ls-files` 列出的每个文件都不含凭证;`git status --porcelain --untracked-files=all` 看不到 `.rismforge`。
 - **解码不抛。** `subprocess_runner` 用 `encoding="utf-8", errors="replace"`,不再用按 locale 严格解码的 `text=True`;非法字节变成 U+FFFD(有测试)。
-- **真起子进程的六条用例**:用 `sys.executable -c <脚本>` 做假可执行体,回显标准输入(大写)与 `{model}` 替换结果;非零退出且 stderr 带凭证(验证 T1 与脱敏);睡 5 秒配 `timeout_s=0.5`(验证超时是 T1);输出 `\xff\xfe`(验证替换解码);另有不存在的绝对路径与 `tmp_path` 里一个不带 shebang 的 `0o755` 脚本(都验证 T2)。
+- **真起子进程的七条用例**:用 `sys.executable -c <脚本>` 做假可执行体,回显标准输入(大写)与 `{model}` 替换结果;非零退出且 stderr 带凭证(验证 T1 与脱敏);睡 5 秒配 `timeout_s=0.5`(验证超时是 T1);输出 `\xff\xfe`(验证替换解码);另有不存在的绝对路径与 `tmp_path` 里一个不带 shebang 的 `0o755` 脚本(都验证 T2)。第七条用一个打印自己环境变量名、工作目录与目录内容的假工具:父进程里用 `monkeypatch` 设一个不在白名单里的变量,验证子进程看不到它、看得到 `FAKE_TOKEN`,工作目录是空的、调用结束后已被删除。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -2040,18 +2126,21 @@ git commit -m "feat: add the inference_bridge package (result, error, protocol, 
 
 ```python
 import hashlib
+import json
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 from urllib.parse import urlparse
 
 import pytest
 
-from controlplane.config import MissingCredentialError, load_backend_config
+import inference_bridge
+from controlplane.config import DEFAULT_ENV_ALLOWLIST, MissingCredentialError, load_backend_config
 from controlplane.gitstore import GitStore
 from controlplane.observe import cost
 from controlplane.paths import run_trace_file
-from inference_bridge import BridgeError, CliBridge, InferenceBridge, RunOutcome
+from inference_bridge import DEFAULT_COMMANDS, BridgeError, CliBridge, InferenceBridge, RunOutcome
 
 SECRET = "sk-test-SECRET-0123456789"
 
@@ -2071,9 +2160,12 @@ class FakeRunner:
     def __init__(self, outcomes):
         self.outcomes = list(outcomes)
         self.calls = []
+        self.cwd_seen = []  # 每次调用当时工作目录的状态:(是否存在, 目录里的文件名)
 
-    def __call__(self, argv, stdin, timeout_s, env):
-        self.calls.append((argv, stdin, timeout_s, dict(env)))
+    def __call__(self, argv, stdin, timeout_s, env, cwd):
+        self.calls.append((argv, stdin, timeout_s, dict(env), cwd))
+        path = Path(cwd)
+        self.cwd_seen.append((path.is_dir(), [p.name for p in path.iterdir()] if path.is_dir() else []))
         out = self.outcomes.pop(0)
         if isinstance(out, BaseException):
             raise out
@@ -2091,9 +2183,10 @@ def store(tmp_path):
     return s
 
 
-def _bridge(runner, *, store=None, log_dir=None, sleeps=None, **over):
+def _bridge(runner, *, store=None, log_dir=None, sleeps=None, env=None, **over):
     return CliBridge(
-        _cfg(**over), store=store, log_dir=log_dir, env={"FAKE_TOKEN": SECRET, "PATH": "/bin"},
+        _cfg(**over), store=store, log_dir=log_dir,
+        env={"FAKE_TOKEN": SECRET, "PATH": "/bin"} if env is None else env,
         runner=runner, sleep=(sleeps.append if sleeps is not None else (lambda s: None)),
     )
 
@@ -2107,7 +2200,7 @@ def test_prompt_goes_through_stdin_and_the_template_is_filled():
     b = _bridge(runner)
     assert isinstance(b, InferenceBridge)
     r = b.complete("plan the next round", run_id="run-1", task_id="plan-1")
-    argv, stdin, timeout_s, env = runner.calls[0]
+    argv, stdin, timeout_s, env, cwd = runner.calls[0]
     assert argv == ["fake-tool", "-p", "--model", "fake-model"]
     assert stdin == "plan the next round"
     assert timeout_s == 5.0
@@ -2375,6 +2468,130 @@ def test_non_utf8_output_is_decoded_with_replacement():
     r = b.complete("p", run_id="r", task_id="t")
     assert r.text == "ok \ufffd\ufffd end"
 
+
+def _child_env_of(runner):
+    return runner.calls[0][3]
+
+
+def test_the_child_env_is_the_default_allowlist_plus_token_env_and_nothing_else():
+    env = {
+        "FAKE_TOKEN": SECRET, "PATH": "/bin", "HOME": "/home/u", "LANG": "C",
+        "AWS_SECRET_ACCESS_KEY": "other-secret", "GITHUB_TOKEN": "other-token",
+    }
+    runner = FakeRunner([_ok()])
+    _bridge(runner, env=env).complete("p", run_id="r", task_id="t")
+    assert _child_env_of(runner) == {"FAKE_TOKEN": SECRET, "PATH": "/bin", "HOME": "/home/u", "LANG": "C"}
+    assert set(_child_env_of(runner)) - {"FAKE_TOKEN"} <= set(DEFAULT_ENV_ALLOWLIST)
+
+
+def test_an_explicit_allowlist_replaces_the_default_and_token_env_is_added_automatically():
+    env = {"FAKE_TOKEN": SECRET, "PATH": "/bin", "LANG": "C", "EXTRA": "x"}
+    runner = FakeRunner([_ok()])
+    _bridge(runner, env=env, env_allowlist=["LANG", "EXTRA", "ABSENT"]).complete("p", run_id="r", task_id="t")
+    # PATH 不在名单里,不传;FAKE_TOKEN 不在名单里也自动加入;名单里有、环境里没有的 ABSENT 直接略过
+    assert _child_env_of(runner) == {"FAKE_TOKEN": SECRET, "LANG": "C", "EXTRA": "x"}
+
+
+def test_without_a_token_env_no_credential_variable_is_passed():
+    env = {"FAKE_TOKEN": SECRET, "PATH": "/bin"}
+    runner = FakeRunner([_ok()])
+    _bridge(runner, env=env, token_env=None).complete("p", run_id="r", task_id="t")
+    assert _child_env_of(runner) == {"PATH": "/bin"}
+
+
+def test_an_empty_allowlist_passes_only_the_token_env():
+    env = {"FAKE_TOKEN": SECRET, "PATH": "/bin", "HOME": "/home/u"}
+    runner = FakeRunner([_ok()])
+    _bridge(runner, env=env, env_allowlist=[]).complete("p", run_id="r", task_id="t")
+    assert _child_env_of(runner) == {"FAKE_TOKEN": SECRET}
+
+
+def test_every_call_runs_in_its_own_empty_directory_that_is_removed_afterwards():
+    runner = FakeRunner([_ok(), _ok()])
+    b = _bridge(runner)
+    b.complete("p", run_id="r", task_id="t1")
+    b.complete("p", run_id="r", task_id="t2")
+    (_, _, _, _, cwd1), (_, _, _, _, cwd2) = runner.calls
+    assert cwd1 != cwd2
+    assert runner.cwd_seen == [(True, []), (True, [])]  # 调用当时:目录存在,而且是空的
+    assert not Path(cwd1).exists() and not Path(cwd2).exists()  # 调用之后:已删除
+
+
+def test_the_attempts_of_one_call_share_one_directory_which_is_removed_after_success():
+    bad = RunOutcome(returncode=1, stdout="", stderr="")
+    runner = FakeRunner([bad, _ok()])
+    _bridge(runner).complete("p", run_id="r", task_id="t")
+    cwds = {call[4] for call in runner.calls}
+    assert len(runner.calls) == 2 and len(cwds) == 1  # 目录是每次调用一个,不是每次尝试一个
+    assert runner.cwd_seen == [(True, []), (True, [])]
+    assert not Path(next(iter(cwds))).exists()
+
+
+def test_the_directory_is_removed_when_the_retries_are_exhausted():
+    bad = RunOutcome(returncode=1, stdout="", stderr="")
+    runner = FakeRunner([bad, bad, bad])
+    with pytest.raises(BridgeError) as exc:
+        _bridge(runner).complete("p", run_id="r", task_id="t")
+    assert exc.value.category == "T1"
+    cwds = {call[4] for call in runner.calls}
+    assert len(runner.calls) == 3 and len(cwds) == 1
+    assert not Path(next(iter(cwds))).exists()
+
+
+def test_the_directory_is_removed_when_the_tool_cannot_start():
+    runner = FakeRunner([FileNotFoundError(2, "No such file or directory")])
+    with pytest.raises(BridgeError) as exc:
+        _bridge(runner).complete("p", run_id="r", task_id="t")
+    assert exc.value.category == "T2" and exc.value.__context__ is None
+    assert runner.cwd_seen == [(True, [])]
+    assert not Path(runner.calls[0][4]).exists()
+
+
+_ENV_TOOL = (
+    "import json, os\n"
+    "print(json.dumps({'env': sorted(os.environ), 'cwd': os.getcwd(), 'ls': os.listdir('.')}))\n"
+)
+
+
+def test_a_real_subprocess_sees_only_allowlisted_variables_and_an_empty_working_directory(monkeypatch):
+    monkeypatch.setenv("FAKE_TOKEN", SECRET)
+    monkeypatch.setenv("RISMFORGE_UNLISTED", "must-not-leak")
+    b = CliBridge(_cfg(command=[sys.executable, "-c", _ENV_TOOL]), sleep=lambda s: None)  # env 缺省取 os.environ
+    seen = json.loads(b.complete("p", run_id="r", task_id="t").text)
+    assert "FAKE_TOKEN" in seen["env"]
+    assert "RISMFORGE_UNLISTED" not in seen["env"]
+    assert seen["ls"] == []
+    assert Path(seen["cwd"]).resolve() != Path.cwd().resolve()
+    assert not Path(seen["cwd"]).exists()  # 调用结束后目录已删除
+
+
+def test_default_commands_turn_tools_off_and_keep_sessions_out_of_the_way():
+    assert DEFAULT_COMMANDS == {
+        "claude": ["claude", "-p", "--model", "{model}", "--tools", "", "--no-session-persistence"],
+        "codex": [
+            "codex", "exec", "-m", "{model}", "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral",
+        ],
+    }
+    claude, codex = DEFAULT_COMMANDS["claude"], DEFAULT_COMMANDS["codex"]
+    assert claude[claude.index("--tools") + 1] == ""  # 关闭全部工具
+    assert codex[codex.index("--sandbox") + 1] == "read-only"  # 只读沙箱
+
+
+def test_default_commands_are_exported_from_the_package():
+    assert "DEFAULT_COMMANDS" in inference_bridge.__all__
+
+
+@pytest.mark.parametrize("tool", ["claude", "codex"])
+def test_a_default_command_template_is_filled_and_passed_as_argv(tool):
+    cfg = replace(_cfg(), command=DEFAULT_COMMANDS[tool])  # 直接构造配置,不经 load_backend_config
+    runner = FakeRunner([_ok()])
+    CliBridge(cfg, env={"FAKE_TOKEN": SECRET}, runner=runner, sleep=lambda s: None).complete(
+        "p", run_id="r", task_id="t"
+    )
+    argv = runner.calls[0][0]
+    assert argv[0] == tool and "fake-model" in argv and "{model}" not in argv
+    assert len(argv) == len(DEFAULT_COMMANDS[tool])
+
 ```
 
 在 `tests/test_bridge_packaging.py` 末尾追加:
@@ -2390,7 +2607,7 @@ def test_the_repo_gitignore_covers_the_default_log_dir():
 - [ ] **Step 2: 运行,确认失败**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error tests/test_bridge_cli.py tests/test_bridge_packaging.py`
-Expected: 收集阶段报错 `ImportError: cannot import name 'CliBridge' from 'inference_bridge'`。(单跑 `tests/test_bridge_packaging.py` 时是 `1 failed, 2 passed`,失败的是 `.gitignore` 那条。)
+Expected: 收集阶段报错 `ImportError: cannot import name 'DEFAULT_COMMANDS' from 'inference_bridge'`。(单跑 `tests/test_bridge_packaging.py` 时是 `1 failed, 2 passed`,失败的是 `.gitignore` 那条。)
 
 - [ ] **Step 3: 写实现**
 
@@ -2401,6 +2618,8 @@ Expected: 收集阶段报错 `ImportError: cannot import name 'CliBridge' from '
 
 - 参数模板来自 BackendConfig.command(argv 列表,不经 shell);模板里的 "{model}" 换成 model_name,
   其余文本原样传。凭证只经环境变量传给子进程,绝不出现在 argv 里。
+- 子进程默认隔离(设计 BR-8):环境变量只有「白名单 ∪ {token_env}」与传入环境的交集,
+  工作目录是每次 complete 调用新建、结束即删的空临时目录。DEFAULT_COMMANDS 是两个工具的默认参数模板。
 - 超时、非零退出、空输出算 T1,按 retry_policy 指数退避重试;耗尽抛 BridgeError("T1")。
   启动阶段的任何 OSError(不存在、无权限、不是目录、ENOEXEC、E2BIG……)都是确定性的,
   立即抛 BridgeError("T2"),不重试。
@@ -2413,18 +2632,26 @@ from __future__ import annotations
 import hashlib
 import os
 import subprocess
+import tempfile
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from controlplane.config import BackendConfig, redact, resolve_credential
+from controlplane.config import DEFAULT_ENV_ALLOWLIST, BackendConfig, redact, resolve_credential
 from controlplane.envelope import BigRef
 from controlplane.gitstore import GitStore
 from inference_bridge.base import BridgeError, BridgeResult, _check_segment, record_bridge_cost
 
 LOG_SUBDIR = ".rismforge/logs"  # 相对 store.repo_root 的默认日志根目录
 _TAIL = 300  # 异常信息里最多带多少字符的 stderr 尾巴(已脱敏)
+
+# 两个工具的默认参数模板(设计 §5.1):claude 关闭全部工具、不落会话文件;codex 只读沙箱、
+# 不要求工作目录是 git 仓库、不落会话文件。只是常量:不自动写进任何配置,组合根按需取用。
+DEFAULT_COMMANDS: dict[str, list[str]] = {
+    "claude": ["claude", "-p", "--model", "{model}", "--tools", "", "--no-session-persistence"],
+    "codex": ["codex", "exec", "-m", "{model}", "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral"],
+}
 
 
 @dataclass(frozen=True)
@@ -2435,9 +2662,9 @@ class RunOutcome:
     timed_out: bool = False
 
 
-# (argv, 标准输入文本, 超时秒数, 子进程环境) -> RunOutcome。
+# (argv, 标准输入文本, 超时秒数, 子进程环境, 工作目录) -> RunOutcome。
 # 子进程起不来时抛 OSError(FileNotFoundError、PermissionError、ENOEXEC 等)。
-Runner = Callable[[list[str], str, float, Mapping[str, str]], RunOutcome]
+Runner = Callable[[list[str], str, float, Mapping[str, str], str], RunOutcome]
 
 
 def _text(data: str | bytes | None) -> str:
@@ -2448,12 +2675,14 @@ def _text(data: str | bytes | None) -> str:
     return data
 
 
-def subprocess_runner(argv: list[str], stdin: str, timeout_s: float, env: Mapping[str, str]) -> RunOutcome:
-    """默认 runner:真起子进程。超时由 subprocess.run 杀掉子进程。"""
+def subprocess_runner(
+    argv: list[str], stdin: str, timeout_s: float, env: Mapping[str, str], cwd: str
+) -> RunOutcome:
+    """默认 runner:真起子进程,工作目录是 cwd。超时由 subprocess.run 杀掉子进程。"""
     try:
         proc = subprocess.run(
             argv, input=stdin, capture_output=True, encoding="utf-8", errors="replace", timeout=timeout_s,
-            env=dict(env), check=False,
+            env=dict(env), cwd=cwd, check=False,
         )
     except subprocess.TimeoutExpired as exc:
         return RunOutcome(returncode=None, stdout=_text(exc.stdout), stderr=_text(exc.stderr), timed_out=True)
@@ -2491,6 +2720,12 @@ class CliBridge:
         # 缺凭证在构造时就明确失败(MissingCredentialError,只报变量名);token_env 为 None 时 secret 为 None
         self._secret = resolve_credential(config, self._env)
         self._argv = [a.replace("{model}", config.model_name) for a in config.command]
+        # 子进程只拿「白名单 ∪ {token_env}」与完整环境的交集。self._env 仍是完整环境(解析凭证、脱敏要用);
+        # env_allowlist 为 None 才用默认白名单,给了空 list 就是"只传 token_env"。
+        allowed = set(DEFAULT_ENV_ALLOWLIST if config.env_allowlist is None else config.env_allowlist)
+        if config.token_env:
+            allowed.add(config.token_env)
+        self._child_env = {k: v for k, v in self._env.items() if k in allowed}
         self._store = store
         if log_dir is not None:
             self._log_root: Path | None = Path(log_dir)
@@ -2537,12 +2772,17 @@ class CliBridge:
     def complete(self, prompt: str, *, run_id: str, task_id: str) -> BridgeResult:
         _check_segment("run_id", run_id)
         _check_segment("task_id", task_id)
+        # 每次调用(不是每次尝试)一个空临时目录:成功、T1 耗尽、T2 都由 with 删掉,一次调用的所有尝试共用它。
+        with tempfile.TemporaryDirectory(prefix="rismforge-bridge-") as cwd:
+            return self._complete_in(cwd, prompt, run_id, task_id)
+
+    def _complete_in(self, cwd: str, prompt: str, run_id: str, task_id: str) -> BridgeResult:
         attempts_log: list[str] = []
         last = ""
         for attempt in range(1, self._max_attempts + 1):
             not_runnable: str | None = None
             try:
-                out = self._runner(list(self._argv), prompt, self._config.timeout_s, self._env)
+                out = self._runner(list(self._argv), prompt, self._config.timeout_s, self._child_env, cwd)
             except OSError as exc:
                 # 只在块内算出脱敏后的原因;出块后再抛,BridgeError 的 __context__ 不会挂着带凭证的原异常
                 not_runnable = self._redact(f"cannot run {self._argv[0]!r}: {type(exc).__name__}: {exc}")
@@ -2592,11 +2832,12 @@ from inference_bridge.base import (
     InferenceBridge,
     record_bridge_cost,
 )
-from inference_bridge.cli import CliBridge, RunOutcome, Runner, subprocess_runner
+from inference_bridge.cli import DEFAULT_COMMANDS, CliBridge, RunOutcome, Runner, subprocess_runner
 from inference_bridge.scripted import ScriptedBridge, ScriptExhaustedError
 
 __all__ = [
     "BRIDGE_COST_TYPE",
+    "DEFAULT_COMMANDS",
     "BridgeError",
     "BridgeResult",
     "CliBridge",
@@ -2630,10 +2871,10 @@ PYEOF
 - [ ] **Step 4: 运行,确认通过**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error tests/test_bridge_cli.py tests/test_bridge_packaging.py tests/test_bridge_scripted.py`
-Expected: `52 passed`(实测约 2 秒,其中超时用例占 0.5 秒)。
+Expected: `65 passed`(实测约 8 秒,其中超时用例占 0.5 秒)。
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error`
-Expected: `B+192 passed`(以 820 为起点为 1012),无警告。
+Expected: `B+221 passed`(以 820 为起点为 1041),无警告。
 
 - [ ] **Step 5: 提交**
 
@@ -2655,7 +2896,7 @@ git commit -m "feat: add CliBridge (stdin prompt, T1 retry with backoff, redacte
 - [ ] **Step 1: 全量回归**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error`
-Expected: `B+192 passed`(以 820 为起点为 1012),无警告(实测约 90 至 110 秒)。
+Expected: `B+221 passed`(以 820 为起点为 1041),无警告(实测约 90 至 110 秒)。
 
 - [ ] **Step 2: 改动范围只在文件表内**
 
@@ -2672,25 +2913,25 @@ Expected(顺序为 git 的字母序):
 ```
  .gitignore                          |   3 +
  pyproject.toml                      |   2 +-
- src/controlplane/config.py          | 155 ++++++++++++++++-
- src/controlplane/evidence.py        |  37 ++++
- src/controlplane/ledger.py          | 137 +++++++++++++++
- src/controlplane/paths.py           |  90 +++++++++-
+ src/controlplane/config.py          | 183 +++++++++++++-
+ src/controlplane/evidence.py        |  37 +++
+ src/controlplane/ledger.py          | 137 +++++++++++
+ src/controlplane/paths.py           |  90 ++++++-
  src/controlplane/states.py          |   4 +
- src/inference_bridge/__init__.py    |  26 +++
- src/inference_bridge/base.py        |  62 +++++++
- src/inference_bridge/cli.py         | 180 +++++++++++++++++++
- src/inference_bridge/scripted.py    |  48 ++++++
- tests/test_awaiting_confirmation.py |  78 +++++++++
- tests/test_bridge_cli.py            | 336 ++++++++++++++++++++++++++++++++++++
- tests/test_bridge_packaging.py      |  36 ++++
- tests/test_bridge_scripted.py       |  97 +++++++++++
- tests/test_config_backend_cli.py    |  96 +++++++++++
- tests/test_config_envelope.py       | 158 +++++++++++++++++
- tests/test_evidence.py              |  69 ++++++++
- tests/test_ledger.py                | 197 +++++++++++++++++++++
- tests/test_paths.py                 |  64 ++++++-
- 20 files changed, 1866 insertions(+), 9 deletions(-)
+ src/inference_bridge/__init__.py    |  27 +++
+ src/inference_bridge/base.py        |  62 +++++
+ src/inference_bridge/cli.py         | 203 ++++++++++++++++
+ src/inference_bridge/scripted.py    |  48 ++++
+ tests/test_awaiting_confirmation.py |  78 ++++++
+ tests/test_bridge_cli.py            | 467 ++++++++++++++++++++++++++++++++++++
+ tests/test_bridge_packaging.py      |  36 +++
+ tests/test_bridge_scripted.py       |  97 ++++++++
+ tests/test_config_backend_cli.py    | 142 +++++++++++
+ tests/test_config_envelope.py       | 159 ++++++++++++
+ tests/test_evidence.py              |  70 ++++++
+ tests/test_ledger.py                | 197 +++++++++++++++
+ tests/test_paths.py                 |  64 ++++-
+ 20 files changed, 2097 insertions(+), 9 deletions(-)
 ```
 
 `docs/superpowers/` 下只应有设计文档与各计划文档本身。再确认三件事:
@@ -2740,11 +2981,11 @@ Expected: `missing __future__: []`。
 
 九个任务做完(八次提交)后:
 
-- `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error` 为 **B+192 通过**、无警告(以 820 为起点为 1012;本计划新增 192 个用例:`test_paths` +20、`test_awaiting_confirmation` 6、`test_ledger` 33、`test_config_backend_cli` 28、`test_config_envelope` 24、`test_evidence` 29、`test_bridge_scripted` 15、`test_bridge_packaging` 3、`test_bridge_cli` 34)。
+- `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error` 为 **B+221 通过**、无警告(以 820 为起点为 1041;本计划新增 221 个用例:`test_paths` +20、`test_awaiting_confirmation` 6、`test_ledger` 33、`test_config_backend_cli` 43、`test_config_envelope` 24、`test_evidence` 30、`test_bridge_scripted` 15、`test_bridge_packaging` 3、`test_bridge_cli` 47)。
 - 设计 §11 的 18 个路径函数全部存在、名字逐字一致;`SUBDIRS` 末尾是 `recipe_candidates`、`skill_library`、`memory_library`、`agent_rounds`。
 - `reconcile.py`、`daemon.py`、`observe.py`、`gitstore.py`、`envelope.py`、`tests/test_config.py` 未改;`awaiting_confirmation` 的指令不产生任何动作、不产生任何提交。
 - `record_cost` 写出的记录能被 `observe.cost` 正确打印与汇总;未知值省略键;同一 `(task_id, cost_type)` 只记一次。
-- `CliBridge` 的凭证值不出现在 argv、日志、异常信息、git 树里;日志对 git 不可见;git 树里只有 `BigRef`。
+- `CliBridge` 的凭证值不出现在 argv、日志、异常信息、git 树里;日志对 git 不可见;git 树里只有 `BigRef`;子进程只拿白名单环境变量与 `token_env`,在每次调用新建、结束即删的空临时目录里运行。
 - `controlplane` 不导入 `inference_bridge`;`pyproject.toml` 的 wheel 列表含 `src/inference_bridge`;没有新增第三方依赖;`cli/` 未改。
 
 ## 已知限制
@@ -2757,15 +2998,16 @@ Expected: `missing __future__: []`。
 6. **`record_cost` 先到者为准,同一 `task_id` 的成本静默去重。** 每次 `complete` 必须用不同的 `task_id`,否则成本去重,后几次调用的成本丢失(计划 7 的解析重试若复用同一个 `task_id` 就会少记)。同一任务想用更准确的数字覆盖也做不到。
 6a. **人工重置后再失败,失败记录静默不写。** `record_failure` 对已存在的 `(run_id, task_id)` 原样返回路径,不返回"已存在"标志;人把产物状态改回 `pending` 重跑后若再失败,第二份失败记录不会写出,调用方也察觉不到。要留第二份,调用方得换 `task_id`(如 `plan-1-retry2`),或先 `store.exists(failure_record_file(...))` 自己判断。
 7. **`record_cost` 与 `write_config` 是读改写,不加锁。** 两个进程同时写同一 `run_trace` 会丢一条记录。当前只有单个调和循环进程写树,与 `GitStore` 现有假设一致。
-8. **凭证检查按字段名,且只查键不查值。** 字段名按小写精确比较:`Token`、`API_KEY` 能挡住,但 `access_token`、`anthropic_api_key` 这类带前后缀的键挡不住;列表值与字符串值完全不检查,`command: [..., "--api-key=sk-..."]` 会原样进树。日志脱敏只替换 `token_env` 指向的那一个值,子进程环境里其他敏感变量(如果工具自己打印出来)不会被脱敏。
+8. **凭证检查按字段名,且只查键不查值。** 字段名按小写精确比较:`Token`、`API_KEY` 能挡住,但 `access_token`、`anthropic_api_key` 这类带前后缀的键挡不住;列表值与字符串值完全不检查,`command: [..., "--api-key=sk-..."]` 会原样进树。日志脱敏只替换 `token_env` 指向的那一个值;子进程只拿白名单环境变量与 `token_env`,其余凭证进不了子进程,但白名单里的变量(如 `HOME` 的路径、`CODEX_HOME`)若含敏感内容,工具自己打印出来时不会被脱敏。
 9. **`subprocess_runner` 超时只杀直接子进程。** 外部工具若自己再派生子进程,孙进程可能残留。
 10. **`ScriptedBridge` 不写日志**,`log_ref` 恒为 `None`(除非脚本里给的 `BridgeResult` 自带)。
-11. **证据等级的过渡窗口。** `diagnostic_grade` 对没有 `backends` 字段、有分数的报告判 `real`。计划 8 给评估器报告写 `backends: mock` 标记之前,以及之后任何不传 `backends` 的 `run_diagnostic` 报告,都会判 `real`;计划 3、5 排在计划 8 之前就会消费 `diagnostic_grade`,这段时间里 mock 后端跑出的报告会被当成真证据。
+11. **没有 `backends` 标记的报告一律判 `stub`(失败关闭,设计 DX-12)。** 手写的或旧版编排器写的无标记报告要补上 `backends` 才能驱动闭环(规划与提名);今天的 `run_diagnostic` 报告没有标记,判 `stub`,不可接受。
 
 ## 未验证项
 
 1. **真实外部工具没有调用过。** `claude -p`、`codex exec` 的参数模板、是否接受标准输入、退出码语义、输出里是否混有进度信息,都没有真实验证;测试只用了 `python -c` 的假可执行体和注入的 runner。
 2. **Windows 未验证。** `file://` 地址的拼法(`file://` + 绝对路径)在 POSIX 下正确;Windows 盘符路径会得到 `file://C:\...`,`observe._reachable` 能否识别没有验证。
 3. **超时后的子进程清理、无 shebang 脚本的 ENOEXEC 只在 macOS 上跑过**(`test_a_real_subprocess_timeout_is_t1`、`test_a_real_script_without_a_shebang_is_t2`);Linux 下的行为按 `subprocess.run` 的文档推断应一致,没有实际运行。
-4. **累计测试数是在一份仓库拷贝里跑出来的**(按本计划的顺序逐任务执行,以 820 为起点,每个任务后跑全量:840、846、879、907、931、960、977、1012)。**绝对通过数依赖执行顺序,本计划只保证增量**(+20、+6、+33、+28、+24、+29、+17、+35、+0)。拷贝不含 `.git` 与 `cli/`,所以第 27 任务里 `git diff "$BASE"..HEAD` 是在拷贝里以基线提交为 `BASE` 模拟的,文件清单与行数来自那次运行;在真仓库里 `docs/superpowers/` 下会多出设计与计划文档(已用 pathspec 排除)。
-5. **任务 19、22 的"预期失败数"(21 失败 3 通过、20 失败 8 通过)与任务 20 的 2 失败 4 通过**来自同一份拷贝的实际运行;如果执行者改了测试的参数化列表,数字会变。
+4. **累计测试数是在一份仓库拷贝里跑出来的**(按本计划的顺序逐任务执行,以 820 为起点,每个任务后跑全量:840、846、879、922、946、976、993、1041;最后一个数实测,中间数由增量推算)。**绝对通过数依赖执行顺序,本计划只保证增量**(+20、+6、+33、+43、+24、+30、+17、+48、+0)。拷贝不含 `.git` 与 `cli/`,所以第 27 任务里 `git diff "$BASE"..HEAD` 是在拷贝里以基线提交为 `BASE` 模拟的,文件清单与行数来自那次运行;在真仓库里 `docs/superpowers/` 下会多出设计与计划文档(已用 pathspec 排除)。
+5. **任务 19、22 的"预期失败数"(21 失败 3 通过、35 失败 8 通过)与任务 20 的 2 失败 4 通过**来自同一份拷贝的实际运行;如果执行者改了测试的参数化列表,数字会变。
+6. **默认参数模板与白名单在真实工具上没有验证。** `claude -p --tools ""`、`codex exec --sandbox read-only` 是否真的让工具写不了文件,默认白名单(含 `HOME`、`CODEX_HOME`、`CLAUDE_CONFIG_DIR`)是否足以让两个工具保持登录态,只有真实调用才能确认;测试只用了 `python -c` 的假工具与注入的 runner。

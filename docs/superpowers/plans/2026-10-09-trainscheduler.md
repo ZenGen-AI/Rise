@@ -173,6 +173,7 @@ PYTHONDONTWRITEBYTECODE=1 uv run --extra dev python -c "
 from controlplane.paths import planner_decision_file, nomination_file, recipe_candidate_file, run_trace_file, failure_record_file, scheduler_config_file, training_defaults_file, recipe_file, recipe_track_file
 from controlplane.config import read_config, write_config
 from controlplane.evidence import diagnostic_grade, evidence_acceptable
+assert diagnostic_grade({'dimension_scores': [1]}) == 'stub' and diagnostic_grade({'backends': 'real', 'dimension_scores': [1]}) == 'real'
 from controlplane.ledger import record_failure
 from controlplane.models import latest_promoted_checkpoint, MissingCheckpointRefError
 from controlplane.states import can_transition
@@ -362,7 +363,8 @@ def write_report(store: GitStore, run_id: str, scores: dict[str, float] | None =
                  baseline_ref: str = "", flags: list[dict] | None = None, backends: str | None = "mock",
                  stub: bool = False, error_profiles: list[dict] | None = None,
                  benchmark_version: str = "bench-v1") -> None:
-    """按 DiagnosticReport.to_dict() 的形状写报告;stub=True 时写成 diagnostic_evaluator_stub 的形状。"""
+    """按 DiagnosticReport.to_dict() 的形状写报告;stub=True 时写成 diagnostic_evaluator_stub 的形状。
+    backends=None 不写标记,controlplane.evidence 按失败关闭判 stub;要一份 real 报告传 backends="real"。"""
     if stub:
         payload = {"candidate_ref": f"cand-{run_id}", "benchmark_version": benchmark_version,
                    "dimension_count": 0, "stub": True}
@@ -1477,7 +1479,7 @@ def test_a_rejected_candidate_carries_its_reason(store):
 
 
 def test_a_real_report_is_graded_real(store):
-    write_round(store, "run-001", {"tom": 0.4}, backends=None)
+    write_round(store, "run-001", {"tom": 0.4}, backends="real")
     assert assemble_context(store, "run-001").diagnostic.grade == "real"
 
 
@@ -3416,13 +3418,13 @@ def test_real_evidence_needs_no_switch(store):
     from ts_fixtures import write_report
 
     # 计划 3 的 compute_gain 不拿 real 候选减 mock 基线,所以基线 run-002 的报告也要是 real
-    write_report(store, "run-002", {"tom": 0.45}, baseline_ref="zengen-v1", backends=None)
-    write_round(store, "run-003", {"tom": 0.50}, baseline_ref="zengen-v2", backends=None)
+    write_report(store, "run-002", {"tom": 0.45}, baseline_ref="zengen-v1", backends="real")
+    write_round(store, "run-003", {"tom": 0.50}, baseline_ref="zengen-v2", backends="real")
     assert nomination_check(store, "run-003", config=SchedulerConfig()).nominate
 
 
 def test_real_evidence_against_a_mock_baseline_is_not_comparable(store):
-    write_round(store, "run-003", {"tom": 0.50}, baseline_ref="zengen-v2", backends=None)
+    write_round(store, "run-003", {"tom": 0.50}, baseline_ref="zengen-v2", backends="real")
     v = nomination_check(store, "run-003", config=SchedulerConfig())
     assert not v.nominate and not v.not_yet
     assert v.reason.startswith("no comparable gain:") and v.baseline_run_id == "run-002"

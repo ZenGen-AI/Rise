@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-> **撰写状态:完成。** 十个任务都写完,并在九份计划与设计的最终文本上做了最后一次完整重放,逐任务验证过(B = 2275,任务 109 后 2406 passed;见「未验证项」第 1 条)。
+> **撰写状态:完成,并已按设计 2026-10-11 的修订更新。** 十个任务都写完,并在九份计划的最终文本上做过一次完整重放:前八份按序放完后收集数为 2359(B),本计划放完后为 2507(= B+148);见「未验证项」第 1 条。
 
 **Goal:** 新增顶层包 `factory`,作为闭环集成的组合根:读配置,按命令行开关组装派发器(带数据生产器)、六个闭环处理器、真实诊断评估器(V1 用 mock 后端)与外部推理桥接,再调用 `run_daemon`;同时提供只读子命令 `trace`、`cost`、`logs` 与单轮的 `reconcile --once`。不传 `--enable` 时,`factory run` 与现有的 `scripts/run_controlplane.py` 逐字节相同。最后用端到端测试证明闭环能转一整圈。
 
@@ -21,6 +21,7 @@
 |---|---|---|
 | `controlplane.daemon` | `Dispatcher`、`run_daemon`、`reconcile_once`(现有);`Handler`、`Evaluator`、三个入口的 `handlers` / `evaluator` / `accept_mock_evidence` 参数(**计划 8** 任务 93) | 已定稿 / 计划 8 |
 | `controlplane.reconcile` | `Action`(现有);`CLOSED_LOOP_ACTIONS`(**计划 8** 任务 90) | 计划 8 |
+| `controlplane.lock` | `RepoLockedError`、`acquire_repo_lock(repo_root)`(**计划 8** 任务 98) | 计划 8 |
 | `controlplane.observe` | `trace`、`cost`、`sum_costs`(现有,只读;本计划不改) | 现有 |
 | `controlplane.gitstore` / `envelope` | `GitStore`、`Envelope`、`OwnerRef`、`BigRef` | 现有 |
 | `controlplane.paths` | `run_dir`、`backends_config_file`、`CONTROL_PLANE_ROOT`、`candidate_checkpoint_file`、`diagnostic_report_file`、`model_file`、`taxonomy_file`(现有) | 现有 |
@@ -65,14 +66,18 @@
 | A7-3 | `mindagent.library.load_library` | `(store) -> LibraryState` | 任务 108 断言收录后的库版本是字符串 |
 | A7-4 | `mindagent.config.AgentConfig` | 冻结数据类 `(scenario_ids, bindings, max_turns=6, episodes_per_scenario=1, max_retries_per_episode=1, min_support=3, min_ratio=0.5, min_fired_on_motivating=0.8, max_fired_elsewhere=0.2, max_parse_retries=2)` | 任务 107 由 `agent.yaml` 构造 |
 | A-H | `controlplane.daemon.Handler` | `Callable[[GitStore, Action], None]`;`handlers` 的键只能是 `CLOSED_LOOP_ACTIONS` 的六个名字(计划 8 Ruling 7) | 任务 104 的表与任务 107 的构造器 |
+| A8-1 | `controlplane.lock.acquire_repo_lock` | `(repo_root)`,返回上下文管理器;锁文件 `<repo_root>/.git/rismforge.lock`(**计划 8** 任务 98) | 任务 104:`reconcile_one_tick` 在装配之前取锁 |
+| A8-2 | `controlplane.lock.RepoLockedError` | 异常类;`str(exc)` 是锁文件路径(**计划 8** 任务 98) | 任务 104:`factory.cli.main` 捕获并退出码 2 |
 
 行为上的依赖,任务 108 在真实代码上验证:
 
 - B5-1(R18):计划 5 的规划处理器遇到任何 `BridgeError`(T1 或 T2)都把决策置 `failed`、写 T3 失败记录(带桥接的 `log_ref`),不上抛。
-- B5-2(R5):计划 8 的 `plan_next_round` 只对 run id 最大的 run 触发(计划 8 的契约表、实现与测试一致)。
+- B5-2(R5):计划 8 的 `plan_next_round` 只对 run id 最大的 run 触发(计划 8 的契约表、实现与测试一致)。启用提名且候选 `effective` 时还要等配方入库门(B8-2)。
 - B5-3:`planner_decision.template_version == "v1"`;`clone` 的指令不带 `data_spec`、复用配方锚定的清单;`new` 的指令带 `data_spec`。
 - B7-1:计划 7 的轮次处理器读模型产物的 `links[1]` 作为 run,部署 episode 落在那个 run 下。
 - B7-2:库版本一律是字符串。
+- B8-1(CP-12):计划 8 任务 98 的 `controlplane.daemon.run_daemon` 在第一个 tick 之前取仓库排他锁,锁被占用时抛 `RepoLockedError`;`reconcile_once` 自己不取锁。任务 104 在真实代码上验证。
+- B8-2(CP-11):计划 8 的 `plan_next_round` 在启用提名且最大 run 的候选 `effective` 时,要等该 run 的提名标记(`nominated` 或 `skipped`)在场,且配方候选 `recipe-<run>` 不在 `pending_review`、`approved`;候选 `rejected` 或没启用提名时不等。任务 105、108 在真实代码上验证。
 
 ## 本计划的裁决
 
@@ -88,7 +93,7 @@
 8. **Ruling: `backends.yaml` 的载荷形状是 `{<角色>: <BackendConfig 原始字典>}`,V1 的角色只有 `planner`(规划后端)与 `agent`(技能提案生成器);`build_bridge(store, role, *, env=None, log_dir=None)` 每次新建一个 `CliBridge`(传 `store` 与 `log_dir`)。只有 `invocation_form: cli` 能构造,`api` 报"only 'cli' is implemented in V1 (R15)"。** —— 原因:计划 1 把形状留给计划 8,计划 8 声明不读任何配置文件,只剩组合根来定;计划 1 的测试已用 `{"planner": ...}` 演示过。 —— 判错的代价:要加第三种外部推理用途(例如 judge)时,在 `BRIDGE_ROLES` 里加一个名字。
 9. **Ruling: 凭证相关的错误一律 `raise FactoryConfigError(...) from None`,信息只用计划 1 已脱敏的原文(变量名、键路径),绝不拼进配置值;有测试断言凭证值不出现在异常信息、`__cause__` 为空、桥接日志里也没有。** —— 原因:设计 G.3 与计划 1 的约定;断开异常链才能保证 traceback 里也没有。 —— 判错的代价:排查配置错误时看不到原始异常类型,只能看信息文字。
 10. **Ruling: `logs` 只扫 run 目录顶层产物的 `payload["log_refs"]`(与 `observe.trace` 同一口径,不递归 `episodes/`);`--task <id>` 按产物载荷的 `task_id` 或桥接日志文件名 `<id>-<k>.log` 过滤;`file://` 之外的地址、文件不存在都标 `[unreachable]` 并写明"contents not shown";`sha256` 对不上照样打印内容但标 `[sha256 mismatch]`。** —— 原因:计划 1 的 `record_failure` 把 L3 引用放在 `log_refs` 列表里,`CliBridge` 的日志文件名是 `<task_id>-<k>.log`;设计要求"引用存在但文件不可达要明说"。 —— 判错的代价:成功调用的桥接日志只登记在桥接返回值里、不写进树(计划 1 的 `record_bridge_cost` 只记成本),所以 `logs` 只能看到失败记录与人工登记的引用;要看成功调用的日志,直接去 `.rismforge/logs/<run>/` 目录。
-11. **Ruling: 退出码约定:0 成功;1 只读子命令发现缺失(`trace` 的 run 不存在、`logs` 的 run 不存在或有引用不可达/哈希不符);2 用法错误或装配错误。`cost` 在没有 `run_trace` 时退出 0。** —— 原因:没有记账是正常状态(设计 §14 第 7 条),不是错误;`trace` 与 `cost` 的文本原样来自 `controlplane.observe`,不改它们的输出。 —— 判错的代价:脚本若用 `cost` 的退出码判断"run 是否存在"会判错,要用 `trace`。
+11. **Ruling: 退出码约定:0 成功;1 只读子命令发现缺失(`trace` 的 run 不存在、`logs` 的 run 不存在或有引用不可达/哈希不符);2 用法错误、装配错误或仓库被另一个进程锁住(Ruling 27)。`cost` 在没有 `run_trace` 时退出 0。** —— 原因:没有记账是正常状态(设计 §14 第 7 条),不是错误;`trace` 与 `cost` 的文本原样来自 `controlplane.observe`,不改它们的输出。 —— 判错的代价:脚本若用 `cost` 的退出码判断"run 是否存在"会判错,要用 `trace`。
 12. **Ruling: `reconcile` 子命令的 `--once` 是必填开关,不带就是用法错误;输出每个动作一行 `<kind> <target_id>`,没有动作时打印 `no actions`。** —— 原因:设计 §10.2 写的就是 `reconcile --once`;把"跑一轮"与"一直跑"分成两个子命令(`reconcile --once` 与 `run`),不留无 `--once` 的歧义形态。 —— 判错的代价:多打一个开关。
 13. **Ruling: `--confirm-directives/--no-confirm-directives` 是三态(不传为 `None`,表示用 `scheduler.yaml` 的 `confirm_directives`,默认真);值经 `BuildContext.confirm_directives` 交给规划与提名处理器的构造器(实现见 Ruling 21)。** —— 原因:设计 §3.4 规定确认模式由配置决定,开关只是覆盖;不传开关时不该悄悄改变配置的语义。 —— 判错的代价:无。
 14. **Ruling: 增加 `--planner-backend bridge|heuristic`(默认 `bridge`)。`bridge` 用 `backends.yaml` 的 `planner` 角色构造 `BridgeDecisionBackend`,`heuristic` 用计划 4 的确定性 `HeuristicBackend`,不需要外部工具。** —— 原因:设计没规定组合根如何选规划后端;没有外部命令行工具时开发与端到端仍要能转闭环。 —— 判错的代价:多一个开关;`heuristic` 产出的决策只证明流程(设计 §14 第 5 条)。
@@ -104,6 +109,9 @@
 24. **Ruling: 端到端测试用人工登记的低分基线 `run-000`(全错的 mock 报告 + `zengen-v1`,`links = [cand-run-000, run-000]`),第一轮训练的候选晋级为 `zengen-v2`。** —— 原因:mock 诊断给每个候选同样的分(Ruling 5),没有更低的基线,`compute_gain` 恒为 0,提名永远跳过,闭环转不到配方这一步;基线经计划 8 的真实评估器写出,形状与真实报告相同。 —— 判错的代价:测试里的模型版本号比 run 号大 1,读断言时要注意;真实部署第一次闭环也需要人登记一个基线。
 25. **Ruling: 整圈端到端用计划 4 的 `HeuristicBackend` 做规划(`--planner-backend heuristic`),不用罐头桥接;设计 §13 已同步为允许这样做。桥接的正向路径由任务 102 的假可执行体测试覆盖(`CliBridge` 取回文本、凭证打码),规划经桥接的正向端到端没有,只测了失败路径(R18,任务 108 的 `test_a_bridge_failure_fails_the_decision_and_stops_the_loop`)。** —— 原因:`HeuristicBackend` 是计划 4 的真实确定性后端,命令行一个开关就能选到,端到端里每一步都是真实代码;罐头桥接要另造一个吐固定 JSON 的假可执行体,它证明的只是"桥接能把字符串带回来",这一点任务 102 已经证明。 —— 判错的代价:规划提示经真实桥接往返时才出现的格式问题,例如模型输出带 Markdown 围栏、前后多出说明文字、JSON 被截断,要到接上真实后端才暴露;计划 4 的解析与重试逻辑在这条路径上只有计划 4 自己的单测覆盖。
 
+26. **Ruling(设计 SYS-21):本计划落地后发现的跨计划缺陷,追加编号 110 起的修补任务,允许改对应的包,修补后重跑任务 106 至 109。** —— 原因:工作包 9 的边界是"不改其他包",它是本计划能独立施工的前提;集成时发现的跨包缺陷若就地放宽这条边界,工作包 9 的回归证明就失去意义,而且缺陷本身的可追溯性也没了。 —— 判错的代价:多一轮修补任务与一次重跑;缺陷若不修,闭环在真实运行里带病。 —— 本条是约定,不是已有任务(见「已知限制」第 11 条)。
+27. **Ruling(设计 CP-12):`factory` 不自己取锁。** `run` 的锁由 `controlplane.daemon.run_daemon` 在第一个 tick 之前取(计划 8 任务 98),`reconcile_one_tick` 在装配之前取同一把锁;`factory.cli.main` 把 `RepoLockedError` 翻译成一行错误与退出码 2。只读子命令 `trace`、`cost`、`logs` 不取锁,被占用时照常输出。 —— 原因:锁的粒度是"一次写入"而不是"一次进程":`run` 与 `reconcile` 是两条可能并发的写入路径,只锁其中一条等于没锁;只读路径不写树,不需要排队。 —— 判错的代价:锁被别的进程占着时 `run` 与 `reconcile` 直接退出码 2,要等人放锁。
+
 ## Global Constraints
 
 每个任务的要求都隐含包含本节。
@@ -115,13 +123,14 @@
 - **凭证绝不进 git 树**;凭证值不进标准输出、标准错误、异常信息、日志(任务 102 有测试)。
 - **读写产物走 `GitStore` + `Envelope`;配置走 `read_config` / `write_config`。** 唯一的直接文件读取是 `logs` 读 `file://` 引用指向的日志文件(那不是产物)。
 - **`mindtrainer.wire` 与 `scripts/run_controlplane.py` 保持原样,不删、不改**(任务 109 用 `git diff` 证明)。
-- **不传 `--enable` 时与 `scripts/run_controlplane.py` 逐字节相同**(任务 104 有测试)。
+- **不传 `--enable` 时与 `scripts/run_controlplane.py` 逐字节相同**(任务 104 有测试)。幂等比较只看 `control-plane/` 下的产物与提交说明;仓库排他锁的锁文件在控制面仓库的 `.git/` 下(计划 8 任务 98),不在被比较的范围里。
+- **仓库排他锁**:`run` 与 `reconcile` 的写入路径取锁(计划 8 任务 98);锁被占用时退出码 2、树里不写任何东西;只读子命令 `trace`、`cost`、`logs` 不取锁(任务 104 有测试)。
 - **默认关闭 `--allow-mock-evidence`;开发入口显式打开**(Ruling 15)。
 - **只改本计划文件表里的文件。** 不碰 `src/controlplane`、`src/diagnostic`、`src/mindtrainer`、`src/inference_bridge`、`src/trainplanner`、`src/recipestore`、`src/trainscheduler`、`src/actio`、`src/mindagent`、`src/simulator`、`schemas/`、`cli/`。跨计划核对发现的冲突只报告,不在本计划里修(任务 109)。
 - **`git add` 逐个文件**,不用 `git add .` / `-A`;**不要碰** `cli/package.json`、`cli/package-lock.json`。
 - **提交信息不加 `Co-Authored-By` 行**(用户明确要求)。下文每个提交命令都照此写。
 - **测试命令**一律是 `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error`(下文称"全量命令";跑单个文件时在末尾加路径),不得出现警告。
-- **测试数**:起点 B 由任务 100 第 1 步实测(撰写时最终重放实测 **B = 2275**)。各任务的增量:任务 100 **+19**、101 **+10**、102 **+14**、103 **+12**、104 **+22**、105 **+4**、106 **+0**、107 **+18**、108 **+9**、109 **+34**(共 **+142**),即 **B+19 → B+29 → B+43 → B+55 → B+77 → B+81 → B+81 → B+99 → B+108 → B+142**;最终重放上对应 2294 → 2304 → 2318 → 2330 → 2352 → 2356 → 2356 → 2374 → 2383 → 2417。绝对通过数依赖前八份计划的执行顺序与各自最终的测试数,以增量为准。
+- **测试数**:起点 B 由任务 100 第 1 步实测(**B = 2359**,见「未验证项」第 1 条)。各任务的增量:任务 100 **+19**、101 **+10**、102 **+14**、103 **+12**、104 **+27**、105 **+4**、106 **+0**、107 **+18**、108 **+10**、109 **+34**(共 **+148**),即 **B+19 → B+29 → B+43 → B+55 → B+82 → B+86 → B+86 → B+104 → B+114 → B+148**。绝对通过数依赖前八份计划的执行顺序与各自最终的测试数,以增量为准;其中任务 104 的锁用例 +5 与任务 108 的配方门用例 +1 来自设计 2026-10-11 的修订(CP-11、CP-12),已在九份计划按序重放的拷贝里核对过收集数(各测试文件的用例数与文件表一致,合计 +148)。
 
 ## File Structure
 
@@ -135,24 +144,24 @@
 | `src/factory/bridges.py` | 新建(71 行) | 102 | `BRIDGE_ROLES`、`build_bridge` |
 | `src/factory/evaluation.py` | 新建(79 行) | 103 | `EVALUATOR_CONFIG`、`EVALUATOR_KEYS`、`read_evaluator_config`、`build_mock_evaluator` |
 | `src/factory/defaults.py` | 新建(49 行);任务 107 整个替换(88 行) | 103 / 107 | 默认诊断资产、评估器配置、MindAgent 部署素材、`install_defaults` |
-| `src/factory/wire.py` | 新建(192 行) | 104 | `FactoryOptions`、`BuildContext`、`Assembly`、`assemble`、`run`、`reconcile_one_tick`、`resolve_repo_commit` |
-| `src/factory/cli.py` | 新建(129 行) | 104 | argparse 子命令与开关、退出码、`main`、`dev_main` |
+| `src/factory/wire.py` | 新建(205 行) | 104 | `FactoryOptions`、`BuildContext`、`Assembly`、`assemble`、`run`、`reconcile_one_tick`、`resolve_repo_commit` |
+| `src/factory/cli.py` | 新建(135 行) | 104 | argparse 子命令与开关、退出码、`main`、`dev_main` |
 | `src/factory/handlers.py` | 新建(10 行,空表);任务 107 整个替换(92 行) | 104 / 107 | `DEFAULT_BUILDERS`、`scheduler_config_loader` |
 | `src/factory/agent.py` | 新建(146 行) | 107 | `agent.yaml`、`DeadlineStub`、`AgentRuntime`、`CannedGuidedBackend`、`personas_from_tree` |
 | `scripts/run_factory.py` | 新建(11 行) | 104 | 默认入口薄壳 |
 | `scripts/run_factory_dev.py` | 新建(11 行) | 104 | 开发入口薄壳(自动 `--allow-mock-evidence`) |
 | `scripts/check_factory_assumptions.py` | 新建(83 行) | 106 | 对计划 3、5、7 的依赖逐条检查 |
-| `tests/factory_fixtures.py` | 新建(103 行,不是测试文件) | 104 | 搭仓库、写指令、合成清单、假处理器、树与提交日志快照 |
+| `tests/factory_fixtures.py` | 新建(112 行,不是测试文件) | 104 | 搭仓库、写指令、合成清单、假处理器、树与提交日志快照、另起进程持锁(`held_lock`) |
 | `tests/test_factory_switches.py` | 新建(17 个用例) | 100 | 开关映射表 |
 | `tests/test_factory_boundaries.py` | 新建(2 个用例) | 100 | 无包导入 `factory`;`__future__` 头 |
 | `tests/test_factory_readonly.py` | 新建(10 个用例) | 101 | 只读函数 |
 | `tests/test_factory_bridges.py` | 新建(14 个用例) | 102 | 桥接装配与凭证不外露 |
 | `tests/test_factory_evaluation.py` | 新建(12 个用例) | 103 | 评估器装配与默认资产 |
-| `tests/test_factory_wire.py` | 新建(14 个用例) | 104 | 逐字节相同、闭环模式的注入、装配错误 |
-| `tests/test_factory_cli.py` | 新建(8 个用例) | 104 | 只读子命令的输出、退出码、不提交、入口脚本 |
+| `tests/test_factory_wire.py` | 新建(18 个用例) | 104 | 逐字节相同、闭环模式的注入、装配错误、仓库锁 |
+| `tests/test_factory_cli.py` | 新建(9 个用例) | 104 | 只读子命令的输出、退出码、不提交、入口脚本、锁被占用时照常工作 |
 | `tests/test_factory_e2e_frame.py` | 新建(4 个用例) | 105 | 端到端框架:空闭环一个 tick;mock 证据默认不转 |
 | `tests/test_factory_handlers.py` | 新建(18 个用例) | 107 | 六个构造器、开关的单一来源、`agent.yaml`、Interact 流的 deadline |
-| `tests/test_factory_e2e_loop.py` | 新建(9 个用例) | 108 | 完整闭环、R5、R18、mock 证据关闭、MindAgent 链、R19 的轮次重入、读不出的轮次产物 |
+| `tests/test_factory_e2e_loop.py` | 新建(10 个用例) | 108 | 完整闭环、R5、计划等配方门(CP-11)、R18、mock 证据关闭、MindAgent 链、R19 的轮次重入、读不出的轮次产物 |
 | `tests/test_factory_cross_plan.py` | 新建(31 个用例) | 109 | 跨计划核对 |
 | `tests/test_factory_run_order.py` | 新建(3 个用例) | 109 | 最大 run 的数值序(计划 8 的 `_latest_numbered_run`) |
 
@@ -182,7 +191,7 @@ BASE=$(git rev-parse HEAD); echo "$BASE"
 PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error 2>&1 | tail -1
 ```
 
-Expected:第二行是 `B passed`(B 为前八份计划落地后的实测值,记下它;下文所有 Expected 都写成 B 加增量),无警告。撰写时在最终重放的集成拷贝里实测 B = 2275(见「未验证项」第 1 条)。再确认计划 8 与计划 1、2、4 的名字在场:
+Expected:第二行是 `B passed`(B 为前八份计划落地后的实测值,记下它;下文所有 Expected 都写成 B 加增量),无警告。撰写时在九份计划按序重放的集成拷贝里,前八份放完后的收集数是 B = 2359(见「未验证项」第 1 条)。再确认计划 8 与计划 1、2、4 的名字在场:
 
 ```bash
 uv run --extra dev python -c "
@@ -1201,20 +1210,22 @@ git commit -m "feat: factory assembles the mock-backed diagnostic evaluator and 
 
 **Files:**
 - Create: `src/factory/wire.py`、`src/factory/cli.py`、`src/factory/handlers.py`、`scripts/run_factory.py`、`scripts/run_factory_dev.py`、`tests/factory_fixtures.py`
-- Test: `tests/test_factory_wire.py`(14 个用例)、`tests/test_factory_cli.py`(8 个用例)
+- Test: `tests/test_factory_wire.py`(18 个用例)、`tests/test_factory_cli.py`(9 个用例)
 
 **Interfaces:**
-- Consumes: 任务 100–103 的全部名字;`controlplane.daemon.run_daemon`、`reconcile_once`、`Dispatcher`、`Handler`、`Evaluator`(计划 8 任务 93);`mindtrainer.dispatch.make_mindtrainer_dispatcher(data_producer=...)`(计划 2);`TemplateDataProducer`(计划 2);`mindtrainer.wire`(现有,只在测试里做对比)。
+- Consumes: 任务 100–103 的全部名字;`controlplane.daemon.run_daemon`、`reconcile_once`、`Dispatcher`、`Handler`、`Evaluator`(计划 8 任务 93);`controlplane.lock.acquire_repo_lock`、`RepoLockedError`(**计划 8** 任务 98);`mindtrainer.dispatch.make_mindtrainer_dispatcher(data_producer=...)`(计划 2);`TemplateDataProducer`(计划 2);`mindtrainer.wire`(现有,只在测试里做对比)。
 - Produces:
   - `FactoryOptions(switches=(), allow_mock_evidence=False, confirm_directives=None, planner_backend="bridge", repo_commit=None)`;`CODE_ROOT`、`resolve_repo_commit(override, *, code_root=CODE_ROOT) -> str | None`(Ruling 20)。
   - `BuildContext(store, accept_mock_evidence, confirm_directives, planner_backend, env, log_dir, repo_commit=None, closers=[])`,方法 `bridge(role) -> CliBridge`、`register_closer(close)`。
   - `HandlerBuilder = Callable[[BuildContext], Handler]`;`Assembly(dispatcher, handlers, evaluator, accept_mock_evidence, closers=())`,方法 `close()`;`run` 与 `reconcile_one_tick` 结束时(含异常)调 `close()`,构造器中途失败时已登记的收尾函数立刻调用。
   - `assemble(store, options, *, env=None, log_dir=None, builders=None) -> Assembly`;`run(repo_root, options=FactoryOptions(), *, interval_s=2.0, max_ticks=None, env=None, log_dir=None, builders=None)`;`reconcile_one_tick(repo_root, options=FactoryOptions(), *, env=None, log_dir=None, builders=None) -> list[Action]`。
-  - `factory.cli.build_parser()`、`main(argv=None, *, env=None, builders=None) -> int`、`dev_main(argv=None, **kw) -> int`。
+  - `factory.cli.build_parser()`、`main(argv=None, *, env=None, builders=None) -> int`、`dev_main(argv=None, **kw) -> int`;`main` 把 `RepoLockedError` 翻成一行 `factory: error: repository is locked by another process: <锁文件路径>` 与退出码 2。
   - `factory.handlers.DEFAULT_BUILDERS`(本任务为空表,任务 107 填满)。
 
 **设计要点:**
-- **两条路径**见 Ruling 2、3;**装配失败**见 Ruling 7;**构造器表**见 Ruling 16。
+- **两条路径**见 Ruling 2、3;**装配失败**见 Ruling 7;**构造器表**见 Ruling 16;**仓库锁**见 Ruling 27。
+- **仓库锁(设计 CP-12、Ruling 27)**:`run` 的锁由 `controlplane.daemon.run_daemon` 在第一个 tick 之前取(计划 8 任务 98),`factory` 不再重复取;`reconcile_one_tick` 在装配之前用 `acquire_repo_lock(repo_root)` 取同一把锁——一次性 tick 也是一次写入,同样要挡住第二个写者。`factory.cli.main` 捕获 `RepoLockedError` 打一行错误并返回 2;只读子命令 `trace`、`cost`、`logs` 不取锁,被占用时照常输出。锁必须**不可重入**:同进程第二次取同一把锁也要失败,否则测试里的"持锁再调 main"证明不了任何事(若计划 8 的实现按进程判重入,以它的测试为准并改这两条)。
+- **锁文件在 `.git/` 下**(计划 8 任务 98),所以第 1 条"逐字节相同"的比较(`control-plane/` 下的产物与提交说明)不受影响,`git status` 也不会看到它。
 - **逐字节相同的证明**:两棵从同一份拷贝复制出来的仓库(含 `.git`,有一条 pending 指令和它的两份清单),一棵跑 `mindtrainer.wire.run`(或 `main`),一棵跑 `factory.cli.main(["run", ...])`,比较整棵 `control-plane/` 下的所有文件内容与 `git log --format=%s` 的全部提交说明。三个 tick 走到候选、诊断、待审;再人工批准、各跑一轮,走到晋级。`--allow-mock-evidence`、`--no-confirm-directives` 单独出现时也逐字节相同。
 - **不读配置**:默认路径下树里没有 `evaluator.yaml` 也照跑,诊断仍是桩(`stub: True`);带 `data_spec` 而缺清单的指令照旧判 `failed` 并点名 `data_producer`(与计划 2 的已知限制第 8 条一致)。
 - **闭环模式注入**:用一条带 `data_spec`、没有清单的指令,直接调 `assemble(...).dispatcher`,证明数据生产器被注入、训练出候选;`BuildContext` 把三个开关原样交给构造器。
@@ -1230,6 +1241,9 @@ git commit -m "feat: factory assembles the mock-backed diagnostic evaluator and 
 from __future__ import annotations
 
 import subprocess
+import sys
+from contextlib import contextmanager
+from pathlib import Path
 
 from controlplane.envelope import BigRef, Envelope, OwnerRef
 from controlplane.gitstore import GitStore
@@ -1310,6 +1324,28 @@ def tree_files(store: GitStore) -> dict[str, bytes]:
     return {str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
 
 
+@contextmanager
+def held_lock(repo_root):
+    """另起一个进程持有仓库排他锁(跨进程才真的互斥,与锁用 flock 还是 lockf 无关);退出时放锁。"""
+    src = Path(__file__).resolve().parents[1] / "src"
+    code = (
+        "import sys\n"
+        f"sys.path.insert(0, {str(src)!r})\n"
+        "from controlplane.lock import acquire_repo_lock\n"
+        f"with acquire_repo_lock({str(repo_root)!r}):\n"
+        "    print('locked', flush=True)\n"
+        "    sys.stdin.read()\n"
+    )
+    # with Popen:退出时关闭并回收两条管道;裸 Popen 会留下未关闭的文件对象,在 -W error 下变成 ResourceWarning
+    with subprocess.Popen([sys.executable, "-c", code], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True) as proc:
+        try:
+            assert proc.stdout.readline().strip() == "locked"
+            yield
+        finally:
+            proc.stdin.close()
+            proc.wait(timeout=10)
+
+
 class Recorder:
     """假处理器:记下 (动作名, target_id),不写任何东西。"""
 
@@ -1347,8 +1383,8 @@ from factory.cli import build_parser, dev_main, main
 from factory.evaluation import EVALUATOR_CONFIG
 from factory.wire import FactoryOptions, assemble
 from factory_fixtures import (
-    DATA_SPEC, Recorder, closed_loop_repo, git_head, git_log_messages, produce_datasets, recording_builders,
-    tree_files, write_directive,
+    DATA_SPEC, Recorder, closed_loop_repo, git_head, git_log_messages, held_lock, produce_datasets,
+    recording_builders, tree_files, write_directive,
 )
 from mindtrainer import wire as mt_wire
 from mindtrainer.dispatch import make_mindtrainer_dispatcher
@@ -1503,6 +1539,51 @@ def test_dev_entry_turns_mock_evidence_on(tmp_path):
     assert main(["reconcile", str(store.repo_root), "--once", "--enable", "plan"],
                 env={}, builders=recording_builders(Recorder(), seen_contexts=seen)) == 0
     assert seen[0].accept_mock_evidence is False
+
+
+# ---- 仓库锁(设计 CP-12):run 的锁由 run_daemon 取,reconcile 的锁由 reconcile_one_tick 在装配之前取 ----
+
+def _locked_message(capsys):
+    err = capsys.readouterr().err
+    assert err.startswith("factory: error: repository is locked by another process: ")
+    assert "rismforge.lock" in err
+
+
+def test_run_exits_2_when_the_repository_is_locked_and_writes_nothing(twin, capsys):
+    a, _ = twin
+    head, files = git_head(a), tree_files(a)
+    with held_lock(a.repo_root):
+        assert main(["run", str(a.repo_root), "--interval-s", "0", "--max-ticks", "2"]) == 2
+    _locked_message(capsys)
+    assert (git_head(a), tree_files(a)) == (head, files)
+
+
+def test_reconcile_exits_2_when_the_repository_is_locked_and_writes_nothing(twin, capsys):
+    a, _ = twin
+    head, files = git_head(a), tree_files(a)
+    with held_lock(a.repo_root):
+        assert main(["reconcile", str(a.repo_root), "--once"]) == 2
+    _locked_message(capsys)
+    assert (git_head(a), tree_files(a)) == (head, files)
+
+
+def test_closed_loop_reconcile_takes_the_lock_before_any_builder_runs(tmp_path, capsys):
+    store = closed_loop_repo(str(tmp_path / "cp"))
+    head, files, seen = git_head(store), tree_files(store), []
+    with held_lock(store.repo_root):
+        assert main(["reconcile", str(store.repo_root), "--once", "--enable", "plan"], env={},
+                    builders=recording_builders(Recorder(), seen_contexts=seen)) == 2
+    _locked_message(capsys)
+    assert seen == []  # 锁在装配之前取:被占用时一个处理器构造器都没跑
+    assert (git_head(store), tree_files(store)) == (head, files)
+
+
+def test_the_lock_is_released_when_run_and_reconcile_finish(twin):
+    a, _ = twin
+    assert main(["run", str(a.repo_root), "--interval-s", "0", "--max-ticks", "1"]) == 0
+    assert main(["reconcile", str(a.repo_root), "--once"]) == 0
+    with held_lock(a.repo_root):  # 取得到,说明前两条没把锁留在身后
+        pass
 ```
 
 新建 `tests/test_factory_cli.py`:
@@ -1520,6 +1601,7 @@ from controlplane.ledger import record_cost, record_failure
 from controlplane.observe import cost as observe_cost, trace as observe_trace
 from controlplane.paths import run_dir
 from factory.cli import main
+from factory_fixtures import held_lock
 
 RUN = "run-001"
 
@@ -1599,6 +1681,19 @@ def test_entry_script_runs_trace(store):
                          capture_output=True, text=True)
     assert out.returncode == 0, out.stderr
     assert out.stdout == observe_trace(store, RUN) + "\n"
+
+
+def test_the_read_only_commands_work_while_the_repository_is_locked(store, capsys):
+    """只读子命令不取锁(设计 CP-12):另一个进程持锁时照常输出,不退出码 2,也不提交。"""
+    before = _snapshot(store)
+    with held_lock(store.repo_root):
+        assert main(["trace", str(store.repo_root), RUN]) == 0
+        assert capsys.readouterr().out == observe_trace(store, RUN) + "\n"
+        assert main(["cost", str(store.repo_root), RUN]) == 0
+        assert capsys.readouterr().out == observe_cost(store, RUN) + "\n"
+        assert main(["logs", str(store.repo_root), RUN]) != 2
+    assert "locked" not in capsys.readouterr().err
+    assert _snapshot(store) == before
 ```
 
 - [ ] **Step 2: 跑测试,确认失败**
@@ -1645,6 +1740,7 @@ from pathlib import Path
 
 from controlplane.daemon import Dispatcher, Evaluator, Handler, reconcile_once, run_daemon
 from controlplane.gitstore import GitStore
+from controlplane.lock import acquire_repo_lock
 from controlplane.reconcile import Action
 from factory.bridges import build_bridge
 from factory.errors import FactoryConfigError
@@ -1808,16 +1904,19 @@ def reconcile_one_tick(
     builders: Mapping[str, HandlerBuilder] | None = None,
 ) -> list[Action]:
     store = GitStore(repo_root)
-    a = assemble(store, options, env=env, log_dir=log_dir, builders=builders)
-    if not a.closed_loop:
-        return reconcile_once(store, dispatcher=a.dispatcher)
-    try:
-        return reconcile_once(
-            store, dispatcher=a.dispatcher, handlers=a.handlers, evaluator=a.evaluator,
-            accept_mock_evidence=a.accept_mock_evidence,
-        )
-    finally:
-        a.close()
+    # 设计 CP-12:一次性的 reconcile 也是一次写入,与 run_daemon 争同一把仓库排他锁(计划 8 任务 98)。
+    # 锁在装配之前取:装配失败(退出码 2)时树里同样不写任何东西,with 会释放锁。
+    with acquire_repo_lock(repo_root):
+        a = assemble(store, options, env=env, log_dir=log_dir, builders=builders)
+        if not a.closed_loop:
+            return reconcile_once(store, dispatcher=a.dispatcher)
+        try:
+            return reconcile_once(
+                store, dispatcher=a.dispatcher, handlers=a.handlers, evaluator=a.evaluator,
+                accept_mock_evidence=a.accept_mock_evidence,
+            )
+        finally:
+            a.close()
 ```
 
 新建 `src/factory/cli.py`:
@@ -1834,7 +1933,7 @@ def reconcile_one_tick(
     factory cost <repo> <run>
     factory logs <repo> <run> [--task <id>]
 
-退出码:0 成功;1 只读子命令发现缺失(run 不存在、日志不可达);2 用法错误或装配错误。
+退出码:0 成功;1 只读子命令发现缺失(run 不存在、日志不可达);2 用法错误、装配错误或仓库被另一个进程锁住(只读子命令不取锁)。
 """
 from __future__ import annotations
 
@@ -1843,6 +1942,7 @@ import sys
 from collections.abc import Mapping
 
 from controlplane.gitstore import GitStore
+from controlplane.lock import RepoLockedError
 from controlplane.paths import run_dir
 from factory import readonly
 from factory.defaults import install_defaults
@@ -1937,6 +2037,10 @@ def main(
         text, code = readonly.render_logs(store, args.run_id, task_id=args.task)
         print(text)
         return code
+    except RepoLockedError as exc:
+        # 设计 CP-12:另一个写者(守护进程或另一次 reconcile)正持锁;树里不写任何东西
+        print(f"factory: error: repository is locked by another process: {exc}", file=sys.stderr)
+        return 2
     except (FactoryConfigError, UnknownSwitchError) as exc:
         print(f"factory: error: {exc}", file=sys.stderr)
         return 2
@@ -1993,10 +2097,10 @@ chmod +x scripts/run_factory.py scripts/run_factory_dev.py
 - [ ] **Step 4: 跑测试,确认通过**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error tests/test_factory_wire.py tests/test_factory_cli.py`
-Expected:`22 passed`。
+Expected:`27 passed`。
 
 Run: 全量命令。
-Expected:`B+77 passed`,无警告。
+Expected:`B+82 passed`,无警告。
 
 再手工跑一次入口,确认用法与退出码:
 
@@ -2035,7 +2139,7 @@ git commit -m "feat: factory composition root and CLI (byte-identical to run_con
 **设计要点:**
 - **空闭环**:五个开关全开、没有任何 run,跑一个 tick 不出错,假处理器一次都没被调。
 - **闭环模式的晋级链**:经 `factory reconcile --once` 四次(派发 → mock 诊断 → 待审 → 人工批准后晋级),打印的动作序列逐行断言;诊断报告的等级是 `mock`。
-- **证据开关(R17)**:晋级后的同一棵树,不带 `--allow-mock-evidence` 时一轮 `reconcile --once` 打印 `no actions`、假处理器没被调;带上后同一状态产生 `nominate_recipe` 与 `plan_next_round`(动作顺序是计划 8 Ruling 3 的固定顺序)。`record_track` 不出现,因为这条人工指令的 `recipe_ref` 为空。
+- **证据开关(R17)**:晋级后的同一棵树,不带 `--allow-mock-evidence` 时一轮 `reconcile --once` 打印 `no actions`、假处理器没被调;带上后同一状态只产生 `nominate_recipe`:`plan_next_round` 还要等来源 run 的提名标记(CP-11),而假处理器不写标记(规划等配方入库门用真处理器在任务 108 的 `test_planning_waits_for_the_recipe_gate` 里验证)。`record_track` 不出现,因为这条人工指令的 `recipe_ref` 为空。
 - 本任务的处理器全是假的(只记调用),所以测试证明的是"组合根把开关、证据参数、评估器正确地交给了计划 8 的调和循环",不是处理器的行为;后者在任务 108。
 - **变异检查(撰写时做过)**:把 `reconcile_one_tick` 传给 `reconcile_once` 的 `accept_mock_evidence` 改成恒 `True`,`test_mock_evidence_does_not_turn_the_loop_unless_allowed` 失败,其余 3 个通过。
 
@@ -2095,8 +2199,9 @@ def test_mock_evidence_does_not_turn_the_loop_unless_allowed(tmp_path, capsys):
     assert rec.calls == []
     assert main(["reconcile", root, "--once", "--enable", "plan,nominate,track", "--allow-mock-evidence"],
                 env={}, builders=recording_builders(rec)) == 0
-    assert rec.calls == [("nominate_recipe", RUN), ("plan_next_round", RUN)]
-    assert capsys.readouterr().out == f"nominate_recipe {RUN}\nplan_next_round {RUN}\n"
+    # 假处理器不写提名标记,所以规划还在等它(CP-11):只出现 nominate_recipe
+    assert rec.calls == [("nominate_recipe", RUN)]
+    assert capsys.readouterr().out == f"nominate_recipe {RUN}\n"
 
 
 def test_the_recorder_handlers_write_nothing_so_the_tree_only_holds_the_round(tmp_path):
@@ -2112,7 +2217,7 @@ Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider
 Expected:`4 passed`。本任务没有新的实现代码,测试一写就该通过;若失败,说明任务 104 的装配或计划 8 的调和循环与本计划的理解不一致,停下报告失败的断言,不要改测试迁就。
 
 Run: 全量命令。
-Expected:`B+81 passed`,无警告。
+Expected:`B+86 passed`,无警告。
 
 - [ ] **Step 3: 提交**
 
@@ -2128,14 +2233,14 @@ git commit -m "test: factory end-to-end frame (one closed-loop tick, mock eviden
 - Create: `scripts/check_factory_assumptions.py`
 
 **Interfaces:**
-- Consumes: 「对计划 3、5、7 的假设」一节的 A3-1 至 A7-4(只查名字与参数,不调用)。
+- Consumes: 「对计划 3、5、7 的假设」一节的 A3-1 至 A7-4 与 A8-1、A8-2(只查名字与参数,不调用)。
 - Produces: `scripts/check_factory_assumptions.py`(退出码 0 = 全部成立;1 = 至少一条不成立)。任务 107、108 的第 1 步都跑它。
 
 **设计要点:**
 - 一律从**子模块**导入:`trainscheduler`、`mindagent` 的 `__init__.py` 只有包说明、不导出名字(两份计划的 File Structure 表)。
 - 只用 `importlib` 与 `inspect.signature`,对每条假设比较"位置参数名的元组"与"keyword-only 参数名的元组";`None` 表示只查存在(数据类)。另有一行 `A5-4f` 比对 `SchedulerConfig` 的九个字段(计划 5 Ruling 8),防止计划 5 改了 `scheduler.yaml` 的键而本计划的覆盖方式(Ruling 21)没跟上。
 - 脚本自己把 `src/` 插进 `sys.path`,与 `scripts/run_controlplane.py` 的薄壳同一手法。
-- **撰写时的验证**:在只有计划 1、2、4、8 桩的拷贝里跑,每行都是 `MISSING (ModuleNotFoundError: ...)`,`exit=1`;在按计划 1–8 文档重放出来的集成拷贝里跑,19 行 `OK`,`exit=0`。
+- **撰写时的验证**:在只有计划 1、2、4、8 桩的拷贝里跑,每行都是 `MISSING (ModuleNotFoundError: ...)`,`exit=1`;在九份计划按序重放出来的拷贝里(前八份提交之后)跑,21 行 `OK`(含 A8-1、A8-2),最后一行 `all assumptions hold`,实测。
 
 - [ ] **Step 1: 写脚本**
 
@@ -2143,7 +2248,7 @@ git commit -m "test: factory end-to-end frame (one closed-loop tick, mock eviden
 
 ```python
 #!/usr/bin/env python3
-"""计划 9 对计划 3、5、7 的假设核对(任务 107、108 第 1 步都跑一次)。
+"""计划 9 对计划 3、5、7、8 的假设核对(任务 107、108、109 第 1 步都跑一次)。
 
 一律从子模块导入(trainscheduler、mindagent 的 __init__.py 不导出名字)。每条假设一行:OK / MISSING(导入失败)/ MISMATCH(签名不符)。全部 OK 退出 0,否则退出 1。
 只检查名字、参数名与参数种类,不调用任何处理器。
@@ -2183,6 +2288,8 @@ ASSUMPTIONS: list[tuple[str, str, str, tuple[str, ...] | None, tuple[str, ...] |
     ("A7-2", "mindagent.admit", "handle_admit_proposal", ("store", "action"), ()),
     ("A7-3", "mindagent.library", "load_library", ("store",), ()),
     ("A7-4", "mindagent.config", "AgentConfig", None, None),
+    ("A8-1", "controlplane.lock", "acquire_repo_lock", ("repo_root",), ()),
+    ("A8-2", "controlplane.lock", "RepoLockedError", None, None),
 ]
 # A5-4 的字段集:scheduler.yaml 恰好九个键(计划 5 Ruling 8)
 SCHEDULER_KEYS = ("confirm_directives", "allow_interact", "accept_mock_evidence", "perturbable", "min_gain",
@@ -2234,10 +2341,10 @@ chmod +x scripts/check_factory_assumptions.py
 uv run --extra dev python scripts/check_factory_assumptions.py; echo "exit=$?"
 ```
 
-Expected:19 行 `OK`(`A3-1` 至 `A7-4` 共 18 行,加 `A5-4f`),最后一行 `all assumptions hold`,`exit=0`。若有 `MISSING` 或 `MISMATCH`,本任务仍然提交脚本(它就是用来报告这件事的),但**不要开始任务 107**,把输出报告给人。
+Expected:21 行 `OK`(`A3-1` 至 `A8-2` 共 20 行,加 `A5-4f`),最后一行 `all assumptions hold`,`exit=0`。若有 `MISSING` 或 `MISMATCH`,本任务仍然提交脚本(它就是用来报告这件事的),但**不要开始任务 107**,把输出报告给人。
 
 Run: 全量命令。
-Expected:`B+81 passed`(脚本不是测试,增量为 0),无警告。
+Expected:`B+86 passed`(脚本不是测试,增量为 0),无警告。
 
 - [ ] **Step 3: 提交**
 
@@ -2278,7 +2385,7 @@ git commit -m "chore: a check script for what the factory assumes about recipest
 uv run --extra dev python scripts/check_factory_assumptions.py; echo "exit=$?"
 ```
 
-Expected:19 行都以 `: OK` 结尾,最后一行 `all assumptions hold`,`exit=0`。有任何一行是 `MISSING` 或 `MISMATCH`:停下,把那几行原样报告,不往下做。
+Expected:21 行都以 `: OK` 结尾,最后一行 `all assumptions hold`,`exit=0`。有任何一行是 `MISSING` 或 `MISMATCH`:停下,把那几行原样报告,不往下做。
 
 - [ ] **Step 2: 写失败测试**
 
@@ -2813,10 +2920,10 @@ def install_defaults(store: GitStore) -> list[str]:
 - [ ] **Step 5: 跑测试,确认通过**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error tests/test_factory_handlers.py tests/test_factory_wire.py tests/test_factory_cli.py tests/test_factory_e2e_frame.py tests/test_factory_evaluation.py`
-Expected:`56 passed`(本任务 18 个,任务 103–105 的 38 个照样通过:它们用 `builders=` 注入假处理器,不受真实表影响)。
+Expected:`61 passed`(本任务 18 个,任务 103–105 的 43 个照样通过:它们用 `builders=` 注入假处理器,不受真实表影响)。
 
 Run: 全量命令。
-Expected:`B+99 passed`,无警告。
+Expected:`B+104 passed`,无警告。
 
 - [ ] **Step 6: 提交**
 
@@ -2833,7 +2940,7 @@ git commit -m "feat: factory builds the six closed-loop handlers from recipestor
 ### Task 108: 完整闭环与 MindAgent 端到端
 
 **Files:**
-- Test: `tests/test_factory_e2e_loop.py`(9 个用例)
+- Test: `tests/test_factory_e2e_loop.py`(10 个用例)
 
 **Interfaces:**
 - Consumes: 任务 105 的 `closed_loop_repo`、`produce_datasets`、`write_directive(..., dimension=...)`;任务 107 的 `DEFAULT_BUILDERS`、`factory.handlers.canned_backend_factory`(测试里 monkeypatch 它);A3-1、A3-2、A3-5、A7-3;计划 7 的 `mindagent.rounds.package`(测试里 monkeypatch 它);计划 8 的 `make_diagnostic_evaluator`(造基线)与 R19 的 `start_agent_round` 触发条件 `agent_round_status in (None, "pending")`。
@@ -2843,9 +2950,10 @@ git commit -m "feat: factory builds the six closed-loop handlers from recipestor
 - **全部走 `factory reconcile --once`**:每个 tick 的动作行逐行断言;人工动作(批准、确认、驳回)用写状态模拟,等价于 TypeScript 的 `approve`、`confirm`、`reject`(与 `tests/test_mt_wire.py` 同一手法)。没有任何处理器是假的。
 - **基线**:mock 诊断对每个候选打同样的分,所以要有一个更低分的基线,提名才有正增益。`run-000` 是人工登记的基线:用"全错"的 mock 运行器经计划 8 的评估器写一份报告,再登记 `zengen-v1`(`links = [cand-run-000, run-000]`,带 `checkpoint_ref`)。run id 一律补零(`run-000`、`run-001`、`run-002`,设计 §4.1)。
 - **目标维度**:指令的 `target_dimension` 用默认分类表唯一的一级维度 `mental_representation`;不然 `compute_gain` 找不到一级分数,提名永远跳过。
-- **一整圈**(`test_the_whole_loop_turns_twice`):`run-001` 训练 → mock 诊断 → 批准 → 晋级(`zengen-v2`)→ 提名(增益 > `min_gain`)→ 配方候选(`repro` 在场,满足 `has_repro_evidence`)→ 批准 → 收录 → 规划(启发式后端 clone `recipe-run-001`,决策 `template_version == "v1"`、`next_run_id == "run-002"`)→ `awaiting_confirmation` 的新指令(闭环不动)→ 确认 → 第二轮训练出候选并晋级(`zengen-v3`;clone 复用 `run-001` 的清单,不为 `run-002` 合成)→ 同一 tick 里 `record_track run-002`、`nominate_recipe run-002`(增益 0,跳过)、`plan_next_round run-002`(只对最大的 run)。最后 `factory cost run-001` 的输出里没有 `None`。
-- **不确认**(`test_a_new_round_without_confirmation_synthesizes_its_data`):`--no-confirm-directives`。同一 tick 里提名先于规划(计划 8 Ruling 3),配方还没收录,启发式后端走 `new batch`,指令直接 `pending` 且带 `data_spec`;下一个 tick 由注入的数据生产器合成 `run-002` 的两份清单并训练出候选。
+- **一整圈**(`test_the_whole_loop_turns_twice`):`run-001` 训练 → mock 诊断 → 批准 → 晋级(`zengen-v2`)→ 提名(增益 > `min_gain`)→ 配方候选(`repro` 在场,满足 `has_repro_evidence`)→ 批准 → 收录 → 规划(启发式后端 clone `recipe-run-001`,决策 `template_version == "v1"`、`next_run_id == "run-002"`)→ `awaiting_confirmation` 的新指令(闭环不动)→ 确认 → 第二轮训练出候选并晋级(`zengen-v3`;clone 复用 `run-001` 的清单,不为 `run-002` 合成)→ 一个 tick 里 `record_track run-002`、`nominate_recipe run-002`(增益 0,写 `skipped` 标记),下一个 tick 才出现 `plan_next_round run-002`(规划要等提名标记,CP-11;只对最大的 run)。最后 `factory cost run-001` 的输出里没有 `None`。
+- **不确认**(`test_a_new_round_without_confirmation_synthesizes_its_data`):`--no-confirm-directives`。启用集是 `plan,track,admit`,没开提名,规划不等配方入库门(CP-11),没有配方可 clone,启发式后端走 `new batch`,指令直接 `pending` 且带 `data_spec`;下一个 tick 由注入的数据生产器合成 `run-002` 的两份清单并训练出候选。
 - **只对最大的 run 规划**(R5,`test_only_the_largest_run_is_planned`):`run-001` 晋级、`run-002` 被驳回(写 `reject_reason`),两者都满足条件,只有 `run-002` 触发。
+- **规划等配方入库门**(CP-11,`test_planning_waits_for_the_recipe_gate`):启用集 `plan,nominate,admit`。晋级后的 tick 只提名(`nominate_recipe run-001`),这个 tick 的快照里还没有提名标记,规划不出现;配方候选停在 `pending_review` 时多个 tick 都是 `no actions`,没有决策;人工批准后的 tick 只出现 `admit_recipe recipe-run-001`(快照里候选是 `approved`,规划仍被挡着),候选收录为 `effective` 之后的下一个 tick 才出现 `plan_next_round run-001`,决策 `clone recipe-run-001`。**先失败**(按计划 8 的触发条件推演,未重放):把触发条件改回不等配方门,这一条与 `test_the_whole_loop_turns_twice` 失败(提名与规划挤进同一个 tick),本任务其余 8 条照样通过。
 - **R18**(`test_a_bridge_failure_fails_the_decision_and_stops_the_loop`):`--planner-backend bridge`,`backends.yaml` 的 `planner` 是一个恒以退出码 3 结束、往标准错误写 `tool down` 的 `sys.executable -c` 脚本,`max_attempts=1`。`CliBridge` 抛 `BridgeError("T1", ...)`,计划 5 的规划处理器把决策置 `failed`(类别 T3,原因以 `bridge T1` 开头)、写 T3 失败记录(带桥接日志的 `log_refs`),不写新指令;下一个 tick 没有动作;`factory logs run-001 --task plan-run-001` 打印出含 `tool down` 的日志、标 `[ok]`。
 - **mock 证据关闭**(`test_without_mock_evidence_the_loop_does_not_turn`):不带 `--allow-mock-evidence`,晋级后一轮 `no actions`,没有提名标记、决策、配方候选。
 - **MindAgent 链**(`test_the_mindagent_line_runs_inside_the_reconcile_loop`):复用计划 7 任务 88 的搭法(罐头带指导语后端、对手首句含情绪词、空库零提案、手工放一条不处理情绪的基线技能),但每一步都由 factory 装配的 `handlers` 经计划 8 的 `reconcile_once` 触发:晋级 `zengen-v2` → `start_agent_round zengen-v2`(零提案,库版本 `{"skill": "0", "memory": "0"}`)→ 同一模型不再开轮次 → 放基线技能 → 第二轮晋级 `zengen-v3` → `start_agent_round zengen-v3` 产出一个 `pending_review` 提案(`verification.method == "replay_behavior"`)→ 批准 → `admit_proposal` → 库版本 `{"skill": "2", "memory": "0"}`,两个值都是字符串。实时服务端是 `AgentRuntime` 起的进程内 loopback,情境与人格来自 `install-defaults`。
@@ -2853,9 +2961,9 @@ git commit -m "feat: factory builds the six closed-loop handlers from recipestor
   - `test_a_transient_failure_leaves_the_round_pending_and_the_next_tick_resumes`:把 `factory.handlers.canned_backend_factory` 换成一个"第一次构造的后端在第 5 句发言时抛 `OSError`"的工厂(前两个情境各 2 句已落盘,第三个情境第一句抛)。计划 7 的约定是实例自己的异常不在任何 `except` 里、原样上抛(`run_deployment_episodes` 的 docstring),所以 ① 第一个 tick 抛 `OSError`,轮次产物是 `pending`,`runs/run-001/` 下没有 `failure-agent-*` 记录,两条部署 episode 已落盘;② 第二个 tick(同一棵树,后端恢复)再次打印 `start_agent_round zengen-v2`,已落盘的两条 episode 逐字节不变(计划 7 的 `_reusable` 复用),第三条补上,轮次 `executed`,提案恰好一个、id 是确定性的 `proposal-agent-round-zengen-v2-1`,没有失败记录;③ 第三个 tick 没有动作(`executed` 挡住)。
   - `test_a_crash_between_episodes_and_proposals_converges_on_the_next_tick`:把 `mindagent.rounds.package` 换成"第一次抛 `RuntimeError`、之后调真的"的替身,模拟进程在写完三条部署 episode 之后、写提案之前被杀。第一个 tick 抛出,轮次 `pending`、三条 episode 在、没有本轮的提案;第二个 tick 再次触发,三条 episode 逐字节不变,`package` 被调第二次,轮次 `executed`,磁盘上本轮的提案与轮次载荷的 `proposals` 一致且非空,没有失败记录;第三个 tick 没有动作。
   - 只数本轮(`proposal-agent-round-zengen-v2-*`)的提案:`train_and_promote` 期间基线 `zengen-v1` 的轮次也会被触发并写出它自己的提案,不计在内。
-  - **先失败**:把计划 8 的触发条件改回 R19 之前的"只在没有轮次产物时触发"(`top.agent_round_status is None`),这两条失败、本任务其余 6 条照样通过;改回 R19 后 8 条全过。
-- **读不出的轮次产物**(`test_an_unreadable_round_product_is_failed_by_the_handler_and_the_loop_moves_on`):计划 8 的视图把读不出的轮次产物当成"没有可用轮次",R19 让 `start_agent_round` 再次触发;计划 7 的轮次处理器在读不出时自己把它整份重写为 `failed`,而不是抛出异常让守护进程每个 tick 崩溃。测试先正常跑完 `zengen-v2` 的一轮,再把 `agent_rounds/agent-round-zengen-v2.yaml` 换成带合并冲突标记的内容并提交。之后第一个 tick 打印 `start_agent_round zengen-v2`,没有异常逃出;轮次产物被整份重写(文件里不再有 `<<<<<<<`),状态 `failed`,失败类别 `T3`、原因 `unreadable round product`,`run_id` 取自模型产物(`run-001`);`runs/run-001/` 下的 `failure-agent-*` 记录恰好多一份。第二个 tick 没有动作(`failed` 挡住)。**变异检查(撰写时做过)**:把计划 7 处理器开头的 `read_or_none` + `_fail_unreadable` 换成直接 `store.read_product`(不接读取异常),这条失败,本任务其余 8 条照样通过。
-- **变异检查(撰写时做过)**:把提名的 `accept_mock_evidence` 改成 `None`,`test_the_whole_loop_turns_twice` 失败;把 `scheduler_config_loader` 的覆盖去掉,`test_a_new_round_without_confirmation_synthesizes_its_data` 失败;把 mock 运行器改回"全对",只有任务 103 的 `test_the_default_evaluator_writes_a_mock_graded_report`(它断言分数严格在 0 与 1 之间、画像是 `surface_match`)失败,本任务 8 个用例照样通过——计划 5 按 R21 丢掉空标签之后,全答对的报告不再让规划失败。
+  - **先失败**:把计划 8 的触发条件改回 R19 之前的"只在没有轮次产物时触发"(`top.agent_round_status is None`),这两条失败、本任务其余 8 条照样通过;改回 R19 后 10 条全过。
+- **读不出的轮次产物**(`test_an_unreadable_round_product_is_failed_by_the_handler_and_the_loop_moves_on`):计划 8 的视图把读不出的轮次产物当成"没有可用轮次",R19 让 `start_agent_round` 再次触发;计划 7 的轮次处理器在读不出时自己把它整份重写为 `failed`,而不是抛出异常让守护进程每个 tick 崩溃。测试先正常跑完 `zengen-v2` 的一轮,再把 `agent_rounds/agent-round-zengen-v2.yaml` 换成带合并冲突标记的内容并提交。之后第一个 tick 打印 `start_agent_round zengen-v2`,没有异常逃出;轮次产物被整份重写(文件里不再有 `<<<<<<<`),状态 `failed`,失败类别 `T3`、原因 `unreadable round product`,`run_id` 取自模型产物(`run-001`);`runs/run-001/` 下的 `failure-agent-*` 记录恰好多一份。第二个 tick 没有动作(`failed` 挡住)。**变异检查(撰写时做过)**:把计划 7 处理器开头的 `read_or_none` + `_fail_unreadable` 换成直接 `store.read_product`(不接读取异常),这条失败,本任务其余 9 条照样通过。
+- **变异检查(撰写时做过)**:把提名的 `accept_mock_evidence` 改成 `None`,`test_the_whole_loop_turns_twice` 失败;把 `scheduler_config_loader` 的覆盖去掉,`test_a_new_round_without_confirmation_synthesizes_its_data` 失败;把 mock 运行器改回"全对",只有任务 103 的 `test_the_default_evaluator_writes_a_mock_graded_report`(它断言分数严格在 0 与 1 之间、画像是 `surface_match`)失败,本任务 10 个用例照样通过——计划 5 按 R21 丢掉空标签之后,全答对的报告不再让规划失败。
 
 - [ ] **Step 1: 前置检查**
 
@@ -2863,7 +2971,7 @@ git commit -m "feat: factory builds the six closed-loop handlers from recipestor
 uv run --extra dev python scripts/check_factory_assumptions.py; echo "exit=$?"
 ```
 
-Expected:19 行都以 `: OK` 结尾,最后一行 `all assumptions hold`,`exit=0`。有任何一行是 `MISSING` 或 `MISMATCH`:停下,把那几行原样报告,不往下做。
+Expected:21 行都以 `: OK` 结尾,最后一行 `all assumptions hold`,`exit=0`。有任何一行是 `MISSING` 或 `MISMATCH`:停下,把那几行原样报告,不往下做。
 
 - [ ] **Step 2: 写测试**
 
@@ -3008,11 +3116,13 @@ def test_the_whole_loop_turns_twice(store, capsys):
     # 第二轮用的是 run-001 的清单,没有为 run-002 合成
     assert not store.exists(dataset_manifest_file("run-002", "sft"))
 
-    # 战绩回写到 recipe-run-001;提名因增益为 0 跳过;规划落在 run-002(最大的 run)
-    assert tick(store, enable, *LOOP) == ["record_track run-002", "nominate_recipe run-002",
-                                          "plan_next_round run-002"]
+    # 战绩回写到 recipe-run-001;提名因增益为 0 写 skipped 标记。规划要等提名标记(CP-11),这个 tick 还不规划
+    assert tick(store, enable, *LOOP) == ["record_track run-002", "nominate_recipe run-002"]
     assert store.exists(recipe_track_note_file("run-002"))
     assert store.read_product(nomination_file("run-002")).payload["result"] == "skipped"
+    assert not store.exists(planner_decision_file("run-002"))
+    # 下一个 tick:提名标记在场(skipped 也放行,且没有配方候选),规划落在 run-002(最大的 run)
+    assert tick(store, enable, *LOOP) == ["plan_next_round run-002"]
     assert directive(store, "run-003").status == "awaiting_confirmation"
 
     capsys.readouterr()
@@ -3021,11 +3131,10 @@ def test_the_whole_loop_turns_twice(store, capsys):
 
 
 def test_a_new_round_without_confirmation_synthesizes_its_data(store):
-    enable = "plan,nominate,track,admit"
+    enable = "plan,track,admit"
     train_and_promote(store, "run-001", enable, *LOOP, "--no-confirm-directives")
-    # 同一 tick 里提名先于规划(计划 8 Ruling 3);配方还没收录,启发式后端走 new batch
-    assert tick(store, enable, *LOOP, "--no-confirm-directives") == [
-        "nominate_recipe run-001", "plan_next_round run-001"]
+    # 没开提名,规划不等配方入库门(CP-11);没有配方可 clone,启发式后端走 new batch
+    assert tick(store, enable, *LOOP, "--no-confirm-directives") == ["plan_next_round run-001"]
     d2 = directive(store, "run-002")
     assert d2.status == "pending" and d2.payload["data_spec"]["purpose"] == "training"
     assert not store.exists(dataset_manifest_file("run-002", "sft"))
@@ -3045,6 +3154,29 @@ def test_only_the_largest_run_is_planned(store):
     assert tick(store, "plan", *LOOP) == ["plan_next_round run-002"]
     assert not store.exists(planner_decision_file("run-001"))
     assert store.read_product(planner_decision_file("run-002")).status == "executed"
+
+
+def test_planning_waits_for_the_recipe_gate(store):
+    """CP-11:启用提名时,规划要等来源 run 的提名标记,且配方候选离开 pending_review 与 approved。"""
+    enable = "plan,nominate,admit"
+    train_and_promote(store, "run-001", enable, *LOOP)
+    # 晋级后的 tick:只提名;这个 tick 的快照里还没有提名标记,规划不出现
+    assert tick(store, enable, *LOOP) == ["nominate_recipe run-001"]
+    assert store.read_product(nomination_file("run-001")).payload["result"] == "nominated"
+    assert store.read_product(recipe_candidate_file("run-001")).status == "pending_review"
+    # 配方候选停在 pending_review:多个 tick 都不规划
+    for _ in range(2):
+        assert tick(store, enable, *LOOP) == []
+    assert not store.exists(planner_decision_file("run-001"))
+    # 人工批准后的 tick:只收录;快照里候选是 approved,规划仍被挡着
+    set_status(store, recipe_candidate_file("run-001"), "approved")
+    assert tick(store, enable, *LOOP) == ["admit_recipe recipe-run-001"]
+    assert not store.exists(planner_decision_file("run-001"))
+    # 候选已是 effective:下一个 tick 才规划,并且 clone 刚收录的配方
+    assert tick(store, enable, *LOOP) == ["plan_next_round run-001"]
+    d = store.read_product(planner_decision_file("run-001"))
+    assert d.status == "executed", d.payload.get("failure")
+    assert (d.payload["decision"]["action"], d.payload["decision"]["source_recipe_id"]) == ("clone", "recipe-run-001")
 
 
 def test_a_bridge_failure_fails_the_decision_and_stops_the_loop(store, capsys):
@@ -3252,10 +3384,10 @@ def test_an_unreadable_round_product_is_failed_by_the_handler_and_the_loop_moves
 - [ ] **Step 3: 跑测试**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error tests/test_factory_e2e_loop.py`
-Expected:`9 passed`。本任务只加测试,实现都在前面的任务与计划 1–8 里;测试一写就该通过。失败若指向前八份计划的实现,停下报告失败的断言,不要在 `factory` 里绕过、也不要改测试迁就。
+Expected:`10 passed`。本任务只加测试,实现都在前面的任务与计划 1–8 里;测试一写就该通过。失败若指向前八份计划的实现,停下报告失败的断言,不要在 `factory` 里绕过、也不要改测试迁就。
 
 Run: 全量命令。
-Expected:`B+108 passed`,无警告。
+Expected:`B+114 passed`,无警告。
 
 - [ ] **Step 4: 提交**
 
@@ -3307,6 +3439,7 @@ git commit -m "test: closed-loop and MindAgent end to end through the factory"
 10. **controlplane 不导入任何新包。** 设计 §11 的依赖方向要求 `controlplane` 不导入 `inference_bridge`、`recipestore`、`trainplanner`、`trainscheduler`、`actio`、`mindagent`、`factory`;各计划的边界测试只检查自己包往外的导入(计划 3 与 `actio` 一侧都没有反向检查)。`test_controlplane_imports_none_of_the_new_packages` 用 `ast` 解析 `src/controlplane` 下全部 `.py`,收集绝对导入的顶层包名,失败信息写出"哪个文件第几行导入了哪个包"。变异检查(撰写时做过):往 `controlplane/ledger.py` 末尾加一行 `import recipestore`,这条失败,信息为 `controlplane/ledger.py:138 imports recipestore`。
 11. **run 编号的两份解析。** 计划 5 的 `trainscheduler.run_ids.run_number` 与计划 8 的 `controlplane.reconcile._RUN_ID` 各写了一份 run 编号正则;早先一边用 `\d`、一边用 `[0-9]`,遇到 Unicode 数字会分叉(计划 5 分配出来的 id 计划 8 不认,或反过来),现在两边与设计 §3.2 统一成 `^run-([0-9]+)$`。`test_run_number_parsers_agree` 对同一组名字比较两边:`run-1`、`run-001`、`run-999`、`run-1000`、`run-٥٠`(阿拉伯-印度数字 U+0665 U+0660)、`run-1b`、`run-`、`RUN-001`、`run-+1`、`scratch`;断言计划 5 解析出编号当且仅当计划 8 的正则匹配,且两边编号相等,失败信息写明"两边都要改"。其中 `run-٥٠` 正好区分 `[0-9]` 与 `\d`(`\d` 会匹配它),任何一边退回 `\d` 这条就失败。变异检查(撰写时做过):把计划 8 的 `_RUN_ID` 临时改回 `^run-(\d+)$`,只有 `test_run_number_parsers_agree[run-٥٠]` 失败,其余 9 个参数通过;改回后 10 个全过。
 12. **分层规则。** 设计 §11 规定 `controlplane` 不导入 `diagnostic` 与 `mindtrainer`、`mindtrainer` 不导入 `diagnostic`、`diagnostic` 不导入 `mindtrainer`;原先只有计划 2、计划 8 里的一次性 grep(计划 8 另有一条 `diagnostic` 不导入 `mindtrainer` 的测试,与这里重复无妨)。`test_layer_rules_hold` 用 `ast` 扫 `src/` 下这三个包的真实源码(只看绝对导入),失败信息写出"文件:行号 imports 包"。撰写时在按计划 1–8 重放出的集成拷贝上确认现状成立;变异检查(撰写时做过):分别往 `controlplane/ledger.py`、`controlplane/daemon.py`、`mindtrainer/dispatch.py`、`diagnostic/evaluator.py` 末尾加一行越界导入,四次都失败,信息依次为 `controlplane/ledger.py:138 imports diagnostic`、`controlplane/daemon.py:360 imports mindtrainer`、`mindtrainer/dispatch.py:245 imports diagnostic`、`diagnostic/evaluator.py:112 imports mindtrainer`。
+13. **仓库排他锁。** 计划 8 任务 98 的 `controlplane.lock` 只用标准库,锁文件在控制面仓库的 `.git/rismforge.lock`:它不在 `control-plane/` 下,也不被 git 追踪,所以任务 104 的"逐字节相同"比较不受影响;第 10 条(`controlplane` 不导入新包)与第 12 条(分层规则)的 `ast` 检查对它同样成立。`factory` 自己不取 `run` 的锁(Ruling 27):`run` 的锁由 `run_daemon` 取,`reconcile_one_tick` 在装配之前取。两条用例在任务 104,不在 `tests/test_factory_cross_plan.py`,所以任务 109 的用例数不变。
 
 - [ ] **Step 1: 前置检查**
 
@@ -3314,7 +3447,7 @@ git commit -m "test: closed-loop and MindAgent end to end through the factory"
 uv run --extra dev python scripts/check_factory_assumptions.py; echo "exit=$?"
 ```
 
-Expected:19 行都以 `: OK` 结尾,最后一行 `all assumptions hold`,`exit=0`。有任何一行是 `MISSING` 或 `MISMATCH`:停下,把那几行原样报告,不往下做。
+Expected:21 行都以 `: OK` 结尾,最后一行 `all assumptions hold`,`exit=0`。有任何一行是 `MISSING` 或 `MISMATCH`:停下,把那几行原样报告,不往下做。
 
 - [ ] **Step 2: 写测试**
 
@@ -3386,7 +3519,7 @@ def test_plan_8_evaluator_baseline_names_the_same_run(tmp_path):
         id="cand-run-001", type="candidate_checkpoint", version=1, created_at="t", created_by=OwnerRef(),
         status="approved", schema_version=1, payload={}), "seed approved candidate")
     apply_action(store, Action("promote_candidate", "cand-run-001", {"run_id": "run-001", "model_version": 1}))
-    ref, scores = resolve_baseline(store, "run-002", "factory-bench-v1")
+    ref, scores = resolve_baseline(store, "run-002", "factory-bench-v1", backends="mock")
     assert ref == "zengen-v1" and scores
     assert baseline_run_of(store, ref)[0] == "run-001"
 
@@ -3564,7 +3697,7 @@ Expected:`34 passed`(共享用例表 13 个、`links` 判法 3 个、评估器�
 - [ ] **Step 4: 全量回归**
 
 Run: 全量命令。
-Expected:`B+142 passed`,无警告。
+Expected:`B+148 passed`,无警告。
 
 - [ ] **Step 5: 提交**
 
@@ -3582,37 +3715,38 @@ git diff --stat "$BASE"..HEAD
 
 `BASE` 是任务 100 第 1 步记下的提交;若 shell 已换,用 `git log --oneline` 找到任务 100 提交的父提交代替(`HEAD~10` 只作退路,本计划共 10 个提交)。
 
-Expected:只列出下面 28 个文件,`28 files changed, 2644 insertions(+), 1 deletion(-)`(最终重放实测):
+Expected:只列出下面 28 个文件(九份计划按序重放、前八份提交之后再放本计划得到的输出;`+` 号条是 `git diff --stat` 自己画的):
 
 ```
  pyproject.toml                       |   2 +-
- scripts/check_factory_assumptions.py |  83 ++++++++++++
- scripts/run_factory.py               |  11 ++
- scripts/run_factory_dev.py           |  11 ++
+ scripts/check_factory_assumptions.py |  85 ++++++++
+ scripts/run_factory.py               |  11 +
+ scripts/run_factory_dev.py           |  11 +
  src/factory/__init__.py              |   6 +
- src/factory/agent.py                 | 146 +++++++++++++++++++++
- src/factory/bridges.py               |  71 +++++++++++
- src/factory/cli.py                   | 129 +++++++++++++++++++
- src/factory/defaults.py              |  88 +++++++++++++
+ src/factory/agent.py                 | 146 +++++++++++++
+ src/factory/bridges.py               |  71 +++++++
+ src/factory/cli.py                   | 134 ++++++++++++
+ src/factory/defaults.py              |  88 ++++++++
  src/factory/errors.py                |   6 +
- src/factory/evaluation.py            |  79 ++++++++++++
- src/factory/handlers.py              |  92 ++++++++++++++
- src/factory/readonly.py              |  75 +++++++++++
- src/factory/switches.py              |  41 ++++++
- src/factory/wire.py                  | 192 ++++++++++++++++++++++++++++
- tests/factory_fixtures.py            | 103 +++++++++++++++
- tests/test_factory_boundaries.py     |  32 +++++
- tests/test_factory_bridges.py        | 116 +++++++++++++++++
- tests/test_factory_cli.py            |  91 ++++++++++++++
- tests/test_factory_cross_plan.py     | 198 ++++++++++++++++++++++++
- tests/test_factory_e2e_frame.py      |  60 +++++++++
- tests/test_factory_e2e_loop.py       | 377 ++++++++++++++++++++++++++++++++++++
- tests/test_factory_evaluation.py     |  81 ++++++++++++
- tests/test_factory_handlers.py       | 175 ++++++++++++++++++++++++
- tests/test_factory_readonly.py       | 123 ++++++++++++++++++
- tests/test_factory_run_order.py      |  30 +++++
- tests/test_factory_switches.py       |  58 +++++++++
- tests/test_factory_wire.py           | 169 +++++++++++++++++++++++++
+ src/factory/evaluation.py            |  79 +++++++
+ src/factory/handlers.py              |  92 ++++++++
+ src/factory/readonly.py              |  75 +++++++
+ src/factory/switches.py              |  41 ++++
+ src/factory/wire.py                  | 196 +++++++++++++++++
+ tests/factory_fixtures.py            | 128 +++++++++++
+ tests/test_factory_boundaries.py     |  32 +++
+ tests/test_factory_bridges.py        | 116 ++++++++++
+ tests/test_factory_cli.py            | 105 +++++++++
+ tests/test_factory_cross_plan.py     | 198 +++++++++++++++++
+ tests/test_factory_e2e_frame.py      |  61 ++++++
+ tests/test_factory_e2e_loop.py       | 401 +++++++++++++++++++++++++++++++++++
+ tests/test_factory_evaluation.py     |  81 +++++++
+ tests/test_factory_handlers.py       | 175 +++++++++++++++
+ tests/test_factory_readonly.py       | 123 +++++++++++
+ tests/test_factory_run_order.py      |  30 +++
+ tests/test_factory_switches.py       |  58 +++++
+ tests/test_factory_wire.py           | 214 +++++++++++++++++++
+ 28 files changed, 2764 insertions(+), 1 deletion(-)
 ```
 
 `pyproject.toml` 的 `2 +-` 是 wheel 列表那一行。
@@ -3633,8 +3767,8 @@ Expected:第一条无输出;第二条恰好两行(`-packages = [...]` 与以 `, 
 
 ## 完成标准
 
-- 全量命令的通过数为 **B+142**、无警告;B 是任务 100 第 1 步实测的起点。
-- `scripts/check_factory_assumptions.py` 19 行 `OK`。
+- 全量命令的通过数为 **B+148**、无警告;B 是任务 100 第 1 步实测的起点。
+- `scripts/check_factory_assumptions.py` 21 行 `OK`。
 - `factory run <repo>` 不带 `--enable` 时,与 `scripts/run_controlplane.py <repo>` 在同一仓库上写出的树与提交说明逐字节相同。
 - `--enable` 的五个开关恰好覆盖 `CLOSED_LOOP_ACTIONS` 的六个处理器键,`admit` 同时启用两类收录;每个键都接到计划 3、5、7 的真实处理器。
 - 经 `factory reconcile --once` 与模拟的人工动作,闭环从一条人工指令转到第二轮训练与第三条指令;MindAgent 链从空库转到提案收录、库版本是字符串;轮次遇瞬态异常或在写提案前被杀时停在 `pending`,下一个 tick 复用已落盘的 episode 收敛到 `executed`,再下一个 tick 不再触发(R19);轮次产物读不出时由处理器写成 `failed`,循环继续。
@@ -3643,6 +3777,8 @@ Expected:第一条无输出;第二条恰好两行(`-packages = [...]` 与以 `, 
 - 闭环模式缺配置、资产、桥接角色或凭证时,退出码 2、一行错误、树里不写东西;凭证值不出现在任何输出里。
 - `mindtrainer/wire.py`、`scripts/run_controlplane.py` 一行未改;`controlplane` 不导入任何新包(「跨计划核对」第 10 条);设计 §11 的三条分层规则成立(第 12 条)。
 - 全答对的诊断报告可以被规划(`test_a_full_pass_report_can_be_planned`,设计 R21)。
+- 启用提名时规划等配方入库门:晋级后的 tick 只提名,配方候选停在 `pending_review` 期间不规划,收录之后才规划(`test_planning_waits_for_the_recipe_gate`,设计 CP-11)。
+- 仓库被另一个进程锁住时,`run`、`reconcile` 退出码 2、`HEAD` 与产物不变、闭环模式下没有处理器构造器被调用;只读子命令照常输出;`run` 与 `reconcile` 结束后锁已放(任务 104,设计 CP-12)。
 
 ## 已知限制
 
@@ -3656,12 +3792,17 @@ Expected:第一条无输出;第二条恰好两行(`-packages = [...]` 与以 `, 
 8. **MindAgent 的模型后端是罐头**(Ruling 23):不加载 checkpoint,话语是指导语拼成的;对手位是罐头台词。部署 episode 只证明技能的路由与轨迹,不代表任何模型能力。
 9. **`repo_commit` 是组合根所在代码仓库的 HEAD**(Ruling 20),不是产出那一轮时的提交:守护进程跨提交长跑时,配方候选记的是提名那一刻的代码版本。
 10. **重入时外部推理成本可能少记**(设计 §14 第 11 条)。R19 重入后计划 7 会重跑 `propose`,计划 5 遇到非桥接的瞬态异常后会从头规划;重跑的桥接调用沿用同一组 `(task_id, cost_type)`,计划 1 的账本以先到者为准,会把重跑的成本静默去重。所以 `factory cost` 打出的外部推理成本是下限,不是实际花费。
+11. **集成缺陷的修补任务是约定,不是已有任务**(设计 SYS-21、Ruling 26)。本计划落地后发现的跨计划缺陷追加编号 110 起的修补任务,允许改对应的包,并重跑任务 106 至 109;目前没有任何 110 以后的任务,施工计划里也没有为它们预留文件或用例数。
+12. **规划等配方入库门让每一轮多停一次等人**(设计 CP-11)。启用提名时,规划要等配方候选过门③;人手放进树的候选没有提名标记,规划永不触发,要人手写下一条指令或关掉提名开关。端到端里 `nominate` 与 `plan` 同开时,`plan_next_round` 最早出现在配方收录之后的那个 tick。
+13. **仓库锁只挡写入路径**(设计 CP-12、Ruling 27)。`run` 与 `reconcile` 取锁,只读子命令不取;TypeScript 命令行不取锁,与守护进程同时提交时 git 自己的索引锁冲突仍会让一方失败,尚未复现。进程被杀后锁是否由操作系统放掉,取决于计划 8 的实现用文件锁而不是"文件存在即占用"的标记文件,见「未验证项」第 8 条。
 
 ## 未验证项
 
-1. **在集成拷贝上验证。** 最终重放用的是九份文件提交前的最终文本(md5 前八位:计划 1 `cc6fecd6`、2 `df89d647`、3 `c940cd94`、4 `0dfd3193`、5 `c7aaa320`、6 `b0595d48`、7 `ee441ec6`、8 `eccc5ef6`、设计 `33cf7942`),重放前与重放结束各核了一次,未变。做法:把 `main@0385004` 拷贝一份,用脚本按设计 §12 的顺序重放计划 1–8,包括写出"新建 / 整个替换 / 末尾追加"的代码块,`git apply` 每个 `diff` 块与 `git apply <<'PATCH'` 块(计划 8 的 TypeScript 补丁与计划 6 里作为期望输出展示的 `.pyi` 差异除外),运行改文件的 heredoc 脚本,并按计划 6 的步骤重新生成协议代码;每份计划之后各提交一次。各计划后的收集数为 820 → 1012 → 1157 → 1354 → 1543 → 1778 → 1963 → 2115 → 2275,增量依次 +192、+145、+197、+189、+235、+185、+152、+160,与各计划声明的增量逐一相等。**B = 2275 passed**(全量实跑,`-W error` 下无警告)。然后在第二份拷贝里按任务 100–109 的顺序逐个放文件(文件取自本计划的代码块):每个"跑到失败"的输出与 Expected 一致,每个任务一次提交,各提交点的收集数为 2294 → 2304 → 2318 → 2330 → 2352 → 2356 → 2356 → 2374 → 2383 → 2417;任务 109 之后全量实跑 **2417 passed**(= B+142),无警告;依赖核对脚本 19 行全部 `OK`。文件表里各测试文件的用例数、任务 109 Step 6 的 `git diff --stat`(28 个文件、各行行数)与 Step 7 的三条守卫命令都在这份拷贝里实测过,与本文一致。中间各任务只核对了收集数与该任务自己的测试文件,全量只在 B 与任务 109 之后各跑一次。
+1. **在九份计划按序重放的拷贝上验证(最终文本)。** 做法:把 `main@0385004` 拷贝一份(全量 820 通过),用脚本按设计 §12 的顺序重放计划 1–9,包括写出「新建 / 整个替换 / 末尾追加」的代码块,`git apply` 每个 `diff` 块与 `git apply <<'PATCH'` 块(计划 6 里作为期望输出展示的 `.pyi` 差异除外),运行改文件的 heredoc 脚本,并按计划 6 的步骤重新生成协议代码。各计划放完后的收集数为 820 → 1041 → 1186 → 1383 → 1572 → 1807 → 1992 → 2144 → 2359 → 2507,增量依次 +221、+145、+197、+189、+235、+185、+152、+215、+148,与各计划声明的增量逐一相等;本计划的 +148 与任务 100 至 109 声明的增量之和相等。前八份提交之后再单放本计划:`git diff --stat` 是 Step 6 列出的 28 个文件,依赖核对脚本 21 行全部 `OK`。九份放完的全量实跑:**2507 passed**(= B+148,`-W error` 下无警告)。逐任务的数(B+19、B+29 等)由增量推算,没有逐任务重放。
 2. **重放不等于落地。** 集成拷贝是计划文本的重放,不是各计划实施者真实提交的代码;实施者若偏离了自己计划里的代码块,结果以实际运行为准。
 3. **TypeScript 一侧只在拷贝里跑过。** 在一份只含 `cli/` 的临时拷贝里(`package.json` 与 `package-lock.json` 取 `HEAD` 已提交的版本,`vitest` 声明 `^1.6.0`,装到的是 1.6.1)按文档顺序应用了计划 8 的命令行改动(新建 `cli/test/gates.test.ts`,再 `git apply` 三份补丁),`npm ci --ignore-scripts` 装依赖,`npx tsc --noEmit` 无输出,`npx vitest run` 为 `Tests  64 passed (64)`,与计划 8 的 Expected 相同;「跨计划核对」第 2 条的 13 行共享用例在 vitest 的输出里逐条对得上(3 条 approve、10 条 refuse)。真实仓库的 `cli/` 没有动过。
 4. **变异检查只做了十二处**(任务 105 的证据开关、任务 107/108 的提名证据参数、确认覆盖、mock 答案、Interact 的 deadline、计划 8 的 R19 触发条件、计划 7 的读取异常处理、任务 109 的配方类型集合、controlplane 反向导入、分层规则、run 编号正则退回 `\d`、全答对报告在 R21 修订前后的计划 5),都被测试抓住;其中 Interact 的 deadline、计划 7 的读取异常处理、分层规则与 run 编号正则四处在最终重放的文本上又做了一次。没有做系统性的变异测试。
 5. **`CliBridge` 只用 `sys.executable -c` 的假可执行体测过**,没有接真实的 `claude` 或 `codex` 命令行(设计 §14 第 1 条);规划经桥接的正向端到端没有,只有失败路径,见 Ruling 25。
 6. **`factory run` 的长循环**只以 `--max-ticks` 跑过少数几轮;`AgentRuntime` 在长跑中的端口与通道占用、真实 `run_daemon` 的耗时都没有测;Interact 的 15 秒 deadline 只用假 stub 验证了参数,没有真的等它超时。
+7. **逐任务的红绿输出没有重放。** 本计划的代码块与测试是在九份计划按序重放的拷贝里整体放过一次,合计收集数与全量结果如第 1 条;每个任务内部「先失败、后通过」的中间输出,以及任务 104、105、106、108 里设计修订之后改动的 Expected 行,没有按步骤重放核对。
+8. **对 `controlplane.lock` 的两点假设。** (a) `RepoLockedError` 的 `str` 是锁文件路径(`factory.cli.main` 把它拼进 `factory: error: repository is locked by another process: <路径>`);(b) 锁在进程之间互斥,且进程被杀后由操作系统放掉(`held_lock` 另起子进程持锁,不依赖 flock 与 lockf 的同进程语义)。任务 106 的 A8-1、A8-2 只核对名字与参数,不核对这两点;不符时报告,不在本计划里改。
