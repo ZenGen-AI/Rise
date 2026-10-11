@@ -2,6 +2,7 @@
 
 > 状态:设计稿。日期 2026-10-09。基线:`main` 在 `0385004`,全量测试 820 通过。
 > 上游设计:`2026-09-22-rismforge-architecture-design.md`、`2026-09-24-rismforge-subsystem-design.md`、`2026-10-03-mindtrainer-design.md`。
+> 修订(2026-10-11):八项设计决策已写进 `docs/design/`(SYS-14 至 SYS-21),本稿下列各处随之改正,其余不变;与本稿冲突时以 `docs/design/` 为准。证据等级失败关闭,`backends` 缺失判 `stub`,`run_diagnostic`、`write_report`、`resolve_baseline` 的 `backends` 必填(DX-12,见 R17、§3.1);`plan_next_round` 在启用提名时还要等配方入库门(CP-11,见 §3.2);晋级幂等、仓库文件锁、提交只带本文件(CP-7、CP-12);桥接子进程默认隔离(BR-8,见 §5.1)。
 
 ## 0. 这份文档做什么
 
@@ -61,7 +62,7 @@
 | R14 | 指令携带 `data_spec`,MindTrainer 派发器缺清单时调用注入的数据生产器。V1 模板生成器与目标维度无关 | 闭环训练的数据与"目标维度"无关,只是流程跑通 |
 | R15 | 桥接 V1 只实现命令行形态,API 形态只留协议。命令行参数模板放配置;`token_env` 允许显式 `null` | 没有 API 形态可用 |
 | R16 | 命令拆两个入口:TypeScript 管门控写命令,Python 管调和与只读可观测 | 用户要记两个入口 |
-| R17 | 诊断报告带 `backends` 标记(`mock` 或 `real`)。默认不接受 `mock` 证据驱动规划与提名,开发入口用显式开关打开 | 默认配置下闭环不会自己转,开发时要加一个开关 |
+| R17 | 诊断报告带 `backends` 标记(`mock` 或 `real`),缺标记判 `stub`(设计 DX-12)。默认不接受 `mock` 证据驱动规划与提名,开发入口用显式开关打开 | 默认配置下闭环不会自己转,开发时要加一个开关 |
 | R18 | 桥接失败一律升级为 T3:`BridgeError`(T1 已用尽重试、T2 确定性)使规划决策或 agent 轮次置 `failed` 并写失败记录;非桥接的瞬态异常原样上抛 | 外部工具整体不可用时,闭环停在 `failed`,要人写新指令或手工重置;换来不会无限空转外部推理 |
 | R19 | `start_agent_round` 的触发条件是"没有轮次产物**或**产物为 `pending`",与 `plan_next_round` 同一模式;轮次处理器负责把终态(`executed` / `failed`)写回,写回之前每一轮 tick 都会重新触发它,重入必须幂等;产物在但读不出的同样视同不存在,由处理器重入时写 `failed` | 若只在"没有产物"时触发,一次瞬态失败(或进程被中途杀掉)留下的 `pending` 轮次将永远不再被派发,直到有更新的模型晋级把它置为 superseded;代价是轮次处理器可能被连续唤醒,必须靠幂等键挡住重复长任务 |
 | R20 | 设计与计划 5 的签名差异:计划 5 给 `nomination_check` 增加了 keyword-only 的 `accept_mock_evidence`,给 `build_recipe_candidate` 增加了 keyword-only 的 `repo_commit` 与 `accept_mock_evidence`(本节的签名已同步) | 这两项是提名时的运行期输入(是否接受 mock 证据、仓库提交号),不是配置内容,不该塞进 `config`;集成时若照旧只传 `config`,候选的 `repro` 会缺 `repo_commit`,复现校验记一条错误 `code_version.repo_commit`(计划 3 的校验器把它判为错误),代价是每个候选的 `repro` 都带上它;组合根取不到 HEAD 时更明显 |
@@ -105,7 +106,7 @@ class GateView:
 #                 enabled: frozenset[str] = frozenset(), accept_mock_evidence: bool = False
 ```
 
-`diagnostic_grade` 的判定:payload 里 `stub` 为真是 `stub`;否则看 `backends` 字段,`mock` 是 `mock`,其余有分数的报告是 `real`。判不出来按最弱算:`backends` 缺失或等于 `real`、且 `dimension_scores` 是非空列表才是 `real`;`backends` 取别的值(含 `null`)、或没有分数,一律判 `stub`。
+`diagnostic_grade` 的判定,按顺序:payload 里 `stub` 为真是 `stub`;`backends` 是 `mock` 是 `mock`;`backends` 是 `real` 且 `dimension_scores` 是非空列表才是 `real`;其余(含缺少 `backends`、取别的值包括 `null`、没有分数)一律判 `stub`。判不出来按最弱算(设计 DX-12,失败关闭)。
 
 ### 3.2 触发条件
 
@@ -113,7 +114,7 @@ class GateView:
 
 | 动作 | `target_id` | 触发条件 | 幂等键 |
 |---|---|---|---|
-| `plan_next_round` | run id | 候选状态是 `effective` 或 `rejected`;证据可接受;`planner_decision_status` 是空或 `pending`;没有在途轮;该 run 是 run 编号最大的 run(**按 `run-<数字>` 的数值序**;不匹配 `^run-[0-9]+$` 的名字一律排最后,不参与"最大"的角逐;树里一个 `run-<数字>` 都没有时——只可能是手工造的目录——不触发规划,闭环停在等人写指令,这是刻意的失败关闭;编号相同(如 `run-7` 与 `run-007`)按 run id 字典序取较大者,结果与输入顺序无关) | `runs/<run>/planner_decision.yaml` 为 `executed` 或 `failed` |
+| `plan_next_round` | run id | 候选状态是 `effective` 或 `rejected`;证据可接受;`planner_decision_status` 是空或 `pending`;没有在途轮;该 run 是 run 编号最大的 run(**按 `run-<数字>` 的数值序**;不匹配 `^run-[0-9]+$` 的名字一律排最后,不参与"最大"的角逐;树里一个 `run-<数字>` 都没有时——只可能是手工造的目录——不触发规划,闭环停在等人写指令,这是刻意的失败关闭;编号相同(如 `run-7` 与 `run-007`)按 run id 字典序取较大者,结果与输入顺序无关);启用提名且候选为 `effective` 时,还要等配方入库门:来源 run 已有提名标记,且配方候选 `recipe-<run>` 不在 `pending_review` 或 `approved`(设计 CP-11;候选 `rejected` 不等) | `runs/<run>/planner_decision.yaml` 为 `executed` 或 `failed` |
 | `nominate_recipe` | run id | 候选状态是 `effective`;证据可接受;没有提名标记 | `runs/<run>/nomination.yaml` |
 | `record_track` | run id | `recipe_ref` 非空;候选状态是 `effective` 或 `rejected`;证据可接受;没有战绩标记 | `runs/<run>/recipe_track.yaml` |
 | `start_agent_round` | model id | 版本号(按数字)最大的 `effective` 模型,且它的轮次产物**不存在,或状态为 `pending`**;产物在但读不出(YAML 解析失败、合并冲突标记、信封缺键)视同不存在,由轮次处理器重入时自己把它写成 `failed` | 轮次产物变为 `executed` 或 `failed` |
@@ -241,7 +242,7 @@ class InferenceBridge(Protocol):
     def complete(self, prompt: str, *, run_id: str, task_id: str) -> BridgeResult: ...
 ```
 
-- **命令行形态**:`CliBridge` 用子进程调外部工具,参数模板、超时、重试策略来自 `BackendConfig`,不在代码里写死厂商参数。进程退出码非零、超时、空输出算 T1,按 `retry_policy`(最大次数、退避基数)指数退避重试;耗尽后抛 `BridgeError(category="T1")`,由调用方升级为 T3。输出格式不合法是调用方的 T2,桥接只负责取回文本。子进程启动阶段的任何 `OSError`(找不到可执行文件、无权限、不可执行)算桥接自己的 T2,不重试;凭证缺失在构造时以 `MissingCredentialError` 失败,不是 `BridgeError`。
+- **命令行形态**:`CliBridge` 用子进程调外部工具,参数模板、超时、重试策略来自 `BackendConfig`,不在代码里写死厂商参数。子进程默认隔离(设计 BR-8):环境变量只传白名单与 `token_env`,工作目录是每次调用新建的空临时目录;默认参数模板(关闭工具或开只读沙箱)只是常量,不自动写进配置。进程退出码非零、超时、空输出算 T1,按 `retry_policy`(最大次数、退避基数)指数退避重试;耗尽后抛 `BridgeError(category="T1")`,由调用方升级为 T3。输出格式不合法是调用方的 T2,桥接只负责取回文本。子进程启动阶段的任何 `OSError`(找不到可执行文件、无权限、不可执行)算桥接自己的 T2,不重试;凭证缺失在构造时以 `MissingCredentialError` 失败,不是 `BridgeError`。
 - **测试替身**:`ScriptedBridge`,按顺序吐罐头回答,可注入失败序列。
 - **配置**:`BackendConfig` 增加可选 `command`(参数列表模板)和 `timeout_s`;`token_env` 允许显式 `null`,表示该工具用自带登录态,此时不解析凭证。其余约束不变:出现凭证值字段仍然报错。
 - **调用方的升级规则(R18)**:`BridgeError` 的 T1 表示桥接已用尽自己的重试,T2 表示确定性故障。TrainScheduler 的规划处理器与 MindAgent 的轮次处理器遇到任何 `BridgeError` 都升级为 T3:决策或轮次置 `failed`,经 `record_failure` 留痕,不再自动重试,等人处理。非桥接的瞬态异常(如 `OSError`)才原样上抛、保持 `pending`。原因:桥接已经退避重试过,把耗尽的 T1 留作 `pending` 会让守护循环重启后无限空转外部推理。
