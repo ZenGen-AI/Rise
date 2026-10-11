@@ -1,7 +1,14 @@
 from __future__ import annotations
 
+import copy
 import math
+import posixpath
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+
+from controlplane.envelope import Envelope, OwnerRef
+from controlplane.gitstore import GitStore
+from controlplane.paths import CONTROL_PLANE_ROOT
 
 # 出现在 git 树配置里即视为凭证泄漏的字段名（spec 补充 G.3）
 _FORBIDDEN_SECRET_KEYS = {"token", "api_key", "apikey", "password", "secret", "private_key"}
@@ -22,6 +29,10 @@ class MissingCredentialError(Exception):
 
 class CredentialInGitTreeError(Exception):
     """git 树配置里出现了凭证值本身，而非变量名引用。"""
+
+
+class ConfigTypeError(Exception):
+    """配置路径上的产物不是 type: config 的信封。"""
 
 
 @dataclass(frozen=True)
@@ -134,3 +145,92 @@ def redact(text: str, secrets: list[str | None]) -> str:
         if secret:
             out = out.replace(secret, _REDACTED)
     return out
+
+
+# ---- 配置信封（闭环集成设计 §11 补充契约）----
+# backends.yaml、scheduler.yaml、training_defaults.yaml 一律是 type: config 的信封，载荷就是配置本体。
+
+CONFIG_TYPE = "config"
+_CONFIG_DIR = f"{CONTROL_PLANE_ROOT}/config/"
+
+
+def _find_secret_keys(obj: object, at: str = "payload") -> list[str]:
+    """递归找出凭证值字段的位置（只报键路径，不报值）。"""
+    found: list[str] = []
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            here = f"{at}.{k}"
+            if _is_secret_key(k):
+                found.append(here)
+            found.extend(_find_secret_keys(v, here))
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            found.extend(_find_secret_keys(v, f"{at}[{i}]"))
+    return found
+
+
+def _check_no_secrets(payload: dict, rel_path: str) -> None:
+    leaked = _find_secret_keys(payload)
+    if leaked:
+        raise CredentialInGitTreeError(
+            f"credential value fields in {rel_path}: {leaked}; store only env var names via 'token_env'"
+        )
+
+
+def read_config(store: GitStore, rel_path: str) -> dict:
+    """读一份配置信封，返回载荷的深拷贝。文件不存在抛 FileNotFoundError；
+    不是 config 信封抛 ConfigTypeError；载荷里有凭证值字段抛 CredentialInGitTreeError。"""
+    env = store.read_product(rel_path)
+    if env.type != CONFIG_TYPE:
+        raise ConfigTypeError(f"{rel_path} is a {env.type!r} product, not {CONFIG_TYPE!r}")
+    _check_no_secrets(env.payload, rel_path)
+    return copy.deepcopy(env.payload)
+
+
+def write_config(
+    store: GitStore, rel_path: str, config_id: str, payload: dict, message: str
+) -> None:
+    """把配置写成 type: config 的信封（状态 effective）。
+
+    - 路径必须在 control-plane/config/ 下且以 .yaml 结尾:先 posixpath.normpath,
+      规范化前后都不得含 .. 段(control-plane/config/../runs/x.yaml 被拒)。
+    - config_id 不能为空。
+    - 写之前递归检查凭证值字段，命中即拒绝，树里什么都不写。
+    - 已存在且载荷相同：不改文件、不产生提交；载荷不同：version 加一。
+    - 已存在但不是 config 信封：拒绝覆盖（ConfigTypeError）。
+    """
+    norm = posixpath.normpath(rel_path) if isinstance(rel_path, str) and rel_path else ""
+    if (
+        norm != rel_path
+        or ".." in rel_path.split("/")
+        or not norm.startswith(_CONFIG_DIR)
+        or not norm.endswith(".yaml")
+    ):
+        raise ValueError(
+            f"config files live under {_CONFIG_DIR}, end with .yaml and contain no '..', got {rel_path!r}"
+        )
+    if not isinstance(config_id, str) or not config_id:
+        raise ValueError(f"config_id must be a non-empty string, got {config_id!r}")
+    if not isinstance(payload, dict):
+        raise ValueError(f"config payload must be a mapping, got {type(payload).__name__}")
+    _check_no_secrets(payload, rel_path)
+    body = copy.deepcopy(payload)
+    version = 1
+    if store.exists(rel_path):
+        old = store.read_product(rel_path)
+        if old.type != CONFIG_TYPE:
+            raise ConfigTypeError(f"refusing to overwrite a {old.type!r} product at {rel_path}")
+        if old.payload == body and old.id == config_id:
+            return
+        version = old.version + 1
+    env = Envelope(
+        id=config_id,
+        type=CONFIG_TYPE,
+        version=version,
+        created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        created_by=OwnerRef(),
+        status="effective",
+        schema_version=1,
+        payload=body,
+    )
+    store.write_product(rel_path, env, message)
