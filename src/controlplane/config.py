@@ -58,12 +58,16 @@ def _load_command(raw: dict) -> list[str] | None:
     command = raw.get("command")
     if command is None:
         return None
+    # 程序名(argv[0])不能为空;之后的参数允许空串,例如 claude 模板里的 "--tools", "" 就是关闭全部工具。
     if (
         not isinstance(command, list)
         or not command
-        or not all(isinstance(a, str) and a for a in command)
+        or not all(isinstance(a, str) for a in command)
+        or not command[0]
     ):
-        raise ValueError(f"command must be a non-empty list of non-empty strings, got {command!r}")
+        raise ValueError(
+            f"command must be a non-empty list of strings with a non-empty program name, got {command!r}"
+        )
     return list(command)
 
 

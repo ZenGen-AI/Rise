@@ -61,6 +61,14 @@ def test_acceptability(grade, accept_mock, ok):
     assert evidence_acceptable(grade, accept_mock) is ok
 
 
+@pytest.mark.parametrize("grade", ["real", "mock", "stub"])
+@pytest.mark.parametrize("bad", ["false", "true", "", 0, 1, None])
+def test_a_non_bool_accept_mock_is_a_type_error_not_a_silent_yes(grade, bad):
+    # 手改 YAML 写出 accept_mock_evidence: "false" 是非空字符串,bool() 会把它当成真,放行 mock 证据。
+    with pytest.raises(TypeError, match="accept_mock"):
+        evidence_acceptable(grade, bad)
+
+
 def test_an_unknown_grade_is_a_value_error():
     with pytest.raises(ValueError, match="bogus"):
         evidence_acceptable("bogus", True)

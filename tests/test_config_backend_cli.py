@@ -42,11 +42,17 @@ def test_the_loaded_command_is_a_copy_of_the_raw_list():
 
 
 @pytest.mark.parametrize(
-    "command", [[], "claude -p", ["claude", ""], ["claude", 3], {"argv": ["claude"]}],
+    "command", [[], "claude -p", ["", "x"], [""], ["claude", 3], {"argv": ["claude"]}],
 )
 def test_a_malformed_command_is_rejected(command):
     with pytest.raises(ValueError, match="command"):
         load_backend_config(_raw(command=command))
+
+
+def test_an_empty_string_argument_after_the_program_is_allowed():
+    # 设计 §5.1 的 claude 模板用 "--tools", "" 关闭全部工具:空串是合法的参数值,只有程序名不能为空。
+    cfg = load_backend_config(_raw(command=["claude", "--tools", "", "-p"]))
+    assert cfg.command == ["claude", "--tools", "", "-p"]
 
 
 @pytest.mark.parametrize("timeout_s", [0, -1, "30", True, float("nan"), float("inf")])

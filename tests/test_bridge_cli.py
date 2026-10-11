@@ -2,7 +2,6 @@ import hashlib
 import json
 import subprocess
 import sys
-from dataclasses import replace
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -456,7 +455,7 @@ def test_default_commands_are_exported_from_the_package():
 
 @pytest.mark.parametrize("tool", ["claude", "codex"])
 def test_a_default_command_template_is_filled_and_passed_as_argv(tool):
-    cfg = replace(_cfg(), command=DEFAULT_COMMANDS[tool])  # 直接构造配置,不经 load_backend_config
+    cfg = _cfg(command=DEFAULT_COMMANDS[tool])  # 经 load_backend_config:默认模板必须能被配置加载器接受
     runner = FakeRunner([_ok()])
     CliBridge(cfg, env={"FAKE_TOKEN": SECRET}, runner=runner, sleep=lambda s: None).complete(
         "p", run_id="r", task_id="t"

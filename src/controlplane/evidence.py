@@ -30,8 +30,12 @@ def evidence_acceptable(grade: str, accept_mock: bool) -> bool:
     """real 恒可接受;mock 仅当 accept_mock 为真;stub 恒不可接受。"""
     if grade not in GRADES:
         raise ValueError(f"unknown evidence grade {grade!r}; expected one of {GRADES}")
+    # 严格要求 bool:手改 YAML 写成 "false"(非空字符串)时,bool() 会把它当成真而放行 mock 证据,
+    # 与 DX-12「默认拒绝 mock」的保证相悖。宁可抛错,也不静默放行。
+    if not isinstance(accept_mock, bool):
+        raise TypeError(f"accept_mock must be a bool, got {type(accept_mock).__name__}")
     if grade == "real":
         return True
     if grade == "mock":
-        return bool(accept_mock)
+        return accept_mock
     return False
