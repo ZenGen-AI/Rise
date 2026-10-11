@@ -117,6 +117,7 @@ MindTrainer 把一条 `pending` 的训练指令变成一个 `pending_review` 的
 | 非目标或推迟项 | 状态 | V1 的处理 |
 |---|---|---|
 | 真实 ROLL 训练执行器与 HF/vLLM 格式转换 | [推迟] | `MockExecutor` 与 `MockConverter` 顶替 |
+| 异步派发 | [推迟] | 派发器同步返回,训练由 mock 完成;接真实执行器之前先落地异步派发契约 |
 | 缺清单时先合成数据 | [计划中] | 缺清单的指令判 `failed`,原因写明缺哪份清单 |
 | judge 归因 | 代码已有,入口不提供 judge | judge 归因的指令在派发器里判 `failed` |
 | interact 的实时服务端 | 入口不启动 | `scripts/run_controlplane.py` 下 interact 指令判 `failed`;注入 `client_factory` 与 `policy` 的调用方可以跑 |
@@ -636,7 +637,7 @@ T1 的上抛异常会让 `run_daemon` 退出,需要外部监督者重启。重�
 | interact 失败的 collect 会在产物树留下不属于任何 batch 的 episode | 按情境扫描取数据会取错 | 下游只按 `metadata["episode_ids"]` 取数据 |
 | 续训次数耗尽后无法通过放宽配置救回 | 人只能写一条新指令 | 改为只哈希影响训练产物的字段 |
 | `gamma<1` 时较长的 episode 均值偏低 | batch 数据集长度不一时奖励有长度偏置 | 默认 `gamma=1.0`;interact 下 episode 都跑满 `max_turns`,不受影响 |
-| 训练同步阻塞调和循环 | 训练期间审核与晋级动作排队 | 真实执行器接入时改为远程任务 |
+| 训练同步阻塞调和循环 | 训练期间审核与晋级动作排队 | 接真实执行器之前落地异步派发:指令加 `submitted` 状态,派发器拆成提交与轮询,训练记录里的 `remote_job_ref` 作幂等键 [推迟] |
 | 服务端 `turn_timeout_s` 小于策略最坏延迟时,慢策略被当作 T1 重试 | 推理成本按重试次数放大 | 组合根配置时保证超时大于策略延迟 |
 | 合成的情境与人格不落盘 | 想按 id 查生成的情境,只能看 episode 里的 `scenario_id` 与 `role_assignment` | 无 [计划中] |
 | 默认生产器的奖励差异是人造的 | 合成数据只证明流程跑通 | 换桥接生成器 [计划中] |

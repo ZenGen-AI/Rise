@@ -12,7 +12,7 @@ def build() -> Canvas:
 
     a = c.box(30, 96, 210, "构造 CliBridge", "校验 retry_policy\n解析凭证", kind="infra", h=80)
     b = c.box(280, 96, 200, "complete()", "校验 run_id · task_id", kind="infra", h=80)
-    r = c.box(520, 96, 230, "起子进程", "argv 模板 · 标准输入\n超时 timeout_s", kind="infra", h=80)
+    r = c.box(520, 96, 230, "起子进程", "白名单环境 · 空临时目录\n标准输入 · 超时 timeout_s", kind="infra", h=80)
     g = c.gate(800, 86, 250, "判定本次尝试", "OSError → T2\n超时 · 非零 · 空输出 → T1\n其余 → 成功", h=100, kind="neutral")
 
     bad = c.box(30, 270, 210, "构造失败", "MissingCredentialError\n不是 BridgeError", kind="danger", h=70)

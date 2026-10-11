@@ -320,7 +320,7 @@ build_recipe_candidate(store, run_id, *, config, repo_commit=None,
 
 | 触发动作 | `target_id` | 调和循环判定的条件 | 处理器自己判的 |
 |---|---|---|---|
-| `plan_next_round` | 来源 run id | 候选 `effective` 或 `rejected`;证据可接受;决策为空或 `pending`;没有在途轮;该 run 是编号最大的 run | 决策状态、重入路径 |
+| `plan_next_round` | 来源 run id | 候选 `effective` 或 `rejected`;证据可接受;决策为空或 `pending`;没有在途轮;启用提名且候选为 `effective` 时来源 run 已有提名标记且其配方候选已离开 `pending_review` 与 `approved`;该 run 是编号最大的 run | 决策状态、重入路径 |
 | `nominate_recipe` | run id | 候选 `effective`;证据可接受;没有提名标记 | 提名判定的全部十一条 |
 
 处理器签名写成字面的 `Callable[[GitStore, Action], None]` [计划中],可以脱离调和循环直接调用。三个 loader 每次调用各读一次,人改了配置,下一次规划就生效。
@@ -490,6 +490,8 @@ build_recipe_candidate(store, run_id, *, config, repo_commit=None,
 
 证据等级不可接受记为终局:之后打开接受 mock 证据的开关,也不会回头补提名已判 `skipped` 的 run,要人删掉 `nomination.yaml` 才会重判。
 
+规划等门③依赖这份标记:`nominated` 与 `skipped` 都放行,只有「还没到」不写标记、规划继续等;标记为 `nominated` 时,再看配方候选是否已离开 `pending_review` 与 `approved`。候选为 `rejected` 的 run 不提名,规划不等这份标记。
+
 "还没到"的四种情形会自己变好,所以不写标记,下次触发再判。终局判定写 `skipped` 标记,原因写进 `reason`。判定通过时先写配方候选,再写 `nominated` 标记。崩在两者之间时,下次只补标记,候选不重写。配方候选的载荷 [计划中]:
 
 | 键 | 取值 |
@@ -611,7 +613,7 @@ build_recipe_candidate(store, run_id, *, config, repo_commit=None,
 | `HeuristicBackend` 只 clone batch 配方 | 开了 `allow_interact` 也不会选 interact 配方 | 用桥接后端 [计划中] |
 | 规划处理器不判证据等级 | 绕过调和循环直接调用时会接受 mock 证据;装配只拒绝桩报告 | 证据由调和循环判 [计划中] |
 | 证据不可接受记为终局 | `skipped` 之后打开接受 mock 证据的开关也不会补提名 | 人删掉 `nomination.yaml` 重判 [计划中] |
-| 规划不等门③ | 同一 tick 里提名先于规划,配方候选还在 `pending_review`,规划看不到它,同一轮提名的配方最早在第 N+2 轮被 clone;端到端测试分两段开关才演示出 clone | 是否让规划等门③是未决的设计问题 |
+| 规划等门③ | 启用提名且候选 `effective` 时规划要等来源 run 的配方候选离开 `pending_review` 与 `approved`,每轮多停一次等人;没有提名标记的 run(人手放进树的候选)规划永不触发 | 人手写下一条指令,或关掉提名开关 [计划中] |
 | 第一次闭环没有基线模型 | 没有可比增益就不会提名 | 先登记一个已晋级的基线模型 |
 
 | 未核实项 | 影响 | 核实办法 |

@@ -130,6 +130,7 @@ ControlPlane 是系统的协调层:它不训练、不评测,只读写产物并�
 | 事件总线或文件监听 | 不做 | 轮询,间隔由入口给定 |
 | 查询索引 | 不做 | 按目录扫描 |
 | 并行多轮在途 | [推迟] | 同一时间只允许一轮,规则 [计划中] |
+| 异步派发 | [推迟] | 契约已定,V1 派发器同步返回;接真实训练之前落地 |
 | 图形界面 | [推迟] | 只有命令行 |
 | 损坏产物的自动隔离 | 不做 | 读不出就抛,守护进程退出;轮次产物与诊断报告例外,见失败处理 [计划中] |
 
@@ -199,6 +200,7 @@ ControlPlane 是系统的协调层:它不训练、不评测,只读写产物并�
 | `config.py` | 后端配置加载、凭证解析、脱敏 | 无 | [已落地] |
 | `ledger.py` | 成本与失败写入 | envelope、gitstore、paths | [计划中] |
 | `evidence.py` | 证据等级,纯函数 | 无 | [计划中] |
+| `lock.py` | 仓库排他文件锁,守护进程与一次性 tick 的入口在第一个 tick 之前取 | 标准库 | [计划中] |
 | `cli/src` | `review`、`approve`、`reject`、`status` | git 命令行、js-yaml | [已落地] |
 
 依赖方向规则:
@@ -221,7 +223,7 @@ ControlPlane 是系统的协调层:它不训练、不评测,只读写产物并�
 | `BigRef` | `uri`、`sha256`、`size_bytes`、`fetch_hint` | 大内容不进树,只存引用;`fetch_hint` 可为空 |
 | `DirectiveView` | `id`、`status`、`target_dimension`、`recipe_ref` | 由 `read_tree_state` 投影 |
 | `CandidateView` | `id`、`status`、`run_id`、`has_diagnostic` | `has_diagnostic` 默认 `False`,未知即无证据 |
-| `TreeState` | 指令视图、候选视图、`model_count` | `model_count` 是 `models/` 下 yaml 文件数 |
+| `TreeState` | 指令视图、候选视图、`model_count` | `model_count` 是 `models/` 下 yaml 文件数;新增 `max_model_version`(默认 `None`),非 `None` 时 `reconcile` 用它加一定版本号,否则沿用 `model_count` 加一,既有 fixture 照旧 [计划中] |
 | `Action` | `kind`、`target_id`、`detail` | 冻结数据类 |
 | `RunView` [计划中] | `run_id`、`directive_status`、`recipe_ref`、`candidate_status`、`has_diagnostic`、`diagnostic_grade`、`planner_decision_status`、`has_nomination_note`、`has_track_note` | 每个 run 目录一条,含没有指令的目录;`recipe_ref` 缺失或不是字符串按空串;诊断报告读不出或载荷不是字典时等级记 `stub` |
 | `ModelView` [计划中] | `model_id`、`version`、`run_id`、`status`、`agent_round_status` | `agent_round_status` 为 `None` 表示没有轮次产物或产物读不出;`has_agent_round` 是由它派生的只读属性,不是构造参数 |
@@ -370,11 +372,11 @@ def evidence_acceptable(grade: str, accept_mock: bool) -> bool: ...  # [计划�
 | `admit_proposal` | 提案 id | 空字典 | `kind` 是 `skill_memory_proposal` 且状态 `approved` | 提案变为 `effective` |
 | `record_track` | run id | `run_id`、`recipe_ref` | `recipe_ref` 非空;候选 `effective` 或 `rejected`;证据可接受;没有战绩标记 | `runs/<run>/recipe_track.yaml` |
 | `nominate_recipe` | run id | `run_id` | 候选 `effective`;证据可接受;没有提名标记 | `runs/<run>/nomination.yaml` |
-| `plan_next_round` | run id | `run_id` | 候选 `effective` 或 `rejected`;证据可接受;决策状态为空或 `pending`;没有在途轮;该 run 是 `run-<数字>` 里编号最大的 | 规划决策变为 `executed` 或 `failed` |
+| `plan_next_round` | run id | `run_id` | 候选 `effective` 或 `rejected`;证据可接受;决策状态为空或 `pending`;没有在途轮;启用提名且候选为 `effective` 时,来源 run 已有提名标记,且配方候选 `recipe-<run>` 不在 `pending_review` 或 `approved`;该 run 是 `run-<数字>` 里编号最大的 | 规划决策变为 `executed` 或 `failed` |
 | `start_agent_round` | 模型 id | `version`、`run_id` | 版本号(按数字)最大的 `effective` 模型,且轮次产物不存在、读不出或状态为 `pending` | 轮次产物变为 `executed` 或 `failed` |
 
 - **输出顺序固定。** 既有动作在前,之后是 `admit_recipe`、`admit_proposal`、`record_track`、`nominate_recipe`、`plan_next_round`、`start_agent_round`,同种动作按 id 字典序。先收录再规划,规划就能看到刚收录的配方;先记战绩再规划,退化的配方不会被同一 tick 选中。`plan_next_round` 每个 tick 至多一条。
-- **在途轮。** 任一指令是 `pending` 或 `awaiting_confirmation`,或任一候选是 `pending_review` 或 `approved`。只有 `plan_next_round` 受它限制,提名与战绩是对已结束 run 的记账,不受限。
+- **在途轮。** 任一指令是 `pending` 或 `awaiting_confirmation`,或任一候选是 `pending_review` 或 `approved`。只有 `plan_next_round` 受它限制,提名与战绩是对已结束 run 的记账,不受限。启用提名且候选为 `effective` 时,`plan_next_round` 还要等配方入库门:来源 run 已有提名标记(`nominated` 或 `skipped`),且 `GateView` 里 id 为 `recipe-<run>` 的配方候选不在 `pending_review` 或 `approved`(CP-11)[计划中]。候选为 `rejected` 的 run 不等,因为被拒绝的候选不提名。
 - **最大 run。** 按 `run-<数字>` 整数比较。不匹配的名字不参与。一个 `run-<数字>` 都没有时不触发规划,这是刻意的失败关闭,闭环停在等人写指令。编号相同(如 `run-7` 与 `run-007`)按 run id 字典序取较大者。若用字符串序,不补零的 `run-9` 会压过 `run-011`,闭环会静默停住。
 - **只对最大版本跑轮次。** 最大 `effective` 模型的轮次到终态后,更旧的模型即使没有轮次也不补跑。`start_agent_round` 的 `run_id` 取模型 `links` 的第二项,不足两项为空串。
 - **轮次重入。** 轮次产物写回终态之前,每个 tick 都会再产生 `start_agent_round`。处理器必须先写 `pending` 的轮次产物作幂等键,重入时整份重写同一产物。
@@ -401,7 +403,7 @@ def evidence_acceptable(grade: str, accept_mock: bool) -> bool: ...  # [计划�
 | 项 | 规则 |
 |---|---|
 | `GRADES` | `stub`、`mock`、`real` |
-| `diagnostic_grade(payload)` | `stub` 字段为真判 `stub`;`backends` 为 `mock` 判 `mock`;`backends` 缺失或为 `real`,且 `dimension_scores` 是非空列表,判 `real`;其余一律判 `stub`。载荷不是字典抛 `TypeError` [计划中] |
+| `diagnostic_grade(payload)` | `stub` 字段为真判 `stub`;`backends` 为 `mock` 判 `mock`;`backends` 为 `real` 且 `dimension_scores` 是非空列表,判 `real`;`backends` 缺失、取值不认识或没有分数,其余一律判 `stub`。载荷不是字典抛 `TypeError` [计划中] |
 | `evidence_acceptable(grade, accept_mock)` | `real` 可接受;`mock` 仅在 `accept_mock` 为真时可接受;`stub` 与没有报告永不可接受。等级不在 `GRADES` 里抛 `ValueError` [计划中] |
 
 命令行契约:
@@ -416,6 +418,19 @@ def evidence_acceptable(grade: str, accept_mock: bool) -> bool: ...  # [计划�
 | 按 id 找产物 | 三类审核路径 | 无 | 同一 id 命中多个产物报 `ambiguous`,不猜;找不到时保持原文 `candidate <id> not found` | [计划中] |
 | `confirm <directive-id>` | 指令 | `awaiting_confirmation → pending` | 查 TypeScript 侧新增的非审核类迁移表,只有 `awaiting_confirmation` 能确认;已确认或多处命中都拒绝,不写文件、不提交 | [计划中] |
 | `status` | 三类待审产物、待确认指令 | 无 | 分节输出;都为空时打印 `nothing awaiting review or confirmation` | [计划中] |
+
+异步派发契约 [推迟]。V1 的派发器同步返回,训练由 mock 完成。接真实训练之前必须先落地下面的契约,否则调和循环被阻塞,或指令在候选出现之前就被置 `executed`。
+
+| 项 | 契约 |
+|---|---|
+| 新状态 | 非审核类指令加 `submitted`:`pending → submitted → executed`,`submitted → failed`;Python 与 TypeScript 两份迁移表同步 [推迟] |
+| 派发器 | 拆成 `submit(store, directive) -> JobHandle` 与 `poll(store, directive, handle) -> JobStatus`;轮询状态取 `running`、`succeeded`、`failed(category, reason)`;同步派发器保持原签名,返回即 `executed` [推迟] |
+| 提交 | `submit` 在训练记录里写 `remote_job_ref`,调和循环随即把指令置 `submitted`;提交遇到瞬态异常原样上抛,指令仍 `pending` [推迟] |
+| 轮询动作 | 新动作 `poll_training`,目标是处于 `submitted` 的指令;处理器调 `poll`:`running` 不写任何东西,`succeeded` 注册候选 `pending_review` 并置 `executed`,`failed` 置 `failed` 并写失败记录 [推迟] |
+| 幂等键 | 训练记录里的 `remote_job_ref`;重复提交先查它,已有就不再提交 [推迟] |
+| 在途轮 | `submitted` 与 `pending`、`awaiting_confirmation` 一样算在途 [推迟] |
+| 超时 | 配置 `max_job_hours`,超时判 T3,不自动取消远程任务 [推迟] |
+| 解除推迟的条件 | 远程执行器的假实现跑通提交、轮询、崩溃重入三类测试 [推迟] |
 
 对邻居的假设:
 
@@ -481,11 +496,11 @@ def evidence_acceptable(grade: str, accept_mock: bool) -> bool: ...  # [计划�
 | 失败点 | 结果 | 恢复 |
 |---|---|---|
 | 派发器抛普通异常 | 守护进程退出,指令仍 `pending` | 外部重启后再派发 |
-| 晋级三次写入中途崩溃 | 已写的模型文件留在树里 | 重启后候选仍 `approved`,再登记 vN+1,同一轮出现两个版本 |
+| 晋级三次写入中途崩溃 | 已写的模型文件留在树里 | 重启后候选仍 `approved`;晋级先找 `promoted_from` 等于该候选的模型,找到就复用它的版本号,只补做后两次写入,不再登记 vN+1(CP-7)[计划中] |
 | 读到损坏产物 | 抛异常,守护进程退出,重启后同处再抛 | 人工修复或删除该文件 |
 | git 命令非零退出 | 子进程异常上抛,守护进程退出 | 人工排查仓库 |
 
-晋级中途崩溃时,`model_count` 已经包含刚写的模型文件。重启后会再登记一个版本,第 10 章已知局限记为晋级非原子。
+晋级动作的幂等键是模型产物里的 `promoted_from`。重启后候选仍是 `approved`,`apply_action` 先扫描 `models/` 找 `promoted_from` 等于该候选的模型:找到就复用它的版本号,只补做候选置 `effective` 与写结果摘要;找不到才按动作里的 `model_version` 新登记。`reconcile` 给出的 `model_version` 是现有最大版本号加一,所以人工删文件只会留下版本号空洞,不会重复 [计划中]。今天的代码按文件数加一,崩溃重放会再登记一个版本,第 10 章已知局限记为晋级非原子。
 
 走查例子取自 `tests/test_e2e_loop.py`:人工写指令 `run-001`,目标维度 `high_order_belief`,用缺省的桩派发器。
 
@@ -512,10 +527,13 @@ def evidence_acceptable(grade: str, accept_mock: bool) -> bool: ...  # [计划�
 | CP-4 | 内容相同不提交 | 每次写都提交 | 崩溃重放半程 tick 时不因"无可提交"崩掉 | 无改动的重写不留历史痕迹 |
 | CP-5 | 派发失败分两类:`DirectiveFailedError` 置 `failed`,其余上抛 | 统一吞掉重试;统一置 `failed` | 确定性失败不空转,瞬态失败不被错判成终态 | 瞬态异常让守护进程退出,需要外部监督 |
 | CP-6 | 晋级要求树里已有诊断报告,即使候选已 `approved` | 只信命令行的 `approve` | 命令行不是唯一写方,底线不依赖审核人走哪条路 | 只保证证据在场,不保证被读过 |
-| CP-7 | 新版本号取 `model_count` 加一,一轮内多个晋级依次递增 | 读出最大版本号再加一 | 原设计未记录理由,代码表现为按文件数计数 | 删除或手放模型文件会让版本号错位 |
+| CP-7 | 新版本号取现有最大版本号加一,一轮内多个晋级依次递增;晋级先找 `promoted_from` 等于该候选的模型,找到就复用它的版本号 [计划中] | 取 `models/` 下的文件数加一(今天的代码) | 崩溃重放不再重复登记,人工删文件或手放模型文件不使版本号错位 | 人工删文件会留下版本号空洞;晋级多一次对 `models/` 的扫描 |
 | CP-8 | 惰性迁移,读取统一经迁移器链,V1 链为空 | 批量改写历史产物 | 历史保持可追溯 | 每次读取多一次迁移与校验 |
 | CP-9 | 配置只存凭证变量名,出现凭证字段即拒绝加载 | 允许本地明文 | 凭证绝不进 git | 换机器要自己配环境变量 |
 | CP-10 | 需审核类迁移表在 Python 与 TypeScript 各一份 | 共享一份 schema 生成 | 两种语言只经树里的文件通信 | 两边改漏一处就会分叉,目前靠人工核对 |
+| CP-11 | `plan_next_round` 还要等来源 run 的配方入库门:启用提名且候选 `effective` 时,来源 run 须已有提名标记,且配方候选 `recipe-<run>` 不在 `pending_review` 或 `approved`;候选 `rejected` 不等 [计划中] | 不等,同一轮提名的配方最早在第 N+2 轮被复用 | 三道门的先后成为树里的状态事实,规划一定看得到刚入库的配方,不再依赖同一 tick 里提名先于规划的顺序 | 每一轮多停一次等人审门③;人手放进树的候选没有提名标记,规划不触发,要人手写下一条指令;关掉提名开关规划就不再等 |
+| CP-12 | 守护进程与一次性 tick 的入口在第一个 tick 之前取排他文件锁,锁文件在控制面仓库的 `.git/` 下;所有产物写入的提交只带本文件(`git commit -m <信息> -- <路径>`),Python 与 TypeScript 两侧一致;命令行不取锁 [计划中] | 命令行写入队列;维持现状 | 锁挡住两个守护进程重复派发与记账互相覆盖;只带本文件让命令行已暂存的改动不被守护进程带走 | 锁被占用时入口以退出码 2 退出;命令行与守护进程同时提交时 git 自己的索引锁冲突仍会让一方失败,尚未复现 |
+| CP-13 | 异步派发的契约现在定下,V1 不写代码:指令加 `submitted` 状态,派发器拆成提交与轮询,调和循环加轮询动作 [推迟] | V1 就实现;推迟到 V2 才设计 | 接真实训练之前契约必须在位,否则要同时改派发契约与调和循环 | 契约先于实现,真实执行器落地时细节仍会微调 |
 | R1 | 事件就是树里的状态事实。每个触发对应一个新动作,幂等键是 run 目录内的标记产物 | 事件订阅 | 循环无状态,崩溃后重读即续接 | 每个触发多一个小文件 [计划中] |
 | R2 | 新动作只有在对应处理器被注入时才会产生,`controlplane` 不导入任何新子系统 | 在 daemon 里直接调用新子系统 | 依赖方向不变;不注入时行为逐字节相同 | 入口要自己组装处理器 [计划中] |
 | R3 | 指令确认默认开启,新增 `awaiting_confirmation` 状态,由 `confirm` 迁到 `pending` | 全自动下发 | 先建立信任 | 闭环每轮停一次等人,关掉要显式配置 [计划中] |
@@ -616,21 +634,21 @@ Python 侧合计 90 个用例,用 `uv run pytest --collect-only -q` 逐文件数
 | `daemon.py` 导入 `simulator.stubs` | 包级循环依赖;controlplane 不能脱离 simulator 单独安装 | 骨架桩移出 controlplane 之后解除 |
 | 未捕获异常让守护进程退出 | 需要外部监督;坏产物会卡死循环 | 人工修复;读取层兜底不在本期,只有轮次产物与诊断报告有兜底 [计划中] |
 | TypeScript 读取不经迁移器链与 Schema 校验,与 Python 不对称 | `schema_version` 升级后两边读法不一致;坏产物在命令行侧不被拒绝 | 未修 |
-| TypeScript 写入无条件提交,与 Python 不对称 | 内容相同时 `git commit` 以非零退出码失败 | 未修 |
-| 晋级非原子 | 崩在写 `zengen-vN` 之后、候选置 `effective` 之前,重放时候选仍是 `approved`,`model_count` 已含 vN,再登记 vN+1。同一轮出现两个 `effective` 模型,下一轮基线、MindAgent 轮次、`outcome.yaml` 可能指向多出来的那个;版本号取 `models/` 下的文件数,人工删文件会留下悬空引用或版本号空洞 | 未修;重启前人工检查 `models/`。根治办法:晋级先找 `promoted_from` 等于该候选的模型并复用其版本号,新版本号取现有最大版本号加一;目前没有排进任何工作包 |
-| 没有单实例保护 | 命令行与守护进程各自提交:守护进程的提交会带走命令行已暂存的改动,命令行随后提交失败,审计信息失真;两个守护进程会对同一条 `pending` 指令重复派发 | 同一时间只跑一个守护进程;根治办法是启动时取文件锁、提交时只带本文件,目前没有排进任何工作包 |
+| TypeScript 写入无条件提交,与 Python 不对称 | 内容相同时 `git commit` 以非零退出码失败 | 未修;提交范围改为只带本文件(CP-12)[计划中] |
+| 晋级非原子 | 崩在写 `zengen-vN` 之后、候选置 `effective` 之前,重放时候选仍是 `approved`,`model_count` 已含 vN,再登记 vN+1。同一轮出现两个 `effective` 模型,下一轮基线、MindAgent 轮次、`outcome.yaml` 可能指向多出来的那个;版本号取 `models/` 下的文件数,人工删文件会留下悬空引用或版本号空洞 | 重启前人工检查 `models/`;设计的修正:晋级先找 `promoted_from` 等于该候选的模型并复用其版本号,新版本号取现有最大版本号加一(CP-7),落在工作包 8 [计划中] |
+| 没有单实例保护 | 命令行与守护进程各自提交:守护进程的提交会带走命令行已暂存的改动,命令行随后提交失败,审计信息失真;两个守护进程会对同一条 `pending` 指令重复派发 | 同一时间只跑一个守护进程;设计的修正:入口启动取排他文件锁,所有提交只带本文件(CP-12),落在工作包 8 与 9 [计划中] |
 | `outcome.yaml` 没有读者 | 守护进程写它,规划不读它;晋级崩在候选置 `effective` 与写它之间时它永久缺失 | 无影响,只供人与 `trace` 查看 |
 | 指令 id 必须等于 run 目录名 | 不一致时派发找不到文件 | 约定;写指令时同名 |
 | `created_at` 写死为 `2026-09-26T00:00:00Z` | ControlPlane 写的产物时间无意义 | 以 git 提交时间为准 |
-| 同步执行 | 慢派发饿住审核与晋级 | 未修 |
+| 同步执行 | 慢派发饿住审核与晋级 | 异步派发契约已定,接真实训练之前落地(CP-13)[推迟] |
 | 命令行文件匹配模式里的 `*` 跨越 `/` | 路径模式可能误匹配更深目录里的产物;命令行按信封 id 匹配,多处命中报歧义,所以误匹配只会变成报错 | Python 一侧逐层遍历,不受影响;两侧扫描范围因此不完全相同 [计划中] |
 | `status` 的输出格式改为分节 | 依赖旧输出的脚本要改 | 仓库里没有这样的脚本 [计划中] |
 | 放弃一条待确认指令只能手改文件为 `failed` | 它在途期间挡住规划(R4),`status` 只把它列在「待确认」下 | 手工改文件 [计划中] |
 | 载荷里有超过 4300 位的整数 | `yaml.safe_dump` 抛 `ValueError`,调和循环退出 | 修在 `gitstore` 或守护进程,不在本期 |
 | 失败记录同键只写一次 | 人把产物手工改回 `pending` 后再失败,第二份失败记录静默不写 | 手工重置后再失败要换 `task_id` [计划中] |
-| 记账与失败记录读改写不加锁 | 两个守护进程同时写同一 run 会互相覆盖 | 同一时间只跑一个守护进程 [计划中] |
+| 记账与失败记录读改写不加锁 | 两个守护进程同时写同一 run 会互相覆盖 | 同一时间只跑一个守护进程;入口取文件锁后第二个守护进程起不来(CP-12)[计划中] |
 | 旧模型不补跑轮次 | 最大 `effective` 模型的轮次到终态后,更旧的模型没有轮次也不补 | 人手写轮次产物补 [计划中] |
-| 没有 `backends` 字段、有分数的报告判 `real` | 评估器写入 `backends` 标记之前,mock 评测写出的报告会被当作真证据 | 工作包 8 的评估器统一写标记;在此之前不要用 mock 后端写报告 [计划中] |
+| 没有 `backends` 字段、有分数的报告判 `real` | 今天的判定失败开放:评估器写入标记之前,mock 评测写出的报告会被当作真证据 | 设计的修正:只有 `backends` 为 `real` 才判 `real`,缺失判 `stub`(DX-12),落在工作包 1 与 8 [计划中];在此之前不要用 mock 后端写报告 |
 
 未核实项:
 

@@ -236,7 +236,7 @@ error_profiles: [{l2_dimension: belief, error_type_distribution: {unstable: 1.0}
 regression_flags: {flags: [...]}
 consistency_signals: {rule_vs_judge_divergence: {}, diagnostic_vs_reward_divergence: 0.0}
 links: [run-002]
-backends: mock           # [计划中] mock 或 real;缺省时载荷与今天逐字节相同
+backends: mock           # [计划中] mock 或 real,必写;缺失的报告一律判 stub
 ```
 
 证据等级由 `controlplane.evidence.diagnostic_grade` 判定 [计划中],诊断评测自己不判等级。
@@ -245,8 +245,8 @@ backends: mock           # [计划中] mock 或 real;缺省时载荷与今天逐
 |---|---|
 | `stub` 为真(占位桩写的报告) | `stub` |
 | `backends` 等于 `mock` | `mock`,不看分数 |
-| `dimension_scores` 非空,且没有 `backends` 或等于 `real` | `real` |
-| 其余,含 `backends` 为未知值或没有分数 | `stub`,判不出来按最弱算 |
+| `dimension_scores` 非空,且 `backends` 等于 `real` | `real` |
+| 其余,含没有 `backends`、`backends` 为未知值或没有分数 | `stub`,判不出来按最弱算 |
 
 不变量:
 
@@ -287,13 +287,13 @@ def make_diagnostic_evaluator(*, taxonomy_version, item_pool_version, someval_ru
         judge_backend, benchmark_version, tier="full", sampling_k=4,
         backends="mock") -> Callable[[GitStore, str, str], None]: ...
 def resolve_baseline(store, run_id, benchmark_version, *,
-        backends=None) -> tuple[str, list[DimensionScore]]: ...
+        backends: str) -> tuple[str, list[DimensionScore]]: ...
 # diagnostic.store_adapter 与 orchestrator 扩展 [计划中]
-def write_report(store, run_id, report, *, backends=None) -> None: ...
-def run_diagnostic(..., *, baseline_scores, dynamic_specs, backends=None): ...
+def write_report(store, run_id, report, *, backends: str) -> None: ...
+def run_diagnostic(..., *, baseline_scores, dynamic_specs, backends: str): ...
 ```
 
-`backends` 为 `None` 时载荷与今天逐字节相同;取值不在 `BACKENDS_VALUES` 里时写之前抛 `ValueError` [计划中]。
+`backends` 是必填的关键字参数,载荷里一定有这个键;取值不在 `BACKENDS_VALUES` 里时写之前抛 `ValueError` [计划中]。既有测试里 `write_report` 与 `run_diagnostic` 的调用点(存储适配与编排器两个测试文件,共七处)补传 `backends="mock"`,这是工作包 8 唯一放宽的既有测试约束 [计划中]。
 
 评估器的行为 [计划中]:
 
@@ -471,6 +471,7 @@ def run_diagnostic(..., *, baseline_scores, dynamic_specs, backends=None): ...
 | DX-9 | 评估器只跑静态轨,`candidate_model_id` 取候选 id [计划中] | 接入动态轨 | V1 没有动态轨的情境与绑定来源 | 接入动态轨时要换成真实模型 id,否则自评偏差守卫形同虚设 |
 | DX-10 | `backends` 作为 `write_report` 的参数一次写入 [计划中] | 写完后再改信封 | 两次提交之间会有一份无标记、被判 `real` 的 mock 报告 | `run_diagnostic` 多一个参数 |
 | DX-11 | 退化标记在 L3、L2、L1 各层独立产出,产出侧不去重;只看某一层时在消费侧按 `level` 筛选 | 只在最低层标记;产出侧合并 | 标记是随聚合层级向上传播的证据,审核门①与 RecipeStore 战绩回看都消费它 | 消费方若数标记条数,会把一次退化读成三次 |
+| DX-12 | 证据等级失败关闭:只有 `backends` 为 `real` 才判 `real`,缺失一律判 `stub`;`run_diagnostic`、`write_report`、`resolve_baseline` 的 `backends` 必填 [计划中] | 失败开放:有分数就判 `real` | 直接调用编排器写出的 mock 报告不会被当作真证据,默认不接受 mock 的规则无法被绕过 | 七个既有调用点要补传参数;手写的无标记报告永远不可接受,要人补标记 |
 
 ## 8. 失败处理与可观测
 

@@ -39,7 +39,7 @@ def build() -> Canvas:
     c.edge(git, mig)
     c.edge(mig, env)
 
-    c.note(256, 454, 400, "daemon 另导入 states、paths、envelope\n命令行在 TypeScript 里各写一份迁移表与路径", kind="neutral")
+    c.note(256, 454, 400, "daemon 另导入 states、paths、envelope\n命令行在 TypeScript 里各写一份迁移表与路径\nlock.py 是入口取的仓库排他文件锁,只依赖标准库", kind="neutral")
     c.legend(40, 538, [("control", "驱动与工具", False), ("store", "存储与契约", False),
                        ("danger", "反向依赖", False)])
     return c

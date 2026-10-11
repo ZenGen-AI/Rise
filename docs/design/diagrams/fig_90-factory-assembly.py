@@ -39,6 +39,7 @@ def build() -> Canvas:
 
     c.note(760, 420, 290, "装配只做一次:运行中改 evaluator.yaml、\nbackends.yaml、agent.yaml 要重启才生效",
            kind="neutral")
+    c.note(40, 520, 290, "run 与 reconcile 在第 1 步之前先取\n仓库排他文件锁,被占用退出码 2", kind="neutral")
     c.legend(40, 600, [("control", "装配步骤", False), ("compute", "诊断资产", False),
                        ("danger", "装配失败", False)])
     return c

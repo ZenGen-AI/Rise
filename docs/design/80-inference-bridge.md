@@ -98,7 +98,7 @@
 </details>
 <!-- figure:end 80-bridge-context -->
 
-上方的调用方经 `complete()` 取文本,judge 在 V1 不装配,factory 组合根读 `backends.yaml` 按角色构造桥接。桥接以子进程调外部强模型命令行,提示词走标准输入。凭证值只在环境变量里,桥接按变量名解析。桥接往两处落地:成本记录进产物树,脱敏日志进对 git 不可见的本地目录。 [计划中]
+上方的调用方经 `complete()` 取文本,judge 在 V1 不装配,factory 组合根读 `backends.yaml` 按角色构造桥接。桥接以子进程调外部强模型命令行,提示词走标准输入;子进程只拿到白名单环境变量,在空临时目录里运行。凭证值只在环境变量里,桥接按变量名解析。桥接往两处落地:成本记录进产物树,脱敏日志进对 git 不可见的本地目录。 [计划中]
 
 ## 2. 目标、非目标与约束
 
@@ -191,7 +191,7 @@
 | 实体 | 字段与含义 | 约束 |
 |---|---|---|
 | `BackendConfig` [已落地] | `backend`、`invocation_form`、`model_name`、`prompt_template_version`、`token_env`、`retry_policy` | 冻结;不含凭证值 |
-| `BackendConfig` 扩展 [计划中] | `command`:argv 模板;`timeout_s`:单次超时秒数 | `command` 非空字符串列表;`timeout_s` 为正有限数,缺省 `120.0`;`token_env` 键必须在场,可为 `null`,空串或非字符串抛 `ValueError`;凭证键名不分大小写比较;`retry_policy` 缺省 3 次、退避基数 1.0 秒 |
+| `BackendConfig` 扩展 [计划中] | `command`:argv 模板;`timeout_s`:单次超时秒数;`env_allowlist`:交给子进程的环境变量名;`workdir`:子进程工作目录 | `command` 非空字符串列表;`timeout_s` 为正有限数,缺省 `120.0`;`token_env` 键必须在场,可为 `null`,空串或非字符串抛 `ValueError`;凭证键名不分大小写比较;`retry_policy` 缺省 3 次、退避基数 1.0 秒;`env_allowlist` 缺省为 `PATH`、`HOME`、`USERPROFILE`、`SYSTEMROOT`、`TMPDIR`、`TEMP`、`TMP`、`LANG`、`LC_ALL`、`TERM`、`CODEX_HOME`、`CLAUDE_CONFIG_DIR`,`token_env` 指向的变量自动加入,其余变量一律不传;`workdir` 只取 `empty_tmp`,缺省即它 |
 | `BridgeResult` [计划中] | `text`、`input_tokens`、`output_tokens`、`model`、`log_ref` | 冻结;`CliBridge` 的两个 token 字段恒为 `None` |
 | `BridgeError` [计划中] | `category`、`reason`、`attempts`、`log_ref` | `category` 只能是 `T1`、`T2`;`str(exc)` 为 `"<category>: <reason>"` |
 | `RunOutcome` [计划中] | `returncode`、`stdout`、`stderr`、`timed_out` | 超时时 `returncode` 为 `None` |
@@ -213,8 +213,10 @@ planner:
   model_name: claude-opus
   prompt_template_version: v1
   token_env: null            # 用工具自带登录态
-  command: ["claude", "-p", "--model", "{model}"]
+  command: ["claude", "-p", "--model", "{model}", "--tools", "", "--no-session-persistence"]
   timeout_s: 120
+  env_allowlist: [PATH, HOME, LANG, TERM, TMPDIR]   # 省略时用默认白名单
+  workdir: empty_tmp                  # 每次调用一个空临时目录,调用后删除
   retry_policy: {max_attempts: 3, backoff_base_s: 1.0}
 ```
 
@@ -247,7 +249,7 @@ def record_bridge_cost(store, result, *, run_id, task_id, calls) -> None: ...
 BRIDGE_COST_TYPE = "external_inference"
 ```
 
-`Runner` 的形状是 `(argv, 标准输入文本, 超时秒数, 子进程环境) -> RunOutcome` [计划中]。子进程起不来时它抛 `OSError`。
+`Runner` 的形状是 `(argv, 标准输入文本, 超时秒数, 子进程环境, 工作目录) -> RunOutcome` [计划中]。子进程起不来时它抛 `OSError`。
 
 已落地的配置入口:
 
@@ -265,11 +267,20 @@ class CredentialInGitTreeError(Exception): ...
 |---|---|
 | 提示词传递 | 走子进程标准输入,不进 argv |
 | 参数模板 | `command` 里的 `{model}` 换成 `model_name`,其余原样;不经 shell |
-| 凭证传递 | 只经子进程环境变量 |
+| 凭证传递 | 只经子进程环境变量;环境变量只传白名单与 `token_env` 指向的那一个 |
+| 工作目录 | 每次 `complete` 新建一个空临时目录作子进程工作目录,调用结束后删除 |
+| 权限 | 默认参数模板关闭工具或开只读沙箱,见下表 |
 | 输出解码 | UTF-8,非法字节替换为 U+FFFD |
 | 返回文本 | 标准输出去掉首尾空白 |
 | 日志位置 | 有 `log_dir` 用它;否则有 `store` 用 `<repo_root>/.rismforge/logs`;两者都无则不写,`log_ref` 为 `None` |
 | 记账位置 | 有 `store` 才记;`calls` 为本次成功用掉的尝试次数,`tokens` 省略 |
+
+两个工具的默认参数模板 [计划中]:
+
+| 工具 | `command` | 作用 |
+|---|---|---|
+| claude | `["claude", "-p", "--model", "{model}", "--tools", "", "--no-session-persistence"]` | 关闭全部工具,不落会话文件 |
+| codex | `["codex", "exec", "-m", "{model}", "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral"]` | 只读沙箱,不要求工作目录是 git 仓库,不落会话文件 |
 
 触发条件:桥接自己不被调和循环触发。它只在调用方的处理器内同步运行。
 
@@ -299,7 +310,7 @@ class CredentialInGitTreeError(Exception): ...
 
 - 构造 CliBridge:校验 retry_policy / 解析凭证
 - complete():校验 run_id · task_id
-- 起子进程:argv 模板 · 标准输入 / 超时 timeout_s
+- 起子进程:白名单环境 · 空临时目录 / 标准输入 · 超时 timeout_s
 - 判定本次尝试:OSError → T2 / 超时 · 非零 · 空输出 → T1 / 其余 → 成功
 - 构造失败:MissingCredentialError / 不是 BridgeError
 - 退避:base × 2^(n-1) 秒 / 最后一次失败后不睡
@@ -328,7 +339,7 @@ class CredentialInGitTreeError(Exception): ...
 |---|---|---|
 | 1 | 构造 CliBridge | 校验 `invocation_form == "cli"`、`command` 非空、`retry_policy`;按 `token_env` 解析凭证,缺失抛 `MissingCredentialError` |
 | 2 | complete() | 校验 `run_id`、`task_id` 是单个路径段,不合法抛 `ValueError` |
-| 3 | 起子进程 | 用 argv 模板起进程,提示词写入标准输入,超时为 `timeout_s` |
+| 3 | 起子进程 | 用 argv 模板在新建的空临时目录里起进程,环境变量只传白名单,提示词写入标准输入,超时为 `timeout_s`,结束后删除该目录 |
 | 4 | 判定本次尝试 | 启动阶段 `OSError` 判 T2;超时、非零退出、空输出判 T1;其余判成功 |
 | 5 | 退避 | T1 且未耗尽时睡 `backoff_base_s × 2^(n-1)` 秒,回到步骤 3;最后一次失败后不睡 |
 | 6 | 写日志 | 每次 `complete` 一份,含各次尝试的 stdout 与 stderr,整体过 `redact`,返回 `BigRef` |
@@ -373,6 +384,7 @@ class CredentialInGitTreeError(Exception): ...
 | BR-5 | 不解析外部工具输出,token 字段恒为 `None` | 猜测 JSON 输出格式 | 不确定输出里是否有用量 | 成本表里外部推理只有调用次数 |
 | BR-6 | `BridgeError` 在 `except` 块外抛出,异常链上不挂原异常 | `raise ... from None` | 原异常信息可能带凭证;`from None` 只断 `__cause__`,不断 `__context__` | 排查时看不到原异常对象,只有脱敏后的原因文本 [计划中] |
 | BR-7 | 记账只有 `record_bridge_cost` 一处,`ScriptedBridge` 也调它 | 各实现自己记 | 测试替身也能走完记账路径 | 无 [计划中] |
+| BR-8 | 子进程默认隔离:只传白名单环境变量与 `token_env`,工作目录是每次新建的空临时目录,默认参数模板关闭工具或开只读沙箱 [计划中] | 传全部环境变量,沿用守护进程所在目录 | 「外部推理只产出文本」由配置强制而不是靠约定,其他凭证不暴露给外部工具 | 登录态依赖的变量没进白名单时调用失败;工具仍能读 `HOME` 下的文件;参数模板要随工具版本维护 |
 
 ## 8. 失败处理与可观测
 
@@ -515,8 +527,8 @@ class CredentialInGitTreeError(Exception): ...
 | 同步阻塞 | 调用期间调和循环不转,审核动作被饿住 | 调小 `timeout_s` 与 `max_attempts` |
 | 日志无轮转 | 长期运行累积文件 | 人工清理 `.rismforge/logs` |
 | `file://` 是本机绝对路径 | 换机器后 `trace` 标为不可达 | 在原机器上查看 |
-| 脱敏只替换 `token_env` 指向的值 | 工具自行打印的其他敏感变量不被脱敏 | 默认把守护进程的全部环境变量交给子进程,所以守护进程的环境里不要放无关凭证;白名单环境变量是改进方向,目前没有排进任何工作包 |
-| 子进程不设工作目录,默认参数模板不带只读权限参数 | 外部命令行是能执行工具的智能体,默认配置下可能读写守护进程所在目录 | 参数模板按所选工具实测权限与沙箱选项;改进方向是空临时目录作工作目录 |
+| 脱敏只替换 `token_env` 指向的值 | 工具自行打印的其他敏感变量不被脱敏 | 子进程只拿白名单环境变量与 `token_env` 那一个,其余凭证不会进入子进程,也就不会被打印 [计划中] |
+| 默认隔离只限制写与环境,不限制读 | 默认模板关闭工具或开只读沙箱,工作目录是空临时目录;外部工具仍能读 `HOME` 下的文件,因为登录态在那里 | 不在 `HOME` 下放无关的敏感文件;要彻底隔离得把工具放进容器,V1 不做 [计划中] |
 | 凭证字段检查只看键名 | `access_token` 这类带前后缀的键、列表里的凭证值挡不住 | 配置评审 |
 | 超时只杀直接子进程 | 外部工具派生的孙进程可能残留 | 无 |
 | 重入时同一 `task_id` 重跑 | 成本被去重,外部推理成本是下限 | V1 接受 |
@@ -524,7 +536,8 @@ class CredentialInGitTreeError(Exception): ...
 | 未核实项 | 影响 | 核实办法 |
 |---|---|---|
 | `claude -p`、`codex exec` 的真实参数、退出码语义、输出是否混有进度信息 | 默认参数模板可能跑不通 | 在本机真实调用一次,对照日志 |
-| 外部命令行在没有权限参数时能否执行写文件的工具 | 决定「外部推理只产出文本」是否被强制 | 在空目录里用 `claude -p` 提示创建一个文件,看文件是否出现;不同版本的默认行为可能不同 |
+| 默认模板下外部命令行是否真的不能写文件、读不到白名单之外的环境变量 | 决定「外部推理只产出文本」是否被强制 | 在空目录里用默认模板提示创建一个文件、打印全部环境变量,看文件是否出现、输出里有没有白名单之外的变量;不同版本的默认行为不同 |
+| 白名单是否足以让两个工具保持登录态 | 不够时工具报未登录,重试耗尽后成为 T1 | 在本机用默认模板各调一次;不够就把缺的变量名加进 `env_allowlist` |
 | 外部工具 JSON 输出里是否带用量 | 决定能否记 token | 用 `--output-format json` 跑一次看字段 |
 | Windows 下 `file://` 拼法 | `trace` 可能判不可达 | 在 Windows 上跑 `test_bridge_cli.py` [计划中] |
 | Linux 下超时清理与 ENOEXEC 行为 | 分类可能不同 | 在 Linux 上跑两条真子进程用例 |

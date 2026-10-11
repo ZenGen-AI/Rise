@@ -414,6 +414,7 @@ TypeScript 命令行:`rismforge <review|approve|reject|status> [id] [reason]` [�
 
 | 步 | 动作 | 失败时 |
 |---|---|---|
+| 0 | 取仓库排他文件锁(`run` 与 `reconcile` 取,只读子命令不取) | 锁已被占用,退出码 2 [计划中] |
 | 1 | 解析 `--enable`,经 `ENABLE_MAP` 得到处理器键 | 未知开关或空项,退出码 2 |
 | 2 | 处理器键为空:只构造 `make_mindtrainer_dispatcher()`,调 `run_daemon` 时只传派发器 | 无 |
 | 3 | 读 `evaluator.yaml`,要求恰好五个键 | `FactoryConfigError`,退出码 2 [计划中] |
@@ -489,7 +490,7 @@ TypeScript 命令行:`rismforge <review|approve|reject|status> [id] [reason]` [�
 | 7 | 规划 run-002 | 开关加上 `plan`、`--planner-backend heuristic`;`plan_next_round run-001`,决策 `clone recipe-run-001`;新指令停在 `awaiting_confirmation`,下一 tick 没有动作 |
 | 8 | 确认指令 | 写状态模拟 `confirm run-002`,指令置 `pending` |
 | 9 | 第二轮训练 | 训练、诊断、批准,晋级为 `zengen-v3`;复用 `run-001` 的清单,不为 `run-002` 合成 |
-| 10 | 战绩 · 再规划 | 同一 tick 打印 `record_track run-002`、`nominate_recipe run-002`(增益 0,跳过)、`plan_next_round run-002`;`run-003` 的指令停在 `awaiting_confirmation` |
+| 10 | 战绩 · 再规划 | 先一个 tick 打印 `record_track run-002`、`nominate_recipe run-002`(增益 0,跳过,写 `skipped` 标记);提名标记在场后,下一个 tick 才打印 `plan_next_round run-002`;`run-003` 的指令停在 `awaiting_confirmation` |
 
 默认 mock 评估器对变体族的基题答参考答案、对变体题恒答错,各 `sampling_k` 次。所以每个候选的一级分数严格在 0 与 1 之间,错误画像是 `{"surface_match": 1.0}`。基线全错,第一轮才有正增益;第二轮与第一轮同分,增益为 0。
 
@@ -547,6 +548,7 @@ factory 是最后一个工作包,前八个全部落地后才能施工。
 | FC-11 | `repo_commit` 取组合根所在代码仓库的 HEAD,启动时取一次 | 取控制面仓库的 HEAD | 控制面仓库不是代码仓库 | 长跑跨提交时记的是启动时的提交 |
 | FC-12 | 端到端用确定性的 `HeuristicBackend` 规划,桥接只单测正向与失败路径 | 罐头桥接 | 每一步都是真实代码,命令行一个开关选得到 | 桥接往返的格式问题要到接真实后端才暴露 [计划中] |
 | FC-13 | MindAgent 用罐头后端与进程内 loopback 实时服务端,首次需要时才起 | 起外部服务端 | V1 没有加载 checkpoint 的推理后端 | 部署 episode 只证明路由与轨迹,不代表模型能力 |
+| FC-14 | `run` 与 `reconcile` 在第一个 tick 之前取仓库排他文件锁,只读子命令不取 [计划中] | 只靠只带本文件提交;把锁放进每次写入 | 挡住两个守护进程重复派发与记账互相覆盖,开销只在启动时一次 | 锁被占用时退出码 2,第二个守护进程起不来 |
 
 ## 8. 失败处理与可观测
 
@@ -624,7 +626,7 @@ factory 是最后一个工作包,前八个全部落地后才能施工。
 | `logs` 看不到成功调用的桥接日志 | 只能看到失败记录登记的引用 | 直接看 `.rismforge/logs/<run>/` |
 | 默认诊断资产是一个一级维度、两道题的最小夹具 | 只证明流程,规划器只看到一个维度 | 换真实题库 |
 | 一条部署会话超过 15 秒即 `DEADLINE_EXCEEDED` | 轮次 `failed` | 调 `interact_deadline_s`,目前不在 `agent.yaml` 里 [计划中] |
-| TypeScript 的 `writeProduct` 无条件提交,读取不经迁移与 Schema 校验 | 两侧校验强度不同;空提交会抛错 | 命令行只改状态字段;根治要两侧共用读写 |
+| TypeScript 的 `writeProduct` 无条件提交,读取不经迁移与 Schema 校验 | 两侧校验强度不同;空提交会抛错 | 命令行只改状态字段;提交改为只带本文件,根治要两侧共用读写 [计划中] |
 
 | 未核实项 | 影响 | 核实办法 |
 |---|---|---|

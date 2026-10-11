@@ -44,7 +44,7 @@ def build() -> Canvas:
     for n, node in zip((6, 7, 8, 9), (f, g, h, i)):
         c.badge(node.x, node.y, n, kind="control")
 
-    c.note(40, 500, 250, "晋级之后三条支线并行\n规划不等待 MindAgent\n两者各自由产物状态触发", kind="neutral")
+    c.note(40, 492, 250, "晋级之后三条支线并行\n规划不等待 MindAgent\n启用提名时规划等门③\n各自由产物状态触发", kind="neutral")
     c.legend(40, 672, [("human", "人工动作与审核门", False), ("compute", "计算层动作", False),
                        ("control", "控制层动作", False)])
     return c
