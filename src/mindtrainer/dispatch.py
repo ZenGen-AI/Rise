@@ -190,7 +190,8 @@ def make_mindtrainer_dispatcher(
     - batch:按 stage_manifest_refs 读数据集清单。
     - interact:另需 client_factory 与 policy,注入后 grpo_opd 走实时会话。
     - data_producer:指令带 data_spec 且本 run 名下的清单缺失时,用它先合成数据(两种模式都可,
-      interact 只合成 sft)。不注入时行为与改动前相同,需要合成的指令判 failed 并写明缺什么。
+      interact 只合成 sft)。不带 data_spec 的指令行为与改动前完全相同;带 data_spec 的指令总是
+      先严格解析,写错的判 failed;需要合成而没有注入生产器时判 failed 并写明缺什么。
     - 确定性失败(数据不对、配置不合法、该人工介入)抛 DirectiveFailedError,调和循环把
       directive 置 failed,不再重试;其余异常原样上抛,保持 pending 等下一轮。
     """

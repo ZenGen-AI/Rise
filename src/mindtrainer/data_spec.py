@@ -6,8 +6,9 @@ data_spec 由调度器写进 directive 的 payload,形如:
      stages: {sft: {group_size: 1}, grpo_opd: {group_size: 2}}}
 
 解析在派发器里、碰树之前就跑:字符串当整数、布尔当整数、列表当字典之类的输入在这里
-一律变成点名字段的 InvalidDataSpecError,不让 TypeError 或 AttributeError 一路滑进生产器、
-再逃出守护循环。
+一律变成点名字段的 InvalidDataSpecError,不让 TypeError 或 AttributeError 一路滑进生产器。
+本模块只保证派发器抛 DirectiveFailedError;调和循环随后把整份 payload 写回时,超过 4300 位
+的整数仍会让 PyYAML 抛 ValueError(controlplane 的既有问题,见计划的已知限制 12)。
 """
 from __future__ import annotations
 
@@ -59,7 +60,7 @@ class DataSpec:
 def _show(value) -> str:
     """错误信息里展示的值(照 training_config._short 的做法):太长就截断;转字符串本身会抛时只写类型。
     超过 4300 位的整数(YAML 的十六进制能写出来)做 repr 或 f-string 都会抛 ValueError,
-    若让它从拼错误信息的地方漏出去,就绕过了 InvalidDataSpecError,一路逃出守护循环。"""
+    若让它从拼错误信息的地方漏出去,就绕过了 InvalidDataSpecError;这里只保证派发器这一步不漏。"""
     try:
         text = repr(value)
     except Exception:  # 超长整数的 ValueError,或自定义对象的 __repr__ 抛的任何异常
@@ -118,7 +119,7 @@ def parse_data_spec(raw) -> DataSpec:
         )
     if purpose not in PURPOSES:
         raise InvalidDataSpecError(
-            f"data_spec.purpose must be one of {list(PURPOSES)}, got {purpose!r}"
+            f"data_spec.purpose must be one of {list(PURPOSES)}, got {_show(purpose)}"
         )
     stages_raw = raw["stages"]
     if not isinstance(stages_raw, dict):
