@@ -12,9 +12,12 @@ data_spec 由调度器写进 directive 的 payload,形如:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol
 
 from controlplane.envelope import Envelope
-from mindtrainer.training_config import STAGES
+from controlplane.gitstore import GitStore
+from controlplane.paths import dataset_manifest_file
+from mindtrainer.training_config import STAGES, TrainingConfig
 
 PURPOSES = ("training", "deployment_simulation")
 MAX_SCENARIO_COUNT = 64
@@ -139,3 +142,74 @@ def data_spec_from_directive(directive: Envelope) -> DataSpec | None:
     if raw is None:
         return None
     return parse_data_spec(raw)
+
+
+def required_stages(cfg: TrainingConfig) -> list[str]:
+    """真正会用到的阶段:配了步数的才算,且与模式有关。stage_manifest_refs 里多写的阶段不读。
+
+    sft 两种模式都从清单读,配了 sft_steps 就要。grpo_opd 只有 batch 模式从清单读;
+    interact 模式的 grpo_opd 来自实时会话(_interact_sources 事后整段覆盖),不读清单,
+    所以即便指令在 stage_manifest_refs 里为 interact 顺手点了一个 grpo_opd 的清单 id
+    (validate_training_config 并不禁止),这里也不该把它当成需要校验的阶段。"""
+    wanted = []
+    if cfg.sft_steps > 0:
+        wanted.append("sft")
+    if cfg.mode == "batch" and cfg.grpo_steps > 0:
+        wanted.append("grpo_opd")
+    return wanted
+
+
+def manifest_data_run(ref: str, stage: str) -> str | None:
+    """清单 id 的格式是 dsm-{数据所在的 run}-{阶段}(build_manifest 是唯一的构造点)。
+    解出数据所在的 run;格式不对返回 None。"""
+    head, tail = "dsm-", f"-{stage}"
+    if not (ref.startswith(head) and ref.endswith(tail) and len(ref) > len(head) + len(tail)):
+        return None
+    return ref[len(head):-len(tail)]
+
+
+def stages_to_synthesize(store: GitStore, run_id: str, cfg: TrainingConfig) -> list[str]:
+    """需要合成的阶段:会用到、点了清单、清单的数据所在 run 就是本 run、且清单文件还不在树里。
+    清单已在的阶段不重新合成;id 格式不对的阶段不在这里判(派发器会判 failed)。"""
+    out = []
+    for name in required_stages(cfg):
+        ref = cfg.stage_manifest_refs.get(name)
+        if not ref or manifest_data_run(ref, name) != run_id:
+            continue
+        if not store.exists(dataset_manifest_file(run_id, name)):
+            out.append(name)
+    return out
+
+
+def check_data_spec_against_config(
+    spec: DataSpec, cfg: TrainingConfig, stages: list[str]
+) -> str | None:
+    """data_spec 能否为这些阶段产出训练用得上的数据。返回第一条原因,合格返回 None。
+    这些问题训练时也会以 DegenerateGroupError、NotEnoughGroupsError 暴露,在这里先判,
+    是为了一条 episode 都不写就失败,并且原因直接指向 data_spec。"""
+    for name in stages:
+        if name not in spec.stages:
+            return f"data_spec.stages has no entry for stage {name!r}, which must be synthesized"
+    if "grpo_opd" in stages:
+        size = spec.stages["grpo_opd"].group_size
+        if size < cfg.min_group_size:
+            return (
+                f"data_spec.stages['grpo_opd'].group_size {size} is below "
+                f"min_group_size {cfg.min_group_size}"
+            )
+        if spec.scenario_count < cfg.groups_per_step:
+            return (
+                f"data_spec.scenario_count {spec.scenario_count} is below "
+                f"groups_per_step {cfg.groups_per_step} (one group per scenario)"
+            )
+    return None
+
+
+class DataProducer(Protocol):
+    def produce(
+        self, store: GitStore, run_id: str, cfg: TrainingConfig, data_spec: DataSpec
+    ) -> None:
+        """写出 stages_to_synthesize(store, run_id, cfg) 列出的各阶段数据集:episode 先写、
+        清单最后写,清单 id 为 dsm-{run_id}-{阶段}。确定性做不成抛 DataSynthesisError
+        (或 DatasetIntegrityError 等派发器认得的确定性错误);瞬态错误原样上抛。"""
+        ...
