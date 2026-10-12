@@ -10,6 +10,10 @@ from controlplane.gitstore import GitStore
 from controlplane.migration import UnknownSchemaVersionError
 from controlplane.paths import dataset_manifest_file
 from mindtrainer.checkpoint import CheckpointConverter, MockConverter
+from mindtrainer.data_spec import (
+    DataProducer, DataSynthesisError, InvalidDataSpecError, check_data_spec_against_config,
+    data_spec_from_directive, manifest_data_run, required_stages, stages_to_synthesize,
+)
 from mindtrainer.executor import MockExecutor, TrainingExecutor
 from mindtrainer.grouping import DegenerateGroupError
 from mindtrainer.orchestrator import NotEnoughGroupsError, resume_or_run
@@ -35,31 +39,71 @@ _DETERMINISTIC = (
 )
 
 
-def _required_stages(cfg: TrainingConfig) -> list[str]:
-    """真正会用到的阶段:配了步数的才算,且与模式有关。stage_manifest_refs 里多写的阶段不读。
-
-    sft 两种模式都从清单读,配了 sft_steps 就要。grpo_opd 只有 batch 模式从清单读;
-    interact 模式的 grpo_opd 来自实时会话(_interact_sources 事后整段覆盖),不读清单,
-    所以即便指令在 stage_manifest_refs 里为 interact 顺手点了一个 grpo_opd 的清单 id
-    (validate_training_config 并不禁止),这里也不该把它当成需要校验的阶段。"""
-    wanted = []
-    if cfg.sft_steps > 0:
-        wanted.append("sft")
-    if cfg.mode == "batch" and cfg.grpo_steps > 0:
-        wanted.append("grpo_opd")
-    return wanted
+# 真正会用到的阶段只在 data_spec.required_stages 一处实现:合成与读清单必须对"要哪几个阶段"
+# 意见一致,否则会合成用不到的阶段,或漏合成要用的阶段。
+_required_stages = required_stages
 
 
 def _data_run_id(run_id: str, ref: str, stage: str) -> str:
     """清单 id 的格式是 dsm-{数据所在的 run}-{阶段}(build_manifest 是唯一的构造点)。后一轮训练
     常常复用前一轮的数据集,所以数据所在的 run 从 id 里解出来,不假设它等于指令自己的 run。"""
-    head, tail = "dsm-", f"-{stage}"
-    if not (ref.startswith(head) and ref.endswith(tail) and len(ref) > len(head) + len(tail)):
+    data_run = manifest_data_run(ref, stage)
+    if data_run is None:
         raise DirectiveFailedError(
             f"directive {run_id}: stage_manifest_refs[{stage!r}]={ref!r} is not a manifest id "
             f"of the form 'dsm-<run>-{stage}'"
         )
-    return ref[len(head):-len(tail)]
+    return data_run
+
+
+def _synthesize_missing(
+    store: GitStore,
+    run_id: str,
+    cfg: TrainingConfig,
+    directive: Envelope,
+    data_producer: DataProducer | None,
+) -> None:
+    """缺清单、指令带 data_spec、清单的数据所在 run 就是本 run:三者同时成立才合成。
+    其余情况什么都不做,交给 _batch_manifests 按原样判(缺清单仍是 failed)。
+
+    走到这里时配置校验、归因与 interact 客户端检查都已通过;此后 data_spec 只要在 payload 里就先严格解析:
+    写错的 data_spec 是指令本身的错,不等用到才暴露。不合成的其余阶段先查清单在场,再调生产器。
+    生产器抛的确定性错误判 failed(T2);瞬态错误(OSError 等)原样上抛,指令保持 pending,
+    下一轮重入时已在树里的清单不再合成,episode 写完而清单未写的阶段整段重跑覆盖。"""
+    try:
+        spec = data_spec_from_directive(directive)
+    except InvalidDataSpecError as exc:
+        raise DirectiveFailedError(f"directive {run_id}: {exc}") from exc
+    if spec is None:
+        return
+    stages = stages_to_synthesize(store, run_id, cfg)
+    if not stages:
+        return
+    if data_producer is None:
+        raise DirectiveFailedError(
+            f"directive {run_id}: dataset manifest(s) for stage(s) {stages} are not in the tree and "
+            f"must be synthesized from data_spec, but no data_producer was supplied"
+        )
+    # 其余阶段的清单(不合成的那些)先查 id 形状与文件是否在场:有一份缺了,指令反正要判 failed,
+    # 先合成只会在树里留下一批不属于任何训练的 episode。内容是否读得出、与 episode 是否一致,
+    # 仍由 _batch_manifests 在合成之后完整校验。
+    for name in _required_stages(cfg):
+        ref = cfg.stage_manifest_refs.get(name)
+        if name in stages or not ref:
+            continue
+        if not store.exists(dataset_manifest_file(_data_run_id(run_id, ref, name), name)):
+            raise DirectiveFailedError(
+                f"directive {run_id}: dataset manifest {ref!r} for stage {name!r} is not in the tree"
+            )
+    reason = check_data_spec_against_config(spec, cfg, stages)
+    if reason is not None:
+        raise DirectiveFailedError(f"directive {run_id}: {reason}")
+    try:
+        data_producer.produce(store, run_id, cfg, spec)
+    except (DataSynthesisError, *_DETERMINISTIC) as exc:
+        raise DirectiveFailedError(
+            f"directive {run_id}: data synthesis failed ({type(exc).__name__}: {exc})"
+        ) from exc
 
 
 def _batch_manifests(store: GitStore, run_id: str, cfg: TrainingConfig) -> dict[str, DatasetManifest]:
@@ -136,6 +180,7 @@ def make_mindtrainer_dispatcher(
     converter: CheckpointConverter | None = None,
     client_factory: Callable[[], object] | None = None,
     policy: ModelBackend | None = None,
+    data_producer: DataProducer | None = None,
 ) -> Dispatcher:
     """构造 MindTrainer 派发器。它只做一件事:把一条 pending 的 directive 跑成候选。
 
@@ -144,6 +189,8 @@ def make_mindtrainer_dispatcher(
 
     - batch:按 stage_manifest_refs 读数据集清单。
     - interact:另需 client_factory 与 policy,注入后 grpo_opd 走实时会话。
+    - data_producer:指令带 data_spec 且本 run 名下的清单缺失时,用它先合成数据(两种模式都可,
+      interact 只合成 sft)。不注入时行为与改动前相同,需要合成的指令判 failed 并写明缺什么。
     - 确定性失败(数据不对、配置不合法、该人工介入)抛 DirectiveFailedError,调和循环把
       directive 置 failed,不再重试;其余异常原样上抛,保持 pending 等下一轮。
     """
@@ -168,8 +215,10 @@ def make_mindtrainer_dispatcher(
                 raise DirectiveFailedError(
                     f"directive {run_id}: interact mode needs a client_factory and a policy"
                 )
+            _synthesize_missing(store, run_id, cfg, directive, data_producer)
             make_sources = _interact_sources(store, run_id, cfg, client_factory, policy)
         else:
+            _synthesize_missing(store, run_id, cfg, directive, data_producer)
             make_sources = _batch_sources(store, run_id, cfg)
         try:
             resume_or_run(
