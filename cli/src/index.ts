@@ -1,6 +1,8 @@
-import { review, approve, reject, status } from "./commands.js";
+import { review, approve, reject, confirm, status } from "./commands.js";
 
 export const CLI_NAME = "rismforge";
+
+export const USAGE = `usage: ${CLI_NAME} <review|approve|reject|confirm|status> [id] [reason]`;
 
 export function main(argv: string[]): void {
   const [cmd, ...rest] = argv;
@@ -17,11 +19,15 @@ export function main(argv: string[]): void {
       reject(repoRoot, rest[0], rest.slice(1).join(" ") || "no reason");
       console.log(`rejected ${rest[0]}`);
       break;
+    case "confirm":
+      confirm(repoRoot, rest[0]);
+      console.log(`confirmed ${rest[0]}`);
+      break;
     case "status":
       console.log(status(repoRoot));
       break;
     default:
-      console.error(`usage: ${CLI_NAME} <review|approve|reject|status> [id] [reason]`);
+      console.error(USAGE);
       process.exitCode = 1;
   }
 }

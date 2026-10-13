@@ -14,6 +14,16 @@ const REVIEW_TRANSITIONS: Record<string, string[]> = {
   deprecated: [],
 };
 
+// 非审核类合法迁移，与 Python controlplane/states.py 的 NONREVIEW_TRANSITIONS 保持一致
+// （awaiting_confirmation 由闭环集成设计 §3.4 引入）。命令行只用到 confirm 这一条。
+const NONREVIEW_TRANSITIONS: Record<string, string[]> = {
+  pending: ["executed", "failed"],
+  awaiting_confirmation: ["pending", "failed"],
+  executed: ["consumed"],
+  consumed: [],
+  failed: [],
+};
+
 function assertTransition(from: string, to: string): void {
   if (!(REVIEW_TRANSITIONS[from] ?? []).includes(to)) {
     throw new Error(`review: ${from} -> ${to} not allowed`);
@@ -31,6 +41,9 @@ const GATE_PATTERNS: ReadonlyArray<{ kind: GateKind; pattern: string }> = [
   { kind: "recipe_candidate", pattern: "control-plane/recipe_candidates/*.yaml" },
   { kind: "skill_memory_proposal", pattern: "control-plane/skill_memory_proposals/*/proposal.yaml" },
 ];
+
+// 指令 ↔ Python controlplane/daemon.py read_tree_state 读的 f"{run_dir(run_id)}/directive.yaml"
+const DIRECTIVE_PATTERN = "control-plane/runs/*/directive.yaml";
 
 function lsFiles(repoRoot: string, pattern: string): string[] {
   // 用 git ls-files 定位产物，避免绑定语言 fs 遍历库
@@ -287,17 +300,48 @@ export function reject(repoRoot: string, id: string, reason: string): void {
   writeProduct(repoRoot, rel, env, `reject ${id}`);
 }
 
+export function confirm(repoRoot: string, id: string): void {
+  // 闭环集成设计 §3.4：调度器写的指令先是 awaiting_confirmation，人确认后才变 pending、被派发
+  // 与 findGateProduct 同一规则：收集全部命中，多处命中报歧义，不取第一个
+  const hits = lsFiles(repoRoot, DIRECTIVE_PATTERN).filter((r) => readProduct(repoRoot, r).id === id);
+  if (hits.length === 0) {
+    throw new Error(`directive ${id} not found`);
+  }
+  if (hits.length > 1) {
+    throw new Error(`directive ${id} is ambiguous: ${hits.join(", ")}`);
+  }
+  const rel = hits[0];
+  const env = readProduct(repoRoot, rel);
+  if (!(NONREVIEW_TRANSITIONS[env.status] ?? []).includes("pending")) {
+    throw new Error(`confirm: ${id} is ${env.status}; only an awaiting_confirmation directive can be confirmed`);
+  }
+  env.status = "pending";
+  writeProduct(repoRoot, rel, env, `confirm ${id}`);
+}
+
 export function status(repoRoot: string): string {
-  const listed = execFileSync(
-    "git",
-    ["-C", repoRoot, "ls-files", "control-plane/runs/*/candidate_checkpoint.yaml"],
-    { encoding: "utf-8" },
-  )
-    .split("\n")
-    .filter((line) => line.length > 0);
-  const lines = listed
+  const review: string[] = [];
+  for (const { kind, pattern } of GATE_PATTERNS) {
+    for (const rel of lsFiles(repoRoot, pattern)) {
+      const env = readProduct(repoRoot, rel);
+      if (env.status === "pending_review") {
+        review.push(`  ${env.id} [${env.status}] ${kind}`);
+      }
+    }
+  }
+  const confirmation = lsFiles(repoRoot, DIRECTIVE_PATTERN)
     .map((rel) => readProduct(repoRoot, rel))
-    .filter((env) => env.status === "pending_review")
-    .map((env) => `${env.id} [${env.status}]`);
-  return lines.length > 0 ? lines.join("\n") : "no candidates awaiting review";
+    .filter((env) => env.status === "awaiting_confirmation")
+    .map((env) => `  ${env.id} [${env.status}] directive`);
+  if (review.length === 0 && confirmation.length === 0) {
+    return "nothing awaiting review or confirmation";
+  }
+  const lines: string[] = [];
+  if (review.length > 0) {
+    lines.push("awaiting review:", ...review);
+  }
+  if (confirmation.length > 0) {
+    lines.push("awaiting confirmation (run: confirm <directive-id>):", ...confirmation);
+  }
+  return lines.join("\n");
 }

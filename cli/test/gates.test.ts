@@ -1,11 +1,12 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { dump } from "js-yaml";
-import { approve, reject, review } from "../src/commands.js";
+import { approve, confirm, reject, review, status } from "../src/commands.js";
 import { readProduct } from "../src/gittree.js";
+import { USAGE, main } from "../src/index.js";
 
 function initRepo(): string {
   const root = mkdtempSync(join(tmpdir(), "cp-"));
@@ -76,6 +77,11 @@ function seedRecipe(root: string, st = "pending_review", payload: Record<string,
 
 function seedProposal(root: string, st = "pending_review", payload: Record<string, unknown> = PROPOSAL_PAYLOAD) {
   return seed(root, PROPOSAL_REL, envelope(PROPOSAL_ID, "skill_memory_proposal", st, payload));
+}
+
+function seedDirective(root: string, runId: string, st: string) {
+  return seed(root, `control-plane/runs/${runId}/directive.yaml`,
+    envelope(runId, "directive", st, { target_dimension: "tom", recipe_ref: "" }));
 }
 
 function seedCandidate(root: string, runId: string, st: string) {
@@ -296,5 +302,99 @@ describe("approve requires per-kind evidence", () => {
     reject(root, PROPOSAL_ID, "overfit");
     expect(readProduct(root, RECIPE_REL).payload.reject_reason).toBe("gain is noise");
     expect(readProduct(root, PROPOSAL_REL).status).toBe("rejected");
+  });
+});
+
+describe("confirm", () => {
+  let root: string;
+  beforeEach(() => {
+    root = initRepo();
+  });
+
+  it("moves awaiting_confirmation to pending and commits", () => {
+    const rel = seedDirective(root, "run-004", "awaiting_confirmation");
+    confirm(root, "run-004");
+    const env = readProduct(root, rel);
+    expect(env.status).toBe("pending");
+    expect(env.payload.target_dimension).toBe("tom");
+    expect(execFileSync("git", ["-C", root, "log", "-1", "--format=%s"], { encoding: "utf-8" }).trim()).toBe("confirm run-004");
+  });
+
+  for (const st of ["pending", "executed", "failed", "consumed"]) {
+    it(`refuses a ${st} directive and changes nothing`, () => {
+      const rel = seedDirective(root, "run-004", st);
+      const before = head(root);
+      expect(() => confirm(root, "run-004")).toThrow(/only an awaiting_confirmation directive/);
+      expect(readProduct(root, rel).status).toBe(st);
+      expect(head(root)).toBe(before);
+    });
+  }
+
+  it("says not found for an unknown directive", () => {
+    seedDirective(root, "run-004", "awaiting_confirmation");
+    expect(() => confirm(root, "run-999")).toThrow(/directive run-999 not found/);
+  });
+
+  it("reports ambiguity instead of confirming the first of several matches", () => {
+    seedDirective(root, "run-004", "awaiting_confirmation");
+    // 同一信封 id 出现在第二个 run 目录(人手复制目录时会这样)
+    const other = seed(root, "control-plane/runs/run-005/directive.yaml",
+      envelope("run-004", "directive", "awaiting_confirmation", { target_dimension: "tom", recipe_ref: "" }));
+    const before = head(root);
+    expect(() => confirm(root, "run-004")).toThrow(/directive run-004 is ambiguous/);
+    expect(readProduct(root, other).status).toBe("awaiting_confirmation");
+    expect(head(root)).toBe(before);
+  });
+});
+
+describe("status", () => {
+  let root: string;
+  beforeEach(() => {
+    root = initRepo();
+  });
+
+  it("lists all three gate kinds awaiting review and directives awaiting confirmation", () => {
+    seedCandidate(root, "run-001", "pending_review");
+    seedCandidate(root, "run-002", "effective");
+    seedRecipe(root);
+    seedProposal(root);
+    seedDirective(root, "run-004", "awaiting_confirmation");
+    seedDirective(root, "run-005", "pending");
+    expect(status(root)).toBe([
+      "awaiting review:",
+      "  cand-run-001 [pending_review] candidate_checkpoint",
+      "  recipe-run-003 [pending_review] recipe_candidate",
+      `  ${PROPOSAL_ID} [pending_review] skill_memory_proposal`,
+      "awaiting confirmation (run: confirm <directive-id>):",
+      "  run-004 [awaiting_confirmation] directive",
+    ].join("\n"));
+  });
+
+  it("says so when nothing waits", () => {
+    seedCandidate(root, "run-001", "effective");
+    seedDirective(root, "run-001", "executed");
+    expect(status(root)).toBe("nothing awaiting review or confirmation");
+  });
+});
+
+describe("index dispatch", () => {
+  it("usage names every command", () => {
+    expect(USAGE).toBe("usage: rismforge <review|approve|reject|confirm|status> [id] [reason]");
+  });
+
+  it("confirm is routed through main", () => {
+    const root = initRepo();
+    const rel = seedDirective(root, "run-004", "awaiting_confirmation");
+    // vitest 的 worker 里不能 chdir;main 只经 process.cwd() 取仓库根,桩掉它即可
+    const cwd = vi.spyOn(process, "cwd").mockReturnValue(root);
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      main(["confirm", "run-004"]);
+      expect(log).toHaveBeenCalledWith("confirmed run-004");
+    } finally {
+      cwd.mockRestore();
+      log.mockRestore();
+    }
+    expect(readProduct(root, rel).status).toBe("pending");
   });
 });
