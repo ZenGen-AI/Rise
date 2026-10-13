@@ -130,6 +130,16 @@ def test_pending_without_directive_and_failed_decisions_are_left_out(store):
     assert assemble_context(store, "run-001").recent_decisions == []
 
 
+def test_an_executed_decision_without_next_run_id_is_a_context_error(store):
+    write_round(store, "run-001", {"tom": 0.4})
+    write_decision(store, "run-001", "run-002", action="new")
+    env = store.read_product("control-plane/runs/run-001/planner_decision.yaml")
+    del env.payload["next_run_id"]
+    store.write_product("control-plane/runs/run-001/planner_decision.yaml", env, "test: strip next_run_id")
+    with pytest.raises(ContextAssemblyError, match="next_run_id"):
+        assemble_context(store, "run-001")
+
+
 def test_a_decision_whose_round_has_no_candidate_yet_has_null_outcome(store):
     write_directive(store, "run-001")
     write_decision(store, "run-001", "run-002", action="new")

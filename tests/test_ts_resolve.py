@@ -186,6 +186,24 @@ def test_a_promoted_model_without_checkpoint_ref_is_a_resolve_error(store):
         resolve_action(store, _d(), config=CFG, defaults=DEFAULTS)
 
 
+def test_a_replay_with_a_perturbation_is_a_violation(store):
+    d = PlannerDecision(
+        target_dimension="tom", action="replay", mode=None, source_recipe_id="recipe-run-001",
+        perturbation={"opd_coefficient": 0.2}, data_synthesis_hint="", rationale="r",
+    )
+    reason = validate_decision(store, d, config=CFG)
+    assert "replay" in reason and "perturbation" in reason
+
+
+def test_resolve_refuses_a_replay_with_a_perturbation(store):
+    d = PlannerDecision(
+        target_dimension="tom", action="replay", mode=None, source_recipe_id="recipe-run-001",
+        perturbation={"opd_coefficient": 0.2}, data_synthesis_hint="", rationale="r",
+    )
+    with pytest.raises(ResolveError):
+        resolve_action(store, d, config=CFG, defaults=DEFAULTS)
+
+
 def test_validation_and_resolution_only_read(store):
     head = store._git("rev-parse", "HEAD")
     resolve_action(store, _d("clone", source="recipe-run-001"), config=CFG, defaults=DEFAULTS)

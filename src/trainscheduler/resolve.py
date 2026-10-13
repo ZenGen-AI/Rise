@@ -97,6 +97,8 @@ def validate_decision(store: GitStore, decision: PlannerDecision, *, config: Sch
     reason, recipe = _recipe_violation(store, decision, config)
     if reason is not None:
         return reason
+    if decision.action == "replay" and decision.perturbation:
+        return "replay takes the recipe verbatim; perturbation must be empty"
     for key in sorted(decision.perturbation):
         if key not in config.perturbable:
             return f"perturbation key {key!r} is not perturbable; allowed {list(config.perturbable)}"

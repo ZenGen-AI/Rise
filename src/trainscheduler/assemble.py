@@ -173,7 +173,9 @@ def _recent_decisions(store: GitStore, runs: list[str], window: int) -> list[Dec
         if not decision_is_executed(store, env):
             continue
         decision = env.payload.get("decision") or {}
-        next_run = env.payload["next_run_id"]
+        next_run = env.payload.get("next_run_id")
+        if not isinstance(next_run, str) or not next_run:
+            raise ContextAssemblyError(f"executed decision {env.id} has no next_run_id")
         cpath = candidate_checkpoint_file(next_run)
         candidate_status = store.read_product(cpath).status if store.exists(cpath) else None
         dimension = decision.get("target_dimension")
