@@ -21,7 +21,6 @@ from controlplane.gitstore import GitStore
 from controlplane.lock import RepoLockedError
 from controlplane.paths import run_dir
 from factory import readonly
-from factory.defaults import install_defaults
 from factory.errors import FactoryConfigError
 from factory.switches import SWITCHES, UnknownSwitchError, parse_enable
 from factory.wire import PLANNER_BACKENDS, FactoryOptions, HandlerBuilder, reconcile_one_tick, run
@@ -101,6 +100,7 @@ def main(
             return 0
         store = GitStore(args.repo_root)
         if args.command == "install-defaults":
+            from factory.defaults import install_defaults  # 惰性导入:它拖进 grpc 与计划 4、5、7 的包(Ruling 16)
             for rel in install_defaults(store):
                 print(rel)
             return 0

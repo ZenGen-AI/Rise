@@ -14,10 +14,10 @@ from controlplane.config import (
     CredentialInGitTreeError,
     MissingCredentialError,
     load_backend_config,
-    read_config,
 )
 from controlplane.gitstore import GitStore
 from controlplane.paths import backends_config_file
+from factory.configio import read_tree_config
 from factory.errors import FactoryConfigError
 from inference_bridge import CliBridge
 
@@ -36,14 +36,11 @@ def build_bridge(
         raise FactoryConfigError(f"unknown bridge role {role!r}; choose from {list(BRIDGE_ROLES)}")
     rel = backends_config_file()
     try:
-        payload = read_config(store, rel)
+        payload = read_tree_config(store, rel)
     except FileNotFoundError:
         raise FactoryConfigError(
             f"{rel} is missing; the {role!r} bridge needs a backend entry there"
         ) from None
-    except CredentialInGitTreeError as exc:
-        # 原信息只含键路径,不含值(计划 1 的 _check_no_secrets)
-        raise FactoryConfigError(str(exc)) from None
     if role not in payload:
         raise FactoryConfigError(f"{rel} has no {role!r} entry (has: {sorted(payload)})")
     raw = payload[role]

@@ -9,13 +9,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from controlplane.config import read_config
 from controlplane.gitstore import GitStore
 from controlplane.paths import CONTROL_PLANE_ROOT
 from diagnostic.assets import DiagnosticAssetError, read_item_pool, read_taxonomy
 from diagnostic.evaluator import make_diagnostic_evaluator
 from diagnostic.scorer import MockJudgeBackend
 from diagnostic.someval_adapter import MockSoMEvalRunner
+from factory.configio import read_tree_config
 from factory.errors import FactoryConfigError
 
 EVALUATOR_CONFIG = f"{CONTROL_PLANE_ROOT}/config/evaluator.yaml"
@@ -28,7 +28,7 @@ Evaluator = Callable[[GitStore, str, str], None]  # 形状同 controlplane.daemo
 
 def read_evaluator_config(store: GitStore) -> dict:
     try:
-        payload = read_config(store, EVALUATOR_CONFIG)
+        payload = read_tree_config(store, EVALUATOR_CONFIG)
     except FileNotFoundError:
         raise FactoryConfigError(
             f"{EVALUATOR_CONFIG} is missing; closed-loop mode needs it to build the diagnostic evaluator"

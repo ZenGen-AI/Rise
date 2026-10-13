@@ -14,7 +14,6 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Callable, Mapping
 
-from controlplane.config import read_config
 from controlplane.daemon import Handler
 from controlplane.gitstore import GitStore
 from controlplane.paths import backends_config_file
@@ -24,6 +23,7 @@ from factory.agent import (
     personas_from_tree,
     read_agent_settings,
 )
+from factory.configio import read_tree_config
 from mindagent.admit import handle_admit_proposal
 from mindagent.rounds import make_start_round_handler
 from recipestore.admit import handle_admit_recipe
@@ -65,7 +65,7 @@ def _nominate(ctx) -> Handler:
 def _has_bridge_role(store: GitStore, role: str) -> bool:
     if not store.exists(backends_config_file()):
         return False
-    return role in read_config(store, backends_config_file())
+    return role in read_tree_config(store, backends_config_file())
 
 
 def _agent(ctx) -> Handler:
