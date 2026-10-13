@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
+
+from controlplane.evidence import evidence_acceptable
 
 
 @dataclass(frozen=True)
@@ -21,11 +24,54 @@ class CandidateView:
     has_diagnostic: bool = False
 
 
+@dataclass(frozen=True)
+class RunView:
+    """闭环集成设计 §3.1:一个 run 目录在闭环动作眼里的样子。只在有处理器被注入时才填。"""
+
+    run_id: str
+    directive_status: str | None
+    recipe_ref: str
+    candidate_status: str | None
+    has_diagnostic: bool
+    diagnostic_grade: str | None  # "stub" | "mock" | "real" | None(没有报告)
+    planner_decision_status: str | None
+    has_nomination_note: bool
+    has_track_note: bool
+
+
+@dataclass(frozen=True)
+class ModelView:
+    model_id: str
+    version: int
+    run_id: str
+    status: str
+    # 轮次产物(agent_round_file(model_id))的信封状态;None 表示没有可用的轮次产物
+    agent_round_status: str | None
+
+    @property
+    def has_agent_round(self) -> bool:
+        """派生量,恒等于 agent_round_status is not None;保留给只关心"有没有轮次"的读者。"""
+        return self.agent_round_status is not None
+
+
+@dataclass(frozen=True)
+class GateView:
+    id: str
+    kind: str  # "recipe_candidate" | "skill_memory_proposal"
+    status: str
+
+
 @dataclass
 class TreeState:
     directives: list[DirectiveView] = field(default_factory=list)
     candidates: list[CandidateView] = field(default_factory=list)
     model_count: int = 0
+    # 闭环集成设计 §3.1:以下字段全部带默认值,既有构造不受影响
+    runs: list[RunView] = field(default_factory=list)
+    models: list[ModelView] = field(default_factory=list)
+    gates: list[GateView] = field(default_factory=list)
+    enabled: frozenset[str] = frozenset()
+    accept_mock_evidence: bool = False
 
 
 @dataclass(frozen=True)
@@ -33,6 +79,74 @@ class Action:
     kind: str
     target_id: str
     detail: dict
+
+
+# 闭环集成设计 §3.2 的六个新动作。只有动作名在 state.enabled 里才会产生(R2)。
+CLOSED_LOOP_ACTIONS: frozenset[str] = frozenset({
+    "plan_next_round", "nominate_recipe", "record_track",
+    "start_agent_round", "admit_recipe", "admit_proposal",
+})
+
+# 在途轮(R4):这些状态说明某一轮还没走完
+_IN_FLIGHT_DIRECTIVE = frozenset({"pending", "awaiting_confirmation"})
+_IN_FLIGHT_CANDIDATE = frozenset({"pending_review", "approved"})
+_TERMINAL_CANDIDATE = frozenset({"effective", "rejected"})
+
+def has_round_in_flight(state: TreeState) -> bool:
+    """任何 run 的指令是 pending/awaiting_confirmation,或候选是 pending_review/approved。"""
+    return any(
+        r.directive_status in _IN_FLIGHT_DIRECTIVE or r.candidate_status in _IN_FLIGHT_CANDIDATE
+        for r in state.runs
+    )
+
+
+# R5 / 设计 §3.2:"最大 run"按 run-<数字> 的数值序比较,不按字符串序(run-9 与 run-011、
+# 超过 999 轮都会让字符串序选错)。不匹配的名字(scratch 之类)不参与比较。
+# 与计划 5 分配 run id 的规则同一口径;controlplane 不导入 trainscheduler,所以这里自己写。
+_RUN_ID = re.compile(r"^run-([0-9]+)$")   # [0-9] 而不是 \d:与计划 5 的 run_number 同一口径,避免 Unicode 数字被一边认、一边不认
+
+
+def _latest_numbered_run(runs: list[RunView]) -> RunView | None:
+    """run-<数字> 里数值最大的那个 run;一个都没有时为 None(刻意失败关闭:不规划)。
+    同编号(只可能是手工命名,例如 run-7 与 run-007)时按 run id 字典序取最大,结果与输入顺序无关。"""
+    numbered = [(int(m.group(1)), r) for r in runs if (m := _RUN_ID.match(r.run_id))]
+    return max(numbered, key=lambda pair: (pair[0], pair[1].run_id))[1] if numbered else None
+
+
+def _acceptable(state: TreeState, run: RunView) -> bool:
+    return run.diagnostic_grade is not None and evidence_acceptable(
+        run.diagnostic_grade, state.accept_mock_evidence
+    )
+
+
+def _recipe_gate_open(state: TreeState, run: RunView) -> bool:
+    """规划是否可以越过配方入库门(设计 CP-11)。没启用提名、或候选被拒绝(被拒绝的候选不提名)时恒为真;
+    否则要求提名标记在场(nominated 与 skipped 都写它),且这个 run 的配方候选不在门前。"""
+    if "nominate_recipe" not in state.enabled or run.candidate_status != "effective":
+        return True
+    if not run.has_nomination_note:
+        return False
+    recipe_id = f"recipe-{run.run_id}"
+    return not any(
+        g.id == recipe_id and g.kind == "recipe_candidate" and g.status in _IN_FLIGHT_CANDIDATE
+        for g in state.gates
+    )
+
+
+def _closed_loop_actions(state: TreeState) -> list[Action]:
+    """闭环动作。本任务只有 plan_next_round;其余五个由任务 91 加入。"""
+    on = state.enabled
+    out: list[Action] = []
+    if "plan_next_round" in on and not has_round_in_flight(state):
+        # R5:只看 run-<数字> 里数值最大的那个 run(在途轮仍看全部 run)。较早 run 的候选即使
+        # 到了终态、证据可接受,也不会被(重复)规划;最大 run 的指令 failed、没有候选时,
+        # 闭环停住等人写新指令;一个 run-<数字> 都没有时也不规划。
+        latest = _latest_numbered_run(state.runs)
+        if (latest is not None and latest.candidate_status in _TERMINAL_CANDIDATE
+                and _acceptable(state, latest) and latest.planner_decision_status in (None, "pending")
+                and _recipe_gate_open(state, latest)):
+            out.append(Action(kind="plan_next_round", target_id=latest.run_id, detail={"run_id": latest.run_id}))
+    return out
 
 
 def reconcile(state: TreeState) -> list[Action]:
@@ -74,4 +188,6 @@ def reconcile(state: TreeState) -> list[Action]:
                     detail={"run_id": c.run_id, "model_version": next_model_version},
                 )
             )
+    if state.enabled:
+        actions.extend(_closed_loop_actions(state))
     return actions
