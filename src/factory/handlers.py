@@ -1,10 +1,92 @@
 """六个处理器键的真实构造器表:{处理器键: (BuildContext) -> Handler}。
 
-任务 104 先放一张空表,闭环开关在没有显式 builders 时一律报
-"no handler builder for [...]" 并以退出码 2 退出;任务 107 按计划 3、5、7 的处理器填满它。
+- admit_recipe / record_track:计划 3 的处理器本身(recipestore.admit / recipestore.record)。
+- admit_proposal:计划 7 的处理器本身(mindagent.admit)。
+- plan_next_round:计划 5 的 make_plan_handler;后端按 --planner-backend 选;--confirm-directives
+  覆盖 scheduler.yaml 的 confirm_directives(只在内存里,不写回配置)。
+- nominate_recipe:计划 5 的 make_nominate_handler;accept_mock_evidence 与传给 reconcile_once 的是
+  同一个值(--allow-mock-evidence);repo_commit 来自 BuildContext。
+- start_agent_round:计划 7 的 make_start_round_handler;AgentConfig 与对手台词来自 agent.yaml,
+  实时服务端是进程内 loopback(factory.agent.AgentRuntime),模型后端是罐头后端。
 """
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Callable, Mapping
 
-DEFAULT_BUILDERS: Mapping[str, Callable] = {}
+from controlplane.config import read_config
+from controlplane.daemon import Handler
+from controlplane.gitstore import GitStore
+from controlplane.paths import backends_config_file
+from factory.agent import (
+    AgentRuntime,
+    canned_backend_factory,
+    personas_from_tree,
+    read_agent_settings,
+)
+from mindagent.admit import handle_admit_proposal
+from mindagent.rounds import make_start_round_handler
+from recipestore.admit import handle_admit_recipe
+from recipestore.record import handle_record_track
+from trainplanner.backends import BridgeDecisionBackend, HeuristicBackend
+from trainscheduler.config import SchedulerConfig, load_scheduler_config
+from trainscheduler.nominate import make_nominate_handler
+from trainscheduler.plan_handler import make_plan_handler
+
+
+def scheduler_config_loader(confirm_directives: bool | None) -> Callable[[GitStore], SchedulerConfig]:
+    """读 scheduler.yaml;confirm_directives 不为 None 时只在返回值里覆盖同名键。"""
+
+    def load(store: GitStore) -> SchedulerConfig:
+        config = load_scheduler_config(store)
+        if confirm_directives is None:
+            return config
+        return dataclasses.replace(config, confirm_directives=confirm_directives)
+
+    return load
+
+
+def _plan(ctx) -> Handler:
+    if ctx.planner_backend == "heuristic":
+        backend = HeuristicBackend()
+    else:
+        backend = BridgeDecisionBackend(ctx.bridge("planner"), name="bridge")
+    return make_plan_handler(backend=backend, config_loader=scheduler_config_loader(ctx.confirm_directives))
+
+
+def _nominate(ctx) -> Handler:
+    return make_nominate_handler(
+        config_loader=scheduler_config_loader(ctx.confirm_directives),
+        accept_mock_evidence=ctx.accept_mock_evidence,
+        repo_commit=ctx.repo_commit,
+    )
+
+
+def _has_bridge_role(store: GitStore, role: str) -> bool:
+    if not store.exists(backends_config_file()):
+        return False
+    return role in read_config(store, backends_config_file())
+
+
+def _agent(ctx) -> Handler:
+    config, lines = read_agent_settings(ctx.store)
+    runtime = AgentRuntime(ctx.store, lines)
+    ctx.register_closer(runtime.close)
+    bridge = ctx.bridge("agent") if _has_bridge_role(ctx.store, "agent") else None
+    return make_start_round_handler(
+        config=config,
+        client_factory=runtime.client_factory,
+        backend_factory=canned_backend_factory,
+        personas_loader=personas_from_tree,
+        bridge=bridge,
+    )
+
+
+DEFAULT_BUILDERS: Mapping[str, Callable] = {
+    "admit_recipe": lambda ctx: handle_admit_recipe,
+    "admit_proposal": lambda ctx: handle_admit_proposal,
+    "record_track": lambda ctx: handle_record_track,
+    "nominate_recipe": _nominate,
+    "plan_next_round": _plan,
+    "start_agent_round": _agent,
+}
