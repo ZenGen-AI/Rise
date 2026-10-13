@@ -134,9 +134,37 @@ def _recipe_gate_open(state: TreeState, run: RunView) -> bool:
 
 
 def _closed_loop_actions(state: TreeState) -> list[Action]:
-    """闭环动作。本任务只有 plan_next_round;其余五个由任务 91 加入。"""
+    """六个新动作。输出顺序固定:admit_recipe → admit_proposal → record_track →
+    nominate_recipe → plan_next_round → start_agent_round;同一种动作内按 id 字典序
+    (plan_next_round 至多一条,只针对编号最大的 run-<数字>,见 _latest_numbered_run)。
+    detail 只是提示,处理器必须自己重读树(动作列表来自 tick 开头的快照)。"""
     on = state.enabled
     out: list[Action] = []
+    gates = sorted(state.gates, key=lambda g: g.id)
+    # 只决定 record_track / nominate_recipe 的输出顺序(Ruling 3:按 id 字典序);
+    # 不用来选"最大 run",那个按数值序,见 _latest_numbered_run。
+    runs = sorted(state.runs, key=lambda r: r.run_id)
+    if "admit_recipe" in on:
+        for g in gates:
+            if g.kind == "recipe_candidate" and g.status == "approved":
+                out.append(Action(kind="admit_recipe", target_id=g.id, detail={}))
+    if "admit_proposal" in on:
+        for g in gates:
+            if g.kind == "skill_memory_proposal" and g.status == "approved":
+                out.append(Action(kind="admit_proposal", target_id=g.id, detail={}))
+    if "record_track" in on:
+        for r in runs:
+            if (r.recipe_ref and r.candidate_status in _TERMINAL_CANDIDATE
+                    and _acceptable(state, r) and not r.has_track_note):
+                out.append(Action(
+                    kind="record_track", target_id=r.run_id,
+                    detail={"run_id": r.run_id, "recipe_ref": r.recipe_ref},
+                ))
+    if "nominate_recipe" in on:
+        for r in runs:
+            if (r.candidate_status == "effective" and _acceptable(state, r)
+                    and not r.has_nomination_note):
+                out.append(Action(kind="nominate_recipe", target_id=r.run_id, detail={"run_id": r.run_id}))
     if "plan_next_round" in on and not has_round_in_flight(state):
         # R5:只看 run-<数字> 里数值最大的那个 run(在途轮仍看全部 run)。较早 run 的候选即使
         # 到了终态、证据可接受,也不会被(重复)规划;最大 run 的指令 failed、没有候选时,
@@ -146,6 +174,18 @@ def _closed_loop_actions(state: TreeState) -> list[Action]:
                 and _acceptable(state, latest) and latest.planner_decision_status in (None, "pending")
                 and _recipe_gate_open(state, latest)):
             out.append(Action(kind="plan_next_round", target_id=latest.run_id, detail={"run_id": latest.run_id}))
+    if "start_agent_round" in on:
+        effective = [m for m in state.models if m.status == "effective"]
+        if effective:
+            top = max(effective, key=lambda m: m.version)
+            # R19:没有轮次产物,或轮次产物仍是 pending(上一次瞬态失败或进程被杀留下的),
+            # 都要(再次)触发;只有终态 executed / failed 才算这一轮已结束。与 plan_next_round
+            # 的"决策为空或 pending"同一模式,重入的幂等由轮次处理器负责。
+            if top.agent_round_status in (None, "pending"):
+                out.append(Action(
+                    kind="start_agent_round", target_id=top.model_id,
+                    detail={"version": top.version, "run_id": top.run_id},
+                ))
     return out
 
 

@@ -310,3 +310,189 @@ def test_a_skill_proposal_with_the_same_id_does_not_count_as_the_recipe_gate():
     state = TreeState(runs=[_run(has_nomination_note=True)],
                       gates=[_gate("pending_review", kind="skill_memory_proposal")], enabled=PLAN_AND_NOMINATE)
     assert [a.target_id for a in _plan(state)] == ["run-001"]
+
+
+# ---- nominate_recipe ----
+
+def test_nominate_triggers_on_an_effective_candidate_with_acceptable_evidence():
+    state = TreeState(runs=[_run()], enabled=frozenset({"nominate_recipe"}))
+    assert reconcile(state) == [
+        Action(kind="nominate_recipe", target_id="run-001", detail={"run_id": "run-001"})
+    ]
+
+
+@pytest.mark.parametrize("candidate_status", ["rejected", "pending_review", "approved", None])
+def test_nominate_needs_an_effective_candidate(candidate_status):
+    state = TreeState(runs=[_run(candidate_status=candidate_status)], enabled=ALL)
+    assert _kinds(reconcile(state), "nominate_recipe") == []
+
+
+def test_nominate_is_idempotent_on_the_nomination_note():
+    state = TreeState(runs=[_run(has_nomination_note=True)], enabled=ALL)
+    assert _kinds(reconcile(state), "nominate_recipe") == []
+
+
+def test_nominate_respects_the_evidence_grade():
+    for grade, accept, expected in [("stub", True, 0), ("mock", False, 0), ("mock", True, 1), ("real", False, 1)]:
+        state = TreeState(runs=[_run(diagnostic_grade=grade)], enabled=ALL, accept_mock_evidence=accept)
+        assert len(_kinds(reconcile(state), "nominate_recipe")) == expected, (grade, accept)
+
+
+def test_nominate_is_not_blocked_by_a_round_in_flight_and_covers_every_run():
+    state = TreeState(
+        runs=[_run("run-002"), _run("run-001"),
+              _run("run-003", directive_status="pending", candidate_status=None,
+                   has_diagnostic=False, diagnostic_grade=None)],
+        enabled=ALL,
+    )
+    assert [a.target_id for a in _kinds(reconcile(state), "nominate_recipe")] == ["run-001", "run-002"]
+
+
+# ---- record_track ----
+
+@pytest.mark.parametrize("candidate_status", ["effective", "rejected"])
+def test_record_track_triggers_for_a_recipe_backed_run(candidate_status):
+    state = TreeState(runs=[_run(recipe_ref="recipe-run-000", candidate_status=candidate_status)],
+                      enabled=frozenset({"record_track"}))
+    assert reconcile(state) == [
+        Action(kind="record_track", target_id="run-001",
+               detail={"run_id": "run-001", "recipe_ref": "recipe-run-000"})
+    ]
+
+
+def test_record_track_needs_a_recipe_ref():
+    state = TreeState(runs=[_run(recipe_ref="")], enabled=ALL)
+    assert _kinds(reconcile(state), "record_track") == []
+
+
+@pytest.mark.parametrize("candidate_status", ["pending_review", "approved", None])
+def test_record_track_needs_a_terminal_candidate(candidate_status):
+    state = TreeState(runs=[_run(recipe_ref="recipe-run-000", candidate_status=candidate_status)], enabled=ALL)
+    assert _kinds(reconcile(state), "record_track") == []
+
+
+def test_record_track_is_idempotent_on_the_track_note():
+    state = TreeState(runs=[_run(recipe_ref="recipe-run-000", has_track_note=True)], enabled=ALL)
+    assert _kinds(reconcile(state), "record_track") == []
+
+
+def test_record_track_respects_the_evidence_grade():
+    run = _run(recipe_ref="recipe-run-000", diagnostic_grade="mock")
+    assert _kinds(reconcile(TreeState(runs=[run], enabled=ALL)), "record_track") == []
+    assert len(_kinds(reconcile(TreeState(runs=[run], enabled=ALL, accept_mock_evidence=True)), "record_track")) == 1
+
+
+# ---- start_agent_round ----
+
+def _model(n, status="effective", round_status=None):
+    return ModelView(f"zengen-v{n}", n, f"run-{n:03d}", status, round_status)
+
+
+def test_agent_round_starts_for_the_highest_effective_model_only():
+    state = TreeState(models=[_model(2), _model(10), _model(9)], enabled=frozenset({"start_agent_round"}))
+    assert reconcile(state) == [
+        Action(kind="start_agent_round", target_id="zengen-v10",
+               detail={"version": 10, "run_id": "run-010"})
+    ]
+
+
+def test_agent_round_skips_non_effective_models():
+    state = TreeState(models=[_model(1), _model(2, status="deprecated")], enabled=ALL)
+    assert [a.target_id for a in _kinds(reconcile(state), "start_agent_round")] == ["zengen-v1"]
+
+
+@pytest.mark.parametrize("round_status", ["executed", "failed"])
+def test_agent_round_is_idempotent_on_a_terminal_round_file(round_status):
+    state = TreeState(models=[_model(1), _model(2, round_status=round_status)], enabled=ALL)
+    assert _kinds(reconcile(state), "start_agent_round") == []  # 旧模型没有轮次也不补跑
+
+
+def test_a_pending_round_file_retriggers_the_agent_round():
+    # R19:瞬态失败或进程被杀留下的 pending 轮次,下一 tick 必须再次派发
+    state = TreeState(models=[_model(1), _model(2, round_status="pending")], enabled=ALL)
+    assert _kinds(reconcile(state), "start_agent_round") == [
+        Action(kind="start_agent_round", target_id="zengen-v2", detail={"version": 2, "run_id": "run-002"})
+    ]
+
+
+def test_no_effective_model_no_agent_round():
+    state = TreeState(models=[_model(1, status="deprecated")], enabled=ALL)
+    assert _kinds(reconcile(state), "start_agent_round") == []
+
+
+# ---- admit_recipe / admit_proposal ----
+
+def test_admit_recipe_on_an_approved_recipe_candidate():
+    state = TreeState(gates=[GateView("recipe-run-003", "recipe_candidate", "approved")],
+                      enabled=frozenset({"admit_recipe"}))
+    assert reconcile(state) == [
+        Action(kind="admit_recipe", target_id="recipe-run-003", detail={})
+    ]
+
+
+def test_admit_proposal_on_an_approved_proposal():
+    state = TreeState(gates=[GateView("proposal-agent-round-zengen-v1-1", "skill_memory_proposal", "approved")],
+                      enabled=frozenset({"admit_proposal"}))
+    assert reconcile(state) == [
+        Action(kind="admit_proposal", target_id="proposal-agent-round-zengen-v1-1", detail={})
+    ]
+
+
+@pytest.mark.parametrize("status", ["pending_review", "rejected", "effective", "deprecated", "draft"])
+def test_admission_needs_the_approved_status(status):
+    state = TreeState(gates=[GateView("recipe-run-003", "recipe_candidate", status),
+                             GateView("proposal-x-1", "skill_memory_proposal", status)], enabled=ALL)
+    assert reconcile(state) == []
+
+
+def test_admission_kinds_do_not_cross():
+    state = TreeState(gates=[GateView("recipe-run-003", "recipe_candidate", "approved"),
+                             GateView("proposal-x-1", "skill_memory_proposal", "approved")],
+                      enabled=frozenset({"admit_recipe"}))
+    assert [a.target_id for a in reconcile(state)] == ["recipe-run-003"]
+
+
+# ---- 组合:顺序与既有动作 ----
+
+def test_existing_actions_come_first_then_closed_loop_actions_in_fixed_order():
+    state = TreeState(
+        directives=[DirectiveView("run-009", "pending", "tom", "")],
+        candidates=[CandidateView("cand-run-008", "approved", "run-008", has_diagnostic=True)],
+        model_count=1,
+        runs=[_run("run-001", recipe_ref="recipe-run-000"),
+              _run("run-009", directive_status="pending", candidate_status=None,
+                   has_diagnostic=False, diagnostic_grade=None),
+              _run("run-008", candidate_status="approved")],
+        models=[_model(1)],
+        gates=[GateView("proposal-x-1", "skill_memory_proposal", "approved"),
+               GateView("recipe-run-000", "recipe_candidate", "approved")],
+        enabled=ALL,
+    )
+    assert [(a.kind, a.target_id) for a in reconcile(state)] == [
+        ("dispatch_directive", "run-009"),
+        ("promote_candidate", "cand-run-008"),
+        ("admit_recipe", "recipe-run-000"),
+        ("admit_proposal", "proposal-x-1"),
+        ("record_track", "run-001"),
+        ("nominate_recipe", "run-001"),
+        # plan_next_round 被在途轮挡住(run-009 pending、run-008 approved)
+        ("start_agent_round", "zengen-v1"),
+    ]
+
+
+def test_enabling_names_does_not_change_the_existing_actions():
+    base = dict(
+        directives=[DirectiveView("run-001", "pending", "tom", "")],
+        candidates=[CandidateView("cand-run-002", "pending_review", "run-002")],
+        model_count=0,
+    )
+    legacy = reconcile(TreeState(**base))
+    extended = reconcile(TreeState(**base, enabled=ALL))
+    assert extended[: len(legacy)] == legacy
+
+
+def test_the_nomination_and_the_planning_that_waits_for_it_are_never_in_the_same_tick():
+    state = TreeState(runs=[_run(has_nomination_note=False)], enabled=PLAN_AND_NOMINATE)
+    assert [a.kind for a in reconcile(state)] == ["nominate_recipe"]
+    later = dataclasses.replace(state, runs=[_run(has_nomination_note=True)])
+    assert [a.kind for a in reconcile(later)] == ["plan_next_round"]
