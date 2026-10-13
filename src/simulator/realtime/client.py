@@ -124,16 +124,30 @@ class EnvironmentServiceClient:
         self._opening_turns = self._await_client_turn()
         return self._session_id
 
-    def submit_turn(self, utterance: str, inner_thought: str | None = None) -> list[TurnRecord]:
+    def submit_turn(
+        self,
+        utterance: str,
+        inner_thought: str | None = None,
+        *,
+        activation_trace: dict | None = None,
+    ) -> list[TurnRecord]:
         """提交客户端这一轮，返回随后直到"再次轮到客户端"之前收到的全部对方
         轮次（可能为空）。返回值**不含**客户端自己那一轮的回显。会话在此期间
         结束则返回结束前收到的轮次，此后 closed 为 True。会话已结束时再调用
-        抛 RuntimeError。不假定角色数量或客户端位置。"""
+        抛 RuntimeError。不假定角色数量或客户端位置。
+
+        activation_trace:客户端角色由完整 Actio 实例扮演时的激活轨迹,服务端写进
+        该轮的 TurnRecord 并在回显里带回。None 表示不带(裸模型);{} 是"轨迹为空",
+        两者在协议上可区分。经 protobuf Struct 传输,数字一律变成浮点数。"""
         if self._closed:
             raise RuntimeError("session already ended; check client.closed before submitting")
         submit = pb2.SubmitTurn(utterance=utterance)
         if inner_thought is not None:
             submit.inner_thought = inner_thought
+        if activation_trace is not None:
+            # SetInParent():update({}) 不会置位 presence,显式空轨迹会被误当成"未设置"
+            submit.activation_trace.SetInParent()
+            submit.activation_trace.update(activation_trace)
         self._send_q.put(pb2.ClientMessage(submit_turn=submit))
         # 服务端会把客户端自己的这一轮也作为 TurnUpdate 回显——先吞掉它，
         # 否则轮次计数会错位，后面的"轮到谁"判断就不成立。回显必须正是

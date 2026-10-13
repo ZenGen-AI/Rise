@@ -9,6 +9,7 @@ from dataclasses import replace
 from typing import Callable
 
 import grpc
+from google.protobuf.json_format import MessageToDict
 
 from simulator.datamodel import Persona, RoleAssignment, Scenario, RoleSlot
 from simulator.backends import ModelBackend
@@ -169,10 +170,14 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
                         yield self._invalid_session(f"{kind} received before create_session")
                         return
                     elif kind == "submit_turn":
+                        submit = msg.submit_turn
                         driver.submit_turn(
-                            msg.submit_turn.utterance,
-                            msg.submit_turn.inner_thought
-                            if msg.submit_turn.HasField("inner_thought") else None,
+                            submit.utterance,
+                            submit.inner_thought if submit.HasField("inner_thought") else None,
+                            # HasField 区分"没有轨迹"(None)与"轨迹为空"({}),§2.6.3。
+                            # MessageToDict 把 Struct 转成纯 dict/list,落盘可 yaml 序列化。
+                            activation_trace=MessageToDict(submit.activation_trace)
+                            if submit.HasField("activation_trace") else None,
                         )
                     elif kind == "end_session":
                         driver.request_end("client_terminated")

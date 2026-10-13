@@ -29,11 +29,22 @@ class ClientDrivenBackend:
     def __init__(self, slot_id: str, timeout_s: float) -> None:
         self.slot_id = slot_id
         self._timeout_s = timeout_s
-        self._inbox: "queue.Queue[tuple[str, str | None] | object]" = queue.Queue()
+        self._inbox: "queue.Queue[tuple | object]" = queue.Queue()
 
-    def submit(self, utterance: str, inner_thought: str | None) -> None:
-        """由 gRPC 主循环线程调用：把客户端刚提交的话语放进队列。"""
-        self._inbox.put((utterance, inner_thought))
+    def submit(
+        self,
+        utterance: str,
+        inner_thought: str | None,
+        *,
+        activation_trace: dict | None = None,
+    ) -> None:
+        """由 gRPC 主循环线程调用：把客户端刚提交的话语放进队列。
+        带激活轨迹时排进去的是三元组,respond() 原样返回给 run_episode,
+        由它写进该轮的 TurnRecord;不带时仍是二元组,行为与改动前相同。"""
+        if activation_trace is None:
+            self._inbox.put((utterance, inner_thought))
+        else:
+            self._inbox.put((utterance, inner_thought, activation_trace))
 
     def request_end(self) -> None:
         """唤醒可能正阻塞的 respond()，但不作为真实话语处理——respond() 收到
@@ -46,7 +57,7 @@ class ClientDrivenBackend:
         scenario: Scenario,
         history: list[TurnRecord],
         speaker_slot: str,
-    ) -> tuple[str, str | None]:
+    ) -> tuple[str, str | None] | tuple[str, str | None, dict]:
         """由 run_episode 的后台驱动线程调用：阻塞直到 submit()/request_end()
         到来或超时。"""
         try:

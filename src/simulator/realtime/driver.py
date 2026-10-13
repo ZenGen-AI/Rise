@@ -61,8 +61,14 @@ class SessionDriver:
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
-    def submit_turn(self, utterance: str, inner_thought: str | None) -> None:
-        self._client_backend.submit(utterance, inner_thought)
+    def submit_turn(
+        self,
+        utterance: str,
+        inner_thought: str | None,
+        *,
+        activation_trace: dict | None = None,
+    ) -> None:
+        self._client_backend.submit(utterance, inner_thought, activation_trace=activation_trace)
 
     def request_end(self, reason: str) -> None:
         """客户端主动、优雅地结束会话（收到 EndSession 消息）：唤醒可能正
