@@ -1,19 +1,39 @@
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Callable
 
+import yaml
+
 from controlplane.envelope import Envelope, OwnerRef
+from controlplane.evidence import diagnostic_grade
 from controlplane.gitstore import GitStore
-from controlplane.paths import CONTROL_PLANE_ROOT, run_dir, model_file, diagnostic_report_file
+from controlplane.migration import UnknownSchemaVersionError
+from controlplane.paths import (
+    CONTROL_PLANE_ROOT,
+    agent_round_file,
+    candidate_checkpoint_file,
+    diagnostic_report_file,
+    model_file,
+    nomination_file,
+    planner_decision_file,
+    proposal_file,
+    recipe_track_note_file,
+    run_dir,
+)
 from controlplane.reconcile import (
     DirectiveView,
     CandidateView,
+    GateView,
+    ModelView,
+    RunView,
     TreeState,
     Action,
     reconcile,
 )
 from controlplane.states import assert_transition
+from controlplane.validate import EnvelopeValidationError
 from simulator.stubs import diagnostic_evaluator_stub, execute_dispatch
 
 _NOW = "2026-09-26T00:00:00Z"
@@ -21,6 +41,8 @@ _NOW = "2026-09-26T00:00:00Z"
 # 派发器:拿到 pending 的 directive,把它做成产物(候选等)。返回即视为派发成功,调和循环随后
 # 把 directive 置 executed。状态迁移归调和循环,派发器不碰 directive 的状态。
 Dispatcher = Callable[[GitStore, Envelope], None]
+
+_MODEL_FILE = re.compile(r"zengen-v(\d+)\.yaml$")
 
 
 class DirectiveFailedError(Exception):
@@ -46,8 +68,16 @@ def _iter_run_ids(store: GitStore) -> list[str]:
     return sorted(p.name for p in runs_dir.iterdir() if p.is_dir())
 
 
-def read_tree_state(store: GitStore) -> TreeState:
-    """扫 git 树，投影成 reconcile() 需要的纯视图。"""
+def read_tree_state(
+    store: GitStore,
+    *,
+    enabled: frozenset[str] = frozenset(),
+    accept_mock_evidence: bool = False,
+) -> TreeState:
+    """扫 git 树，投影成 reconcile() 需要的纯视图。
+
+    enabled 为空时只读既有的三项,返回值与引入闭环视图之前逐字节相同(accept_mock_evidence
+    此时不起作用:没有闭环动作,它无处可用)。非空时才去填 runs / models / gates。"""
     directives: list[DirectiveView] = []
     candidates: list[CandidateView] = []
     for run_id in _iter_run_ids(store):
@@ -72,7 +102,108 @@ def read_tree_state(store: GitStore) -> TreeState:
                 )
             )
     model_count = len(store.list_products(f"{CONTROL_PLANE_ROOT}/models"))
-    return TreeState(directives=directives, candidates=candidates, model_count=model_count)
+    if not enabled:
+        return TreeState(directives=directives, candidates=candidates, model_count=model_count)
+    return TreeState(
+        directives=directives, candidates=candidates, model_count=model_count,
+        runs=_read_run_views(store), models=_read_model_views(store), gates=_read_gate_views(store),
+        enabled=frozenset(enabled), accept_mock_evidence=accept_mock_evidence,
+    )
+
+
+def _status_or_none(store: GitStore, rel: str) -> str | None:
+    return store.read_product(rel).status if store.exists(rel) else None
+
+
+def _read_run_views(store: GitStore) -> list[RunView]:
+    # directive.yaml 的路径 ↔ cli/src/commands.ts 的 DIRECTIVE_PATTERN(confirm 与 status 读它)
+    views: list[RunView] = []
+    for run_id in _iter_run_ids(store):
+        d_path = f"{run_dir(run_id)}/directive.yaml"
+        directive = store.read_product(d_path) if store.exists(d_path) else None
+        recipe_ref = directive.payload.get("recipe_ref") if directive is not None else None
+        report_path = diagnostic_report_file(run_id)
+        has_diagnostic = store.exists(report_path)
+        views.append(RunView(
+            run_id=run_id,
+            directive_status=directive.status if directive is not None else None,
+            # 人写的指令里 recipe_ref 恒为 "";None 或非字符串一律当作"没有配方"
+            recipe_ref=recipe_ref if isinstance(recipe_ref, str) else "",
+            candidate_status=_status_or_none(store, candidate_checkpoint_file(run_id)),
+            has_diagnostic=has_diagnostic,
+            diagnostic_grade=_report_grade(store, report_path) if has_diagnostic else None,
+            planner_decision_status=_status_or_none(store, planner_decision_file(run_id)),
+            has_nomination_note=store.exists(nomination_file(run_id)),
+            has_track_note=store.exists(recipe_track_note_file(run_id)),
+        ))
+    return views
+
+
+def _report_grade(store: GitStore, rel: str) -> str:
+    """诊断报告的证据等级。等级只有一处实现(controlplane.evidence),这里不另写判断;
+    但"判不出来按最弱算":载荷不是 dict、或报告文件读不出(与 _UNREADABLE_ROUND 同一组异常),
+    都记为 stub(永不可接受),不让一份坏报告在读视图时把守护进程带走。"""
+    try:
+        payload = store.read_product(rel).payload
+    except _UNREADABLE_ROUND:
+        return "stub"
+    return diagnostic_grade(payload) if isinstance(payload, dict) else "stub"
+
+
+def _read_model_views(store: GitStore) -> list[ModelView]:
+    views: list[ModelView] = []
+    for rel in store.list_products(f"{CONTROL_PLANE_ROOT}/models"):
+        match = _MODEL_FILE.search(rel)
+        if match is None:
+            continue
+        env = store.read_product(rel)
+        # promote_candidate 写的 links 是 [候选 id, run id]:第二项就是产生该模型的 run。
+        # 计划 3 的 recipestore.gain.baseline_run_of 对同一问题取"cand-<x> 也在 links 里的那一项"
+        # (以该函数为准,不按文档行号引用);两种判法目前一致,
+        # 改晋级写法时两处要一起改,计划 9 的一致性核对会加测试钉住。
+        run_id = env.links[1] if len(env.links) >= 2 else ""
+        views.append(ModelView(
+            model_id=env.id, version=int(match.group(1)), run_id=run_id, status=env.status,
+            agent_round_status=_agent_round_status(store, env.id),
+        ))
+    return views
+
+
+# 轮次产物"文件在、内容读不出"时的异常:YAML 解析失败(含合并冲突标记)、缺键、类型不对、
+# 信封校验失败、schema_version 无法迁移。OSError 不在其中,原样上抛(瞬态,守护进程退出)。
+_UNREADABLE_ROUND = (KeyError, TypeError, AttributeError, yaml.YAMLError,
+                     EnvelopeValidationError, UnknownSchemaVersionError)
+
+
+def _agent_round_status(store: GitStore, model_id: str) -> str | None:
+    """轮次产物的信封状态;没有产物或产物读不出时为 None(R19:按"没有可用轮次"处理,让
+    start_agent_round 再次触发,由轮次处理器重入时判定损坏并自己写 failed)。"""
+    rel = agent_round_file(model_id)
+    if not store.exists(rel):
+        return None
+    try:
+        return store.read_product(rel).status
+    except _UNREADABLE_ROUND:
+        return None
+
+
+def _read_gate_views(store: GitStore) -> list[GateView]:
+    views: list[GateView] = []
+    # 配方候选:recipe_candidates/<id>.yaml,顶层文件,list_products 够用
+    for rel in store.list_products(f"{CONTROL_PLANE_ROOT}/recipe_candidates"):
+        env = store.read_product(rel)
+        views.append(GateView(id=env.id, kind="recipe_candidate", status=env.status))
+    # 技能提案在子目录里(skill_memory_proposals/<id>/proposal.yaml)。list_products 不递归,
+    # 所以像 _iter_run_ids 那样自己遍历目录;路径仍由 proposal_file 拼(文件夹名就是产物 id)。
+    # 两类路径模式 ↔ cli/src/commands.ts 的 GATE_PATTERNS。
+    proposals_dir = store.repo_root / CONTROL_PLANE_ROOT / "skill_memory_proposals"
+    if proposals_dir.is_dir():
+        for sub in sorted(p for p in proposals_dir.iterdir() if p.is_dir()):
+            rel = proposal_file(sub.name)
+            if store.exists(rel):
+                env = store.read_product(rel)
+                views.append(GateView(id=env.id, kind="skill_memory_proposal", status=env.status))
+    return views
 
 
 def apply_action(
