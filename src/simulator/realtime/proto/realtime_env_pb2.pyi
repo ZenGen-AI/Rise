@@ -87,12 +87,14 @@ class SessionReady(_message.Message):
     def __init__(self, session_id: _Optional[str] = ...) -> None: ...
 
 class SubmitTurn(_message.Message):
-    __slots__ = ("utterance", "inner_thought")
+    __slots__ = ("utterance", "inner_thought", "activation_trace")
     UTTERANCE_FIELD_NUMBER: _ClassVar[int]
     INNER_THOUGHT_FIELD_NUMBER: _ClassVar[int]
+    ACTIVATION_TRACE_FIELD_NUMBER: _ClassVar[int]
     utterance: str
     inner_thought: str
-    def __init__(self, utterance: _Optional[str] = ..., inner_thought: _Optional[str] = ...) -> None: ...
+    activation_trace: _struct_pb2.Struct
+    def __init__(self, utterance: _Optional[str] = ..., inner_thought: _Optional[str] = ..., activation_trace: _Optional[_Union[_struct_pb2.Struct, _Mapping]] = ...) -> None: ...
 
 class TurnUpdate(_message.Message):
     __slots__ = ("turn",)
