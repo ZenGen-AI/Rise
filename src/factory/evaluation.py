@@ -62,6 +62,11 @@ def build_mock_evaluator(store: GitStore) -> Evaluator:
         pool = read_item_pool(store, cfg["item_pool_version"])
     except DiagnosticAssetError as exc:
         raise FactoryConfigError(f"diagnostic assets: {exc}") from None
+    except Exception as exc:
+        # 文件原文损坏(yaml 语法、信封不合 schema、载荷缺键):异常信息会引用文件内容,所以只写版本号与异常类名
+        raise FactoryConfigError(
+            f"diagnostic assets {cfg['taxonomy_version']!r} and {cfg['item_pool_version']!r} cannot be read ({type(exc).__name__})"
+        ) from None
     variants = {v for fam in pool.variant_families for v in fam.variant_item_ids}
     fixed = {
         item.id: [MOCK_WRONG if item.id in variants else (item.reference_answer or "")] * cfg["sampling_k"]

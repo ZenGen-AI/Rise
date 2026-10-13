@@ -13,9 +13,9 @@ from dataclasses import fields
 
 import grpc
 
-from controlplane.config import read_config
 from controlplane.gitstore import GitStore
 from controlplane.paths import CONTROL_PLANE_ROOT
+from factory.configio import read_tree_config
 from factory.errors import FactoryConfigError
 from mindagent.config import AgentConfig
 from simulator.backends import ScriptedBackend
@@ -58,7 +58,7 @@ def _str_list(payload: dict, key: str) -> list[str]:
 def read_agent_settings(store: GitStore) -> tuple[AgentConfig, tuple[str, ...]]:
     """返回 (AgentConfig, 对手罐头台词)。"""
     try:
-        payload = read_config(store, AGENT_CONFIG)
+        payload = read_tree_config(store, AGENT_CONFIG)
     except FileNotFoundError:
         raise FactoryConfigError(
             f"{AGENT_CONFIG} is missing; the agent switch needs it (run install-defaults)"

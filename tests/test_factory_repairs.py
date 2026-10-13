@@ -14,8 +14,10 @@ from controlplane.envelope import Envelope, OwnerRef
 from controlplane.evidence import diagnostic_grade
 from controlplane.gitstore import GitStore
 from controlplane.paths import backends_config_file, candidate_checkpoint_file, diagnostic_report_file
+from diagnostic.paths import item_pool_file, taxonomy_file
+from factory.agent import AGENT_CONFIG
 from factory.cli import main
-from factory.defaults import DEFAULT_EVALUATOR_CONFIG
+from factory.defaults import DEFAULT_AGENT_CONFIG, DEFAULT_EVALUATOR_CONFIG
 from factory.evaluation import EVALUATOR_CONFIG
 from factory_fixtures import (
     Recorder, approve, closed_loop_repo, git_head, held_lock, recording_builders, tree_files,
@@ -73,6 +75,13 @@ CONFIG_DEFECTS = [
                  id="backends-that-is-not-a-config-agent-switch"),
     pytest.param(backends_config_file(), "directive", {}, "plan",
                  id="backends-that-is-not-a-config-planner-bridge"),
+    pytest.param(AGENT_CONFIG, "config", {**DEFAULT_AGENT_CONFIG, "token": SECRET}, "agent",
+                 id="agent-with-a-credential-field"),
+    pytest.param(AGENT_CONFIG, "directive", {}, "agent", id="agent-that-is-not-a-config"),
+    pytest.param(taxonomy_file(DEFAULT_EVALUATOR_CONFIG["taxonomy_version"]), "diagnostic_taxonomy", {}, "plan",
+                 id="taxonomy-with-an-empty-payload"),
+    pytest.param(item_pool_file(DEFAULT_EVALUATOR_CONFIG["item_pool_version"]), "diagnostic_item_pool", {}, "plan",
+                 id="item-pool-with-an-empty-payload"),
 ]
 
 
@@ -96,6 +105,10 @@ RAW_DEFECTS = [
                  id="evaluator-with-a-yaml-syntax-error"),
     pytest.param(backends_config_file(), f"id: backends\ntype: config\nschema_version: 1\nstatus: {SECRET}\n", "agent",
                  id="backends-that-fails-the-envelope-schema-agent-switch"),
+    pytest.param(AGENT_CONFIG, f"id: agent\nbad: {SECRET}: [\n", "agent",
+                 id="agent-with-a-yaml-syntax-error"),
+    pytest.param(taxonomy_file(DEFAULT_EVALUATOR_CONFIG["taxonomy_version"]), f"id: taxonomy\nbad: {SECRET}: [\n", "plan",
+                 id="taxonomy-with-a-yaml-syntax-error"),
 ]
 
 
