@@ -60,8 +60,12 @@ def run_diagnostic(
     *,
     baseline_scores: list[DimensionScore],
     dynamic_specs: list[dict],
+    backends: str,
 ) -> DiagnosticReport:
-    """Run one full diagnostic pass and persist the resulting report."""
+    """Run one full diagnostic pass and persist the resulting report.
+
+    backends ("mock" | "real") is written into the persisted payload by
+    write_report in the same write (R17); required, no default (DX-12)."""
 
     # 1. Select items for this run's tier.
     selected_items = select_items(pool, cfg.tier)
@@ -195,7 +199,7 @@ def run_diagnostic(
         consistency_signals=consistency_signals,
         run_id=cfg.run_id,
     )
-    write_report(store, cfg.run_id, report)
+    write_report(store, cfg.run_id, report, backends=backends)
     return report
 
 

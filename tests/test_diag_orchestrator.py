@@ -34,7 +34,7 @@ def test_run_diagnostic_end_to_end_writes_report(tmp_path):
         benchmark_version="bench-v1",
     )
     report = run_diagnostic(cfg, tax, pool, someval, judge, store,
-                            baseline_scores=[], dynamic_specs=[])
+                            baseline_scores=[], dynamic_specs=[], backends="mock")
     # 报告已落盘,可读回
     got = read_report(store, "run-1")
     assert got.id == report.id
@@ -50,7 +50,7 @@ def test_run_diagnostic_static_only_track_provenance(tmp_path):
     tax, pool, someval, judge = _setup()
     cfg = DiagnosticConfig("run-2", "cand-1", "cand-model", "zengen-v3", "quick", 4, "bench-v1")
     report = run_diagnostic(cfg, tax, pool, someval, judge, store,
-                            baseline_scores=[], dynamic_specs=[])
+                            baseline_scores=[], dynamic_specs=[], backends="mock")
     # 无动态 specs → 纯静态轨,轨道来源都是 static
     assert all(d.track_provenance == "static" for d in report.dimension_scores)
 
