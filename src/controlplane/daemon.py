@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 import yaml
 
@@ -23,6 +23,7 @@ from controlplane.paths import (
     run_dir,
 )
 from controlplane.reconcile import (
+    CLOSED_LOOP_ACTIONS,
     DirectiveView,
     CandidateView,
     GateView,
@@ -41,6 +42,12 @@ _NOW = "2026-09-26T00:00:00Z"
 # 派发器:拿到 pending 的 directive,把它做成产物(候选等)。返回即视为派发成功,调和循环随后
 # 把 directive 置 executed。状态迁移归调和循环,派发器不碰 directive 的状态。
 Dispatcher = Callable[[GitStore, Envelope], None]
+
+# 闭环集成设计 §3.3(R2):闭环动作的处理器。处理器自己负责写终态记录;确定性失败写自己产物的
+# failed 与失败记录,瞬态异常原样上抛(与派发器同一约定,守护循环会退出)。
+Handler = Callable[[GitStore, Action], None]
+# 诊断评估器:(store, run_id, candidate_id),把诊断报告写到 diagnostic_report_file(run_id)。
+Evaluator = Callable[[GitStore, str, str], None]
 
 _MODEL_FILE = re.compile(r"zengen-v(\d+)\.yaml$")
 
@@ -206,9 +213,31 @@ def _read_gate_views(store: GitStore) -> list[GateView]:
     return views
 
 
+def _check_handlers(handlers: Mapping[str, Handler] | None) -> frozenset[str]:
+    if not handlers:
+        return frozenset()
+    unknown = set(handlers) - CLOSED_LOOP_ACTIONS
+    if unknown:
+        raise ValueError(
+            f"handlers only cover closed-loop actions {sorted(CLOSED_LOOP_ACTIONS)}; "
+            f"got unknown kinds {sorted(unknown)}"
+        )
+    return frozenset(handlers)
+
+
 def apply_action(
-    store: GitStore, action: Action, *, dispatcher: Dispatcher | None = None
+    store: GitStore,
+    action: Action,
+    *,
+    dispatcher: Dispatcher | None = None,
+    handlers: Mapping[str, Handler] | None = None,
+    evaluator: Evaluator | None = None,
 ) -> None:
+    _check_handlers(handlers)
+    if handlers and action.kind in handlers:
+        # 闭环动作:处理器异常原样上抛,不吞
+        handlers[action.kind](store, action)
+        return
     if action.kind == "dispatch_directive":
         run_id = action.target_id
         path = f"{run_dir(run_id)}/directive.yaml"
@@ -272,6 +301,10 @@ def apply_action(
         store.write_product(f"{run_dir(run_id)}/outcome.yaml", outcome, f"reconcile: outcome {run_id}")
     elif action.kind == "request_diagnostic":
         run_id = action.detail["run_id"]
+        if evaluator is not None:
+            # 注入的评估器只替换这一步:它自己把报告写到 diagnostic_report_file(run_id)
+            evaluator(store, run_id, action.target_id)
+            return
         # 骨架里计算层由 stub 顶替（同 execute_dispatch）。stub 报告带 stub 标记，
         # 审核门 review 会醒目标出，不会被误当成真诊断。真实诊断见 diagnostic.orchestrator。
         report = diagnostic_evaluator_stub(run_id, action.target_id)
@@ -282,13 +315,23 @@ def apply_action(
     # await_review / noop：无自动动作，等待人工
 
 
-def reconcile_once(store: GitStore, *, dispatcher: Dispatcher | None = None) -> list[Action]:
+def reconcile_once(
+    store: GitStore,
+    *,
+    dispatcher: Dispatcher | None = None,
+    handlers: Mapping[str, Handler] | None = None,
+    evaluator: Evaluator | None = None,
+    accept_mock_evidence: bool = False,
+) -> list[Action]:
     """一次性调和：读状态 → reconcile → 执行非人工动作。返回本轮动作列表。
-    dispatcher 缺省为桩;注入后只替换"下发 directive"这一步,其余动作不变。"""
-    state = read_tree_state(store)
+    dispatcher 缺省为桩;注入后只替换"下发 directive"这一步,其余动作不变。
+    handlers 的键就是启用的闭环动作(闭环集成设计 §3.3);没有处理器的动作种类不会出现在
+    返回列表里。evaluator 缺省为诊断桩;注入后只替换 request_diagnostic 这一步。"""
+    enabled = _check_handlers(handlers)
+    state = read_tree_state(store, enabled=enabled, accept_mock_evidence=accept_mock_evidence)
     actions = reconcile(state)
     for action in actions:
-        apply_action(store, action, dispatcher=dispatcher)
+        apply_action(store, action, dispatcher=dispatcher, handlers=handlers, evaluator=evaluator)
     return actions
 
 
@@ -298,11 +341,18 @@ def run_daemon(
     max_ticks: int | None = None,
     *,
     dispatcher: Dispatcher | None = None,
+    handlers: Mapping[str, Handler] | None = None,
+    evaluator: Evaluator | None = None,
+    accept_mock_evidence: bool = False,
 ) -> None:
     """轮询守护进程（spec 补充 B.1：轮询而非 inotify）。max_ticks 供测试限次。"""
+    _check_handlers(handlers)
     ticks = 0
     while max_ticks is None or ticks < max_ticks:
-        reconcile_once(store, dispatcher=dispatcher)
+        reconcile_once(
+            store, dispatcher=dispatcher, handlers=handlers, evaluator=evaluator,
+            accept_mock_evidence=accept_mock_evidence,
+        )
         ticks += 1
         if max_ticks is not None and ticks >= max_ticks:
             break
