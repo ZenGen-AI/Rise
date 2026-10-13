@@ -33,5 +33,6 @@ export function writeProduct(
 ): void {
   writeFileSync(join(repoRoot, relPath), dump(env, { sortKeys: false }));
   execFileSync("git", ["-C", repoRoot, "add", relPath]);
-  execFileSync("git", ["-C", repoRoot, "commit", "-m", message]);
+  // 只提交本文件:别的文件若已在暂存区,不被卷进这次提交,也不丢
+  execFileSync("git", ["-C", repoRoot, "commit", "-m", message, "--", relPath]);
 }

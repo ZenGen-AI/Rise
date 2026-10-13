@@ -78,7 +78,9 @@ def _seed_everything(store):
 def test_with_nothing_enabled_the_state_equals_the_legacy_shape(store):
     _seed_everything(store)
     state = read_tree_state(store)
-    assert state == TreeState(directives=state.directives, candidates=state.candidates, model_count=1)
+    assert state == TreeState(
+        directives=state.directives, candidates=state.candidates, model_count=1, max_model_version=1,
+    )
     assert (state.runs, state.models, state.gates) == ([], [], [])
     assert read_tree_state(store, enabled=frozenset(), accept_mock_evidence=True) == state
 

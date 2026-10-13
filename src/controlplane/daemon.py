@@ -9,7 +9,9 @@ import yaml
 from controlplane.envelope import Envelope, OwnerRef
 from controlplane.evidence import diagnostic_grade
 from controlplane.gitstore import GitStore
+from controlplane.lock import acquire_repo_lock
 from controlplane.migration import UnknownSchemaVersionError
+from controlplane.models import max_model_version
 from controlplane.paths import (
     CONTROL_PLANE_ROOT,
     agent_round_file,
@@ -109,10 +111,15 @@ def read_tree_state(
                 )
             )
     model_count = len(store.list_products(f"{CONTROL_PLANE_ROOT}/models"))
+    top_version = max_model_version(store)
     if not enabled:
-        return TreeState(directives=directives, candidates=candidates, model_count=model_count)
+        return TreeState(
+            directives=directives, candidates=candidates, model_count=model_count,
+            max_model_version=top_version,
+        )
     return TreeState(
         directives=directives, candidates=candidates, model_count=model_count,
+        max_model_version=top_version,
         runs=_read_run_views(store), models=_read_model_views(store), gates=_read_gate_views(store),
         enabled=frozenset(enabled), accept_mock_evidence=accept_mock_evidence,
     )
@@ -225,6 +232,16 @@ def _check_handlers(handlers: Mapping[str, Handler] | None) -> frozenset[str]:
     return frozenset(handlers)
 
 
+def _recorded_model_version(store: GitStore, candidate_id: str) -> int | None:
+    """models/ 下已经登记过这个候选的模型的版本号;没有返回 None(控制面 CP-7)。
+    晋级在"模型已写、候选还没置 effective"时崩溃,重放就靠它认出上一次写下的那个模型。"""
+    for rel in store.list_products(f"{CONTROL_PLANE_ROOT}/models"):
+        match = _MODEL_FILE.search(rel)
+        if match and store.read_product(rel).payload.get("promoted_from") == candidate_id:
+            return int(match.group(1))
+    return None
+
+
 def apply_action(
     store: GitStore,
     action: Action,
@@ -260,7 +277,10 @@ def apply_action(
         )
     elif action.kind == "promote_candidate":
         run_id = action.detail["run_id"]
-        version = action.detail["model_version"]
+        # 崩溃重放(CP-7):这个候选已经登记过模型,就复用它的版本号(不再登记新版本);
+        # 找不到才按 reconcile 给的版本号新登记。
+        recorded = _recorded_model_version(store, action.target_id)
+        version = action.detail["model_version"] if recorded is None else recorded
         cand = store.read_product(f"{run_dir(run_id)}/candidate_checkpoint.yaml")
         # 1) 登记 ZenGen 版本产物（仅引用）。把候选的 checkpoint_ref 带过来：
         # 下一轮训练的基座要从"最新已晋级模型"解析（controlplane.models），
@@ -279,6 +299,9 @@ def apply_action(
             links=[action.target_id, run_id],
             payload=model_payload,
         )
+        # 复用时这一次写也照发:内容与已提交的逐字节相同,write_product 什么都不做;
+        # 若上次崩在 git add 与 git commit 之间,模型文件还停在暂存区,这一次把它提交掉
+        # (提交只带本文件,不会有别的提交替它收尾)。
         store.write_product(model_file(version), model, f"reconcile: promote zengen-v{version}")
         # 2) 候选 approved → effective
         assert_transition("review", cand.status, "effective")
@@ -345,15 +368,18 @@ def run_daemon(
     evaluator: Evaluator | None = None,
     accept_mock_evidence: bool = False,
 ) -> None:
-    """轮询守护进程（spec 补充 B.1：轮询而非 inotify）。max_ticks 供测试限次。"""
+    """轮询守护进程（spec 补充 B.1：轮询而非 inotify）。max_ticks 供测试限次。
+    同一棵树只许一个守护进程写(控制面 CP-12):第一个 tick 之前取仓库文件锁,
+    已被占用就抛 RepoLockedError,一个产物都不写;退出(含异常)时释放。"""
     _check_handlers(handlers)
-    ticks = 0
-    while max_ticks is None or ticks < max_ticks:
-        reconcile_once(
-            store, dispatcher=dispatcher, handlers=handlers, evaluator=evaluator,
-            accept_mock_evidence=accept_mock_evidence,
-        )
-        ticks += 1
-        if max_ticks is not None and ticks >= max_ticks:
-            break
-        time.sleep(interval_s)
+    with acquire_repo_lock(store.repo_root):
+        ticks = 0
+        while max_ticks is None or ticks < max_ticks:
+            reconcile_once(
+                store, dispatcher=dispatcher, handlers=handlers, evaluator=evaluator,
+                accept_mock_evidence=accept_mock_evidence,
+            )
+            ticks += 1
+            if max_ticks is not None and ticks >= max_ticks:
+                break
+            time.sleep(interval_s)

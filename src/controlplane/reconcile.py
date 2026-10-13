@@ -72,6 +72,8 @@ class TreeState:
     gates: list[GateView] = field(default_factory=list)
     enabled: frozenset[str] = frozenset()
     accept_mock_evidence: bool = False
+    # 控制面 CP-7:models/ 下最大的 zengen 版本号。None 表示调用方没填,版本号起点退回 model_count
+    max_model_version: int | None = None
 
 
 @dataclass(frozen=True)
@@ -201,7 +203,9 @@ def reconcile(state: TreeState) -> list[Action]:
       （这只保证证据在场，不证明有人读过。）
     """
     actions: list[Action] = []
-    next_model_version = state.model_count
+    next_model_version = (
+        state.max_model_version if state.max_model_version is not None else state.model_count
+    )
     for d in state.directives:
         if d.status == "pending":
             actions.append(Action(kind="dispatch_directive", target_id=d.id, detail={}))

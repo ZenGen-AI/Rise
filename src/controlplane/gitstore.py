@@ -52,7 +52,8 @@ class GitStore:
         )
         if staged_check.returncode == 0:
             return
-        self._git("commit", "-m", message)
+        # 只提交本文件(控制面 CP-12):别的文件若已在暂存区,不被卷进这次提交,也不丢。
+        self._git("commit", "-m", message, "--", rel_path)
 
     def read_product(self, rel_path: str) -> Envelope:
         abs_path = self.repo_root / rel_path

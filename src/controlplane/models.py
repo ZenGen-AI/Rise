@@ -49,3 +49,16 @@ def latest_promoted_checkpoint(store: GitStore) -> PromotedBase | None:
             )
         return PromotedBase(model_id=env.id, version=version, checkpoint_ref=BigRef.from_dict(raw))
     return None
+
+
+def max_model_version(store: GitStore) -> int:
+    """models/ 下最大的 zengen 版本号;没有模型返回 0。
+
+    新模型的版本号是它加一,不数文件个数:手工删掉中间的版本会留下空洞,但新号绝不会撞上
+    已经用过的号。"""
+    versions = [
+        int(match.group(1))
+        for rel in store.list_products(f"{CONTROL_PLANE_ROOT}/models")
+        if (match := _MODEL_FILE.search(rel))
+    ]
+    return max(versions, default=0)
