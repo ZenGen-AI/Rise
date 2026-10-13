@@ -18,6 +18,22 @@ class RoleSlotMismatchError(ValueError):
     """RoleAssignment 引用了 Scenario 中不存在的角色位。"""
 
 
+def _unpack_reply(reply: object, speaker_slot: str) -> tuple[str, str | None, dict | None]:
+    """后端返回 (utterance, inner_thought) 或 (utterance, inner_thought, activation_trace)。
+    三元组的第三项是该轮的激活轨迹(None 表示"没有轨迹",{} 表示"轨迹为空",
+    §2.6.3 要求区分);存进 TurnRecord 的是深拷贝,后端事后改它不影响 Episode。"""
+    if not isinstance(reply, (tuple, list)) or len(reply) not in (2, 3):
+        raise TypeError(
+            f"backend for slot {speaker_slot!r} must return a 2- or 3-tuple, got {reply!r}"
+        )
+    trace = reply[2] if len(reply) == 3 else None
+    if trace is not None and not isinstance(trace, dict):
+        raise TypeError(
+            f"backend for slot {speaker_slot!r} returned a non-dict activation_trace: {trace!r}"
+        )
+    return reply[0], reply[1], deepcopy(trace)
+
+
 def run_episode(
     scenario: Scenario,
     assignment: RoleAssignment,
@@ -69,8 +85,8 @@ def run_episode(
             else replace(t, inner_thought=None, activation_trace=None)
             for t in turns
         ]
-        utterance, inner_thought = backend.respond(
-            persona, scenario, history, binding.slot_id
+        utterance, inner_thought, activation_trace = _unpack_reply(
+            backend.respond(persona, scenario, history, binding.slot_id), binding.slot_id
         )
         turns.append(
             TurnRecord(
@@ -78,7 +94,7 @@ def run_episode(
                 speaker_slot=binding.slot_id,
                 utterance=utterance,
                 inner_thought=inner_thought,
-                activation_trace=None,  # V1 裸模型：无激活轨迹（§2.6.3）
+                activation_trace=activation_trace,  # 裸模型的二元组为 None(§2.6.3)
             )
         )
         if on_turn is not None:
