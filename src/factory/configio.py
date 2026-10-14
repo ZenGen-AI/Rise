@@ -15,7 +15,7 @@ PLACEHOLDER = "<value>"
 _QUOTES = "'\""
 _OPEN = {"[": "]", "{": "}", "(": ")"}
 _RANGE = re.compile(r"\s*[-+]?[0-9]+(?:\.[0-9]+)?\s*,\s*[-+]?[0-9]+(?:\.[0-9]+)?\s*")
-_AFTER_IN = re.compile(r"(?:^|\s)in\s+$")
+_AFTER_IN = re.compile(r"(?<!\S)in\s+\Z")
 _LOOKBACK = 16
 
 
@@ -75,7 +75,8 @@ def _skip_group(text: str, i: int) -> tuple[int, bool]:
 def redact_message(text: str) -> str:
     """把信息里的字面量换成 <value>:引号括起的字符串,以及括号括起的一整组(可嵌套)。
     只有紧跟在单词 in 之后、恰好是两个数字(整数或小数,可带正负号)用逗号隔开的括号组,是校验信息自己写的区间(如 in [0, 1]),原样保留;
-    其余括号组一律换掉,哪怕里面全是数字:一个数字列表(如 [123456789])可能正是被误填的取值。引号或括号没有闭合时,从它开始到结尾都换掉。"""
+    其余括号组一律换掉,哪怕里面全是数字:一个数字列表(如 [123456789])可能正是被误填的取值。引号或括号没有闭合时,从它开始到结尾都换掉。
+    限制:被误填的取值若恰好是紧跟在 in 之后的两个数字(如 in [3, 4]),和校验信息自己写的区间长得一样,会被保留。花括号组一律换掉。"""
     out: list[str] = []
     i = 0
     while i < len(text):
@@ -85,7 +86,7 @@ def redact_message(text: str) -> str:
             out.append(PLACEHOLDER)
         elif c in _OPEN:
             j, closed = _skip_group(text, i)
-            if closed and _AFTER_IN.search(text[max(0, i - _LOOKBACK):i]) and _RANGE.fullmatch(text[i + 1:j - 1]):
+            if closed and c in "[(" and _AFTER_IN.search(text, max(0, i - _LOOKBACK), i) and _RANGE.fullmatch(text[i + 1:j - 1]):
                 out.append(text[i:j])
             else:
                 out.append(PLACEHOLDER)
