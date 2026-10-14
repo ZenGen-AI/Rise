@@ -15,7 +15,7 @@ import grpc
 
 from controlplane.gitstore import GitStore
 from controlplane.paths import CONTROL_PLANE_ROOT
-from factory.configio import read_tree_config
+from factory.configio import describe, read_tree_config
 from factory.errors import FactoryConfigError
 from mindagent.config import AgentConfig
 from simulator.backends import ScriptedBackend
@@ -80,7 +80,7 @@ def read_agent_settings(store: GitStore) -> tuple[AgentConfig, tuple[str, ...]]:
             **{k: payload[k] for k in _OPTIONAL if k in payload},
         )
     except (KeyError, TypeError, ValueError) as exc:
-        raise FactoryConfigError(f"{AGENT_CONFIG}: {type(exc).__name__}: {exc}") from None
+        raise FactoryConfigError(f"{AGENT_CONFIG}: {describe(exc)}") from None
     return config, tuple(lines)
 
 

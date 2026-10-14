@@ -43,10 +43,10 @@ def read_evaluator_config(store: GitStore) -> dict:
         if not isinstance(payload[key], str) or not payload[key]:
             raise FactoryConfigError(f"{EVALUATOR_CONFIG}: {key} must be a non-empty string")
     if payload["tier"] not in ("full", "quick"):
-        raise FactoryConfigError(f"{EVALUATOR_CONFIG}: tier must be 'full' or 'quick', got {payload['tier']!r}")
+        raise FactoryConfigError(f"{EVALUATOR_CONFIG}: tier must be 'full' or 'quick'")
     k = payload["sampling_k"]
     if isinstance(k, bool) or not isinstance(k, int) or k < 1:
-        raise FactoryConfigError(f"{EVALUATOR_CONFIG}: sampling_k must be an int >= 1, got {k!r}")
+        raise FactoryConfigError(f"{EVALUATOR_CONFIG}: sampling_k must be an int >= 1")
     return payload
 
 
@@ -67,11 +67,17 @@ def build_mock_evaluator(store: GitStore) -> Evaluator:
         raise FactoryConfigError(
             f"diagnostic assets {cfg['taxonomy_version']!r} and {cfg['item_pool_version']!r} cannot be read ({type(exc).__name__})"
         ) from None
-    variants = {v for fam in pool.variant_families for v in fam.variant_item_ids}
-    fixed = {
-        item.id: [MOCK_WRONG if item.id in variants else (item.reference_answer or "")] * cfg["sampling_k"]
-        for item in pool.items
-    }
+    try:
+        variants = {v for fam in pool.variant_families for v in fam.variant_item_ids}
+        fixed = {
+            item.id: [MOCK_WRONG if item.id in variants else (item.reference_answer or "")] * cfg["sampling_k"]
+            for item in pool.items
+        }
+    except Exception as exc:
+        # 载荷形状错(变体列表里嵌了列表、题目 id 不是字符串之类):异常信息可能引用取值,所以只写版本号与异常类名
+        raise FactoryConfigError(
+            f"diagnostic assets {cfg['taxonomy_version']!r} and {cfg['item_pool_version']!r} are malformed ({type(exc).__name__})"
+        ) from None
     return make_diagnostic_evaluator(
         taxonomy_version=cfg["taxonomy_version"],
         item_pool_version=cfg["item_pool_version"],

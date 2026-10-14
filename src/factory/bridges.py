@@ -17,7 +17,7 @@ from controlplane.config import (
 )
 from controlplane.gitstore import GitStore
 from controlplane.paths import backends_config_file
-from factory.configio import read_tree_config
+from factory.configio import describe, read_tree_config
 from factory.errors import FactoryConfigError
 from inference_bridge import CliBridge
 
@@ -50,11 +50,13 @@ def build_bridge(
         cfg = load_backend_config(raw)
     except KeyError as exc:
         raise FactoryConfigError(f"{rel}: {role!r} is missing key {exc.args[0]!r}") from None
-    except (ValueError, CredentialInGitTreeError) as exc:
+    except CredentialInGitTreeError as exc:
         raise FactoryConfigError(f"{rel}: {role!r}: {exc}") from None
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise FactoryConfigError(f"{rel}: {role!r}: {describe(exc)}") from None
     if cfg.invocation_form != "cli":
         raise FactoryConfigError(
-            f"{rel}: {role!r} uses invocation_form {cfg.invocation_form!r}; "
+            f"{rel}: {role!r} uses an invocation_form other than 'cli'; "
             "only 'cli' is implemented in V1 (R15)"
         )
     try:
@@ -64,5 +66,5 @@ def build_bridge(
     except MissingCredentialError as exc:
         # 信息只报变量名(controlplane.config.resolve_credential)
         raise FactoryConfigError(str(exc)) from None
-    except ValueError as exc:
-        raise FactoryConfigError(f"{rel}: {role!r}: {exc}") from None
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise FactoryConfigError(f"{rel}: {role!r}: {describe(exc)}") from None
