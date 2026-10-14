@@ -14,7 +14,9 @@ T = TypeVar("T")
 PLACEHOLDER = "<value>"
 _QUOTES = "'\""
 _OPEN = {"[": "]", "{": "}", "(": ")"}
-_NUMERIC_ONLY = re.compile(r"[0-9\s,.eE+\-]*")
+_RANGE = re.compile(r"\s*[-+]?[0-9]+(?:\.[0-9]+)?\s*,\s*[-+]?[0-9]+(?:\.[0-9]+)?\s*")
+_AFTER_IN = re.compile(r"(?:^|\s)in\s+$")
+_LOOKBACK = 16
 
 
 def read_tree_config(store: GitStore, rel: str) -> dict:
@@ -72,7 +74,8 @@ def _skip_group(text: str, i: int) -> tuple[int, bool]:
 
 def redact_message(text: str) -> str:
     """把信息里的字面量换成 <value>:引号括起的字符串,以及括号括起的一整组(可嵌套)。
-    括号组里只有数字、逗号、点和正负号的(数字范围,如 [0, 1])原样保留;引号或括号没有闭合时,从它开始到结尾都换掉。"""
+    只有紧跟在单词 in 之后、恰好是两个数字(整数或小数,可带正负号)用逗号隔开的括号组,是校验信息自己写的区间(如 in [0, 1]),原样保留;
+    其余括号组一律换掉,哪怕里面全是数字:一个数字列表(如 [123456789])可能正是被误填的取值。引号或括号没有闭合时,从它开始到结尾都换掉。"""
     out: list[str] = []
     i = 0
     while i < len(text):
@@ -82,7 +85,7 @@ def redact_message(text: str) -> str:
             out.append(PLACEHOLDER)
         elif c in _OPEN:
             j, closed = _skip_group(text, i)
-            if closed and _NUMERIC_ONLY.fullmatch(text[i + 1:j - 1]):
+            if closed and _AFTER_IN.search(text[max(0, i - _LOOKBACK):i]) and _RANGE.fullmatch(text[i + 1:j - 1]):
                 out.append(text[i:j])
             else:
                 out.append(PLACEHOLDER)
@@ -103,11 +106,11 @@ def describe(exc: BaseException) -> str:
 
     - ValueError(各包的校验错误):类名加信息。先把信息截在 ", got " 之前(校验信息通常是"<字段> must be ..., got <取值>"),
       再用 redact_message 把剩下的引号字符串与括号组换成 <value>:有的校验器把取值写在分隔符之前,甚至没有分隔符。
-      数字范围(如 [0, 1])不是取值,保留。
+      紧跟在 in 之后的两个数字的区间(如 in [0, 1])是校验信息自己写的,保留;别的数字组一律换成 <value>。
     - KeyError:键名是标识符时写出键名(缺了哪个键有用),否则只写类名。
     - 其余(TypeError、AttributeError、OverflowError、yaml 与 jsonschema 的错误):只写类名,它们的信息可能引用取值。
     版本号、变量名、路径里的名字这类标识符出现在信息里是有意的:操作者要靠它们找到文件。没有引号也没有括号的裸取值
-    (例如 unknown mode x)挡不住,新写的校验器要把取值放进 repr,或放在 ", got " 之后。"""
+    (例如 unknown mode x;或 backend 写成整数 123456789,被 !r 回显成 123456789)挡不住,新写的校验器要把取值放进 repr,或放在 ", got " 之后。"""
     name = type(exc).__name__
     if isinstance(exc, KeyError) and exc.args and isinstance(exc.args[0], str) and exc.args[0].isidentifier():
         return f"{name}: {exc.args[0]!r}"
