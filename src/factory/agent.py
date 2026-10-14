@@ -15,7 +15,7 @@ import grpc
 
 from controlplane.gitstore import GitStore
 from controlplane.paths import CONTROL_PLANE_ROOT
-from factory.configio import describe, read_tree_config
+from factory.configio import describe, key_names, read_tree_config
 from factory.errors import FactoryConfigError
 from mindagent.config import AgentConfig
 from simulator.backends import ScriptedBackend
@@ -64,8 +64,8 @@ def read_agent_settings(store: GitStore) -> tuple[AgentConfig, tuple[str, ...]]:
             f"{AGENT_CONFIG} is missing; the agent switch needs it (run install-defaults)"
         ) from None
     keys = set(payload)
-    missing = sorted(set(_REQUIRED) - keys)
-    unknown = sorted(keys - set(_REQUIRED) - set(_OPTIONAL))
+    missing = key_names(set(_REQUIRED) - keys)
+    unknown = key_names(keys - set(_REQUIRED) - set(_OPTIONAL))
     if missing or unknown:
         raise FactoryConfigError(f"{AGENT_CONFIG}: missing {missing}, unknown {unknown}")
     scenario_ids = _str_list(payload, "scenario_ids")
@@ -79,7 +79,7 @@ def read_agent_settings(store: GitStore) -> tuple[AgentConfig, tuple[str, ...]]:
             scenario_ids=tuple(scenario_ids), bindings=bindings,
             **{k: payload[k] for k in _OPTIONAL if k in payload},
         )
-    except (KeyError, TypeError, ValueError) as exc:
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
         raise FactoryConfigError(f"{AGENT_CONFIG}: {describe(exc)}") from None
     return config, tuple(lines)
 

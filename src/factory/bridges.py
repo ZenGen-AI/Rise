@@ -17,7 +17,7 @@ from controlplane.config import (
 )
 from controlplane.gitstore import GitStore
 from controlplane.paths import backends_config_file
-from factory.configio import describe, read_tree_config
+from factory.configio import describe, key_names, read_tree_config
 from factory.errors import FactoryConfigError
 from inference_bridge import CliBridge
 
@@ -42,7 +42,7 @@ def build_bridge(
             f"{rel} is missing; the {role!r} bridge needs a backend entry there"
         ) from None
     if role not in payload:
-        raise FactoryConfigError(f"{rel} has no {role!r} entry (has: {sorted(payload)})")
+        raise FactoryConfigError(f"{rel} has no {role!r} entry (has: {key_names(payload)})")
     raw = payload[role]
     if not isinstance(raw, dict):
         raise FactoryConfigError(f"{rel}: {role!r} must be a mapping, got {type(raw).__name__}")
@@ -52,7 +52,7 @@ def build_bridge(
         raise FactoryConfigError(f"{rel}: {role!r} is missing key {exc.args[0]!r}") from None
     except CredentialInGitTreeError as exc:
         raise FactoryConfigError(f"{rel}: {role!r}: {exc}") from None
-    except (ValueError, TypeError, AttributeError) as exc:
+    except (ValueError, TypeError, AttributeError, OverflowError) as exc:
         raise FactoryConfigError(f"{rel}: {role!r}: {describe(exc)}") from None
     if cfg.invocation_form != "cli":
         raise FactoryConfigError(
@@ -66,5 +66,5 @@ def build_bridge(
     except MissingCredentialError as exc:
         # 信息只报变量名(controlplane.config.resolve_credential)
         raise FactoryConfigError(str(exc)) from None
-    except (ValueError, TypeError, AttributeError) as exc:
+    except (ValueError, TypeError, AttributeError, OverflowError) as exc:
         raise FactoryConfigError(f"{rel}: {role!r}: {describe(exc)}") from None

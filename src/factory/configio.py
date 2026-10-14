@@ -1,7 +1,8 @@
 """装配期读配置文件与预检的入口:把"这份文件读不了"的各种形态统一成 FactoryConfigError(命令行退出码 2)。"""
 from __future__ import annotations
 
-from collections.abc import Callable
+import re
+from collections.abc import Callable, Iterable
 from typing import TypeVar
 
 from controlplane.config import ConfigTypeError, CredentialInGitTreeError, read_config
@@ -10,11 +11,17 @@ from factory.errors import FactoryConfigError
 
 T = TypeVar("T")
 
+PLACEHOLDER = "<value>"
+_QUOTES = "'\""
+_OPEN = {"[": "]", "{": "}", "(": ")"}
+_NUMERIC_ONLY = re.compile(r"[0-9\s,.eE+\-]*")
+
 
 def read_tree_config(store: GitStore, rel: str) -> dict:
     """read_config 的包装。文件不存在照旧抛 FileNotFoundError,由调用方按场景措辞;其余读不了的情形都是 FactoryConfigError:
 
-    - 载荷里有凭证值字段,或文件不是 config 信封:沿用原信息,里面只有路径与键名,没有值。
+    - 载荷里有凭证值字段:沿用原信息,里面只有路径与键名,没有值。
+    - 文件不是 config 信封:只写路径。信封的 type 字段是个自由字符串,可能被误填成凭证,所以不写它的取值。
     - 其他情形(YAML 语法错误、信封不合 schema、schema_version 不认识、顶层不是映射、读文件失败):
       只写路径与异常类名。yaml 与 jsonschema 的信息会引用文件内容,可能带出凭证,所以不回显。
     """
@@ -22,7 +29,9 @@ def read_tree_config(store: GitStore, rel: str) -> dict:
         return read_config(store, rel)
     except FileNotFoundError:
         raise
-    except (CredentialInGitTreeError, ConfigTypeError) as exc:
+    except ConfigTypeError:
+        raise FactoryConfigError(f"{rel} is not a configuration product (its type field is wrong)") from None
+    except CredentialInGitTreeError as exc:
         raise FactoryConfigError(str(exc)) from None
     except Exception as exc:
         raise FactoryConfigError(
@@ -30,21 +39,82 @@ def read_tree_config(store: GitStore, rel: str) -> dict:
         ) from None
 
 
+def _skip_quote(text: str, i: int) -> int:
+    """text[i] 是引号时,返回这个字符串结束后的位置;没有闭合就一直到结尾。反斜杠转义下一个字符。"""
+    delim = text[i]
+    j = i + 1
+    while j < len(text):
+        if text[j] == "\\":
+            j += 2
+            continue
+        if text[j] == delim:
+            return j + 1
+        j += 1
+    return len(text)
+
+
+def _skip_group(text: str, i: int) -> tuple[int, bool]:
+    """text[i] 是 [ { ( 之一时,返回这一组结束后的位置和它是否闭合。组内的引号字符串整体跳过,组可以嵌套。"""
+    closers = [_OPEN[text[i]]]
+    j = i + 1
+    while j < len(text) and closers:
+        c = text[j]
+        if c in _QUOTES:
+            j = _skip_quote(text, j)
+            continue
+        if c in _OPEN:
+            closers.append(_OPEN[c])
+        elif c == closers[-1]:
+            closers.pop()
+        j += 1
+    return j, not closers
+
+
+def redact_message(text: str) -> str:
+    """把信息里的字面量换成 <value>:引号括起的字符串,以及括号括起的一整组(可嵌套)。
+    括号组里只有数字、逗号、点和正负号的(数字范围,如 [0, 1])原样保留;引号或括号没有闭合时,从它开始到结尾都换掉。"""
+    out: list[str] = []
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if c in _QUOTES:
+            i = _skip_quote(text, i)
+            out.append(PLACEHOLDER)
+        elif c in _OPEN:
+            j, closed = _skip_group(text, i)
+            if closed and _NUMERIC_ONLY.fullmatch(text[i + 1:j - 1]):
+                out.append(text[i:j])
+            else:
+                out.append(PLACEHOLDER)
+            i = j
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def key_names(keys: Iterable[object]) -> list[str]:
+    """给错误信息列键名。键不一定是字符串(yaml 里可以写 1: 2),字符串和整数混着排序会抛 TypeError,所以先转成字符串。"""
+    return sorted(str(k) for k in keys)
+
+
 def describe(exc: BaseException) -> str:
     """把外来异常说成一句不带配置取值的话,给 FactoryConfigError 的信息用。
 
-    - ValueError(各包的校验错误):类名加信息,信息截在 ", got " 之前。校验信息的形状是"<字段> must be ..., got <取值>",
-      期望的形状已经说完整,取值本身对操作者没有用,还可能是误填进来的凭证。
+    - ValueError(各包的校验错误):类名加信息。先把信息截在 ", got " 之前(校验信息通常是"<字段> must be ..., got <取值>"),
+      再用 redact_message 把剩下的引号字符串与括号组换成 <value>:有的校验器把取值写在分隔符之前,甚至没有分隔符。
+      数字范围(如 [0, 1])不是取值,保留。
     - KeyError:键名是标识符时写出键名(缺了哪个键有用),否则只写类名。
-    - 其余(TypeError、AttributeError、yaml 与 jsonschema 的错误):只写类名,它们的信息可能引用取值。
-    版本号、变量名、路径里的名字这类标识符出现在信息里是有意的:操作者要靠它们找到文件。"""
+    - 其余(TypeError、AttributeError、OverflowError、yaml 与 jsonschema 的错误):只写类名,它们的信息可能引用取值。
+    版本号、变量名、路径里的名字这类标识符出现在信息里是有意的:操作者要靠它们找到文件。没有引号也没有括号的裸取值
+    (例如 unknown mode x)挡不住,新写的校验器要把取值放进 repr,或放在 ", got " 之后。"""
     name = type(exc).__name__
     if isinstance(exc, KeyError) and exc.args and isinstance(exc.args[0], str) and exc.args[0].isidentifier():
         return f"{name}: {exc.args[0]!r}"
     if isinstance(exc, ValueError):
         text = str(exc)
         cut = text.find(", got ")
-        return f"{name}: {text if cut == -1 else text[:cut]}"
+        return f"{name}: {redact_message(text if cut == -1 else text[:cut])}"
     return name
 
 
@@ -55,7 +125,9 @@ def preflight(label: str, load: Callable[[], T]) -> T:
         return load()
     except FactoryConfigError:
         raise
-    except (CredentialInGitTreeError, ConfigTypeError) as exc:
+    except ConfigTypeError:
+        raise FactoryConfigError(f"{label}: not a configuration product (its type field is wrong)") from None
+    except CredentialInGitTreeError as exc:
         raise FactoryConfigError(f"{label}: {exc}") from None
     except Exception as exc:
         raise FactoryConfigError(f"{label}: {describe(exc)}") from None

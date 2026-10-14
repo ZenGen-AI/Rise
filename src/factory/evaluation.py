@@ -15,7 +15,7 @@ from diagnostic.assets import DiagnosticAssetError, read_item_pool, read_taxonom
 from diagnostic.evaluator import make_diagnostic_evaluator
 from diagnostic.scorer import MockJudgeBackend
 from diagnostic.someval_adapter import MockSoMEvalRunner
-from factory.configio import read_tree_config
+from factory.configio import key_names, read_tree_config
 from factory.errors import FactoryConfigError
 
 EVALUATOR_CONFIG = f"{CONTROL_PLANE_ROOT}/config/evaluator.yaml"
@@ -37,7 +37,7 @@ def read_evaluator_config(store: GitStore) -> dict:
     if keys != set(EVALUATOR_KEYS):
         raise FactoryConfigError(
             f"{EVALUATOR_CONFIG} must have exactly the keys {list(EVALUATOR_KEYS)}; "
-            f"missing {sorted(set(EVALUATOR_KEYS) - keys)}, unknown {sorted(keys - set(EVALUATOR_KEYS))}"
+            f"missing {key_names(set(EVALUATOR_KEYS) - keys)}, unknown {key_names(keys - set(EVALUATOR_KEYS))}"
         )
     for key in ("taxonomy_version", "item_pool_version", "benchmark_version"):
         if not isinstance(payload[key], str) or not payload[key]:
