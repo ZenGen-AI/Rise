@@ -23,13 +23,14 @@ from factory.agent import (
     personas_from_tree,
     read_agent_settings,
 )
-from factory.configio import read_tree_config
+from factory.configio import preflight, read_tree_config
 from mindagent.admit import handle_admit_proposal
 from mindagent.rounds import make_start_round_handler
 from recipestore.admit import handle_admit_recipe
 from recipestore.record import handle_record_track
 from trainplanner.backends import BridgeDecisionBackend, HeuristicBackend
-from trainscheduler.config import SchedulerConfig, load_scheduler_config
+from trainplanner.templates import load_template
+from trainscheduler.config import SchedulerConfig, load_scheduler_config, load_training_defaults
 from trainscheduler.nominate import make_nominate_handler
 from trainscheduler.plan_handler import make_plan_handler
 
@@ -46,7 +47,16 @@ def scheduler_config_loader(confirm_directives: bool | None) -> Callable[[GitSto
     return load
 
 
+def _checked_scheduler(ctx) -> SchedulerConfig:
+    """装配期预检 scheduler.yaml:读一次、转成 FactoryConfigError,但不缓存。处理器仍在每次调用时自己重读(计划 5,Ruling 21),
+    所以人改了配置下一次动作就生效;预检只保证"起跑时这份配置是好的",不是"一直是好的"。"""
+    return preflight("scheduler.yaml", lambda: scheduler_config_loader(ctx.confirm_directives)(ctx.store))
+
+
 def _plan(ctx) -> Handler:
+    config = _checked_scheduler(ctx)
+    preflight("training_defaults.yaml", lambda: load_training_defaults(ctx.store))
+    preflight("planner prompt template", lambda: load_template(ctx.store, config.template_version))
     if ctx.planner_backend == "heuristic":
         backend = HeuristicBackend()
     else:
@@ -55,6 +65,7 @@ def _plan(ctx) -> Handler:
 
 
 def _nominate(ctx) -> Handler:
+    _checked_scheduler(ctx)
     return make_nominate_handler(
         config_loader=scheduler_config_loader(ctx.confirm_directives),
         accept_mock_evidence=ctx.accept_mock_evidence,
