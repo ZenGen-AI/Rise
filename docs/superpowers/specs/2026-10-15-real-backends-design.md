@@ -225,7 +225,9 @@ Mock 引用(`mock://`)和真实引用(`ssh://`)互相拒绝,避免一个模式�
 component_backends: {executor: "real", converter: "real", someval: "real", judge: "mock"}
 ```
 
-`diagnostic_grade` 不读这个字段,所以等级判定不受影响;人和后续的 real 升级则能据此知道缺口只剩 judge。这个字段要加在哪一层(`run_diagnostic` 的参数,还是评估器写报告的地方)取决于 `diagnostic/orchestrator.py` 的写法,我没读到,见 V12。
+`diagnostic_grade` 不读这个字段,所以等级判定不受影响;人和后续的 real 升级则能据此知道缺口只剩 judge。
+
+加在哪里已核实:`diagnostic/store_adapter.py:16` 的 `write_report(store, run_id, report, *, backends)` 做 `payload = report.to_dict()` 再 `payload[BACKENDS_KEY] = backends`,报告与标记同一次写入落盘。`component_backends` 按同样方式加在这里,多一个关键字参数,不进 `DiagnosticReport` 数据类,也不动 `run_diagnostic`(它在 `diagnostic/orchestrator.py:202` 调用 `write_report`)。
 
 升到 real 要另开一轮:实现 RealJudge(独立于候选模型的 OpenAI 兼容端点,沿用 `scorer.py` 现有的自评偏差防护),再把 `backends` 改成 `"real"`。届时 `resolve_baseline` 要求基线报告的等级与当前等级相同,所以切换后的头几轮不会有可比增益,这一点闭环设计第 10 条已有记载。
 
@@ -264,11 +266,11 @@ component_backends: {executor: "real", converter: "real", someval: "real", judge
 - **V9(阻塞)。** `run_sft_validation.py --resume` 的参数形态,以及续训时存点目录如何指定。
 - **V10。** 该脚本里 `--max-steps`、`--train-records` 与配置里 `num_train_epochs` 的关系:数据行数变化时步数怎么算,`--max-steps` 能否在 epoch 中途停下并写存点。
 - **V11(阻塞)。** 渲染配置时覆盖 `gradient_accumulation_steps` 是否安全,以及 ROLL 是否按"DP8 × 每卡批 × 累积"消费整批(第 5.2 节第 2 步的算式依赖它)。顺带确认 `--sequence-length` 对长上下文行的截断行为:行展开会让后面的行变长,被静默截断就等于丢监督。
-- **V12。** `diagnostic/orchestrator.py` 里报告载荷的组装位置,决定 `component_backends` 加在哪一层。
+- ~~V12~~,**已核实。** 载荷在 `diagnostic/store_adapter.py:16` 的 `write_report` 里组装,`component_backends` 加在那里(第 8 节)。
 
 **本机还没读的部分**
 
-`factory` 的装配与 CLI 入口、子系统设计里的 SSH 约定、`_rule_hit` 的判分细节。这些决定第 3 节配置怎么接进 `make_mindtrainer_dispatcher` 和 `factory/evaluation.py`,实现计划阶段先读。
+子系统设计里的 SSH 约定、`_rule_hit` 的判分细节还没读,实现计划阶段先读。`factory` 的装配入口已核实,见第 12 节。
 
 ## 11. 实施顺序
 
@@ -277,6 +279,17 @@ component_backends: {executor: "real", converter: "real", someval: "real", judge
 3. 在主机上做 V1 到 V5 的验证,结果回填本文档。
 4. `RollExecutor` 与 `RollLoraConverter`。
 5. 评测:先 V3、V6、V8,再做 `RealSoMEvalRunner`。
-6. 装配:`backends` 声明、`training_defaults.yaml` 的真实模式配置、远端冒烟。
+6. 装配(接线点见第 12 节):`assemble` 的真实后端分支、`component_backends` 记录、`training_defaults.yaml` 的真实模式配置(`grpo_steps: 0`)、远端冒烟。
 
 1 和 2 不依赖任何待验证项,可以并行开始。3 之后每一步都要等对应验证有答案。
+
+## 12. 装配(已核实的接线点)
+
+`factory/wire.py:106` 的 `assemble(store, options, *, env=None, log_dir=None, builders=None)` 是唯一入口。核实到的两条路径:
+
+- 不传 `--enable` 时直接 `return Assembly(make_mindtrainer_dispatcher(), {}, None, False)`,评估器为 `None`。
+- 开了闭环开关时注入 `make_mindtrainer_dispatcher(data_producer=TemplateDataProducer())` 与 `build_mock_evaluator(store)`。
+
+真实后端因此只需在 `assemble` 里多一条分支:给 `make_mindtrainer_dispatcher` 传 `executor_factory` 与 `converter`,并把评估器从 `build_mock_evaluator` 换成真实组装。无开关路径一行不动,保持与 `mindtrainer.wire` 字节等价这条既有约定。
+
+真实后端用什么开关表达(复用 `--enable`,还是单独的 `--backends real`),以及 `compute.yaml` 缺失时的退出码,取决于 `factory/switches.py` 与 `FactoryOptions` 的现有形状,实现计划阶段定。
