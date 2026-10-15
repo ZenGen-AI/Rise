@@ -62,7 +62,7 @@ control-plane/                              # git仓库根
 │   ├── backends.yaml                       # 外部推理后端:形态/模型名/prompt模板版本/凭证变量名
 │   └── pricing.yaml                        # 可选单价表(GPU/token),给出则算金额
 ├── compute/
-│   └── endpoints.yaml                      # 远程GPU服务器连接配置(不含密码/私钥内容,见补充 G.3)
+│   └── endpoints.yaml                      # 远程GPU的逻辑端点与路径、阈值(不含主机地址与密码/私钥内容,见补充 G.3 与真实后端设计 D9)
 └── index.sqlite                            # 从文件树重建的查询索引(.gitignore排除)
 ```
 
@@ -1367,7 +1367,8 @@ V1 是单开发者、单能力维度的研究原型,但 V2 已确定三个演进
 | 层 | 内容 | 位置 | 是否进 git |
 |---|---|---|---|
 | **L-A 可复现性配置** | 外部推理后端选择(claude/codex/deepseek)、调用形态(CLI 进程/API)、模型名、prompt 模板版本、RetryPolicy、单价表、轮询间隔 | git 树 `control-plane/config/` | **进** |
-| **L-B 环境配置** | 远程 GPU 连接目标(主机、端口、用户名、工作目录) | git 树 `control-plane/compute/endpoints.yaml`(1.2 节已定) | **进**(仅非秘密字段) |
+| **L-B 环境配置** | 远程 GPU 的逻辑端点、工作目录、模型路径、预检阈值、轮询与超时 | git 树 `control-plane/compute/endpoints.yaml`(1.2 节已定) | **进**(仅非秘密字段) |
+| **L-B′ 主机定位** | 逻辑端点到 ssh 别名的映射(主机、端口、用户、跳板都在 `~/.ssh/config`) | 仓库之外的本机文件,路径由 `RISMFORGE_COMPUTE_HOSTS` 指定 | **不进**(依据:真实后端设计 D9) |
 | **L-C 凭证** | API token、SSH 密码/私钥口令 | 环境变量,或 gitignored 的本地文件 | **绝不进** |
 
 **L-A 必须进 git 的理由**:它直接决定实验能不能复现。RecipeStore 要求锚定"外部推理桥接的精确 prompt 模板版本"(5.1 节),而配方锚定的是**版本引用**,被引用的配置本体必须在 git 树里可追溯,否则锚定就是空指针。这与"元数据唯一真相"完全一致,配置本就是元数据的一种。
@@ -1383,7 +1384,7 @@ backend: claude_cli
 token_env: ANTHROPIC_API_KEY      # 只记变量名,值从环境读取
 ```
 
-而不是 `token: sk-ant-xxx`。SSH 同理:`endpoints.yaml` 存主机/端口/用户名/私钥**路径**,不存密码或私钥内容。
+而不是 `token: sk-ant-xxx`。SSH 同理:`endpoints.yaml` 只存逻辑端点与路径、阈值,主机定位走仓库之外的本机映射(L-B′),密钥、端口、用户都留在 `~/.ssh/config`,不存密码或私钥内容。
 
 **落地要求(V1 编码时必做)**:
 - 仓库 `.gitignore` 必须排除本地凭证文件(如 `.env`、`*.local.yaml`、`secrets/`)。
@@ -1426,7 +1427,7 @@ token_env: ANTHROPIC_API_KEY      # 只记变量名,值从环境读取
 | 实体 | 概念内容 |
 |---|---|
 | **BackendConfig(外部推理后端配置,L-A)** | `{backend, invocation_form(cli/api), model_name, prompt_template_version, token_env(变量名,非值), retry_policy}`;进 git 树 `control-plane/config/` |
-| **ComputeEndpoint(计算层连接配置,L-B)** | `{host, port, user, workdir, key_path}`;进 `compute/endpoints.yaml`,**不含密码/私钥内容** |
+| **ComputeEndpoint(计算层连接配置,L-B)** | `{endpoint_id, work_root, roll_root, launch_prefix, base_model_path, heldout_jsonl, sft_template, 预检阈值, 轮询与超时}`;进 `compute/endpoints.yaml`,**不含主机地址与密码/私钥内容**。`endpoint_id` 到 ssh 别名的映射在仓库之外(L-B′) |
 | **PricingTable(单价表,L-A,可选)** | GPU 单价 + 各外部模型 token 单价;给出则 `outcome.yaml` 额外算金额(D.4) |
 
 #### G.7 可测试性

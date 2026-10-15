@@ -58,12 +58,12 @@ SoMEval(未核对):
 | D1 | 本机编排,远端以"后台作业 + 轮询"执行,不做常驻服务 | ROLL4ZenGen 只提供整段作业入口;作业可脱离 SSH 连接存活,守护进程重启后能重新接上 |
 | D2 | 编排器增加可选的 `run_sft_stage`;没有该方法的执行器走原来的逐步路径 | 让 ROLL 整段作业与逐步协议对上,又不动 Mock 与现有测试 |
 | D3 | 真实执行器只声明 `supported_phases = {"sft"}`;`grpo_steps > 0` 在配置校验期失败 | 一半真一半 mock 的存点没有意义,也会谎报 |
-| D4 | 真实存点是 `BigRef`:`uri=ssh://<别名>/<路径>`,`sha256`=目录清单哈希,`fetch_hint.type="roll_ssh"` | 复用现有信封;跨模式续训在派发层挡住(见 §6.1) |
+| D4 | 真实存点是 `BigRef`:`uri=ssh://<endpoint_id>/<路径>`,`sha256`=目录清单哈希,`fetch_hint.type="roll_ssh"` | 复用现有信封;跨模式续训在派发层挡住(见 §6.1) |
 | D5 | 转换器调用 `LoRAHFConverter`(CPU),产物是适配器导出,`fetch_hint` 写明所需基座 | 这是文档里唯一验证过的导出路径 |
 | D6 | SoMEval 以子进程运行,不在进程内导入 | 隔离重依赖与顶层 `src` 包名 |
 | D7 | `backends="real"` 只在所有参与评测的组件都是真实现时才声明 | 沿用 `diagnostic_grade` 的失败关闭语义 |
 | D8 | GPU 独占:主机租约 + 预检,绝不终止非本任务启动的进程 | 验证主机上有别人的服务 |
-| D9 | 连接配置放本机 `compute.yaml`,不进 git 树;密钥只记环境变量名 | 地址与路径因环境而异,密钥不落盘 |
+| D9 | 连接配置拆两处:路径与阈值进 git 树 `control-plane/compute/endpoints.yaml`,主机定位(ssh 别名)留本机文件;密钥只记环境变量名 | 远端路径与阈值要可追溯;主机地址因环境而异,不进仓库历史 |
 | D10 | 远端只写 `work_root`;所有远端操作经一个只依赖标准库的助手脚本 | 缩小 shell 引号面,远端行为可被哈希固定 |
 
 ## 3. 远端计算层
@@ -72,11 +72,13 @@ SoMEval(未核对):
 
 ### 3.1 配置
 
-本机文件 `compute.yaml`,路径由环境变量 `RISMFORGE_COMPUTE_CONFIG` 指定,不进 git 树。装配期读取,键缺失、多余或类型不对按 factory 现有约定退出码 2,报错只写键名,不回显值。
+配置拆成两处,按"是否需要可追溯"切。
+
+**树内 `control-plane/compute/endpoints.yaml`。** 一份 config 信封,用 `read_tree_config` 读,与 `evaluator.yaml` 走同一条路径,凭证字段名检查随之生效。在 `controlplane/paths.py` 加一个 `compute_endpoints_file()`,和 `backends_config_file()` 并列。装配期读取,键缺失、多余或类型不对按 factory 现有约定退出码 2,报错只写键名,不回显值。`install_defaults` 不安装它:远端路径没有合理默认值,缺了就拒绝装配真实后端。
 
 | 键 | 含义 |
 | --- | --- |
-| `ssh_alias` | `~/.ssh/config` 里的主机别名。密钥、跳板、端口都在那里,这份配置不存凭据 |
+| `endpoint_id` | 逻辑端点名,写进存点的 `uri`。它不是 ssh 别名,换主机时保持不变 |
 | `work_root` | 远端唯一可写根目录。作业、租约、助手脚本、产物都在其下 |
 | `roll_root` | ROLL4ZenGen 检出目录(只读使用) |
 | `launch_prefix` | 启动命令前缀(argv 列表),例如进入训练容器的命令。裸机时为空列表 |
@@ -85,6 +87,10 @@ SoMEval(未核对):
 | `sft_template` | `roll_root` 下的 LoRA SFT 配置模板路径 |
 | `min_free_host_mem_gib`、`min_free_disk_gib` | 预检阈值 |
 | `poll_seconds`、`job_timeout_seconds` | 轮询间隔与整段作业超时 |
+
+**本机主机映射。** 一个 YAML 文件,路径由环境变量 `RISMFORGE_COMPUTE_HOSTS` 指定,放在仓库之外,内容是 `{<endpoint_id>: <ssh 别名>}`。别名指向 `~/.ssh/config` 里的主机条目,密钥、跳板、端口都在那里,所以两处配置都不存凭据。映射里查不到树内的 `endpoint_id` 时退出码 2,报错写环境变量名和 `endpoint_id`。换机器只改本机映射,树内记录与已有存点引用都不用动。
+
+**与子系统设计 G.2 的关系。** G.2 的 L-B 一行把主机、端口、用户名都放进 `endpoints.yaml`。这里收窄为只放路径与阈值,主机定位退到本机,理由与 G.3 相同:地址一旦进了提交就清不掉。G.2 已按此同步修订。
 
 SSH 一律带 `-o BatchMode=yes -o ConnectTimeout=...`。远端命令用 `shlex.join` 拼成一个字符串,文件内容走 stdin,不拼进命令行。
 
@@ -141,7 +147,7 @@ class StagedExecutor(TrainingExecutor, Protocol):
 
 ## 5. RollExecutor
 
-放在 `mindtrainer/roll_executor.py`,依赖 `compute`。`executor_factory` 是闭包,装配期绑定好 `compute.yaml`。
+放在 `mindtrainer/roll_executor.py`,依赖 `compute`。`executor_factory` 是闭包,装配期绑定好树内 `endpoints.yaml` 与本机主机映射。
 
 ### 5.1 协议实现
 
@@ -188,7 +194,7 @@ class StagedExecutor(TrainingExecutor, Protocol):
 
 ### 6.1 存点引用
 
-`BigRef(uri="ssh://<别名>/<work_root>/jobs/<job_id>/<目录>", sha256=<manifest 哈希>, size_bytes=<总字节>, fetch_hint={"type": "roll_ssh", "format": "roll_lora_legacy", "job_id": ...})`。
+`BigRef(uri="ssh://<endpoint_id>/<work_root>/jobs/<job_id>/<目录>", sha256=<manifest 哈希>, size_bytes=<总字节>, fetch_hint={"type": "roll_ssh", "format": "roll_lora_legacy", "job_id": ...})`。
 
 manifest 哈希 = 排序后的 `(相对路径, 字节数)` 列表的哈希,再并入所有小文件(json、txt、小于 64 MiB 的 pt)的内容哈希。大张量分片只记大小,不逐字节哈希:几十 GB 的优化器状态每次存点都完整读一遍代价太高。它能发现结构变化和截断,发现不了位腐烂。
 
@@ -283,7 +289,7 @@ component_backends: {executor: "real", converter: "real", someval: "real", judge
 - **转换器。** 幂等(已有完成标记直接返回)、`.tmp` 清理范围、引用格式。
 - **评测。** 假子进程与假隧道:`candidate_id` 经产物解析回 `BigRef`、`prediction.jsonl` 回填、答案归一化后才比对 `reference_answer`、k 条不齐、缺失 item 抛 `UnmappedItemsError`、服务启动超时仍会释放租约。
 - **证据等级。** 混合组件时 `diagnostic_grade` 不返回 real 的回归测试。
-- **真实冒烟(`@pytest.mark.remote`,默认跳过,需要 `compute.yaml`)。** 一条 8 步的最小 SFT 加一次转换加 2 个 item 的评测,验证整条链路能走通。它证明接线正确,不证明模型变好。
+- **真实冒烟(`@pytest.mark.remote`,默认跳过,需要树内 `endpoints.yaml` 与本机主机映射)。** 一条 8 步的最小 SFT 加一次转换加 2 个 item 的评测,验证整条链路能走通。它证明接线正确,不证明模型变好。
 
 ## 10. 未核实项与待你确认
 
@@ -335,4 +341,4 @@ component_backends: {executor: "real", converter: "real", someval: "real", judge
 
 真实后端因此只需在 `assemble` 里多一条分支:给 `make_mindtrainer_dispatcher` 传 `executor_factory` 与 `converter`,并把评估器从 `build_mock_evaluator` 换成真实组装。无开关路径一行不动,保持与 `mindtrainer.wire` 字节等价这条既有约定。
 
-真实后端用什么开关表达(复用 `--enable`,还是单独的 `--backends real`),以及 `compute.yaml` 缺失时的退出码,取决于 `factory/switches.py` 与 `FactoryOptions` 的现有形状,实现计划阶段定。
+真实后端用什么开关表达(复用 `--enable`,还是单独的 `--backends real`),取决于 `factory/switches.py` 与 `FactoryOptions` 的现有形状,实现计划阶段定。树内 `endpoints.yaml` 或本机主机映射缺失、不合法,一律是 `FactoryConfigError`,退出码 2,与 `evaluator.yaml` 缺失同一约定。
