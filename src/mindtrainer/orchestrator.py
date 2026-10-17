@@ -23,6 +23,7 @@ from mindtrainer.training_config import (
     total_steps, validate_training_config,
 )
 from mindtrainer.trajectory_source import RolloutFailedError, TrajectorySource, batch_for_step
+from simulator.datamodel import Episode
 from simulator.dataset import DatasetIntegrityError
 
 
@@ -90,6 +91,48 @@ def _update_summary(summary: dict, result: StepResult, reward_mean: float | None
     summary["degenerate_groups_total"] = (
         summary.get("degenerate_groups_total", 0) + int(result.metrics["n_degenerate_groups"])
     )
+
+
+def _compute_stage_end(
+    executor: TrainingExecutor, batches: list[list[Episode]], first_step: int, limit: int
+) -> int:
+    """执行器能一次吃下的段终点(开区间)。limit 是编排器算的段边界,开区间。
+
+    有 stage_end 的执行器可以让段更短(例如磁盘容量约束);返回值必须满足
+    first_step < end <= limit。不前进就是死循环,所以违反时响亮失败。
+    """
+    end_fn = getattr(executor, "stage_end", None)
+    if end_fn is None:
+        return limit
+    end = end_fn(batches, first_step=first_step, limit=limit)
+    if not (first_step < end <= limit):
+        raise RuntimeError(
+            f"executor.stage_end returned {end} which is not in ({first_step}, {limit}], "
+            "violating the guarantee of forward progress"
+        )
+    return end
+
+
+def _process_step_results(
+    results: list[StepResult],
+    *,
+    summary: dict,
+    start_step: int,
+    reward_mean: float | None,
+    failed: int,
+    on_step: Callable[[StepResult], None] | None,
+) -> None:
+    """对一批结果逐个做与逐步路径完全相同的检查和记账:step 字段必须连续且从 start_step 起,
+    然后写摘要、回调。抽出来让单步路径与阶段路径共用,避免两份记账逻辑漂移。"""
+    for i, result in enumerate(results):
+        expected_step = start_step + i
+        if result.step != expected_step:
+            raise RuntimeError(
+                f"executor returned step {result.step} at index {i}, expected {expected_step}"
+            )
+        _update_summary(summary, result, reward_mean, failed)
+        if on_step is not None:
+            on_step(result)
 
 
 def run_training(
@@ -171,13 +214,46 @@ def run_training(
         if cfg.mode == "batch" and cfg.grpo_steps > 0:
             point = "grpo precheck"
             batch_groups = _prepare_batch_grpo(cfg, sources["grpo_opd"], attribution)
-        for step in range(start, total):
+        step = start
+        while step < total:
             phase = phase_at(step, cfg)
             point = f"step {step} ({phase})"
             reward_mean, failed = None, 0
             if phase == "sft":
                 if sft_episodes is None:
                     sft_episodes = sources["sft"].collect().episodes
+                run_sft_stage = getattr(executor, "run_sft_stage", None)
+                if run_sft_stage is not None:
+                    # 阶段路径:一段跑完再记账,段尾补一次存点判断
+                    sft_end = min(cfg.sft_steps, total)
+                    next_checkpoint = (step // cfg.checkpoint_every_steps + 1) * cfg.checkpoint_every_steps
+                    limit = min(next_checkpoint, sft_end)
+                    prior_batches = [
+                        batch_for_step(sft_episodes, i, cfg.sft_batch_size) for i in range(step)
+                    ]
+                    end = _compute_stage_end(executor, prior_batches, step, limit)
+                    batches = [
+                        batch_for_step(sft_episodes, i, cfg.sft_batch_size) for i in range(step, end)
+                    ]
+                    point = f"sft stage [{step}, {end})"
+                    results = run_sft_stage(
+                        batches, first_step=step, trained_slot=cfg.trained_slot,
+                        prior_batches=prior_batches,
+                    )
+                    _process_step_results(
+                        results, summary=summary, start_step=step,
+                        reward_mean=None, failed=0, on_step=on_step,
+                    )
+                    done = end
+                    step = end
+                    if done < total and done % cfg.checkpoint_every_steps == 0:
+                        ref = executor.save_checkpoint(f"step-{done}")
+                        run = dataclasses.replace(
+                            run, checkpoint_step=done, last_checkpoint_ref=ref,
+                            curve_summary=copy.deepcopy(summary),
+                        )
+                        write_training_run(store, run)
+                    continue
                 chosen = batch_for_step(sft_episodes, step, cfg.sft_batch_size)
                 result = executor.sft_step(chosen, trained_slot=cfg.trained_slot)
             else:
@@ -202,10 +278,12 @@ def run_training(
                     f"executor reports step {result.step} but the orchestrator is at step {step}: "
                     f"executor and run record are out of sync"
                 )
-            _update_summary(summary, result, reward_mean, failed)
-            if on_step is not None:
-                on_step(result)
+            _process_step_results(
+                [result], summary=summary, start_step=step,
+                reward_mean=reward_mean, failed=failed, on_step=on_step,
+            )
             done = step + 1
+            step = done
             if done < total and done % cfg.checkpoint_every_steps == 0:
                 ref = executor.save_checkpoint(f"step-{done}")
                 run = dataclasses.replace(

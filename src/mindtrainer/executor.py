@@ -56,6 +56,37 @@ class TrainingExecutor(Protocol):
     def checkpoint_intact(self, checkpoint_ref: BigRef) -> bool: ...
 
 
+class StagedExecutor(TrainingExecutor, Protocol):
+    """支持阶段批量执行的扩展协议(真实后端设计 §4)。
+
+    run_sft_stage(batches, *, first_step, trained_slot, prior_batches) -> list[StepResult]:
+    按阶段返回整段步级结果。batches[i] 是全局第 first_step + i 步的数据,与逐步路径里
+    batch_for_step 取到的相同。返回的 StepResult 按步排列,step 字段必须连续且从 first_step 起。
+
+    prior_batches[j] 是全局第 j 步的数据,j 取 [0, first_step)。执行器不在这些步上训练,
+    但必须把它们写进 train.jsonl 的前缀:ROLL 续训按位置跳过已消费的批次,前缀缺失会让它
+    从错误的数据位置接着跑,而且不报错。first_step == 0 时为空列表。
+
+    stage_end(batches, *, first_step, limit) -> int:可选方法,让执行器把段切得更细。
+    limit 是编排器算出的段终点(开区间,不含该步);返回值是执行器能一次吃下的终点,
+    同样开区间,必须满足 first_step < 返回值 <= limit,否则编排器抛 RuntimeError
+    (不前进就是死循环,要响亮地失败)。没有这个方法的执行器按 limit 处理。
+    """
+
+    def run_sft_stage(
+        self,
+        batches: list[list[Episode]],
+        *,
+        first_step: int,
+        trained_slot: str,
+        prior_batches: list[list[Episode]],
+    ) -> list[StepResult]: ...
+
+    def stage_end(
+        self, batches: list[list[Episode]], *, first_step: int, limit: int
+    ) -> int: ...
+
+
 def _sha256(obj) -> str:
     text = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(text.encode("utf-8")).hexdigest()

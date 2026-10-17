@@ -649,3 +649,105 @@ def test_a_reviewed_candidate_that_is_not_this_runs_is_left_for_a_human(store, e
     with pytest.raises(CandidateAlreadyReviewedError):
         _go(store, cfg, MockExecutor())
     assert read_training_run(store, RUN).status == "pending"
+
+
+class TestStagedExecutor:
+    """阶段执行器协议:run_sft_stage 成批返回、stage_end 切段、prior_batches 是前缀。
+
+    覆盖:
+    - 无 run_sft_stage 时走单步路径,on_step 逐步到达(与改动前一致)
+    - 有 run_sft_stage 时成批返回,段内每步都被记账
+    - stage_end 返回更短的段,编排器按子段衔接,prior_batches 随段增长
+    - stage_end 不前进(first_step <= end)抛 RuntimeError
+    - 结果的 step 字段与预期不符抛 RuntimeError
+    """
+
+    def test_single_step_path_unchanged(self, store):
+        """MockExecutor 无 run_sft_stage:单步路径逐步回调,run 正常收尾。"""
+        steps = []
+        cfg = _batch_cfg(sft_steps=3, grpo_steps=0, checkpoint_every_steps=100)
+        run = _go(store, cfg, MockExecutor(), steps=steps)
+        assert [r.step for r in steps] == [0, 1, 2]
+        assert run.status == "executed"
+
+    def test_staged_path_records_every_step(self, store):
+        """有 run_sft_stage:一次成批返回,段内每步都进 on_step 与摘要。"""
+
+        class StagedExecutor(MockExecutor):
+            def __init__(self):
+                super().__init__()
+                self.calls = []
+
+            def run_sft_stage(self, batches, *, first_step, trained_slot, prior_batches):
+                self.calls.append((first_step, len(batches), len(prior_batches)))
+                return [
+                    self.sft_step(batch, trained_slot=trained_slot) for batch in batches
+                ]
+
+        steps = []
+        cfg = _batch_cfg(sft_steps=5, grpo_steps=0, checkpoint_every_steps=100)
+        executor = StagedExecutor()
+        run = _go(store, cfg, executor, steps=steps)
+        assert executor.calls == [(0, 5, 0)], executor.calls
+        assert [r.step for r in steps] == [0, 1, 2, 3, 4]
+        assert run.curve_summary["sft_steps_done"] == 5
+
+    def test_stage_end_cuts_finer_and_prefix_grows(self, store):
+        """stage_end 每段只吃 2 步:段依次衔接,prior_batches 随已训步数增长。"""
+
+        class ChunkingExecutor(MockExecutor):
+            def __init__(self):
+                super().__init__()
+                self.calls = []
+
+            def run_sft_stage(self, batches, *, first_step, trained_slot, prior_batches):
+                self.calls.append((first_step, len(batches), len(prior_batches)))
+                return [
+                    self.sft_step(batch, trained_slot=trained_slot) for batch in batches
+                ]
+
+            def stage_end(self, batches, *, first_step, limit):
+                return min(first_step + 2, limit)
+
+        cfg = _batch_cfg(sft_steps=5, grpo_steps=0, checkpoint_every_steps=100)
+        executor = ChunkingExecutor()
+        _go(store, cfg, executor)
+        assert executor.calls == [(0, 2, 0), (2, 2, 2), (4, 1, 4)], executor.calls
+
+    def test_stage_end_without_forward_progress_fails_loudly(self, store):
+        class StuckExecutor(MockExecutor):
+            def run_sft_stage(self, batches, *, first_step, trained_slot, prior_batches):
+                return []
+
+            def stage_end(self, batches, *, first_step, limit):
+                return first_step
+
+        cfg = _batch_cfg(sft_steps=3, grpo_steps=0)
+        with pytest.raises(RuntimeError, match=r"violating the guarantee of forward progress"):
+            _go(store, cfg, StuckExecutor())
+
+    def test_stage_end_beyond_limit_is_rejected(self, store):
+        class OverrunExecutor(MockExecutor):
+            def run_sft_stage(self, batches, *, first_step, trained_slot, prior_batches):
+                return []
+
+            def stage_end(self, batches, *, first_step, limit):
+                return limit + 1
+
+        cfg = _batch_cfg(sft_steps=3, grpo_steps=0)
+        with pytest.raises(RuntimeError, match=r"violating the guarantee of forward progress"):
+            _go(store, cfg, OverrunExecutor())
+
+    def test_results_step_mismatch_is_rejected(self, store):
+        """结果的 step 字段错开时,记账处抛 RuntimeError(step 校验没有被废掉)。"""
+
+        class MismatchExecutor(MockExecutor):
+            def run_sft_stage(self, batches, *, first_step, trained_slot, prior_batches):
+                return [
+                    StepResult(first_step + i + 100, "sft", {"sft_loss": 0.1})
+                    for i in range(len(batches))
+                ]
+
+        cfg = _batch_cfg(sft_steps=3, grpo_steps=0)
+        with pytest.raises(RuntimeError, match=r"executor returned step \d+ at index \d+, expected \d+"):
+            _go(store, cfg, MismatchExecutor())
