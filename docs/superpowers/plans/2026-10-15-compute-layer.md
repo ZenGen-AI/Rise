@@ -54,12 +54,12 @@
 
 - `src/compute/` 与 `src/factory/compute_config.py` 的每个源文件以 `from __future__ import annotations` 开头(模块 docstring 之后的第一条语句也算);`job_tool.py` 同样,Task 1 的 `tests/test_compute_scaffold.py` 与既有的 `tests/test_factory_boundaries.py` 强制检查。
 - **依赖方向:** `src/compute/*.py` 只导入标准库、`compute.*`、`controlplane.deferred`;`job_tool.py` 只导入标准库。`controlplane`、`simulator`、`inference_bridge`、`recipestore`、`trainplanner`、`trainscheduler`、`actio`、`mindagent` 不导入 `compute`。`compute` 不导入 `factory`、`mindtrainer`、`diagnostic`。
-- **不引入新第三方依赖**;`pyproject.toml` 只改 wheel 包列表这一行(追加式脚本,见任务 1)。
+- **不引入新第三方依赖**;`pyproject.toml` 只改两处:wheel 包列表追加 `src/compute`(Task 1,追加式脚本)、`[tool.pytest.ini_options]` 新增 `markers`(Task 7 Step 5)。
 - **凭证绝不进 git 树、命令行或日志。** 密钥只走 stdin;`TransportError` 的 `reason` 只含 stderr 尾巴与退出码,不含请求内容;配置错误只写键名与路径,不回显取值。
 - **绝不终止非本任务启动的进程。** `stop` 只对 `proc.json` 记录且启动标记仍匹配的进程组发信号。
-- **只改本计划文件表里的文件**:`src/mindtrainer` 只动文件表列出的那几个(`roll_executor.py`、`roll_converter.py` 新建,`executor.py`、`orchestrator.py`、`dispatch.py`、`checkpoint.py` 按 Task 5、7、8 的步骤改);不碰 `src/diagnostic`、`schemas/`、`cli/`;`src/controlplane` 只动三处:`deferred.py` 新建(Task 1)、`paths.py` 追加一个函数(Task 1)、`daemon.py` 加延后通道(Task 6)。
+- **只改本计划文件表与各任务 Files 小节列出的文件**:`src/mindtrainer` 只动文件表列出的那几个(`roll_executor.py`、`roll_converter.py` 新建,`executor.py`、`orchestrator.py`、`dispatch.py`、`checkpoint.py` 按 Task 5、7、8 的步骤改);不碰 `src/diagnostic`、`schemas/`、`cli/`;`src/controlplane` 只动三处:`deferred.py` 新建(Task 1)、`paths.py` 追加一个函数(Task 1)、`daemon.py` 加延后通道(Task 6)。
 - `git add` 逐个文件,**不要用 `git add .`**;**不要碰** `cli/package.json`、`cli/package-lock.json`;**提交信息不加 `Co-Authored-By` 行**。
-- **测试命令**一律是 `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error`(下文简称"全量命令",跑单个文件时在末尾加路径),不得出现警告。
+- **测试命令**一律是 `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error`(下文简称"全量命令",跑单个文件时在末尾加路径),不得出现警告。pytest 不必带 `PYTHONPATH`,`pyproject.toml` 已设 `pythonpath = ["src"]`;只有 Task 5、Task 8 那两行 `PYTHONPATH=src python3 -` 的即席脚本要自己带。
 - **测试数:** 基线 **B = 2642**(`5fa42b7`)。各任务增量见任务末尾的"期望",累计数在 Task 8 末尾给出;以增量为准,若 B 因其他计划先落地而不同,绝对数会变。
 
 ## 文件表
@@ -68,7 +68,7 @@
 |---|---|---|
 | `src/controlplane/deferred.py` | 新建 | `DeferredError` 基类(若延后通道那份计划已落地,只核对签名) |
 | `src/controlplane/paths.py` | 改 | 追加 `compute_endpoints_file()` |
-| `pyproject.toml` | 改 | wheel 包列表追加 `src/compute` |
+| `pyproject.toml` | 改 | Task 1:wheel 包列表追加 `src/compute`;Task 7:`[tool.pytest.ini_options]` 新增 `markers` |
 | `src/compute/{__init__,errors,endpoint,transport,helper,client}.py` | 新建 | 见 Architecture |
 | `src/compute/job_tool.py` | 新建 | 远端助手,只用标准库,3.8 语法 |
 | `src/factory/compute_config.py` | 新建 | Task 3 读树内 `endpoints.yaml` 出 `ComputeEndpoint` 列表;Task 4 读本机主机映射出 `ComputeClient` |
@@ -79,6 +79,10 @@
 | `tests/test_compute_*.py`、`tests/test_factory_compute_config.py` | 新建 | Task 1-4 的测试 |
 | `tests/test_mt_roll_executor.py`、`tests/test_mt_roll_converter.py` | 新建 | Task 7、8 的单测 |
 | `tests/test_mt_orchestrator.py` | 改 | Task 5、7、8 的集成测试 |
+| `tests/test_factory_cross_plan.py` | 改 | Task 1:`NEW_PACKAGES` 加 `compute` |
+| `tests/test_daemon_deferred.py` | 新建 | Task 6:守护进程延后通道的测试 |
+| `tests/test_mt_dispatch.py` | 改 | Task 6:追加两条延后异常用例 |
+| `src/controlplane/daemon.py` | 改 | Task 6:`DeferralBook`、`DeferredExhaustedError`、`reconcile_once` 接住 `DeferredError`、`run_daemon` 持有退避表 |
 
 **代码块约定:** 围栏信息串里的 `path=` 是整文件创建;`insert-before=<path>` 表示把代码块插到该文件的 `# --- entry ---` 行之前。
 
@@ -1884,7 +1888,7 @@ def test_success_reads_two_endpoints(store):
 - [ ] **Step 2: 跑,确认失败**
 
 ```bash
-PYTHONPATH=src python3 -m pytest tests/test_factory_compute_config.py -q -p no:cacheprovider --color=no -W error
+PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_factory_compute_config.py -q -p no:cacheprovider --color=no -W error
 ```
 
 期望:`ModuleNotFoundError: No module named 'factory.compute_config'`。
@@ -1963,7 +1967,7 @@ def read_endpoints_config(store: GitStore) -> list[ComputeEndpoint]:
 - [ ] **Step 4: 跑通**
 
 ```bash
-PYTHONPATH=src python3 -m pytest tests/test_factory_compute_config.py -q -p no:cacheprovider --color=no -W error
+PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_factory_compute_config.py -q -p no:cacheprovider --color=no -W error
 ```
 
 期望:**8 passed**。
@@ -2064,7 +2068,7 @@ from compute.endpoint import ComputeEndpoint
 - [ ] **Step 2: 跑,确认失败**
 
 ```bash
-PYTHONPATH=src python3 -m pytest tests/test_factory_compute_config.py -q -p no:cacheprovider --color=no -W error
+PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_factory_compute_config.py -q -p no:cacheprovider --color=no -W error
 ```
 
 期望:`ImportError: cannot import name 'HOSTS_ENV'`。
@@ -2122,7 +2126,7 @@ def build_compute_client(
 - [ ] **Step 4: 跑通**
 
 ```bash
-PYTHONPATH=src python3 -m pytest tests/test_factory_compute_config.py -q -p no:cacheprovider --color=no -W error
+PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_factory_compute_config.py -q -p no:cacheprovider --color=no -W error
 ```
 
 期望:**14 passed**。
@@ -2146,7 +2150,7 @@ def test_install_defaults_does_not_install_endpoints(tmp_path):
 ```
 
 ```bash
-PYTHONPATH=src python3 -m pytest tests/test_factory_compute_config.py -q -p no:cacheprovider --color=no -W error
+PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_factory_compute_config.py -q -p no:cacheprovider --color=no -W error
 ```
 
 期望:**15 passed**。
@@ -2471,7 +2475,7 @@ class TestStagedExecutor:
 - [ ] **Step 6: 跑通**
 
 ```bash
-PYTHONPATH=src python3 -m pytest tests/test_mt_orchestrator.py::TestStagedExecutor -q -p no:cacheprovider --color=no -W error
+PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_mt_orchestrator.py::TestStagedExecutor -q -p no:cacheprovider --color=no -W error
 ```
 
 期望:**6 passed**。
@@ -2479,7 +2483,7 @@ PYTHONPATH=src python3 -m pytest tests/test_mt_orchestrator.py::TestStagedExecut
 再跑整个文件,确认单步路径与 GRPO 路径的既有测试一字未改地全过:
 
 ```bash
-PYTHONPATH=src python3 -m pytest tests/test_mt_orchestrator.py -q -p no:cacheprovider --color=no -W error
+PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_mt_orchestrator.py -q -p no:cacheprovider --color=no -W error
 ```
 
 期望:该文件全部通过(既有用例 + 6)。
@@ -2726,7 +2730,7 @@ def test_a_deferred_error_is_never_rewrapped_as_a_permanent_failure(store, monke
 - [ ] **Step 2: 跑,确认失败**
 
 ```bash
-PYTHONPATH=src python3 -m pytest tests/test_daemon_deferred.py tests/test_mt_dispatch.py -q -p no:cacheprovider --color=no -W error -k "deferred"
+PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_daemon_deferred.py tests/test_mt_dispatch.py -q -p no:cacheprovider --color=no -W error -k "deferred"
 ```
 
 期望:`test_daemon_deferred.py` 收集阶段 `ImportError: cannot import name 'DeferralBook' from 'controlplane.daemon'`;`test_mt_dispatch.py` 里的第二条因兜底分支把 `DeferredError` 包成 `DirectiveFailedError` 而失败。
@@ -2851,6 +2855,7 @@ def reconcile_once(
             ticks += 1
             if max_ticks is not None and ticks >= max_ticks:
                 break
+            time.sleep(interval_s)
 ```
 
 `src/mindtrainer/dispatch.py`:导入 `from controlplane.deferred import DeferredError`(紧跟 `from controlplane.daemon import ...` 之后),在 `dispatch` 函数最后一个 `except Exception as exc:` 之前加:
@@ -2864,14 +2869,14 @@ def reconcile_once(
 
 `src/controlplane/deferred.py` 的 docstring 补一句(Task 1 写的是"按退避重试"):
 
-```python
+```text
 守护进程接住它之后不写树、状态不动、按退避重试;连续延后达到上限就带原因退出(见 daemon.DeferredExhaustedError)。
 ```
 
 - [ ] **Step 4: 跑通**
 
 ```bash
-PYTHONPATH=src python3 -m pytest tests/test_daemon_deferred.py tests/test_mt_dispatch.py tests/test_mt_dispatch_synthesis.py tests/test_daemon.py tests/test_daemon_dispatcher.py tests/test_daemon_closed_loop_seams.py tests/test_repo_lock.py tests/test_e2e_loop.py -q -p no:cacheprovider --color=no -W error
+PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_daemon_deferred.py tests/test_mt_dispatch.py tests/test_mt_dispatch_synthesis.py tests/test_daemon.py tests/test_daemon_dispatcher.py tests/test_daemon_closed_loop_seams.py tests/test_repo_lock.py tests/test_e2e_loop.py -q -p no:cacheprovider --color=no -W error
 ```
 
 期望:全部通过;新增 **12** 个(`test_daemon_deferred.py` 10 个,`test_mt_dispatch.py` 2 个),既有用例一行不改。
@@ -3141,7 +3146,8 @@ class RollExecutor:
         """只做校验与记录,不占 GPU(设计 §5.1)。
 
         接受两类引用:指向 base_model_path 的起点基座,和本设计产出的训练存点。
-        mock:// 引用抛 CheckpointCorruptError(确定性失败,设计 §6.1 反方向那条)。
+        mock:// 引用抛 CheckpointCorruptError:重试不会好,但它不在任何 _DETERMINISTIC 里、`load` 在 `try` 之外,
+        所以和 MockExecutor 的损坏存点一样原样上抛、记录保持 pending(本任务不改这条,见 Task 7 Step 2)。
         适配器导出引用抛 InvalidTrainingConfigError:真实转换产出的是
         qwen4_exp_vllm_2d 布局,不是 HF 训练起点,所以本轮只支持单轮(设计 §5.1)。
         """
@@ -3545,14 +3551,14 @@ def test_render_rows_ignores_other_slots():
 
 # ---------------- load ----------------
 
-def test_load_accepts_the_base_model(client_and_base := None):
+def test_load_accepts_the_base_model():
     client = FakeClient()
     executor = _executor(client)
     executor.load(_base_ref(client))  # 不抛即通过:起点基座不过 checkpoint_intact
 
 
 def test_load_rejects_mock_refs():
-    """mock:// 引用是确定性失败(设计 §6.1 反方向那条)。"""
+    """mock:// 引用:load 抛 CheckpointCorruptError(重试不会好;分级沿用现状,见 Task 7 Step 2)。"""
     executor = _executor(FakeClient())
     ref = BigRef(uri="mock://ckpt/" + "a" * 64 + "@3", sha256="a" * 64, size_bytes=0)
     with pytest.raises(CheckpointCorruptError, match=r"expects an ssh:// reference"):
@@ -3734,7 +3740,7 @@ def test_stage_end_never_cuts_finer():
 - [ ] **Step 9: 跑通单测**
 
 ```bash
-PYTHONPATH=src python3 -m pytest tests/test_mt_roll_executor.py -q -p no:cacheprovider --color=no -W error
+PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_mt_roll_executor.py -q -p no:cacheprovider --color=no -W error
 ```
 
 期望:**21 passed**(上面列出的全部用例)。`FakeClient` 纯内存,应在 1 秒内跑完。
@@ -3786,8 +3792,9 @@ class TestRollExecutorIntegration:
         """跨模式续训要在 checkpoint_intact 之前挡住:T3、理由是后端不一致、记录不改(设计 §6.1)。"""
         from compute_fixtures import FakeClient
 
-        cfg = _batch_cfg(sft_steps=2, grpo_steps=0)
-        _go(store, cfg, MockExecutor(crash_at_step=1), converter=MockConverter())  # 留下 mock 存点
+        cfg = _batch_cfg(sft_steps=4, grpo_steps=0, checkpoint_every_steps=2)
+        with pytest.raises(SimulatedCrashError):
+            _go(store, cfg, MockExecutor(crash_at_step=3), converter=MockConverter())  # 第 2 步存点后崩在第 3 步
         pending = read_training_run(store, RUN)
         assert pending.status == "pending" and pending.last_checkpoint_ref is not None
 
@@ -3796,15 +3803,12 @@ class TestRollExecutorIntegration:
         assert read_training_run(store, RUN) == pending  # 记录一个字节都没动
 ```
 
-第三个用例依赖"mock 执行器先崩在第 1 步、留下一份 `mock://` 存点"。`_batch_cfg` 的
-`checkpoint_every_steps=2`,`sft_steps=2` 时第 2 步才存点,所以 `crash_at_step=1` 之后
-`last_checkpoint_ref` 可能为 None;实现时按实际情况调 `sft_steps` / `checkpoint_every_steps`
-(例如 `sft_steps=4, checkpoint_every_steps=2, crash_at_step=3`),让它确实留下一份中间存点。
+第三个用例用 `sft_steps=4`、`checkpoint_every_steps=2`、`crash_at_step=3`:第 2 步存点之后崩在第 3 步,留下一份 `mock://` 中间存点且记录仍是 `pending`(已在隔离拷贝里跑过)。`SimulatedCrashError` 与 `MockExecutor`、`MockConverter` 在该文件顶部已导入。
 
 - [ ] **Step 11: 跑通集成测试与整文件**
 
 ```bash
-PYTHONPATH=src python3 -m pytest tests/test_mt_orchestrator.py -q -p no:cacheprovider --color=no -W error
+PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_mt_orchestrator.py -q -p no:cacheprovider --color=no -W error
 ```
 
 期望:新增 3 个用例通过(Task 7 共 21 + 3 = **24**),且该文件既有用例全部不受影响。
@@ -3940,7 +3944,7 @@ print(hashlib.sha256(pathlib.Path('src/compute/job_tool.py').read_bytes()).hexdi
 把输出填进 `src/compute/helper.py` 的 `HELPER_SHA256`。改完跑:
 
 ```bash
-PYTHONPATH=src python3 -m pytest tests/test_compute_assistant.py -q -p no:cacheprovider --color=no -W error
+PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_compute_assistant.py -q -p no:cacheprovider --color=no -W error
 ```
 
 期望:原有用例全过(钉死哈希那条会校验新值)。远端助手路径里带哈希前 8 位,所以
@@ -4106,7 +4110,8 @@ class RollLoraConverter:
         export_dir = f"{work}/exports/{ref.sha256[:8]}"
 
         # 1. 已经转过就直接返回(幂等)。标记在而哈希不符,说明产物被动过:
-        #    这是确定性失败,不是瞬态,所以抛 CheckpointCorruptError 而不是重做。
+        #    重做只会再次覆盖同一份产物、结果同样不可信,所以抛 CheckpointCorruptError 而不是重做;
+        #    它的分级沿用现状(不在 _DETERMINISTIC、原样上抛),不是 T2。
         recorded = self._read_marker(export_dir)
         if recorded is not None:
             actual = self.client.hash_tree(export_dir, "full")
@@ -4357,7 +4362,7 @@ def test_convert_is_idempotent_and_does_not_rerun_the_job():
 
 
 def test_a_tampered_export_is_a_corrupt_error():
-    """标记在而内容变了:确定性失败,不重做(设计 §6.2 第 2 步)。"""
+    """标记在而内容变了:抛 CheckpointCorruptError,不重做(设计 §6.2 第 2 步;分级沿用现状)。"""
     client = _exporting_client()
     converter = _converter(client)
     converter.convert(_ref())
@@ -4426,7 +4431,7 @@ def test_a_reference_without_a_sha256_is_refused():
 - [ ] **Step 9: 跑通转换器单测**
 
 ```bash
-PYTHONPATH=src python3 -m pytest tests/test_mt_roll_converter.py -q -p no:cacheprovider --color=no -W error
+PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_mt_roll_converter.py -q -p no:cacheprovider --color=no -W error
 ```
 
 期望:上面列出的用例全过。
