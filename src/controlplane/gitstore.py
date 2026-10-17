@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -17,11 +18,15 @@ class GitStore:
         self.repo_root = Path(repo_root)
 
     def _git(self, *args: str) -> str:
-        result = subprocess.run(
+        return self._run(*args, check=True).stdout
+
+    def _run(self, *args: str, check: bool) -> subprocess.CompletedProcess:
+        # LC_ALL=C:下面要靠 git 的报错文本分支(未跟踪 vs 无改动),本地化的消息会让它瞎掉。
+        env = {**os.environ, "LC_ALL": "C"}
+        return subprocess.run(
             ["git", "-C", str(self.repo_root), *args],
-            capture_output=True, text=True, check=True,
+            capture_output=True, text=True, check=check, env=env,
         )
-        return result.stdout
 
     def init(self) -> None:
         self.repo_root.mkdir(parents=True, exist_ok=True)
@@ -38,21 +43,34 @@ class GitStore:
 
     def write_product(self, rel_path: str, env: Envelope, message: str) -> None:
         abs_path = self.repo_root / rel_path
+        existed = abs_path.is_file()
         abs_path.parent.mkdir(parents=True, exist_ok=True)
         with abs_path.open("w", encoding="utf-8") as f:
             yaml.safe_dump(env.to_dict(), f, allow_unicode=True, sort_keys=False)
-        self._git("add", rel_path)
-        # 幂等性保护（§1.4）：若内容与已提交版本逐字节相同，git add 不会暂存任何
-        # 改动，此时无条件 commit 会因 "nothing to commit" 以非零退出码失败并
-        # 抛出 CalledProcessError（_git 使用 check=True）。先探测暂存区是否为空，
-        # 为空则跳过提交（no-op），避免崩溃恢复重放半程 tick 时把守护进程整个杀死。
-        staged_check = subprocess.run(
-            ["git", "-C", str(self.repo_root), "diff", "--cached", "--quiet", rel_path],
-            capture_output=True, text=True, check=False,
-        )
-        if staged_check.returncode == 0:
+        # 只提交本文件(控制面 CP-12):别的文件若已在暂存区,不被卷进这次提交,也不丢——
+        # commit -- <path> 的行为就是如此(已实测)。
+        #
+        # 文件原先不在磁盘上,就一定没进过索引,`commit -- <path>` 认不出它,直接走 add:
+        # 先试 commit 再回退等于白跑一个子进程,而全量测试里八成以上的写入都是新文件。
+        if not existed:
+            self._git("add", rel_path)
+            self._git("commit", "-m", message, "--", rel_path)
             return
-        # 只提交本文件(控制面 CP-12):别的文件若已在暂存区,不被卷进这次提交,也不丢。
+        # 文件已在磁盘上:绝大多数情况它也已被跟踪且内容有变,此时一个子进程就够
+        # (commit -- <path> 对已跟踪文件会隐式暂存它)。全量里 write_product 被调七千多次。
+        if self._run("commit", "-m", message, "--", rel_path, check=False).returncode == 0:
+            return
+        # 走到这里有三种可能:内容逐字节相同(幂等 no-op)、已落盘但没进过索引(崩溃恢复
+        # 留下的半程状态)、真故障。**不要靠 git 的提示文本分辨**:`commit -- <path>` 做的是
+        # 部分提交,它按 HEAD 加 pathspec 造临时索引,所以暂存区里有别的文件时,提示会从
+        # "nothing to commit" 变成 "nothing added to commit but untracked files present"。
+        # 改用结构信号:add 之后看该路径在暂存区里到底有没有差异。
+        #
+        # 幂等性保护(§1.4):内容相同就是 no-op,不是故障——崩溃恢复重放半程 tick 不能把
+        # 守护进程杀掉。真故障由 _git 的 check=True 抛出来。
+        self._git("add", rel_path)
+        if self._run("diff", "--cached", "--quiet", "--", rel_path, check=False).returncode == 0:
+            return
         self._git("commit", "-m", message, "--", rel_path)
 
     def read_product(self, rel_path: str) -> Envelope:
