@@ -462,6 +462,56 @@ def cmd_put(req):
     return {"size": len(data), "sha256": digest}
 
 
+MAX_GET_BYTES = 1 << 20  # 完成标记、tracker 这类小文件;大文件不走这条路
+
+
+@command("get")
+def cmd_get(req):
+    root = _work_root(req)
+    path = _abs_path_inside(root, req)
+    if not os.path.isfile(path):
+        raise Failure("not_found", "no such file")
+    size = os.lstat(path).st_size
+    if size > MAX_GET_BYTES:
+        raise Failure("too_large", "file exceeds %d bytes" % MAX_GET_BYTES)
+    with open(path, "rb") as handle:
+        data = handle.read()
+    return {"content_b64": base64.b64encode(data).decode("ascii"),
+            "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+
+
+@command("rename")
+def cmd_rename(req):
+    """os.replace:同一文件系统内原子改名。目标已存在就拒绝,不覆盖别人的产物。"""
+    root = _work_root(req)
+    src = _abs_path_inside(root, req, key="src")
+    dst = _abs_path_inside(root, req, key="dst")
+    if not os.path.exists(src):
+        raise Failure("not_found", "no such source path")
+    if os.path.exists(dst):
+        raise Failure("exists", "the destination already exists")
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    os.replace(src, dst)
+    return {"renamed": True}
+
+
+@command("rm-tmp")
+def cmd_rm_tmp(req):
+    """只删形如 <...>.tmp-<十六进制> 的目录:调用方自己造的未完成产物。
+
+    删除是不可逆的,所以不接受任意路径:名字不合这个形状一律 bad_path。
+    """
+    root = _work_root(req)
+    path = _abs_path_inside(root, req)
+    name = os.path.basename(path.rstrip("/"))
+    if ".tmp-" not in name or not name.rsplit(".tmp-", 1)[1].isalnum():
+        raise Failure("bad_path", "rm-tmp only removes directories named '<name>.tmp-<token>'")
+    if not os.path.isdir(path):
+        return {"removed": False}
+    shutil.rmtree(path)
+    return {"removed": True}
+
+
 def _digest_file(path, size, mode):
     """full:整个文件;sampled:小于 SAMPLE_THRESHOLD 的整体哈希,更大的取头、中、尾各 SAMPLE_CHUNK(Ruling 6)。"""
     digest = hashlib.sha256()
@@ -484,6 +534,9 @@ def cmd_hash_tree(req):
     mode = req.get("mode")
     if mode not in ("sampled", "full"):
         raise Failure("bad_request", "mode must be 'sampled' or 'full'")
+    exclude = req.get("exclude", [])
+    if not isinstance(exclude, list) or not all(isinstance(name, str) and name for name in exclude):
+        raise Failure("bad_request", "exclude must be a list of relative file names")
     if not os.path.isdir(top):
         raise Failure("not_found", "no such directory")
     entries = []
@@ -492,6 +545,8 @@ def cmd_hash_tree(req):
         for name in sorted(names):
             full = os.path.join(base, name)
             rel = os.path.relpath(full, top).replace(os.sep, "/")
+            if rel in exclude:
+                continue
             info = os.lstat(full)
             if os.path.islink(full):
                 entries.append((rel, "link", hashlib.sha256(os.readlink(full).encode("utf-8", "replace")).hexdigest()))

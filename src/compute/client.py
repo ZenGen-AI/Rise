@@ -139,8 +139,26 @@ class ComputeClient:
         self._call("put", path=path, content_b64=base64.b64encode(data).decode("ascii"),
                    sha256=hashlib.sha256(data).hexdigest(), executable=executable)
 
-    def hash_tree(self, path: str, mode: str) -> str:
-        return str(self._call("hash-tree", timeout=3600.0, path=path, mode=mode)["sha256"])
+    def hash_tree(self, path: str, mode: str, *, exclude: Sequence[str] = ()) -> str:
+        """exclude:不进哈希的相对文件名(例如转换产物里记录这个哈希的完成标记)。"""
+        extra = {"exclude": list(exclude)} if exclude else {}
+        return str(self._call("hash-tree", timeout=3600.0, path=path, mode=mode, **extra)["sha256"])
+
+    def get(self, path: str) -> bytes:
+        """读一个小文件(完成标记、tracker)。文件不在抛 HelperError(code='not_found')。"""
+        reply = self._call("get", path=path)
+        data = base64.b64decode(str(reply["content_b64"]).encode("ascii"), validate=True)
+        if hashlib.sha256(data).hexdigest() != reply["sha256"]:
+            raise TransportError("the remote helper returned a file whose sha256 does not match")
+        return data
+
+    def rename(self, src: str, dst: str) -> None:
+        """原子改名。目标已存在抛 HelperError(code='exists')。"""
+        self._call("rename", src=src, dst=dst)
+
+    def rm_tmp(self, path: str) -> bool:
+        """删掉自己造的 '<name>.tmp-<token>' 目录。别的形状抛 HelperError(code='bad_path')。"""
+        return bool(self._call("rm-tmp", path=path)["removed"])
 
     # ---------- 租约与资源 ----------
 
@@ -186,11 +204,12 @@ class ComputeClient:
     # ---------- 整段作业 ----------
 
     def run_job(self, job_id: str, spec: JobSpec, *, secret: str | None = None,
-                tail_lines: int = 40) -> JobResult:
+                tail_lines: int = 40, lease: bool = True) -> JobResult:
         """取租约、启动(幂等)、轮询到结束、释放租约。非零退出抛 RemoteJobFailedError,超时先 stop 再抛
         RemoteJobTimeoutError,租约被占抛 ComputeBusyError。传输错误原样抛出且不释放租约:作业还在远端跑,
-        下一次调用会接上它。超时从本次调用算起,守护进程重启后重新计时。"""
-        if not self.lease_acquire(job_id):
+        下一次调用会接上它。超时从本次调用算起,守护进程重启后重新计时。
+        lease=False 给纯 CPU 作业(转换器):不取也不释放 GPU 租约。"""
+        if lease and not self.lease_acquire(job_id):
             holder, _ = self.lease_holder()
             raise ComputeBusyError(f"the GPU lease is held by job {holder or 'unknown'}")
         started = self._clock()
@@ -199,12 +218,14 @@ class ComputeClient:
             remaining = self.endpoint.job_timeout_seconds - (self._clock() - started)
             if remaining <= 0:
                 self.stop(job_id)
-                self.lease_release(job_id)
+                if lease:
+                    self.lease_release(job_id)
                 raise RemoteJobTimeoutError(f"job {job_id} exceeded {self.endpoint.job_timeout_seconds:g}s")
             self._sleep(min(self.endpoint.poll_seconds, remaining))
             status = self.status(job_id)
         tail = self.tail(job_id, tail_lines)
-        self.lease_release(job_id)
+        if lease:
+            self.lease_release(job_id)
         if status.state == "exited" and status.exit_code == 0:
             return JobResult(0, tail)
         what = f"exited with code {status.exit_code}" if status.state == "exited" else f"is {status.state}"

@@ -60,9 +60,12 @@ class FakeClient:
         self.job_hook = job_hook
         self.files: dict[str, bytes] = {}
         self.jobs: dict[str, JobStatus] = {}
-        self.run_calls: list[tuple[str, JobSpec]] = []
+        self.run_calls: list[tuple[str, JobSpec, bool]] = []  # (job_id, spec, lease)
         self.put_calls: list[str] = []
         self.preflight_calls = 0
+        self.rename_calls: list[tuple[str, str]] = []
+        self.rm_tmp_calls: list[str] = []
+        self.mem_available_gib = 32.0
 
     # --- 与 ComputeClient 对齐的方法 ---
 
@@ -78,13 +81,17 @@ class FakeClient:
     def status(self, job_id: str) -> JobStatus:
         return self.jobs.get(job_id, JobStatus("missing", None, None))
 
-    def hash_tree(self, path: str, mode: str) -> str:
+    def hash_tree(self, path: str, mode: str, *, exclude: tuple[str, ...] = ()) -> str:
         assert mode in ("sampled", "full"), mode
-        under = {k: v for k, v in self.files.items() if k == path or k.startswith(path.rstrip("/") + "/")}
+        top = path.rstrip("/")
+        # 与真实助手一致:按相对路径入哈希,所以同样内容的两个目录哈希相同(tmp 与改名后的正式目录)
+        under = {k[len(top) + 1:]: v for k, v in self.files.items() if k.startswith(top + "/")}
+        if path in self.files:
+            under = {"": self.files[path]}
         if not under:
             raise HelperError("not_found", "no such directory")
         digest = hashlib.sha256()
-        for key in sorted(under):
+        for key in sorted(k for k in under if k not in exclude):
             digest.update(key.encode("utf-8"))
             digest.update(b"\0")
             digest.update(under[key] if mode == "full" else str(len(under[key])).encode("ascii"))
@@ -92,14 +99,45 @@ class FakeClient:
         return digest.hexdigest()
 
     def run_job(self, job_id: str, spec: JobSpec, *, secret: str | None = None,
-                tail_lines: int = 40) -> JobResult:
-        self.run_calls.append((job_id, spec))
-        if self.busy:
+                tail_lines: int = 40, lease: bool = True) -> JobResult:
+        self.run_calls.append((job_id, spec, lease))
+        if self.busy and lease:
             raise ComputeBusyError(f"the GPU lease is held by job other-{job_id}")
         if self.job_hook is not None:
             self.job_hook(job_id, spec)
         self.jobs[job_id] = JobStatus("exited", self.exit_code, None)
         return JobResult(self.exit_code, self.log)
+
+    def get(self, path: str) -> bytes:
+        if path not in self.files:
+            raise HelperError("not_found", "no such file")
+        return self.files[path]
+
+    def rename(self, src: str, dst: str) -> None:
+        under = {k: v for k, v in self.files.items()
+                 if k == src or k.startswith(src.rstrip("/") + "/")}
+        if not under:
+            raise HelperError("not_found", "no such source path")
+        if any(k == dst or k.startswith(dst.rstrip("/") + "/") for k in self.files):
+            raise HelperError("exists", "the destination already exists")
+        for key, value in under.items():
+            self.files[dst + key[len(src):]] = value
+            del self.files[key]
+        self.rename_calls.append((src, dst))
+
+    def rm_tmp(self, path: str) -> bool:
+        name = path.rstrip("/").rsplit("/", 1)[-1]
+        if ".tmp-" not in name:
+            raise HelperError("bad_path", "rm-tmp only removes '<name>.tmp-<token>'")
+        under = [k for k in self.files
+                 if k == path or k.startswith(path.rstrip("/") + "/")]
+        for key in under:
+            del self.files[key]
+        self.rm_tmp_calls.append(path)
+        return bool(under)
+
+    def probe(self) -> dict:
+        return {"mem_available_gib": self.mem_available_gib}
 
     # --- 测试辅助 ---
 

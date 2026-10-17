@@ -799,3 +799,43 @@ class TestRollExecutorIntegration:
         with pytest.raises(NeedsHumanError, match=r"resuming across backend modes"):
             _go(store, cfg, self._executor(FakeClient()))
         assert read_training_run(store, RUN) == pending  # 记录一个字节都没动
+
+
+class TestRollConverterIntegration:
+    """编排器调真实转换器:候选产物里落的是适配器导出引用。"""
+
+    def test_the_candidate_carries_the_adapter_export_reference(self, store):
+        """run_training 收尾时调 converter.convert(final_ref),产出进 candidate_checkpoint.yaml。"""
+        from compute_fixtures import FakeClient, fake_endpoint, metrics_log
+        from mindtrainer.roll_converter import EXPORT_FORMAT, RollLoraConverter
+        from mindtrainer.roll_executor import RollExecutor
+
+        client = FakeClient(log=metrics_log(0, 2))
+        endpoint = fake_endpoint()
+
+        def hook(job_id, spec, lease=True):
+            if "--output" in spec.argv:  # 转换作业
+                out = spec.argv[spec.argv.index("--output") + 1]
+                client.files[f"{out}/adapter_model.safetensors"] = b"w"
+            else:  # 训练作业
+                out = spec.argv[spec.argv.index("--output-dir") + 1]
+                client.files[f"{out}/checkpoint-1/config.json"] = b"c"
+
+        client.job_hook = hook
+        client.seed_dir(endpoint.base_model_path)
+        executor = RollExecutor(client=client, endpoint=endpoint, run_id=RUN)
+        converter = RollLoraConverter(client=client, endpoint=endpoint)
+
+        cfg = _batch_cfg(sft_steps=2, grpo_steps=0, checkpoint_every_steps=100,
+                         base_checkpoint_ref=BigRef(
+                             uri=f"ssh://{endpoint.endpoint_id}{endpoint.base_model_path}",
+                             sha256=client.hash_tree(endpoint.base_model_path, "sampled"),
+                             size_bytes=0, fetch_hint={"type": "roll_ssh"}))
+        run = _go(store, cfg, executor, converter=converter)
+        assert run.status == "executed"
+
+        candidate = _candidate(store).payload
+        ref = BigRef.from_dict(candidate["checkpoint_ref"])
+        assert "/exports/" in ref.uri
+        assert ref.fetch_hint["format"] == EXPORT_FORMAT
+        assert ref.fetch_hint["type"] == "roll_ssh"

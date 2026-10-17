@@ -19,7 +19,20 @@ class CandidateAlreadyReviewedError(Exception):
 
 
 class CheckpointConverter(Protocol):
-    """训练格式 -> 推理格式。诊断评测和 MindAgent 要加载的是转换后的那份。"""
+    """训练存点 -> 推理格式(设计 §6.2)。
+
+    返回的 BigRef 要满足:
+    - `uri` 指向转换产物自己的目录,不复用训练存点的路径;
+    - `sha256` 是产物目录的 **full** 口径哈希(§6.1:任何字节变化都会变号);
+    - `fetch_hint` 写明 `type`(后端种类)、`format`(布局)、以及推理侧加载所需的
+      `base_model_path` 与 `requires`。评测侧靠 `type` 判断证据等级(§8),靠
+      `format` 与 `requires` 决定能不能加载。
+
+    幂等:同一个输入引用重复调用,返回同一个产物引用,不重做转换。
+
+    抛:`CheckpointCorruptError`(产物已存在但哈希不符)、`ComputeBusyError` 与
+    `TransportError`(都是 `DeferredError`,走延后通道,不耗续训预算)。
+    """
 
     def convert(self, ref: BigRef) -> BigRef: ...
 

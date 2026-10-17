@@ -386,3 +386,67 @@ def test_nvidia_smi_command_has_no_injection_vector():
     assert NVIDIA_SMI == ("nvidia-smi", "--query-compute-apps=pid", "--format=csv,noheader")
 
 
+# ===== get / rename / rm-tmp(Task 8:转换器要用的三件远端动作) =====
+
+def _local_client(tmp_path: Path):
+    """与上面的客户端用例同一套装配;返回 (客户端, work_root)。"""
+    ep = _endpoint(tmp_path)
+    return ComputeClient(ep, SshTransport("local", runner=local_runner)), ep.work_root
+
+
+def test_get_reads_a_small_file(tmp_path: Path):
+    client, work_root = _local_client(tmp_path)
+    client.put(f"{work_root}/marker", b"abc")
+    assert client.get(f"{work_root}/marker") == b"abc"
+
+
+def test_get_reports_a_missing_file(tmp_path: Path):
+    client, work_root = _local_client(tmp_path)
+    with pytest.raises(HelperError) as caught:
+        client.get(f"{work_root}/nope")
+    assert caught.value.code == "not_found"
+
+
+def test_rename_is_atomic_and_refuses_to_overwrite(tmp_path: Path):
+    client, work_root = _local_client(tmp_path)
+    client.put(f"{work_root}/a.tmp-1234/f", b"x")
+    client.rename(f"{work_root}/a.tmp-1234", f"{work_root}/a")
+    assert client.get(f"{work_root}/a/f") == b"x"
+    client.put(f"{work_root}/b.tmp-5678/f", b"y")
+    with pytest.raises(HelperError) as caught:
+        client.rename(f"{work_root}/b.tmp-5678", f"{work_root}/a")
+    assert caught.value.code == "exists"
+
+
+def test_rm_tmp_only_removes_tmp_directories(tmp_path: Path):
+    client, work_root = _local_client(tmp_path)
+    client.put(f"{work_root}/c.tmp-aaaa/f", b"z")
+    assert client.rm_tmp(f"{work_root}/c.tmp-aaaa") is True
+    assert client.rm_tmp(f"{work_root}/c.tmp-aaaa") is False  # 幂等
+    client.put(f"{work_root}/keep/f", b"z")
+    with pytest.raises(HelperError) as caught:
+        client.rm_tmp(f"{work_root}/keep")
+    assert caught.value.code == "bad_path"
+
+
+def test_paths_outside_work_root_are_refused(tmp_path: Path):
+    client, _ = _local_client(tmp_path)
+    for call in (lambda: client.get("/etc/passwd"),
+                 lambda: client.rm_tmp("/tmp/x.tmp-1111")):
+        with pytest.raises(HelperError) as caught:
+            call()
+        assert caught.value.code == "bad_path"
+
+
+def test_hash_tree_exclude_drops_the_named_file_and_nothing_else(tmp_path: Path):
+    """转换器的完成标记记录目录哈希,所以标记自己不能进哈希;其余文件改动仍要变号。"""
+    client, work_root = _local_client(tmp_path)
+    client.put(f"{work_root}/d/w", b"weights")
+    bare = client.hash_tree(f"{work_root}/d", "full")
+    client.put(f"{work_root}/d/.exported", bare.encode("ascii"))
+    assert client.hash_tree(f"{work_root}/d", "full") != bare  # 不排除:标记进了哈希
+    assert client.hash_tree(f"{work_root}/d", "full", exclude=(".exported",)) == bare
+    client.put(f"{work_root}/d/w", b"tampered")
+    assert client.hash_tree(f"{work_root}/d", "full", exclude=(".exported",)) != bare
+
+
