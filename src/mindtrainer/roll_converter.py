@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import uuid
 from dataclasses import dataclass
 
@@ -21,6 +22,7 @@ from mindtrainer.executor import CheckpointCorruptError
 
 EXPORT_MARKER = ".exported"  # 内容是产物目录的 full 哈希
 EXPORT_FORMAT = "qwen4_exp_vllm_2d"  # ROLL 的 LoRAHFConverter 布局(设计 §1 已核实)
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 # V15:真实导出命令待主机核实(V3、V5)。ROLL 文档记录的是 LoRAHFConverter,
 # 入口脚本名与参数都还没在机器上跑过,所以这里只固定"纯 CPU、写进 tmp 目录"这两点。
@@ -42,7 +44,9 @@ class RollLoraConverter:
             raise CheckpointCorruptError(
                 f"RollLoraConverter cannot convert {ref.uri!r}: it expects an ssh:// reference"
             )
-        if len(ref.sha256) != 64:
+        if len(ref.sha256) != 64 or not _SHA256.match(ref.sha256):
+            # 必须是 64 位小写十六进制:sha256[:8] 会直接进远端路径,非十六进制的 64 字符串
+            # (例如 "../../..")会让产物目录逃出 work_root。
             raise CheckpointCorruptError(
                 f"the checkpoint reference carries no usable sha256: {ref.sha256!r}"
             )
@@ -165,8 +169,23 @@ class RollLoraConverter:
         )
 
     def _remote_path(self, uri: str) -> str:
+        """ssh://<endpoint_id>/<绝对路径> -> /<绝对路径>,且必须落在 work_root 之内。
+
+        这个路径会作为 `--checkpoint` 进导出作业的 argv,助手的 `_abs_path_inside` 看不到它,
+        所以容器边界只能在这里把住:训练存点一定在 `work_root/runs/` 下(见 roll_executor
+        的 out_dir),指向别处的引用是装配错了端点或引用被改过,不是能转换的东西。
+        """
         rest = uri[len("ssh://"):]
-        _, slash, path = rest.partition("/")
+        endpoint_id, slash, path = rest.partition("/")
         if not slash:
             raise CheckpointCorruptError(f"{uri!r} carries no remote path")
-        return "/" + path
+        if endpoint_id != self.endpoint.endpoint_id:
+            raise CheckpointCorruptError(
+                f"{uri!r} names endpoint {endpoint_id!r} but this converter is wired to "
+                f"{self.endpoint.endpoint_id!r}"
+            )
+        path = "/" + path
+        work = self.endpoint.work_root.rstrip("/")
+        if ".." in path.split("/") or not (path == work or path.startswith(work + "/")):
+            raise CheckpointCorruptError(f"{uri!r} points outside the endpoint work root")
+        return path

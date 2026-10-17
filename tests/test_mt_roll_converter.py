@@ -150,3 +150,37 @@ def test_a_reference_without_a_sha256_is_refused():
         _converter(FakeClient()).convert(
             BigRef(uri=f"ssh://gpu-1{CKPT}", sha256="", size_bytes=0)
         )
+
+
+# ---------------- 路径围栏 ----------------
+
+def test_a_sha256_that_is_not_hex_cannot_escape_the_work_root():
+    """sha256[:8] 直接进远端路径。BigRef 不校验这个字段,所以转换器自己要校验:
+    64 个字符的 '../../..' 会让产物目录逃出 work_root。"""
+    client = _exporting_client()
+    traversal = "../../.." + "/x" * 28  # 64 字符,非十六进制
+    assert len(traversal) == 64
+    with pytest.raises(CheckpointCorruptError, match=r"no usable sha256"):
+        _converter(client).convert(BigRef(uri=f"ssh://gpu-1{CKPT}", sha256=traversal, size_bytes=0))
+    assert client.run_calls == []  # 一个作业都没起
+
+
+@pytest.mark.parametrize("uri", [
+    "ssh://gpu-1/etc/shadow",                     # work_root 之外的绝对路径
+    "ssh://gpu-1/srv/rise/work/../../etc/shadow",  # 用 .. 绕出去
+    "ssh://gpu-1/srv/rise/workshop/ckpt",          # 前缀像 work_root 但不是它的子目录
+])
+def test_a_checkpoint_outside_the_work_root_is_refused(uri):
+    """这个路径作为 --checkpoint 进导出作业的 argv,助手的路径校验看不到它。"""
+    client = _exporting_client()
+    with pytest.raises(CheckpointCorruptError, match=r"points outside the endpoint work root"):
+        _converter(client).convert(BigRef(uri=uri, sha256=SHA, size_bytes=0))
+    assert client.run_calls == []
+
+
+def test_a_reference_for_another_endpoint_is_refused():
+    """同一条路径在别的主机上是另一份东西,不能拿本端点的客户端去转。"""
+    client = _exporting_client()
+    with pytest.raises(CheckpointCorruptError, match=r"names endpoint 'gpu-2'"):
+        _converter(client).convert(BigRef(uri=f"ssh://gpu-2{CKPT}", sha256=SHA, size_bytes=0))
+    assert client.run_calls == []
