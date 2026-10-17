@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import logging
 import re
 import time
 from collections.abc import Callable, Mapping
 
 import yaml
 
+from controlplane.deferred import DeferredError
 from controlplane.envelope import Envelope, OwnerRef
 from controlplane.evidence import diagnostic_grade
 from controlplane.gitstore import GitStore
@@ -52,6 +54,65 @@ Handler = Callable[[GitStore, Action], None]
 Evaluator = Callable[[GitStore, str, str], None]
 
 _MODEL_FILE = re.compile(r"zengen-v(\d+)\.yaml$")
+
+_log = logging.getLogger("controlplane.daemon")
+
+ActionKey = tuple[str, str]  # (动作种类, 目标 id)
+
+
+class DeferredExhaustedError(Exception):
+    """同一个动作连续延后达到上限:瞬态失败拖成了常态,该人来看。
+
+    刻意不继承 DeferredError:它要逃出调和循环、让守护进程带着原因退出,而不是再被接住退避。
+    树里没有写任何东西,指令与候选仍是原状态;人处理完原因后重启守护进程即可。"""
+
+
+class DeferralBook:
+    """延后动作的退避表(真实后端设计 §7.3)。只在内存里,守护进程重启后所有动作立即可重试。
+
+    退避秒数取 retry_after_seconds 与 default_backoff_s 的较大者,再封顶 max_backoff_s;
+    连续延后次数达到 max_consecutive,下一次延后就抛 DeferredExhaustedError。动作成功即清零。
+    """
+
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        default_backoff_s: float = 30.0,
+        max_backoff_s: float = 900.0,
+        max_consecutive: int = 20,
+    ) -> None:
+        self._clock = clock
+        self._default = default_backoff_s
+        self._max_backoff = max_backoff_s
+        self._max_consecutive = max_consecutive
+        self._next: dict[ActionKey, float] = {}
+        self._streak: dict[ActionKey, int] = {}
+
+    def due(self, key: ActionKey) -> bool:
+        return self._clock() >= self._next.get(key, 0.0)
+
+    def next_try(self, key: ActionKey) -> float | None:
+        return self._next.get(key)
+
+    def streak(self, key: ActionKey) -> int:
+        return self._streak.get(key, 0)
+
+    def record(self, key: ActionKey, exc: DeferredError) -> float:
+        streak = self._streak.get(key, 0) + 1
+        if streak > self._max_consecutive:
+            raise DeferredExhaustedError(
+                f"{key[0]} {key[1]} was deferred {self._max_consecutive} times in a row; "
+                f"last reason: {exc.reason}"
+            ) from exc
+        self._streak[key] = streak
+        wait = min(max(float(exc.retry_after_seconds or 0), self._default), self._max_backoff)
+        self._next[key] = self._clock() + wait
+        return self._next[key]
+
+    def clear(self, key: ActionKey) -> None:
+        self._next.pop(key, None)
+        self._streak.pop(key, None)
 
 
 class DirectiveFailedError(Exception):
@@ -345,16 +406,34 @@ def reconcile_once(
     handlers: Mapping[str, Handler] | None = None,
     evaluator: Evaluator | None = None,
     accept_mock_evidence: bool = False,
+    deferrals: DeferralBook | None = None,
 ) -> list[Action]:
     """一次性调和：读状态 → reconcile → 执行非人工动作。返回本轮动作列表。
     dispatcher 缺省为桩;注入后只替换"下发 directive"这一步,其余动作不变。
     handlers 的键就是启用的闭环动作(闭环集成设计 §3.3);没有处理器的动作种类不会出现在
-    返回列表里。evaluator 缺省为诊断桩;注入后只替换 request_diagnostic 这一步。"""
+    返回列表里。evaluator 缺省为诊断桩;注入后只替换 request_diagnostic 这一步。
+
+    任何动作抛 DeferredError(资源暂时不可用,真实后端设计 §7.3):不写树、状态不动,同一 tick 的
+    其他动作照常处理。传入 deferrals 时该动作进退避期(期内被跳过)并累计连续次数;不传则只接住、
+    不退避,行为与引入延后通道之前相比只多了"不再让进程退出"。返回的仍是 reconcile 给出的完整动作列表。"""
     enabled = _check_handlers(handlers)
     state = read_tree_state(store, enabled=enabled, accept_mock_evidence=accept_mock_evidence)
     actions = reconcile(state)
     for action in actions:
-        apply_action(store, action, dispatcher=dispatcher, handlers=handlers, evaluator=evaluator)
+        key = (action.kind, action.target_id)
+        if deferrals is not None and not deferrals.due(key):
+            continue
+        try:
+            apply_action(store, action, dispatcher=dispatcher, handlers=handlers, evaluator=evaluator)
+        except DeferredError as exc:
+            retry_at = deferrals.record(key, exc) if deferrals is not None else None
+            _log.warning(
+                "deferred %s %s: %s (%s); next try at %s",
+                action.kind, action.target_id, exc.reason, type(exc).__name__, retry_at,
+            )
+        else:
+            if deferrals is not None:
+                deferrals.clear(key)
     return actions
 
 
@@ -373,11 +452,12 @@ def run_daemon(
     已被占用就抛 RepoLockedError,一个产物都不写;退出(含异常)时释放。"""
     _check_handlers(handlers)
     with acquire_repo_lock(store.repo_root):
+        deferrals = DeferralBook()  # 退避表归守护进程持有,只在内存里
         ticks = 0
         while max_ticks is None or ticks < max_ticks:
             reconcile_once(
                 store, dispatcher=dispatcher, handlers=handlers, evaluator=evaluator,
-                accept_mock_evidence=accept_mock_evidence,
+                accept_mock_evidence=accept_mock_evidence, deferrals=deferrals,
             )
             ticks += 1
             if max_ticks is not None and ticks >= max_ticks:

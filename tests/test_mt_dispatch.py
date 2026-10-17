@@ -521,3 +521,41 @@ def test_a_batch_directive_without_grpo_steps_does_not_read_the_grpo_manifest(st
     reconcile_once(store, dispatcher=make_mindtrainer_dispatcher())
     assert store.read_product(f"{run_dir(RUN)}/directive.yaml").status == "executed"
     assert store.read_product(candidate_checkpoint_file(RUN)).status == "pending_review"
+
+
+def test_a_deferred_error_from_the_executor_leaves_the_directive_pending_and_is_absorbed(store):
+    """延后异常(资源暂时不可用)不是指令的错:守护进程接住,指令保持 pending,下一次再派发。"""
+    from controlplane.daemon import DeferralBook
+    from controlplane.deferred import DeferredError
+
+    class BusyExecutor(MockExecutor):
+        def load(self, checkpoint_ref):
+            raise DeferredError("gpu busy")
+
+    _directive(store, payload={"target_dimension": "tom", "recipe_ref": "", "training_config": _cfg_dict()})
+    disp = make_mindtrainer_dispatcher(executor_factory=BusyExecutor)
+    reconcile_once(store, dispatcher=disp, deferrals=DeferralBook())  # 不抛
+    assert store.read_product(f"{run_dir(RUN)}/directive.yaml").status == "pending"
+    assert not store.exists(candidate_checkpoint_file(RUN))
+
+
+def test_a_deferred_error_is_never_rewrapped_as_a_permanent_failure(store, monkeypatch):
+    """兜底分支见到"记录已 failed"会把异常包成 DirectiveFailedError(终态)。DeferredError 不在此列:
+    它说的是"稍后再试",不论记录当时是什么状态,都要原样上抛。"""
+    from controlplane.deferred import DeferredError
+    from mindtrainer import dispatch as dispatch_module
+    from mindtrainer.store_adapter import read_training_run, write_training_run
+
+    _directive(store, payload={"target_dimension": "tom", "recipe_ref": "", "training_config": _cfg_dict()})
+
+    def fake_resume_or_run(cfg, *, store, run_id, **kwargs):
+        from mindtrainer.datamodel import TrainingRun
+        write_training_run(store, TrainingRun(run_id=run_id, config_hash="h", status="failed",
+                                              failure={"category": "T2", "point": "x", "detail": "y"}))
+        raise DeferredError("busy")
+
+    monkeypatch.setattr(dispatch_module, "resume_or_run", fake_resume_or_run)
+    directive = store.read_product(f"{run_dir(RUN)}/directive.yaml")
+    with pytest.raises(DeferredError):
+        make_mindtrainer_dispatcher()(store, directive)
+    assert read_training_run(store, RUN).status == "failed"  # 记录没人动,指令也没被判死

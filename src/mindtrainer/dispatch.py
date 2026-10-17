@@ -5,6 +5,7 @@ from collections.abc import Callable
 import yaml
 
 from controlplane.daemon import DirectiveFailedError, Dispatcher
+from controlplane.deferred import DeferredError
 from controlplane.envelope import Envelope
 from controlplane.gitstore import GitStore
 from controlplane.migration import UnknownSchemaVersionError
@@ -233,6 +234,10 @@ def make_mindtrainer_dispatcher(
             raise DirectiveFailedError(
                 f"directive {run_id}: {type(exc).__name__}: {exc}", category=category
             ) from exc
+        except DeferredError:
+            # 资源暂时不可用(真实后端设计 §7.3):不是指令的错,不论记录当时是什么状态都原样上抛,
+            # 交给守护进程的延后通道;不能落进下面的兜底分支被包成终态的 DirectiveFailedError。
+            raise
         except Exception as exc:
             # 编排器对 invalid_session 这类确定性的 rollout 拒绝,会先把 training_run 写成 failed 再重抛。
             # 记录已是终态,下一轮重派只会换来 NeedsHumanError,而这一轮的异常会一路逃出守护循环,
