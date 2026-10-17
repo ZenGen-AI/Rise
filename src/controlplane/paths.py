@@ -21,6 +21,10 @@ def backends_config_file() -> str:
     return f"{CONTROL_PLANE_ROOT}/config/backends.yaml"
 
 
+def compute_endpoints_file() -> str:
+    return f"{CONTROL_PLANE_ROOT}/compute/endpoints.yaml"
+
+
 def scenario_file(scenario_id: str) -> str:
     return f"{CONTROL_PLANE_ROOT}/scenarios/{scenario_id}.yaml"
 

@@ -113,7 +113,8 @@ def test_recipe_types_agree_between_recipestore_and_trainplanner():
     assert len(set(trainplanner_types)) == len(trainplanner_types)
 
 
-NEW_PACKAGES = ("inference_bridge", "recipestore", "trainplanner", "trainscheduler", "actio", "mindagent", "factory")
+NEW_PACKAGES = ("inference_bridge", "recipestore", "trainplanner", "trainscheduler", "actio", "mindagent", "factory",
+                "compute")
 
 
 def test_controlplane_imports_none_of_the_new_packages():
