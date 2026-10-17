@@ -23,14 +23,14 @@
 | 子系统 | 职责 | 所在层 | 现状 |
 |---|---|---|---|
 | ControlPlane | 协调层:git 版本化产物树、状态机、调和循环、三个审核门 | 控制层 | 核心 [已落地],闭环扩展 [计划中] |
-| SocialSimulator | 情境与人格生成、多智能体仿真、实时环境服务、诊断评测 | 计算层 | [已落地],诊断用 mock 后端 |
-| MindTrainer | 权重级训练:BatchTrain(SFT 后接 GRPO 加 OPD)与 InteractTrain | 计算层 | [已落地],训练执行器是 mock |
+| SocialSimulator | 情境与人格生成、多智能体仿真、实时环境服务、诊断评测 | 计算层 | [已落地],诊断用 mock 后端;vLLM 加 SoMEval 的真实运行器 [计划中] |
+| MindTrainer | 权重级训练:BatchTrain(SFT 后接 GRPO 加 OPD)与 InteractTrain | 计算层 | [已落地],训练执行器是 mock;ROLL LoRA SFT 真实执行器 [计划中] |
 | MindAgent | 部署态智能体的技能与记忆自进化,不改权重 | 计算层 | [计划中] |
 | RecipeStore | 验证有效的训练配方的版本化仓库 | 控制层 | [计划中] |
 | TrainScheduler | 决策执行器:装配上下文、校验决策、构造训练指令、提名配方 | 控制层 | [计划中] |
 | TrainPlanner | 决策学习者:经可插拔后端给出下一轮训练决策 | 控制层 | [计划中] |
 
-共享基础设施有四个。**Actio** 是带技能库与显式记忆的智能体框架,每次响应附带激活轨迹。**外部推理桥接**用命令行调用外部强模型。**ROLL** 是分布式训练引擎,**vLLM** 是推理引擎。ROLL 与 vLLM 在 V1 里没有接入真实服务,训练与推理由确定性 mock 顶替。
+共享基础设施有五个。**Actio** 是带技能库与显式记忆的智能体框架,每次响应附带激活轨迹。**外部推理桥接**用命令行调用外部强模型。**远端计算层** `compute` 经 SSH 在远端 GPU 主机上跑作业 [计划中]。**ROLL** 是分布式训练引擎,**vLLM** 是推理引擎。V1 经远端计算层接入 ROLL 的 LoRA SFT 与 vLLM 推理服务 [计划中]。已落地部分仍由确定性 mock 顶替。真实 GRPO 加 OPD 训练与真实 judge [推迟]。
 
 **状态标记。** **[已落地]** 表示代码在主干上且有测试。**[计划中]** 表示设计与实施计划已定,代码还没写。**[推迟]** 表示明确不在 V1 范围内。图只画目标系统,不标进展,进展只看正文的状态标记。
 
@@ -126,11 +126,12 @@ ControlPlane 是系统的协调层:它不训练、不评测,只读写产物并�
 
 | 非目标 | 状态 | V1 的处理 |
 |---|---|---|
-| 资源调度、SSH 下发、多租户隔离 | [推迟] | 信封只预留 `created_by` 归属字段 |
+| 多租户隔离、资源调度 | [推迟] | 信封只预留 `created_by` 归属字段 |
+| 经 SSH 下发到远端 GPU 主机 | [计划中] | 由远端计算层 `compute` 承担,控制面只认延后通道(CP-14),不认识 SSH |
 | 事件总线或文件监听 | 不做 | 轮询,间隔由入口给定 |
 | 查询索引 | 不做 | 按目录扫描 |
 | 并行多轮在途 | [推迟] | 同一时间只允许一轮,规则 [计划中] |
-| 异步派发 | [推迟] | 契约已定,V1 派发器同步返回;接真实训练之前落地 |
+| 异步派发 | [推迟] | 契约已定,V1 派发器同步返回;接真实 LoRA SFT 的这一轮作为有限定的例外接受同步阻塞(CP-15) |
 | 图形界面 | [推迟] | 只有命令行 |
 | 损坏产物的自动隔离 | 不做 | 读不出就抛,守护进程退出;轮次产物与诊断报告例外,见失败处理 [计划中] |
 
@@ -220,7 +221,7 @@ ControlPlane 是系统的协调层:它不训练、不评测,只读写产物并�
 |---|---|---|
 | `Envelope` | `id`、`type`、`version`、`created_at`、`created_by`、`status`、`schema_version`、`links`、`payload` | 前七个必填,`version` 与 `schema_version` 不小于 1 |
 | `OwnerRef` | `owner`、`visibility` | 默认 `default`、`shared`;`visibility` 只取 `private` 或 `shared` |
-| `BigRef` | `uri`、`sha256`、`size_bytes`、`fetch_hint` | 大内容不进树,只存引用;`fetch_hint` 可为空 |
+| `BigRef` | `uri`、`sha256`、`size_bytes`、`fetch_hint` | 大内容不进树,只存引用;`fetch_hint` 可为空。真实后端 [计划中] 下 `fetch_hint` 的 `type` 与 `format` 两个键承担「这份存点是真实的还是 mock」的判定,不再只是取回提示:`type` 为 `roll_ssh` 表示训练存点在远端主机上,`format` 区分训练存点与适配器导出 |
 | `DirectiveView` | `id`、`status`、`target_dimension`、`recipe_ref` | 由 `read_tree_state` 投影 |
 | `CandidateView` | `id`、`status`、`run_id`、`has_diagnostic` | `has_diagnostic` 默认 `False`,未知即无证据 |
 | `TreeState` | 指令视图、候选视图、`model_count` | `model_count` 是 `models/` 下 yaml 文件数;新增 `max_model_version`(默认 `None`),非 `None` 时 `reconcile` 用它加一定版本号,否则沿用 `model_count` 加一,既有 fixture 照旧 [计划中] |
@@ -239,6 +240,7 @@ ControlPlane 是系统的协调层:它不训练、不评测,只读写产物并�
 | 模型版本 | `models/zengen-v<N>.yaml` | 需审核,写入即 `effective` | 守护进程 | [已落地] |
 | 成本与失败记录 | `runs/<run>/run_trace.yaml`、`failure-<任务>.yaml` | 非审核 | 记账函数 | [计划中] |
 | 配置 | `config/<名>.yaml`,信封 `type: config` | 非审核 | 配置写入函数 | 路径 [已落地],信封 [计划中] |
+| 远端计算端点 | `compute/endpoints.yaml`,信封 `type: config`,载荷是映射 `{endpoints: [...]}` | 非审核 | 人工写;配置写入函数只认 `config/` 下的路径,写不了它 | [计划中] |
 
 `SUBDIRS` 今天有九个目录:`runs`、`recipes`、`skill_memory_proposals`、`models`、`compute`、`config`、`scenarios`、`personas`、`diagnostics`。闭环在末尾追加 `recipe_candidates`、`skill_library`、`memory_library`、`agent_rounds` [计划中]。
 
@@ -335,6 +337,7 @@ def cost(store, run_id) -> str: ...
 |---|---|---|
 | 正常返回 | 重读指令,置 `executed` 并提交 | `executed` |
 | 抛 `DirectiveFailedError` | 写 `payload.failure = {category, reason}` | `failed`,不再派发 |
+| 抛 `DeferredError` [计划中] | 不写树、状态不动,该动作进入退避期;同一 tick 的其余动作照常 | 仍 `pending`,退避期过后再派发 |
 | 抛其他异常 | 不接住,原样上抛 | 仍 `pending`,重启后再派发 |
 
 派发器不改指令状态;它拿到的是一份读出的副本,改副本不影响树。续训与重试上限由派发器自己兜底。
@@ -419,7 +422,7 @@ def evidence_acceptable(grade: str, accept_mock: bool) -> bool: ...  # [计划�
 | `confirm <directive-id>` | 指令 | `awaiting_confirmation → pending` | 查 TypeScript 侧新增的非审核类迁移表,只有 `awaiting_confirmation` 能确认;已确认或多处命中都拒绝,不写文件、不提交 | [计划中] |
 | `status` | 三类待审产物、待确认指令 | 无 | 分节输出;都为空时打印 `nothing awaiting review or confirmation` | [计划中] |
 
-异步派发契约 [推迟]。V1 的派发器同步返回,训练由 mock 完成。接真实训练之前必须先落地下面的契约,否则调和循环被阻塞,或指令在候选出现之前就被置 `executed`。
+异步派发契约 [推迟]。V1 的派发器同步返回,训练由 mock 完成。真实训练要数小时,同步返回会阻塞调和循环,或让指令在候选出现之前就被置 `executed`;下面的契约就是为此定的。接真实 LoRA SFT 的这一轮不等它:作为已评估的例外接受同步阻塞,限定条件见 CP-15,异步派发本身仍 [推迟]。
 
 | 项 | 契约 |
 |---|---|
@@ -533,7 +536,9 @@ def evidence_acceptable(grade: str, accept_mock: bool) -> bool: ...  # [计划�
 | CP-10 | 需审核类迁移表在 Python 与 TypeScript 各一份 | 共享一份 schema 生成 | 两种语言只经树里的文件通信 | 两边改漏一处就会分叉,目前靠人工核对 |
 | CP-11 | `plan_next_round` 还要等来源 run 的配方入库门:启用提名且候选 `effective` 时,来源 run 须已有提名标记,且配方候选 `recipe-<run>` 不在 `pending_review` 或 `approved`;候选 `rejected` 不等 [计划中] | 不等,同一轮提名的配方最早在第 N+2 轮被复用 | 三道门的先后成为树里的状态事实,规划一定看得到刚入库的配方,不再依赖同一 tick 里提名先于规划的顺序 | 每一轮多停一次等人审门③;人手放进树的候选没有提名标记,规划不触发,要人手写下一条指令;关掉提名开关规划就不再等 |
 | CP-12 | 守护进程与一次性 tick 的入口在第一个 tick 之前取排他文件锁,锁文件在控制面仓库的 `.git/` 下;所有产物写入的提交只带本文件(`git commit -m <信息> -- <路径>`),Python 与 TypeScript 两侧一致;命令行不取锁 [计划中] | 命令行写入队列;维持现状 | 锁挡住两个守护进程重复派发与记账互相覆盖;只带本文件让命令行已暂存的改动不被守护进程带走 | 锁被占用时入口以退出码 2 退出;命令行与守护进程同时提交时 git 自己的索引锁冲突仍会让一方失败,已复现(同一仓库六个线程各写 15 次,90 次里 62 次失败),守护进程遇到即退出 |
-| CP-13 | 异步派发的契约现在定下,V1 不写代码:指令加 `submitted` 状态,派发器拆成提交与轮询,调和循环加轮询动作 [推迟] | V1 就实现;推迟到 V2 才设计 | 接真实训练之前契约必须在位,否则要同时改派发契约与调和循环 | 契约先于实现,真实执行器落地时细节仍会微调 |
+| CP-13 | 异步派发的契约现在定下,V1 不写代码:指令加 `submitted` 状态,派发器拆成提交与轮询,调和循环加轮询动作 [推迟];接真实 LoRA SFT 的例外见 CP-15 | V1 就实现;推迟到 V2 才设计 | 契约先于实现,真正做异步派发时不必同时改派发契约与调和循环 | 契约先于实现,真实执行器落地时细节仍会微调 |
+| CP-14 | 资源暂时不可用走延后通道 [计划中]:基类 `DeferredError(reason, retry_after_seconds)` 放在无依赖的 `controlplane/deferred.py`;守护进程在 `reconcile_once` 里接住它,不写树、状态不动;退避取 `retry_after_seconds` 与默认 30 秒的较大者、封顶 900 秒,退避期内跳过该动作而同一 tick 的其余动作照常;同一动作连续延后超过 20 次抛 `DeferredExhaustedError`(不继承 `DeferredError`),守护进程带原因退出;退避表只在内存。派发器的通用异常分支对 `DeferredError` 原样上抛,不把它包成 `DirectiveFailedError` | 沿用「派发器抛其他异常就让守护进程退出」;只在计算层内部重试 | 验证主机上常有别人的服务,忙是常态;仓库没有监督脚本,退出等于停摆;内部重试看不到守护进程的节奏 | 上限偏小会在长队列前过早退出,偏大发现得晚;树里没有任何写入,代价只是重启一次守护进程 |
+| CP-15 | 接真实 LoRA SFT 的这一轮,训练同步阻塞调和循环,作为已评估的例外 [计划中]:限定条件是真实后端只由组合根在装配时直接启用;异步派发(CP-13)留给下一轮,不作本轮前置 | 先落地异步派发再接真实训练 | 异步派发要改指令状态机与守护循环,与真实后端叠在一起风险过大;训练期间排队的只是审核与晋级动作,树不会被写坏 | 一轮训练期间审核与晋级动作排队,可达数小时;真正做异步派发时,真实执行器要从同步形态改成提交与轮询两段 |
 | R1 | 事件就是树里的状态事实。每个触发对应一个新动作,幂等键是 run 目录内的标记产物 | 事件订阅 | 循环无状态,崩溃后重读即续接 | 每个触发多一个小文件 [计划中] |
 | R2 | 新动作只有在对应处理器被注入时才会产生,`controlplane` 不导入任何新子系统 | 在 daemon 里直接调用新子系统 | 依赖方向不变;不注入时行为逐字节相同 | 入口要自己组装处理器 [计划中] |
 | R3 | 指令确认默认开启,新增 `awaiting_confirmation` 状态,由 `confirm` 迁到 `pending` | 全自动下发 | 先建立信任 | 闭环每轮停一次等人,关掉要显式配置 [计划中] |
@@ -554,6 +559,7 @@ def evidence_acceptable(grade: str, accept_mock: bool) -> bool: ...  # [计划�
 | 失败点 | 类 | 处理 | 留痕 |
 |---|---|---|---|
 | 派发器抛 `DirectiveFailedError` | 派发器标注,默认 T2 | 指令置 `failed`,不再派发,同一 tick 其余动作继续 | 指令 `payload.failure`,提交信息带类别 |
+| 派发器抛 `DeferredError` [计划中] | 资源暂时不可用,不是指令的错 | 守护进程接住,不写树,按退避重试;同一动作连续延后超过上限则抛 `DeferredExhaustedError` 带原因退出 | 结构化日志一行:动作、目标、原因、下次尝试时间;不进树 |
 | 派发器抛其他异常 | 按 T1 对待 | 原样上抛,守护进程退出,指令仍 `pending` | 只有进程输出 |
 | 产物读不出:YAML 坏、Schema 不符、版本过高 | T3 | 抛异常退出;重启后同处再抛(轮次产物与诊断报告除外,见下两行) | 进程输出 |
 | 非法状态迁移 | T2 | `InvalidTransitionError` 上抛 | 进程输出 |
@@ -642,7 +648,7 @@ Python 侧合计 90 个用例,用 `uv run pytest --collect-only -q` 逐文件数
 | `outcome.yaml` 没有读者 | 守护进程写它,规划不读它;晋级崩在候选置 `effective` 与写它之间时它永久缺失 | 无影响,只供人与 `trace` 查看 |
 | 指令 id 必须等于 run 目录名 | 不一致时派发找不到文件 | 约定;写指令时同名 |
 | `created_at` 写死为 `2026-09-26T00:00:00Z` | ControlPlane 写的产物时间无意义 | 以 git 提交时间为准 |
-| 同步执行 | 慢派发饿住审核与晋级 | 异步派发契约已定,接真实训练之前落地(CP-13)[推迟] |
+| 同步执行 | 慢派发饿住审核与晋级 | 异步派发契约已定(CP-13)[推迟];接真实 LoRA SFT 的这一轮接受阻塞(CP-15) |
 | 命令行文件匹配模式里的 `*` 跨越 `/` | 路径模式可能误匹配更深目录里的产物;命令行按信封 id 匹配,多处命中报歧义,所以误匹配只会变成报错 | Python 一侧逐层遍历,不受影响;两侧扫描范围因此不完全相同 [计划中] |
 | `status` 的输出格式改为分节 | 依赖旧输出的脚本要改 | 仓库里没有这样的脚本 [计划中] |
 | 放弃一条待确认指令只能手改文件为 `failed` | 它在途期间挡住规划(R4),`status` 只把它列在「待确认」下 | 手工改文件 [计划中] |

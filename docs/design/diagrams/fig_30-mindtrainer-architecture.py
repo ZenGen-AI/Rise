@@ -4,11 +4,13 @@ from svgkit import Canvas
 
 def build() -> Canvas:
     c = Canvas(
-        1080, 600, title="MindTrainer 的组件",
+        1080, 730, title="MindTrainer 的组件",
         desc="上层是入口与编排:派发器读配置并构造轨迹源工厂,编排器读训练记录交给续训判定,再逐步驱动训练。"
-             "下层是模式无关的流水线:两种轨迹源产出同一种轨迹批,之后的奖励、分组、执行器与 checkpoint 管理器完全共享。")
+             "下层是模式无关的流水线:两种轨迹源产出同一种轨迹批,之后的奖励、分组、执行器与 checkpoint 管理器完全共享。"
+             "真实执行器与转换器经远端计算层在远端主机上跑 ROLL 作业。")
     c.lane(14, 44, 1052, 152, "入口与编排", kind="compute", dashed=False)
     c.lane(14, 222, 1052, 344, "模式无关的训练流水线", kind="compute")
+    c.lane(14, 590, 1052, 116, "远端计算(本地开发机经 SSH 驱动)", kind="infra")
 
     cfg = c.box(40, 92, 210, "训练配置", "training_config.py\n校验 · 哈希 · phase_at", kind="compute", h=78)
     disp = c.box(300, 92, 210, "派发器", "dispatch.py · wire.py\n指令 → 训练", kind="compute", h=78)
@@ -22,6 +24,7 @@ def build() -> Canvas:
     ex = c.box(670, 328, 160, "训练执行器", "executor.py\nMockExecutor", kind="compute", h=78)
     ck = c.box(860, 328, 180, "checkpoint 管理器", "checkpoint.py\n转换 · 注册候选", kind="compute", h=78)
     tree = c.store(290, 478, 750, "产物树", "dataset_manifest · episodes · training_run · candidate_checkpoint")
+    rc = c.box(560, 626, 440, "远端计算层 compute", "ComputeClient · 助手脚本 · GPU 租约与预检\n真实执行器与转换器经它在远端主机上跑 ROLL 作业", kind="infra", h=64)
 
     c.edge(disp, cfg, "left", "right", label="读取并校验")
     c.edge(disp, orch, label="调用")
@@ -37,4 +40,5 @@ def build() -> Canvas:
     c.edge(ex, ck)
     c.edge(batch, tree, "bottom", "left", label="读清单与 episode")
     c.edge(ck, tree, "bottom", "top", b_f=(950 - 290) / 750, label="注册候选")
+    c.edge(ex, rc, "bottom", "right", a_f=0.5, via=[(750, 466), (1053, 466), (1053, 658)])
     return c

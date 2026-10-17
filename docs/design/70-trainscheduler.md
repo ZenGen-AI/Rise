@@ -21,14 +21,14 @@
 | 子系统 | 职责 | 所在层 | 现状 |
 |---|---|---|---|
 | ControlPlane | 协调层:git 版本化产物树、状态机、调和循环、三个审核门 | 控制层 | 核心 [已落地],闭环扩展 [计划中] |
-| SocialSimulator | 情境与人格生成、多智能体仿真、实时环境服务、诊断评测 | 计算层 | [已落地],诊断用 mock 后端 |
-| MindTrainer | 权重级训练:BatchTrain(SFT 后接 GRPO 加 OPD)与 InteractTrain | 计算层 | [已落地],训练执行器是 mock |
+| SocialSimulator | 情境与人格生成、多智能体仿真、实时环境服务、诊断评测 | 计算层 | [已落地],诊断用 mock 后端;vLLM 加 SoMEval 的真实运行器 [计划中] |
+| MindTrainer | 权重级训练:BatchTrain(SFT 后接 GRPO 加 OPD)与 InteractTrain | 计算层 | [已落地],训练执行器是 mock;ROLL LoRA SFT 真实执行器 [计划中] |
 | MindAgent | 部署态智能体的技能与记忆自进化,不改权重 | 计算层 | [计划中] |
 | RecipeStore | 验证有效的训练配方的版本化仓库 | 控制层 | [计划中] |
 | TrainScheduler | 决策执行器:装配上下文、校验决策、构造训练指令、提名配方 | 控制层 | [计划中] |
 | TrainPlanner | 决策学习者:经可插拔后端给出下一轮训练决策 | 控制层 | [计划中] |
 
-共享基础设施有四个。**Actio** 是带技能库与显式记忆的智能体框架,每次响应附带激活轨迹。**外部推理桥接**用命令行调用外部强模型。**ROLL** 是分布式训练引擎,**vLLM** 是推理引擎。ROLL 与 vLLM 在 V1 里没有接入真实服务,训练与推理由确定性 mock 顶替。
+共享基础设施有五个。**Actio** 是带技能库与显式记忆的智能体框架,每次响应附带激活轨迹。**外部推理桥接**用命令行调用外部强模型。**远端计算层** `compute` 经 SSH 在远端 GPU 主机上跑作业 [计划中]。**ROLL** 是分布式训练引擎,**vLLM** 是推理引擎。V1 经远端计算层接入 ROLL 的 LoRA SFT 与 vLLM 推理服务 [计划中]。已落地部分仍由确定性 mock 顶替。真实 GRPO 加 OPD 训练与真实 judge [推迟]。
 
 **状态标记。** **[已落地]** 表示代码在主干上且有测试。**[计划中]** 表示设计与实施计划已定,代码还没写。**[推迟]** 表示明确不在 V1 范围内。图只画目标系统,不标进展,进展只看正文的状态标记。
 
@@ -422,6 +422,8 @@ build_recipe_candidate(store, run_id, *, config, repo_commit=None,
 | `clone` | 配方的配置套上扰动 | 最新已晋级模型;没有就保留配方原值 | 无 | 配方锚定的清单,不再合成 |
 | `replay` | 配方的配置原样 | 配方原值 | 无 | 配方锚定的清单 |
 
+真实后端 [计划中] 下 `new` 与 `clone` 的基座解析只走得通一轮:最新已晋级模型带的 `checkpoint_ref` 是真实转换器产出的适配器导出,不是训练起点,真实执行器的 `load` 会拒绝它,所以第二轮在训练起点处确定性失败。解析本身不区分后端,这里不改;补救方案是让候选多带一个训练格式引用 [推迟]。
+
 领域校验按顺序返回第一条违规,违规原因回给规划器重采样,计入同一重试预算:
 
 | 顺序 | 违规 |
@@ -488,7 +490,7 @@ build_recipe_candidate(store, run_id, *, config, repo_commit=None,
 | 10 | 增益低于 `min_gain` | 终局 |
 | 11 | 报告带退化标记 | 终局 |
 
-证据等级不可接受记为终局:之后打开接受 mock 证据的开关,也不会回头补提名已判 `skipped` 的 run,要人删掉 `nomination.yaml` 才会重判。
+证据等级不可接受记为终局:之后打开接受 mock 证据的开关,也不会回头补提名已判 `skipped` 的 run,要人删掉 `nomination.yaml` 才会重判。这对 mock 证据的代价不可逆:真实 SoMEval 加 mock judge 的报告等级仍是 `mock`(见诊断评测文档),所以真实后端 [计划中] 下没打开开关就跑完的 run,会被永久记成 `skipped`。
 
 规划等门③依赖这份标记:`nominated` 与 `skipped` 都放行,只有「还没到」不写标记、规划继续等;标记为 `nominated` 时,再看配方候选是否已离开 `pending_review` 与 `approved`。候选为 `rejected` 的 run 不提名,规划不等这份标记。
 

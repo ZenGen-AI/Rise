@@ -8,7 +8,7 @@ def build() -> Canvas:
     c = Canvas(
         1080, 730, title="RismForge 系统架构",
         desc="四层结构。控制层放决策与配方相关的四个组件,协调层 ControlPlane 配三道人工审核门,"
-             "计算层放三个子系统,共享基础设施放 Actio、训练与推理引擎。"
+             "计算层放三个子系统,共享基础设施放 Actio、远端计算层、训练与推理引擎。"
              "所有子系统经 ControlPlane 读写产物,只有两条受限直连接口绕过它。")
     c.lane(14, 44, 1052, 146, "控制层(本地开发机)", kind="control")
     c.lane(14, 214, 1052, 128, "协调层", kind="control", dashed=False)
@@ -27,8 +27,9 @@ def build() -> Canvas:
     ss = c.box(330, 412, 210, "SocialSimulator", "情境仿真 · 实时环境服务\n诊断评测", kind="compute", h=80)
     ma = c.box(600, 412, 210, "MindAgent", "部署态智能体\n技能与记忆自进化", kind="compute", h=80)
 
-    rv = c.box(60, 590, 210, "ROLL · vLLM", "分布式训练 · 推理引擎", kind="infra", h=80)
-    ac = c.box(420, 590, 300, "Actio", "带技能库与显式记忆的智能体框架\n每次响应附带激活轨迹", kind="infra", h=80)
+    cm = c.box(60, 590, 260, "远端计算层 compute", "经 SSH 在远端 GPU 主机上跑作业\nGPU 租约 · 预检 · 作业控制", kind="infra", h=80)
+    rv = c.box(380, 590, 210, "ROLL · vLLM", "分布式训练 · 推理引擎", kind="infra", h=80)
+    ac = c.box(680, 590, 370, "Actio", "带技能库与显式记忆的智能体框架\n每次响应附带激活轨迹", kind="infra", h=80)
 
     def fx(node, target):
         return (node.cx - target.x) / target.w
@@ -43,7 +44,8 @@ def build() -> Canvas:
     c.edge(tp, br, label="推理")
     c.edge(mt, ss, label="①", tail=True, color=ORANGE, width=2.4)
     c.edge(ss, ma, label="②", tail=True, color=ORANGE, width=2.4)
-    c.edge(mt, rv, "bottom", "top")
+    c.edge(mt, cm, "bottom", "top")
+    c.edge(cm, rv, "right", "left", label="驱动")
     c.edge(ss, ac, "bottom", "top", b_f=fx(ss, ac))
     c.edge(ma, ac, "bottom", "top", b_f=fx(ma, ac))
 

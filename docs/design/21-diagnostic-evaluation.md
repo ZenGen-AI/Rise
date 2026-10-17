@@ -21,14 +21,14 @@
 | 子系统 | 职责 | 所在层 | 现状 |
 |---|---|---|---|
 | ControlPlane | 协调层:git 版本化产物树、状态机、调和循环、三个审核门 | 控制层 | 核心 [已落地],闭环扩展 [计划中] |
-| SocialSimulator | 情境与人格生成、多智能体仿真、实时环境服务、诊断评测 | 计算层 | [已落地],诊断用 mock 后端 |
-| MindTrainer | 权重级训练:BatchTrain(SFT 后接 GRPO 加 OPD)与 InteractTrain | 计算层 | [已落地],训练执行器是 mock |
+| SocialSimulator | 情境与人格生成、多智能体仿真、实时环境服务、诊断评测 | 计算层 | [已落地],诊断用 mock 后端;vLLM 加 SoMEval 的真实运行器 [计划中] |
+| MindTrainer | 权重级训练:BatchTrain(SFT 后接 GRPO 加 OPD)与 InteractTrain | 计算层 | [已落地],训练执行器是 mock;ROLL LoRA SFT 真实执行器 [计划中] |
 | MindAgent | 部署态智能体的技能与记忆自进化,不改权重 | 计算层 | [计划中] |
 | RecipeStore | 验证有效的训练配方的版本化仓库 | 控制层 | [计划中] |
 | TrainScheduler | 决策执行器:装配上下文、校验决策、构造训练指令、提名配方 | 控制层 | [计划中] |
 | TrainPlanner | 决策学习者:经可插拔后端给出下一轮训练决策 | 控制层 | [计划中] |
 
-共享基础设施有四个。**Actio** 是带技能库与显式记忆的智能体框架,每次响应附带激活轨迹。**外部推理桥接**用命令行调用外部强模型。**ROLL** 是分布式训练引擎,**vLLM** 是推理引擎。ROLL 与 vLLM 在 V1 里没有接入真实服务,训练与推理由确定性 mock 顶替。
+共享基础设施有五个。**Actio** 是带技能库与显式记忆的智能体框架,每次响应附带激活轨迹。**外部推理桥接**用命令行调用外部强模型。**远端计算层** `compute` 经 SSH 在远端 GPU 主机上跑作业 [计划中]。**ROLL** 是分布式训练引擎,**vLLM** 是推理引擎。V1 经远端计算层接入 ROLL 的 LoRA SFT 与 vLLM 推理服务 [计划中]。已落地部分仍由确定性 mock 顶替。真实 GRPO 加 OPD 训练与真实 judge [推迟]。
 
 **状态标记。** **[已落地]** 表示代码在主干上且有测试。**[计划中]** 表示设计与实施计划已定,代码还没写。**[推迟]** 表示明确不在 V1 范围内。图只画目标系统,不标进展,进展只看正文的状态标记。
 
@@ -116,7 +116,8 @@
 
 | 非目标或推迟项 | 状态 | V1 的处理 |
 |---|---|---|
-| 真实 SoMEval 子进程与真实 judge | [推迟] | 注入 `MockSoMEvalRunner` 与 `MockJudgeBackend`,报告标 `backends: mock` |
+| 真实 SoMEval 子进程,经远端 vLLM 服务推理 | [计划中] | 今天注入 `MockSoMEvalRunner`,报告标 `backends: mock` |
+| 真实 judge | [推迟] | 注入 `MockJudgeBackend`;含 mock judge 的报告等级仍是 `mock`,不升 `real` |
 | 评估器跑动态轨 | [推迟] | 评估器传空的动态 spec,只跑静态轨;没有情境与绑定的来源 |
 | G 组探针与 reward hacking 检测进报告 | [推迟] | 检测函数已实现,编排器不调用,报告里只有社会能力退化 |
 | 一致性信号 | [推迟] | 报告里恒为空映射与 0.0 |
@@ -307,7 +308,7 @@ def run_diagnostic(..., *, baseline_scores, dynamic_specs, backends: str): ...
 
 诊断资产的读写 [计划中]:`write_taxonomy`、`write_item_pool` 与常量 `TAXONOMY_TYPE`、`ITEM_POOL_TYPE` 放在 `diagnostic.assets`。产物类型是 `diagnostic_taxonomy` 与 `diagnostic_item_pool`,状态 `effective`,登记即生效,题库变更本身不走审核门。信封 id 为 `taxonomy-<版本>` 与 `item-pool-<版本>`。读取时校验信封类型与载荷里的版本号,路径上放错东西会明确报错。组合根的 `install-defaults` 调这两个写函数。
 
-`candidate_ref` 在 V1 是候选 id,mock 运行器忽略它。接真实 SoMEval 之前,评估器要读候选载荷里的 `checkpoint_ref` 并交给运行器,协议签名随之改成接收引用而不是候选 id [计划中]。
+`candidate_ref` 在 V1 是候选 id,mock 运行器忽略它。真实 SoMEval 运行器 [计划中] 的协议签名不变,仍收候选 id:它按候选 id 读 `candidate_checkpoint.yaml`,从里面取 `checkpoint_ref` 的 `BigRef`,再由 `fetch_hint` 的 `type` 与 `format` 判断存点是真实导出还是 mock。取不到或解不出,抛确定性错误,走下面的失败落点。
 
 触发条件:候选为 `pending_review` 或 `approved` 且没有诊断报告时,调和循环产生 `request_diagnostic`。今天执行它的是占位桩,工作包 9 的组合根在闭环模式下换成评估器 [计划中]。
 
@@ -485,6 +486,12 @@ def run_diagnostic(..., *, baseline_scores, dynamic_specs, backends: str): ...
 | 未知档位、mock 缺题目的固定输出、judge 缺固定分 | T2 | 抛 `ValueError` 或 `KeyError` | 无报告 |
 | 基准版本不可比 | T2 | 抛 `CrossVersionError`;V1 不触发 | 无报告 |
 | 报告分数可疑或画像异常 | T3 | 不自动处理,审核门①的人读报告判断 | 报告本身 |
+| 真实 SoMEval 的确定性失败:题库条目没有对应的 SoMBench 样本、候选存点解不出、某题输出条数不等于 k [计划中] | T2 | 评估器内部捕获,写一份 `stub: true` 的报告,载荷带 `failure_reason` 与缺失清单;`request_diagnostic` 动作正常结束,该候选此后不再触发评测 | 报告本身,等级为 `stub` |
+| 真实 SoMEval 的瞬态失败:服务启动超时、隧道建立失败、GPU 被占用 [计划中] | 延后 | 抛 `DeferredError` 的子类,守护进程不写树、按退避重试;不写报告,租约在失败时释放 | 守护进程结构化日志 |
+
+写 `stub` 报告而不是让动作一直失败:报告是评测的结论载体,`diagnostic_grade` 对 `stub: true` 已经失败关闭,闭环里记录、提名、规划下一轮都要求证据可接受,所以不推进。晋级本身只看对应报告是否在场、不看等级,这条语义不变,拦它的是人工审核门:`review` 对 `stub` 报告标 `[STUB]` [计划中] 并打印 `failure_reason`,批准的人能区分「占位」和「评测没跑成」。判错的代价:把确定性错误当瞬态,守护进程会无限重试同一个必然失败的评测。
+
+**含 mock 组件的真实评测不升级。** 真实 SoMEval 加 mock judge 的报告,`backends` 仍写 `mock`,`diagnostic_grade` 与下游门控一行不改。报告载荷另加一个只作记录、不参与判级的字段 `component_backends`,形如 `{executor: real, converter: real, someval: real, judge: mock}`,让人看出缺口只剩 judge。`executor` 与 `converter` 两项由候选存点引用的 `fetch_hint.type` 推出(`roll_ssh` 即训练与转换都是真实的,`mock` 即都是 mock),`someval` 与 `judge` 两项由评估器装配时声明。该字段与 `backends` 在同一次 `write_report` 里落盘。
 
 只读观测手段:
 
@@ -525,7 +532,8 @@ def run_diagnostic(..., *, baseline_scores, dynamic_specs, backends: str): ...
 | 隔离校验器、G 组探针检测、reward hacking 检测 | [已落地] | 没有调用方 |
 | 评估器、资产读写、`backends` 标记、基线解析 | [计划中] | 工作包 8 |
 | 默认资产 `factory-tax-v1`、`factory-pool-v1` 与 mock 装配 | [计划中] | 工作包 9 |
-| 真实 SoMEval 与真实 judge | [推迟] | 接入后报告标 `backends: real` |
+| 真实 SoMEval | [计划中] | 子进程运行,推理经远端 vLLM 服务;样本与题库条目之间靠一份 `item_map.json` 对应 |
+| 真实 judge | [推迟] | 接入后报告才可能标 `backends: real`;切换后的头几轮基线等级不同,没有可比增益 |
 
 | 已知局限 | 影响 | 缓解 |
 |---|---|---|
