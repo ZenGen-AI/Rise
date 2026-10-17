@@ -618,7 +618,7 @@ T1 的上抛异常会让 `run_daemon` 退出,需要外部监督者重启。重�
 | 派发与接线 | 指令到候选、失败到类别、坏指令不挡后面的指令 | 临时 git 仓库 |
 | 端到端 | 候选走完未修改的调和循环到晋级,再成为下一轮基座 | 占位诊断 |
 
-默认测试套件不依赖的外部服务:ROLL、vLLM、真实 LLM judge、远程 GPU、SSH。真实后端 [计划中] 的测试用假传输和假客户端,远端助手脚本在本机真跑;连真实主机的冒烟用例标 `remote`,默认跳过。
+默认测试套件不依赖的外部服务:ROLL、vLLM、真实 LLM judge、远程 GPU、SSH。真实后端的测试用假传输和假客户端,远端助手脚本在本机真跑 [已落地];真起子进程的那个文件标 `slow`,`-m 'not slow'` 可跳。连真实主机的冒烟用例标 `remote`、默认跳过 [计划中]:这个标记还没有注册,也还没有这样的用例。
 
 | 测试文件 | 用例数 | 状态 |
 |---|---|---|
@@ -637,7 +637,7 @@ T1 的上抛异常会让 `run_daemon` 退出,需要外部监督者重启。重�
 | `tests/test_daemon_dispatcher.py`(ControlPlane 侧的派发缝) | 14 | [已落地] |
 | `tests/test_mt_data_spec.py`、`tests/test_mt_data_spec_stages.py` | 预计 70、17 | [计划中] |
 | `tests/test_mt_data_producer.py`、`tests/test_mt_dispatch_synthesis.py` | 预计 25、33 | [计划中] |
-| `tests/test_mt_roll_executor.py`、`tests/test_mt_roll_converter.py` | 21、12 | [已落地] |
+| `tests/test_mt_roll_executor.py`、`tests/test_mt_roll_converter.py` | 21、17 | [已落地] |
 | `tests/test_mt_orchestrator.py` 的阶段路径、真实执行器与转换器集成用例 | 新增 6、3、1 | [已落地] |
 | `tests/test_daemon_deferred.py`(ControlPlane 侧的延后通道) | 10 | [已落地] |
 

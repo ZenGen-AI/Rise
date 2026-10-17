@@ -143,6 +143,18 @@ def test_build_compute_client_wires_the_ssh_transport(tmp_path):
     ]
 
 
+@pytest.mark.parametrize("alias", ["-oProxyCommand=touch /tmp/pwned", "a b", "has'quote"])
+def test_a_malformed_ssh_alias_is_a_config_error(tmp_path, alias):
+    """别名来自本机映射文件,会进 ssh 的 argv。以 `-` 开头的会被 ssh 当选项读
+    (ProxyCommand 能执行任意命令),所以 transport._ALIAS 拒绝它;装配期就要翻成
+    FactoryConfigError,不能让 ComputeError 漏到调用方。
+
+    空别名不走这条分支:read_host_map 的"值必须是非空字符串"先把它拦下。"""
+    path = _hosts_file(tmp_path, f"gpu-1: {alias!r}\n")
+    with pytest.raises(FactoryConfigError, match=r"the ssh alias for endpoint 'gpu-1' has an invalid form"):
+        build_compute_client(ComputeEndpoint(**_ITEM), read_host_map(env={HOSTS_ENV: path}))
+
+
 def test_install_defaults_does_not_install_endpoints(tmp_path):
     """远端路径没有合理默认值:默认值安装器不得写端点配置,缺了就拒绝装配。"""
     from factory.defaults import install_defaults

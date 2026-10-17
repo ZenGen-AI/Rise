@@ -1,7 +1,11 @@
 """远端助手、传输、引导、客户端,本机冒烟。
 
-总耗时约 10s(助手在本机真起子进程、真等其退出)。不加自定义标记:仓库的 pytest 配置没有注册 markers,
-全量命令带 -W error,未注册的标记会让收集阶段直接失败。
+总耗时约 10s(助手在本机真起子进程、真等其退出),所以整个模块标 `slow`:
+`-m 'not slow'` 能跳掉它换一个快反馈的循环。标记已在 `pyproject.toml` 的
+`[tool.pytest.ini_options]` 注册过;全量命令带 -W error,未注册的标记会让收集阶段直接失败。
+
+模块级标记会把文件开头那几个纯数据类用例(端点校验、launch_prefix 白名单、别名形态)
+一并标上,它们其实是毫秒级的。分开标要给二十多个用例各加一行装饰器,不值得。
 """
 from __future__ import annotations
 
@@ -19,6 +23,8 @@ from compute.endpoint import ENDPOINT_ID_PATTERN, LAUNCH_PREFIX_PROGRAMS, Comput
 from compute.errors import ComputeBusyError, ComputeError, HelperError, RemoteJobFailedError, RemoteJobTimeoutError
 from compute.helper import HELPER_SHA256, helper_bytes
 from compute.transport import RunResult, SshTransport
+
+pytestmark = pytest.mark.slow
 
 TOOL = Path(__file__).parent.parent / "src" / "compute" / "job_tool.py"
 PYTHON = "python3"
