@@ -64,3 +64,50 @@ def read_endpoints_config(store: GitStore) -> list[ComputeEndpoint]:
         except ComputeError as exc:
             raise FactoryConfigError(f"{COMPUTE_ENDPOINTS_FILE} item {index}: {exc}") from None
     return endpoints
+
+
+def read_host_map(*, env: Mapping[str, str] | None = None) -> dict[str, str]:
+    """本机主机映射 `{endpoint_id: ssh 别名}`。路径由 `RISMFORGE_COMPUTE_HOSTS` 指定。
+
+    映射放在仓库之外,别名指向 `~/.ssh/config` 的主机条目,所以两处配置都不存凭据。
+    报错只写环境变量名与路径,不回显内容。
+    """
+    environ = os.environ if env is None else env
+    path = environ.get(HOSTS_ENV)
+    if not path:
+        raise FactoryConfigError(
+            f"{HOSTS_ENV} is not set; real backends need it to locate the endpoint hosts"
+        )
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = yaml.safe_load(handle)
+    except OSError:
+        raise FactoryConfigError(f"{path} cannot be read as a compute host map (OSError)") from None
+    except yaml.YAMLError:
+        raise FactoryConfigError(f"{path} cannot be read as a compute host map (YAMLError)") from None
+    if not isinstance(data, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) and v for k, v in data.items()
+    ):
+        raise FactoryConfigError(f"{path} must be a mapping of endpoint_id to ssh alias")
+    return dict(data)
+
+
+def build_compute_client(
+    endpoint: ComputeEndpoint,
+    hosts: Mapping[str, str],
+    *,
+    python: str = "python3",
+) -> ComputeClient:
+    """按端点与主机映射装配一个 `ComputeClient`。别名只在映射里,不进 git 树。"""
+    alias = hosts.get(endpoint.endpoint_id)
+    if alias is None:
+        raise FactoryConfigError(
+            f"{HOSTS_ENV} has no entry for endpoint {endpoint.endpoint_id!r}"
+        )
+    try:
+        transport = SshTransport(alias)
+    except ComputeError:
+        raise FactoryConfigError(
+            f"the ssh alias for endpoint {endpoint.endpoint_id!r} has an invalid form"
+        ) from None
+    return ComputeClient(endpoint, transport, python=python)

@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import pytest
+from compute.client import ComputeClient
+from compute.endpoint import ComputeEndpoint
 from controlplane.envelope import Envelope, OwnerRef
 from controlplane.gitstore import GitStore
 from factory.compute_config import COMPUTE_ENDPOINTS_FILE, read_endpoints_config
@@ -88,3 +90,67 @@ def test_success_reads_two_endpoints(store):
     assert eps[0].work_root == "/srv/rise/work"
     assert eps[1].poll_seconds == 5.0
     assert eps[0].launch_prefix == ()
+
+
+# ---------------- 本机主机映射与装配注入 ----------------
+
+from factory.compute_config import HOSTS_ENV, build_compute_client, read_host_map
+
+
+def _hosts_file(tmp_path, text):
+    path = tmp_path / "hosts.yaml"
+    path.write_text(text, encoding="utf-8")
+    return str(path)
+
+
+def test_host_map_missing_env_names_the_variable(tmp_path):
+    with pytest.raises(FactoryConfigError, match=rf"{HOSTS_ENV} is not set"):
+        read_host_map(env={})
+
+
+def test_host_map_missing_file_names_the_path(tmp_path):
+    missing = str(tmp_path / "nope.yaml")
+    with pytest.raises(FactoryConfigError, match=r"cannot be read as a compute host map"):
+        read_host_map(env={HOSTS_ENV: missing})
+
+
+def test_host_map_must_be_a_mapping_of_strings(tmp_path):
+    path = _hosts_file(tmp_path, "- just\n- a list\n")
+    with pytest.raises(FactoryConfigError, match=r"must be a mapping of endpoint_id to ssh alias"):
+        read_host_map(env={HOSTS_ENV: path})
+
+
+def test_host_map_reads_the_aliases(tmp_path):
+    path = _hosts_file(tmp_path, "gpu-1: '.181'\nmock-gpu: localhost\n")
+    assert read_host_map(env={HOSTS_ENV: path}) == {"gpu-1": ".181", "mock-gpu": "localhost"}
+
+
+def test_unknown_endpoint_in_the_map_is_a_config_error(tmp_path):
+    path = _hosts_file(tmp_path, "other: somewhere\n")
+    with pytest.raises(FactoryConfigError, match=rf"{HOSTS_ENV} has no entry for endpoint 'gpu-1'"):
+        build_compute_client(ComputeEndpoint(**_ITEM), read_host_map(env={HOSTS_ENV: path}))
+
+
+def test_build_compute_client_wires_the_ssh_transport(tmp_path):
+    # 别名要过 transport._ALIAS(首字符必须是字母数字或下划线),所以这里用 ~/.ssh/config 里
+    # 真实条目的形状;规格里的 `.181` 是主机简称,不是别名。
+    path = _hosts_file(tmp_path, "gpu-1: gpu-181\n")
+    client = build_compute_client(ComputeEndpoint(**_ITEM), read_host_map(env={HOSTS_ENV: path}))
+    assert isinstance(client, ComputeClient)
+    assert client.endpoint.endpoint_id == "gpu-1"
+    assert client._transport.ssh_argv(["python3", "-c", "1"])[:6] == [
+        "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "--",
+    ]
+
+
+def test_install_defaults_does_not_install_endpoints(tmp_path):
+    """远端路径没有合理默认值:默认值安装器不得写端点配置,缺了就拒绝装配。"""
+    from factory.defaults import install_defaults
+
+    store = GitStore(str(tmp_path / "cp"))
+    store.init()
+    paths = install_defaults(store)
+    assert COMPUTE_ENDPOINTS_FILE not in paths
+    assert not store.exists(COMPUTE_ENDPOINTS_FILE)
+    with pytest.raises(FactoryConfigError, match=r"is missing; real backends need it"):
+        read_endpoints_config(store)
