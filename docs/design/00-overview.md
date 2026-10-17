@@ -29,7 +29,8 @@ RismForge 是一套"AI 驱动的社会心智后训练工厂"。输入通用开�
 | 诊断评测 | [已落地] 未接入循环 | 编排器已实现;循环里的 `request_diagnostic` 仍写占位报告 |
 | MindTrainer | [已落地] | batch 与 interact 轨迹源、奖励管线、续训;训练由 mock 执行器完成。闭环组合根不装配实时客户端,interact 指令在闭环里判 `failed` |
 | 闭环:规划、提名、配方、智能体、桥接、组合根 | [计划中] | 九个工作包,78 个任务,设计与施工计划已定 |
-| 远端计算层(经 SSH)、ROLL LoRA SFT 真实训练、vLLM 服务、真实 SoMEval 运行器 | [计划中] | 设计与施工计划已定;其余组件仍由确定性 mock 顶替 |
+| 远端计算层(经 SSH)、ROLL LoRA SFT 真实执行器与适配器导出转换器 | [已落地] | 代码与测试在主干上,但还没有入口装配它们(`run_controlplane.py` 仍用 mock),也还没在真实主机上跑过 |
+| vLLM 服务、真实 SoMEval 运行器 | [计划中] | 设计与施工计划已定;仍由确定性 mock 顶替 |
 | 真实 GRPO 加 OPD 训练、真实 judge | [推迟] | 仍用确定性 mock,所以真实评测的报告等级仍是 mock |
 
 今天能跑通的端到端路径是:人工写一条 batch 训练指令,守护进程派发给 MindTrainer 派发器,mock 训练产出候选,占位诊断补齐证据,人工经命令行批准,守护进程晋级候选并写入 zengen 版本。
@@ -153,8 +154,8 @@ RismForge 是一套"AI 驱动的社会心智后训练工厂"。输入通用开�
 | `src/controlplane` | 标准库、`simulator.stubs`(骨架桩) | 任何闭环新包 | [已落地] |
 | `src/simulator` | `controlplane` | `mindtrainer`、`diagnostic` | [已落地] |
 | `src/diagnostic` | `controlplane`、`simulator` | `mindtrainer` | [已落地] |
-| `src/mindtrainer` | `controlplane`、`simulator`,真实执行器另加 `compute` [计划中] | `diagnostic` | [已落地] |
-| `src/compute` | 标准库、`controlplane.deferred` | 其余一切业务包,含 `factory` | [计划中] |
+| `src/mindtrainer` | `controlplane`、`simulator`,真实执行器另加 `compute` | `diagnostic` | [已落地] |
+| `src/compute` | 标准库、`controlplane.deferred` | 其余一切业务包,含 `factory` | [已落地] |
 | `src/actio` | `simulator.datamodel` | 其余业务包 | [计划中] |
 | `src/inference_bridge` | `controlplane` | 其余业务包 | [计划中] |
 | `src/recipestore`、`src/trainplanner` | `controlplane`,后者另加 `inference_bridge` | 其余业务包 | [计划中] |
@@ -534,7 +535,7 @@ V2 要做多租户、配方跨工厂流通、数据结构升级。这些无法�
 | `scripts/run_controlplane.py` | 守护进程入口,接 MindTrainer 派发器 | 薄壳 | [已落地] |
 | `schemas/envelope.schema.json` | 信封的 JSON Schema | 1 个文件 | [已落地] |
 | `src/actio`、`src/recipestore`、`src/trainplanner`、`src/trainscheduler`、`src/mindagent`、`src/inference_bridge`、`src/factory` | 闭环的七个新包 | 未写 | [计划中] |
-| `src/compute` | 远端计算层:端点、SSH 传输、只依赖标准库的远端助手、GPU 租约与预检、客户端 | 未写 | [计划中] |
+| `src/compute` | 远端计算层:端点、SSH 传输、只依赖标准库的远端助手、GPU 租约与预检、客户端 | 1151 行 | [已落地] |
 
 **今天是真的**
 
