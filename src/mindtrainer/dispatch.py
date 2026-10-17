@@ -177,7 +177,7 @@ def _interact_sources(
 
 def make_mindtrainer_dispatcher(
     *,
-    executor_factory: Callable[[], TrainingExecutor] = MockExecutor,
+    executor_factory: Callable[[str], TrainingExecutor] = lambda run_id: MockExecutor(),
     converter: CheckpointConverter | None = None,
     client_factory: Callable[[], object] | None = None,
     policy: ModelBackend | None = None,
@@ -225,7 +225,7 @@ def make_mindtrainer_dispatcher(
         try:
             resume_or_run(
                 cfg, store=store, run_id=run_id, make_sources=make_sources,
-                attribution=attribution, executor=executor_factory(), converter=converter,
+                attribution=attribution, executor=executor_factory(run_id), converter=converter,
             )
         except _DETERMINISTIC as exc:
             # NeedsHumanError 的含义是"该人工介入"(设计 §6.2、resume.py),是 T3,不是 T2;

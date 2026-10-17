@@ -23,7 +23,7 @@ from controlplane.paths import run_dir
 from factory import readonly
 from factory.errors import FactoryConfigError
 from factory.switches import SWITCHES, UnknownSwitchError, parse_enable
-from factory.wire import PLANNER_BACKENDS, FactoryOptions, HandlerBuilder, reconcile_one_tick, run
+from factory.wire import EXECUTORS, PLANNER_BACKENDS, FactoryOptions, HandlerBuilder, reconcile_one_tick, run
 
 
 def _assembly_flags(p: argparse.ArgumentParser) -> None:
@@ -39,6 +39,11 @@ def _assembly_flags(p: argparse.ArgumentParser) -> None:
                    help="规划后端:bridge 走 backends.yaml 的 planner 桥接,heuristic 是确定性后端")
     p.add_argument("--repo-commit", default=None,
                    help="写进配方候选 code_version.repo_commit 的提交;不传则取代码仓库的 git rev-parse HEAD")
+    p.add_argument("--executor", choices=EXECUTORS, default="mock",
+                   help="训练执行器:mock 是确定性替身(默认);roll 经 SSH 在远端 GPU 主机上跑真实 ROLL LoRA SFT,"
+                        "一次训练会同步占住调和循环数小时,且暂不能与 --enable 同用")
+    p.add_argument("--endpoint", default=None,
+                   help="只在 --executor roll 时有意义:点名 compute/endpoints.yaml 里的端点 id;只有一个端点时可省")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -76,6 +81,8 @@ def _options(args: argparse.Namespace) -> FactoryOptions:
         confirm_directives=args.confirm_directives,
         planner_backend=args.planner_backend,
         repo_commit=args.repo_commit,
+        executor=args.executor,
+        endpoint=args.endpoint,
     )
 
 

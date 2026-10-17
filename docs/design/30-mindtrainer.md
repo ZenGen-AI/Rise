@@ -301,7 +301,7 @@ payload:
 
 ```python
 def make_mindtrainer_dispatcher(
-    *, executor_factory: Callable[[], TrainingExecutor] = MockExecutor,
+    *, executor_factory: Callable[[str], TrainingExecutor] = lambda run_id: MockExecutor(),
     converter: CheckpointConverter | None = None,
     client_factory: Callable[[], object] | None = None,
     policy: ModelBackend | None = None,

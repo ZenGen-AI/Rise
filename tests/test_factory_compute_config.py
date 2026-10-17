@@ -166,3 +166,37 @@ def test_install_defaults_does_not_install_endpoints(tmp_path):
     assert not store.exists(COMPUTE_ENDPOINTS_FILE)
     with pytest.raises(FactoryConfigError, match=r"is missing; real backends need it"):
         read_endpoints_config(store)
+
+
+# ---------------- --endpoint 选端点 ----------------
+
+from factory.compute_config import select_endpoint
+
+
+def _eps(*ids):
+    return [ComputeEndpoint(**{**_ITEM, "endpoint_id": i}) for i in ids]
+
+
+def test_a_single_endpoint_needs_no_name():
+    (only,) = _eps("gpu-1")
+    assert select_endpoint([only], None) is only
+
+
+def test_the_named_endpoint_is_picked_among_several():
+    eps = _eps("gpu-1", "gpu-2")
+    assert select_endpoint(eps, "gpu-2").endpoint_id == "gpu-2"
+
+
+def test_several_endpoints_without_a_name_is_ambiguous():
+    with pytest.raises(FactoryConfigError, match=r"2 endpoints.*gpu-1.*gpu-2.*--endpoint"):
+        select_endpoint(_eps("gpu-1", "gpu-2"), None)
+
+
+def test_a_name_that_matches_nothing_lists_what_exists():
+    with pytest.raises(FactoryConfigError, match=r"no endpoint 'gpu-9'.*gpu-1"):
+        select_endpoint(_eps("gpu-1"), "gpu-9")
+
+
+def test_an_empty_endpoint_list_is_refused():
+    with pytest.raises(FactoryConfigError, match=r"defines no endpoints"):
+        select_endpoint([], None)

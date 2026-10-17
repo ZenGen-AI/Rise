@@ -66,6 +66,27 @@ def read_endpoints_config(store: GitStore) -> list[ComputeEndpoint]:
     return endpoints
 
 
+def select_endpoint(endpoints: list[ComputeEndpoint], name: str | None) -> ComputeEndpoint:
+    """按 `--endpoint` 在树内端点里选一个。只有一个端点时可以不点名;多于一个必须点名。
+
+    报错列出现有端点的 id:它们来自 git 树里的配置,不含秘密,而且「点名点错了」时
+    最有用的信息就是正确答案有哪些。"""
+    if not endpoints:
+        raise FactoryConfigError(f"{COMPUTE_ENDPOINTS_FILE} defines no endpoints")
+    ids = [e.endpoint_id for e in endpoints]
+    if name is None:
+        if len(endpoints) == 1:
+            return endpoints[0]
+        raise FactoryConfigError(
+            f"{COMPUTE_ENDPOINTS_FILE} defines {len(endpoints)} endpoints {ids}; "
+            "name one with --endpoint"
+        )
+    for endpoint in endpoints:
+        if endpoint.endpoint_id == name:
+            return endpoint
+    raise FactoryConfigError(f"no endpoint {name!r} in {COMPUTE_ENDPOINTS_FILE}; it defines {ids}")
+
+
 def read_host_map(*, env: Mapping[str, str] | None = None) -> dict[str, str]:
     """本机主机映射 `{endpoint_id: ssh 别名}`。路径由 `RISMFORGE_COMPUTE_HOSTS` 指定。
 

@@ -212,3 +212,202 @@ def test_the_lock_is_released_when_run_and_reconcile_finish(twin):
     assert main(["reconcile", str(a.repo_root), "--once"]) == 0
     with held_lock(a.repo_root):  # 取得到,说明前两条没把锁留在身后
         pass
+
+
+# ---------------- --executor roll(设计 FC-15) ----------------
+
+_ENDPOINT = {
+    "endpoint_id": "gpu-1", "work_root": "/srv/rise/work", "roll_root": "/srv/roll",
+    "launch_prefix": [], "base_model_path": "/srv/models/qwen-4b",
+    "heldout_jsonl": "/srv/roll/data/heldout.jsonl", "sft_template": "/srv/roll/configs/sft_lora.yaml",
+    "min_free_host_mem_gib": 12.0, "min_free_disk_gib": 50.0,
+    "poll_seconds": 10.0, "job_timeout_seconds": 3600.0,
+}
+
+
+def _write_endpoints(store, *ids):
+    from compute.endpoint import ComputeEndpoint  # noqa: F401  (确认包可导入)
+    from controlplane.envelope import Envelope, OwnerRef
+    from controlplane.paths import compute_endpoints_file
+
+    env = Envelope(
+        id="cfg-compute-endpoints", type="config", version=1, created_at="2026-10-17T00:00:00Z",
+        created_by=OwnerRef(), status="effective", schema_version=1,
+        payload={"endpoints": [{**_ENDPOINT, "endpoint_id": i} for i in ids]},
+    )
+    store.write_product(compute_endpoints_file(), env, "test: endpoints")
+
+
+def _hosts(tmp_path, text):
+    path = tmp_path / "hosts.yaml"
+    path.write_text(text, encoding="utf-8")
+    return {"RISMFORGE_COMPUTE_HOSTS": str(path)}
+
+
+@pytest.fixture
+def real_repo(tmp_path):
+    s = GitStore(str(tmp_path / "cp"))
+    s.init()
+    return s
+
+
+def _commit_count(store):
+    """空仓库安全:还没有提交时 rev-list HEAD 会抛;--all 返回 0。"""
+    return int(store._git("rev-list", "--all", "--count").strip())
+
+
+def test_executor_defaults_to_mock_and_changes_nothing(twin):
+    """不传 --executor:装配结果与改动前逐字节相同,不读端点配置。"""
+    a, _ = twin
+    asm = assemble(a, FactoryOptions())
+    assert asm.handlers == {} and asm.evaluator is None
+
+
+def test_roll_assembles_a_dispatcher_whose_factory_builds_a_roll_executor(real_repo, tmp_path):
+    from mindtrainer.roll_executor import RollExecutor
+
+    _write_endpoints(real_repo, "gpu-1")
+    asm = assemble(real_repo, FactoryOptions(executor="roll"), env=_hosts(tmp_path, "gpu-1: gpu-181\n"))
+    assert asm.executor_factory is not None
+    built = asm.executor_factory("run-007")
+    assert isinstance(built, RollExecutor)
+    assert built.run_id == "run-007"  # 指令 id 一路传到作业身份
+
+
+def test_roll_pairs_the_executor_with_the_adapter_converter(real_repo, tmp_path):
+    from mindtrainer.roll_converter import RollLoraConverter
+
+    _write_endpoints(real_repo, "gpu-1")
+    asm = assemble(real_repo, FactoryOptions(executor="roll"), env=_hosts(tmp_path, "gpu-1: gpu-181\n"))
+    assert isinstance(asm.converter, RollLoraConverter)
+
+
+def test_roll_picks_the_named_endpoint(real_repo, tmp_path):
+    _write_endpoints(real_repo, "gpu-1", "gpu-2")
+    env = _hosts(tmp_path, "gpu-1: gpu-181\ngpu-2: gpu-182\n")
+    asm = assemble(real_repo, FactoryOptions(executor="roll", endpoint="gpu-2"), env=env)
+    assert asm.executor_factory("r").endpoint.endpoint_id == "gpu-2"
+
+
+@pytest.mark.parametrize("what", ["no_endpoints_file", "no_hosts_env", "ambiguous", "unknown_name", "no_host_entry"])
+def test_roll_misconfiguration_fails_at_assembly_not_at_the_first_tick(real_repo, tmp_path, what):
+    """设计 4a:这些全在第一个 tick 之前报 FactoryConfigError,树里一个字节都不写。"""
+    from factory.errors import FactoryConfigError
+
+    env = _hosts(tmp_path, "gpu-1: gpu-181\n")
+    opts = FactoryOptions(executor="roll")
+    if what == "no_endpoints_file":
+        pass
+    elif what == "no_hosts_env":
+        _write_endpoints(real_repo, "gpu-1")
+        env = {}
+    elif what == "ambiguous":
+        _write_endpoints(real_repo, "gpu-1", "gpu-2")
+        env = _hosts(tmp_path, "gpu-1: a\ngpu-2: b\n")
+    elif what == "unknown_name":
+        _write_endpoints(real_repo, "gpu-1")
+        opts = FactoryOptions(executor="roll", endpoint="gpu-9")
+    elif what == "no_host_entry":
+        _write_endpoints(real_repo, "gpu-1")
+        env = _hosts(tmp_path, "other: somewhere\n")
+    before = _commit_count(real_repo)
+    with pytest.raises(FactoryConfigError):
+        assemble(real_repo, opts, env=env)
+    assert _commit_count(real_repo) == before  # 树里一个字节都没写
+
+
+def test_roll_and_a_closed_loop_switch_are_mutually_exclusive(real_repo, tmp_path):
+    """设计保证 7:真训练同步占住循环数小时,闭环处理器的排队语义是按 mock 训练写的。"""
+    from factory.errors import FactoryConfigError
+
+    _write_endpoints(real_repo, "gpu-1")
+    with pytest.raises(FactoryConfigError, match=r"--executor roll.*--enable"):
+        assemble(real_repo, FactoryOptions(executor="roll", switches=("plan",)),
+                 env=_hosts(tmp_path, "gpu-1: gpu-181\n"))
+
+
+def test_an_endpoint_name_without_roll_is_a_usage_error(real_repo):
+    from factory.errors import FactoryConfigError
+
+    with pytest.raises(FactoryConfigError, match=r"--endpoint.*--executor roll"):
+        assemble(real_repo, FactoryOptions(endpoint="gpu-1"))
+
+
+def test_an_unknown_executor_is_refused(real_repo):
+    from factory.errors import FactoryConfigError
+
+    with pytest.raises(FactoryConfigError, match=r"executor must be one of"):
+        assemble(real_repo, FactoryOptions(executor="gpu-magic"))
+
+
+# ---------------- 命令行 ----------------
+
+def test_the_parser_defaults_to_the_mock_executor():
+    args = build_parser().parse_args(["run", "/tmp/x"])
+    assert args.executor == "mock" and args.endpoint is None
+
+
+def test_the_parser_accepts_roll_and_an_endpoint():
+    args = build_parser().parse_args(["run", "/tmp/x", "--executor", "roll", "--endpoint", "gpu-1"])
+    assert args.executor == "roll" and args.endpoint == "gpu-1"
+
+
+def test_the_parser_rejects_an_unknown_executor(capsys):
+    with pytest.raises(SystemExit) as caught:
+        build_parser().parse_args(["run", "/tmp/x", "--executor", "gpu-magic"])
+    assert caught.value.code == 2
+
+
+def test_roll_without_endpoints_config_exits_2_with_one_line_and_writes_nothing(real_repo, capsys):
+    """端到端:--executor roll 但树里没有 endpoints.yaml。一行错误、退出码 2、树里不写东西。"""
+    before = _commit_count(real_repo)
+    code = main(["run", str(real_repo.repo_root), "--executor", "roll", "--max-ticks", "1"], env={})
+    err = capsys.readouterr().err
+    assert code == 2
+    assert err.startswith("factory: error:") and "endpoints.yaml is missing" in err
+    assert len(err.strip().splitlines()) == 1
+    assert _commit_count(real_repo) == before
+
+
+def test_roll_with_enable_exits_2(real_repo, tmp_path, capsys):
+    _write_endpoints(real_repo, "gpu-1")
+    code = main(["run", str(real_repo.repo_root), "--executor", "roll", "--enable", "plan", "--max-ticks", "1"],
+                env=_hosts(tmp_path, "gpu-1: gpu-181\n"))
+    assert code == 2
+    assert "cannot be combined" in capsys.readouterr().err
+
+
+def test_the_assembled_dispatcher_calls_its_factory_with_the_directive_id(real_repo, tmp_path, monkeypatch):
+    """装配出的派发器不是摆设:它按指令 id 调装配时造的工厂,造出的是点名端点上的真实执行器。
+
+    不伪造整套远端文件系统(真实执行器的 load 会先碰远端,够不着)。让指令在 load 处失败即可,
+    这里只验证装配接对了线,所以直接用 asm.dispatcher,从外面观察 RollExecutor 的构造。"""
+    from controlplane.daemon import reconcile_once
+    from mindtrainer import roll_executor
+
+    _write_endpoints(real_repo, "gpu-1")
+    asm = assemble(real_repo, FactoryOptions(executor="roll"), env=_hosts(tmp_path, "gpu-1: gpu-181\n"))
+    write_directive(real_repo, RUN)
+    produce_datasets(real_repo, real_repo.read_product(f"{run_dir(RUN)}/directive.yaml"))
+
+    seen = []
+    original_init = roll_executor.RollExecutor.__init__
+
+    def spy(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        seen.append((self.run_id, self.endpoint.endpoint_id))
+
+    monkeypatch.setattr(roll_executor.RollExecutor, "__init__", spy)
+    try:
+        reconcile_once(real_repo, dispatcher=asm.dispatcher)
+    except Exception:  # noqa: BLE001  load 碰不到远端而失败;怎么失败不是这条测试的事
+        pass
+    assert seen == [(RUN, "gpu-1")]
+
+
+def test_the_default_executor_does_not_read_the_endpoint_config(twin):
+    """不传 --executor:与改动前逐字节相同,树里没有 endpoints.yaml 也照常跑。"""
+    a, b = twin
+    mt_wire.run(str(a.repo_root), interval_s=0, max_ticks=3)
+    assert main(["run", str(b.repo_root), "--interval-s", "0", "--max-ticks", "3"]) == 0
+    _same(a, b)

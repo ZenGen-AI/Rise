@@ -119,7 +119,8 @@ factory 是组合根:系统里唯一知道所有包的地方。它把各子系�
 | 非目标 | 状态 | V1 的处理 |
 |---|---|---|
 | 真实 GRPO 加 OPD 训练、真实 judge | [推迟] | 仍用 mock |
-| 真实 ROLL LoRA SFT、真实 SoMEval、真实 vLLM(经远端计算层) | [计划中] | 今天训练用 mock 执行器,诊断用 mock 后端,MindAgent 用罐头后端;真实后端用什么开关表达,实施时定 |
+| 真实 SoMEval、真实 vLLM(经远端计算层) | [计划中] | 今天诊断用 mock 后端,MindAgent 用罐头后端;开关形状同下,实施时定 |
+| 真实 ROLL LoRA SFT(经远端计算层) | [已落地] | 由 `--executor roll` 显式启用(FC-15);默认仍是 mock 执行器。装配与配置错误路径有测试,**尚未在真实主机上跑过** |
 | 桥接的 API 形态 | [推迟] | `invocation_form` 不是 `cli` 时装配报错 |
 | 运行中热加载配置 | [推迟] | 改 `evaluator.yaml`、`backends.yaml`、`agent.yaml` 要重启 |
 | 进程自我重启与重试 | [推迟] | 瞬态异常让进程退出,由外部监督者重启 |
@@ -299,6 +300,7 @@ sampling_k: 4       # 整数,至少 1
 4. 确认覆盖不写回 `scheduler.yaml`,只改 loader 的返回值 [计划中]。
 5. 门控写命令在迁移不合法或证据不在场时,不写文件、不提交。
 6. 已存在的配置文件 `install-defaults` 不覆盖,人改过的配置优先 [计划中]。
+7. `--executor roll` 与任一 `--enable` 开关同时给是用法错误,退出码 2,树里不写东西 [已落地]。真训练会同步占住调和循环数小时(CP-15),闭环处理器的排队语义是按 mock 训练的前提写的;先让一条链路跑通真机,再决定叠加。以后放开比以后收紧容易。
 
 ## 5. 接口契约
 
@@ -347,6 +349,8 @@ Python 子命令 [计划中]。每个子命令的第一个位置参数都是控�
 | `--confirm-directives` / `--no-confirm-directives` | 三态 | 不传就用 `scheduler.yaml` 的 `confirm_directives` |
 | `--planner-backend` | `bridge`(默认)、`heuristic` | `heuristic` 是确定性后端,不需要外部工具 |
 | `--repo-commit` | 提交号 | 不传取代码仓库根的 `git rev-parse HEAD`,取不到为 `None` |
+| `--executor` | `mock`(默认)、`roll` | `roll` 装配真实 ROLL LoRA SFT 执行器与适配器导出转换器 [已落地],装配步骤见下文的 4a,取舍见 FC-15 |
+| `--endpoint` | 端点 id | 只在 `--executor roll` 时有意义,点名 `compute/endpoints.yaml` 里的哪个端点;只有一个端点时可省 [已落地] |
 
 TypeScript 命令行:`rismforge <review|approve|reject|status> [id] [reason]` [已落地],工作包 8 加入 `confirm` [计划中]。
 
@@ -421,6 +425,7 @@ TypeScript 命令行:`rismforge <review|approve|reject|status> [id] [reason]` [�
 | 2 | 处理器键为空:只构造 `make_mindtrainer_dispatcher()`,调 `run_daemon` 时只传派发器 | 无 |
 | 3 | 读 `evaluator.yaml`,要求恰好五个键 | `FactoryConfigError`,退出码 2 [计划中] |
 | 4 | 校验分类表与题库在树里,构造 mock 评估器 | 同上 |
+| 4a | `--executor roll` 时:读 `compute/endpoints.yaml` 与本机主机映射,选定端点,造 `ComputeClient`,再造执行器工厂与转换器 [已落地] | `FactoryConfigError`,退出码 2;缺文件、键缺失或多余、映射里查不到端点、别名形态不合、`--endpoint` 点名了不存在的端点、有多个端点却没点名,全在第一个 tick 之前报 |
 | 5 | 按 `DEFAULT_BUILDERS` 逐个构造处理器,需要时经 `build_bridge(store, role, *, env=None, log_dir=None)` 建桥接、读凭证、读 `agent.yaml`。`planner` 角色只在 `--planner-backend bridge` 时必需,`agent` 角色可选,缺了就不建桥接,提案生成回到规则模板 [计划中] | 同上;已登记的收尾函数逆序调用 |
 | 6 | 注入派发器(带数据生产器)、处理器、评估器、证据开关,启动调和循环 | 运行中的异常原样上抛,进程退出 |
 
@@ -551,6 +556,7 @@ factory 是最后一个工作包,前八个全部落地后才能施工。
 | FC-12 | 端到端用确定性的 `HeuristicBackend` 规划,桥接只单测正向与失败路径 | 罐头桥接 | 每一步都是真实代码,命令行一个开关选得到 | 桥接往返的格式问题要到接真实后端才暴露 [计划中] |
 | FC-13 | MindAgent 用罐头后端与进程内 loopback 实时服务端,首次需要时才起 | 起外部服务端 | V1 没有加载 checkpoint 的推理后端 | 部署 episode 只证明路由与轨迹,不代表模型能力 |
 | FC-14 | `run` 与 `reconcile` 在第一个 tick 之前取仓库排他文件锁,只读子命令不取 [计划中] | 只靠只带本文件提交;把锁放进每次写入 | 挡住两个守护进程重复派发与记账互相覆盖,开销只在启动时一次 | 锁被占用时退出码 2,第二个守护进程起不来 |
+| FC-15 | 真实 ROLL 执行器由显式的 `--executor roll` 启用,默认 `mock`;`--endpoint` 点名端点 [已落地]。执行器工厂接收 `run_id`:派发器按指令 id 调 `executor_factory(run_id)`,`MockExecutor` 一侧用 `lambda _: MockExecutor()` 适配 | 看树里有没有 `compute/endpoints.yaml` 就自动启用;环境变量启用 | 一次训练会同步占住调和循环数小时并真的动远端 GPU(CP-15),这个后果值得在命令行上明写;自动启用会让「提交一份配置」悄悄改变入口行为;环境变量在 `--help` 里看不见,也与已有五个开关风格不一致 | 要多输入一个参数;派发器的 `executor_factory` 签名从无参改成带 `run_id`,既有五处测试调用要跟着改 |
 
 ## 8. 失败处理与可观测
 

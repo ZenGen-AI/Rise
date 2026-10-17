@@ -36,7 +36,7 @@ def _confirm(store, run_id):
 
 def _train(store, run_id):
     reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
-        executor_factory=MockExecutor, data_producer=TemplateDataProducer()))
+        executor_factory=lambda run_id: MockExecutor(), data_producer=TemplateDataProducer()))
     assert store.read_product(f"{run_dir(run_id)}/directive.yaml").status == "executed"
     return store.read_product(candidate_checkpoint_file(run_id))
 

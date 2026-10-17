@@ -28,6 +28,7 @@ from mindtrainer.data_producer import TemplateDataProducer
 from mindtrainer.dispatch import make_mindtrainer_dispatcher
 
 PLANNER_BACKENDS = ("bridge", "heuristic")
+EXECUTORS = ("mock", "roll")
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,8 @@ class FactoryOptions:
     confirm_directives: bool | None = None  # None:用 scheduler.yaml 的 confirm_directives
     planner_backend: str = "bridge"
     repo_commit: str | None = None  # None:取代码仓库的 git rev-parse HEAD(取不到仍是 None)
+    executor: str = "mock"  # roll:真实 ROLL LoRA SFT 执行器(设计 FC-15),默认 mock
+    endpoint: str | None = None  # 只在 executor == "roll" 时有意义:点名 compute/endpoints.yaml 里的端点
 
 
 CODE_ROOT = Path(__file__).resolve().parents[2]  # src/factory/wire.py -> 代码仓库根
@@ -86,6 +89,9 @@ class Assembly:
     evaluator: Evaluator | None
     accept_mock_evidence: bool
     closers: tuple = ()
+    # --executor roll 时才有(设计 FC-15);mock 路径下两者都是 None,Assembly 与改动前等价
+    executor_factory: Callable[[str], object] | None = None
+    converter: object | None = None
 
     def close(self) -> None:
         for close in reversed(self.closers):
@@ -103,6 +109,31 @@ def default_builders() -> Mapping[str, HandlerBuilder]:
     return DEFAULT_BUILDERS
 
 
+def _assemble_roll(store: GitStore, options: FactoryOptions, *, env: Mapping[str, str] | None) -> Assembly:
+    """`--executor roll`:读端点与主机映射,造客户端,再造执行器工厂与转换器(设计 FC-15)。
+
+    配置错误一律 FactoryConfigError,全在第一个 tick 之前。工厂接收 run_id,因为真实执行器把它
+    编进作业身份与远端输出目录,而装配期不知道它——它是每条指令来了才有的。"""
+    # 惰性导入:不走 roll 的入口不该为此多载入 compute 与两个真实后端模块
+    from factory.compute_config import build_compute_client, read_endpoints_config, read_host_map, select_endpoint
+    from mindtrainer.roll_converter import RollLoraConverter
+    from mindtrainer.roll_executor import RollExecutor
+
+    environ = os.environ if env is None else env
+    endpoint = select_endpoint(read_endpoints_config(store), options.endpoint)
+    client = build_compute_client(endpoint, read_host_map(env=environ))
+
+    def executor_factory(run_id: str) -> RollExecutor:
+        return RollExecutor(client=client, endpoint=endpoint, run_id=run_id)
+
+    converter = RollLoraConverter(client=client, endpoint=endpoint)
+    return Assembly(
+        make_mindtrainer_dispatcher(executor_factory=executor_factory, converter=converter),
+        {}, None, False,
+        executor_factory=executor_factory, converter=converter,
+    )
+
+
 def assemble(
     store: GitStore,
     options: FactoryOptions,
@@ -116,6 +147,19 @@ def assemble(
             f"planner backend must be one of {list(PLANNER_BACKENDS)}, got {options.planner_backend!r}"
         )
     keys = handler_keys(options.switches)
+    if options.executor not in EXECUTORS:
+        raise FactoryConfigError(f"executor must be one of {list(EXECUTORS)}, got {options.executor!r}")
+    if options.endpoint is not None and options.executor != "roll":
+        raise FactoryConfigError("--endpoint only makes sense with --executor roll")
+    if options.executor == "roll":
+        if keys:
+            # 设计保证 7:真训练同步占住调和循环数小时(CP-15),闭环处理器的排队语义是按 mock
+            # 训练写的;先让一条链路跑通真机,再决定叠加。以后放开比以后收紧容易。
+            raise FactoryConfigError(
+                "--executor roll cannot be combined with --enable yet: a real training run "
+                "holds the reconcile loop for hours"
+            )
+        return _assemble_roll(store, options, env=env)
     if not keys:
         # 与 mindtrainer.wire.run 逐字节相同的路径:不读配置、不注入别的
         return Assembly(make_mindtrainer_dispatcher(), {}, None, False)

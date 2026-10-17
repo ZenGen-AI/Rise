@@ -165,7 +165,7 @@ def test_interact_without_a_client_factory_fails_the_directive(store):
 
 def test_transient_failure_keeps_the_directive_pending_for_the_next_tick(store):
     _directive(store, payload={"target_dimension": "tom", "recipe_ref": "", "training_config": _cfg_dict()})
-    disp = make_mindtrainer_dispatcher(executor_factory=lambda: MockExecutor(crash_at_step=1))
+    disp = make_mindtrainer_dispatcher(executor_factory=lambda run_id: MockExecutor(crash_at_step=1))
     for _ in range(2):
         with pytest.raises(SimulatedCrashError):
             reconcile_once(store, dispatcher=disp)
@@ -176,7 +176,7 @@ def test_a_dispatch_crash_then_retry_resumes_from_the_checkpoint(store):
     _directive(store, payload={"target_dimension": "tom", "recipe_ref": "", "training_config": _cfg_dict()})
     with pytest.raises(SimulatedCrashError):
         reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
-            executor_factory=lambda: MockExecutor(crash_at_step=1)))
+            executor_factory=lambda run_id: MockExecutor(crash_at_step=1)))
     pending = store.read_product(f"{run_dir(RUN)}/training_run.yaml")
     assert pending.status == "pending"
 
@@ -339,7 +339,7 @@ def test_a_judge_attribution_directive_fails_because_this_entry_has_no_judge(sto
 def test_a_directive_that_keeps_crashing_is_failed_once_the_resume_limit_is_spent(store):
     cfg = _cfg_dict(max_resume_attempts=1)
     _directive(store, payload={"target_dimension": "tom", "recipe_ref": "", "training_config": cfg})
-    crashing = make_mindtrainer_dispatcher(executor_factory=lambda: MockExecutor(crash_at_step=1))
+    crashing = make_mindtrainer_dispatcher(executor_factory=lambda run_id: MockExecutor(crash_at_step=1))
     for expected_attempts in (0, 1):  # 第一次新运行,第二次续训;都崩在第 1 步
         with pytest.raises(SimulatedCrashError):
             reconcile_once(store, dispatcher=crashing)
@@ -533,7 +533,7 @@ def test_a_deferred_error_from_the_executor_leaves_the_directive_pending_and_is_
             raise DeferredError("gpu busy")
 
     _directive(store, payload={"target_dimension": "tom", "recipe_ref": "", "training_config": _cfg_dict()})
-    disp = make_mindtrainer_dispatcher(executor_factory=BusyExecutor)
+    disp = make_mindtrainer_dispatcher(executor_factory=lambda run_id: BusyExecutor())
     reconcile_once(store, dispatcher=disp, deferrals=DeferralBook())  # 不抛
     assert store.read_product(f"{run_dir(RUN)}/directive.yaml").status == "pending"
     assert not store.exists(candidate_checkpoint_file(RUN))
@@ -559,3 +559,18 @@ def test_a_deferred_error_is_never_rewrapped_as_a_permanent_failure(store, monke
     with pytest.raises(DeferredError):
         make_mindtrainer_dispatcher()(store, directive)
     assert read_training_run(store, RUN).status == "failed"  # 记录没人动,指令也没被判死
+
+
+def test_the_executor_factory_is_called_with_the_directive_id(store):
+    """真实执行器把 run_id 编进作业身份与远端输出目录,所以工厂必须拿到它;装配期不知道
+    run_id,它是每条指令来了才有的。"""
+    seen = []
+
+    def factory(run_id):
+        seen.append(run_id)
+        return MockExecutor()
+
+    _directive(store, payload={"target_dimension": "tom", "recipe_ref": "", "training_config": _cfg_dict()})
+    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(executor_factory=factory))
+    assert seen == [RUN]
+    assert store.read_product(f"{run_dir(RUN)}/directive.yaml").status == "executed"
