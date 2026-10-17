@@ -23,3 +23,6 @@ packages = ["src/controlplane", "src/simulator", "src/diagnostic", "src/mindtrai
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+markers = [
+    "slow: 真起子进程或多段作业的测试,用 -m 'not slow' 跳过",
+]

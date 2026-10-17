@@ -751,3 +751,51 @@ class TestStagedExecutor:
         cfg = _batch_cfg(sft_steps=3, grpo_steps=0)
         with pytest.raises(RuntimeError, match=r"executor returned step \d+ at index \d+, expected \d+"):
             _go(store, cfg, MismatchExecutor())
+
+
+class TestRollExecutorIntegration:
+    """RollExecutor 与编排器合在一起:预检时机、阶段路径、跨模式与 supported_phases。
+
+    用 FakeClient,不碰真实 SSH,所以不标 slow。
+    """
+
+    def _executor(self, client):
+        from compute_fixtures import fake_endpoint
+        from mindtrainer.roll_executor import RollExecutor
+
+        return RollExecutor(client=client, endpoint=fake_endpoint(), run_id=RUN)
+
+    def test_preflight_runs_before_the_run_record_is_written(self, store):
+        """预检在 run_training 之前:被占时 run 记录一个字节都不写(设计 §7.3)。"""
+        from compute.errors import ComputeBusyError
+        from compute_fixtures import FakeClient
+        from controlplane.paths import training_run_file
+
+        cfg = _batch_cfg(sft_steps=2, grpo_steps=0)
+        with pytest.raises(ComputeBusyError):
+            _go(store, cfg, self._executor(FakeClient(busy=True)))
+        assert not store.exists(training_run_file(RUN))
+
+    def test_grpo_steps_are_refused_as_a_config_error(self, store):
+        """supported_phases 只有 sft,配置却要 GRPO:确定性失败,run 记 failed(设计 §5.1)。"""
+        from compute_fixtures import FakeClient
+
+        cfg = _batch_cfg(sft_steps=1, grpo_steps=2)
+        with pytest.raises(InvalidTrainingConfigError, match=r"supports only \['sft'\]"):
+            _go(store, cfg, self._executor(FakeClient()))
+        run = read_training_run(store, RUN)
+        assert run.status == "failed" and run.failure["category"] == "T2"
+
+    def test_resuming_a_mock_run_with_the_real_executor_needs_a_human(self, store):
+        """跨模式续训要在 checkpoint_intact 之前挡住:T3、理由是后端不一致、记录不改(设计 §6.1)。"""
+        from compute_fixtures import FakeClient
+
+        cfg = _batch_cfg(sft_steps=4, grpo_steps=0, checkpoint_every_steps=2)
+        with pytest.raises(SimulatedCrashError):
+            _go(store, cfg, MockExecutor(crash_at_step=3), converter=MockConverter())  # 第 2 步存点后崩在第 3 步
+        pending = read_training_run(store, RUN)
+        assert pending.status == "pending" and pending.last_checkpoint_ref is not None
+
+        with pytest.raises(NeedsHumanError, match=r"resuming across backend modes"):
+            _go(store, cfg, self._executor(FakeClient()))
+        assert read_training_run(store, RUN) == pending  # 记录一个字节都没动

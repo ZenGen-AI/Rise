@@ -183,6 +183,18 @@ def run_training(
         write_training_run(store, _failed(base, "config", InvalidTrainingConfigError(reason)))
         raise InvalidTrainingConfigError(reason)
 
+    phases = getattr(executor, "supported_phases", None)
+    if phases is not None:
+        wanted = {stage for stage, steps in (("sft", cfg.sft_steps), ("grpo_opd", cfg.grpo_steps)) if steps > 0}
+        unsupported = sorted(wanted - set(phases))
+        if unsupported:
+            reason = (
+                f"the executor supports only {sorted(phases)} but the config asks for {unsupported}; "
+                "real backends need a training_defaults with grpo_steps: 0"
+            )
+            write_training_run(store, _failed(base, "config", InvalidTrainingConfigError(reason)))
+            raise InvalidTrainingConfigError(reason)
+
     # 起点:纯计算,先不写任何东西
     if resume_from is None:
         run, start, from_base = base, 0, True
@@ -327,6 +339,28 @@ def run_training(
     return run
 
 
+def _check_backend_match(
+    store: GitStore, existing: TrainingRun, cfg: TrainingConfig, executor: TrainingExecutor
+) -> None:
+    """续训前比对存点的后端类型与当前执行器(设计 §6.1)。
+
+    不一致是装配开关的问题,不是存点损坏。这道检查必须在 checkpoint_intact 之前:
+    另一种后端的 checkpoint_intact 会对陌生引用返回 False,同样升级成 T3,
+    但理由字段会写"存点损坏",让运维去查远端磁盘而不是查装配。这里也是 T3,只是理由说对。
+    """
+    ref = existing.last_checkpoint_ref
+    want = getattr(executor, "checkpoint_type", None)
+    if ref is None or want is None:
+        return
+    got = (ref.fetch_hint or {}).get("type")
+    if got is not None and got != want:
+        reason = (
+            f"run {existing.run_id} has a {got!r} checkpoint but the executor produces {want!r}; "
+            "resuming across backend modes is not supported"
+        )
+        raise NeedsHumanError(reason)
+
+
 def resume_or_run(
     cfg: TrainingConfig,
     *,
@@ -348,8 +382,12 @@ def resume_or_run(
         executor=executor, converter=converter,
         metric_stream_refs=metric_stream_refs, on_step=on_step,
     )
+    preflight = getattr(executor, "preflight", None)
     if existing is None:
+        if preflight is not None:
+            preflight()  # ComputeBusyError 走延后通道:此时 run 记录一个字节都没写
         return run_training(cfg, **kwargs)
+    _check_backend_match(store, existing, cfg, executor)
     intact = (
         executor.checkpoint_intact(existing.last_checkpoint_ref)
         if existing.last_checkpoint_ref is not None else None
@@ -359,4 +397,6 @@ def resume_or_run(
         return existing
     if decision.action == "escalate":
         raise NeedsHumanError(decision.reason)
+    if preflight is not None:
+        preflight()
     return run_training(cfg, resume_from=existing, **kwargs)

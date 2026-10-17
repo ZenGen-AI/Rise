@@ -55,6 +55,14 @@ class TrainingExecutor(Protocol):
 
     def checkpoint_intact(self, checkpoint_ref: BigRef) -> bool: ...
 
+    def preflight(self) -> None:
+        """可选预检(真实后端设计 §3.3、§7.3):资源不可用时抛 ComputeBusyError
+        (DeferredError 子类),由守护进程延后重试,不耗 resume_attempts 预算。
+
+        无参:端点与租约标识都由执行器自己持有。`MockExecutor` 不实现它,
+        `resume_or_run` 用 getattr 探测,缺省视为通过。"""
+        ...
+
 
 class StagedExecutor(TrainingExecutor, Protocol):
     """支持阶段批量执行的扩展协议(真实后端设计 §4)。
