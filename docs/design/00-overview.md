@@ -29,7 +29,7 @@ RismForge 是一套"AI 驱动的社会心智后训练工厂"。输入通用开�
 | 诊断评测 | [已落地] 未接入循环 | 编排器已实现;循环里的 `request_diagnostic` 仍写占位报告 |
 | MindTrainer | [已落地] | batch 与 interact 轨迹源、奖励管线、续训;训练由 mock 执行器完成。闭环组合根不装配实时客户端,interact 指令在闭环里判 `failed` |
 | 闭环:规划、提名、配方、智能体、桥接、组合根 | [计划中] | 九个工作包,78 个任务,设计与施工计划已定 |
-| 远端计算层(经 SSH)、ROLL LoRA SFT 真实执行器与适配器导出转换器 | [已落地] | 代码与测试在主干上,但还没有入口装配它们(`run_controlplane.py` 仍用 mock),也还没在真实主机上跑过 |
+| 远端计算层(经 SSH)、ROLL LoRA SFT 真实执行器与适配器导出转换器 | [已落地] | `factory run --executor roll` 装配它们(默认入口与 `run_controlplane.py` 仍用 mock);已在真实主机上从训练指令端到端跑到待审候选一次,只跑过单段两步,多段与续训未在真机上验证 |
 | vLLM 服务、真实 SoMEval 运行器 | [计划中] | 设计与施工计划已定;仍由确定性 mock 顶替 |
 | 真实 GRPO 加 OPD 训练、真实 judge | [推迟] | 仍用确定性 mock,所以真实评测的报告等级仍是 mock |
 
