@@ -24,9 +24,32 @@ EXPORT_MARKER = ".exported"  # 内容是产物目录的 full 哈希
 EXPORT_FORMAT = "qwen4_exp_vllm_2d"  # ROLL 的 LoRAHFConverter 布局(设计 §1 已核实)
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
-# V15:真实导出命令待主机核实(V3、V5)。ROLL 文档记录的是 LoRAHFConverter,
-# 入口脚本名与参数都还没在机器上跑过,所以这里只固定"纯 CPU、写进 tmp 目录"这两点。
-EXPORT_SCRIPT = "scripts/export_lora_for_vllm.py"
+# ROLL4ZenGen 的导出是 convert_checkpoint_to_hf 的 Python 调用,没有命令行入口(README 与 B2 实测)。
+# 此前假定的 scripts/export_lora_for_vllm.py 不存在。路径只经环境变量传进来,程序文本是固定常量:
+# argv 里没有任何来自引用的字符串。
+#
+# 用 convert_checkpoint_to_hf 而不是 README 里的 LoRAHFConverter(...):后者的 __init__ 现在要求 verbose,
+# 照 README 抄会抛 TypeError(B2 实测)。low_mem=False 是适配器导出的唯一合法取值(源码:适配器不支持流式)。
+EXPORT_PROGRAM = (
+    "import os, torch\n"
+    "from mcore_adapter.models.converter.post_converter import convert_checkpoint_to_hf\n"
+    "convert_checkpoint_to_hf(\n"
+    "    model_name_or_path=os.environ['ROLL_EXPORT_BASE'],\n"
+    "    adapter_name_or_path=os.environ['ROLL_EXPORT_ADAPTER'],\n"
+    "    save_directory=os.environ['ROLL_EXPORT_OUT'],\n"
+    "    torch_dtype=torch.bfloat16,\n"
+    "    low_mem=False,\n"
+    "    verbose=False,\n"
+    ")\n"
+)
+PROGRAM_SHA8 = hashlib.sha256(EXPORT_PROGRAM.encode("utf-8")).hexdigest()[:8]
+
+
+def _job_identity(source_sha256: str, tmp_dir: str) -> str:
+    """导出作业的 id。程序文本的哈希进来:改了程序就是另一个作业,不会撞上旧程序留下的成功记录。"""
+    return "export-" + hashlib.sha256(
+        f"{source_sha256}\0{tmp_dir}\0{EXPORT_FORMAT}\0{PROGRAM_SHA8}".encode("utf-8")
+    ).hexdigest()[:12]
 
 
 @dataclass
@@ -74,18 +97,16 @@ class RollLoraConverter:
 
         # 3. 写进自己的 tmp 目录。token 让并发的两次转换互不覆盖。
         tmp_dir = f"{export_dir}.tmp-{uuid.uuid4().hex[:8]}"
-        job_id = "export-" + hashlib.sha256(
-            f"{ref.sha256}\0{tmp_dir}\0{EXPORT_FORMAT}".encode("utf-8")
-        ).hexdigest()[:12]
+        job_id = _job_identity(ref.sha256, tmp_dir)
         spec = JobSpec(
-            argv=(
-                "python", f"{self.endpoint.roll_root.rstrip('/')}/{EXPORT_SCRIPT}",
-                "--checkpoint", src,
-                "--base-model", self.endpoint.base_model_path,
-                "--output", tmp_dir,
-            ),
+            argv=("python3", "-c", EXPORT_PROGRAM),
             cwd=self.endpoint.roll_root,
-            env={"CUDA_VISIBLE_DEVICES": ""},  # 设计 §6.2 第 1 步:纯 CPU
+            env={
+                "CUDA_VISIBLE_DEVICES": "",  # 设计 §6.2 第 1 步:纯 CPU
+                "ROLL_EXPORT_BASE": self.endpoint.base_model_path,
+                "ROLL_EXPORT_ADAPTER": src,
+                "ROLL_EXPORT_OUT": tmp_dir,
+            },
         )
         try:
             # lease=False:纯 CPU 作业不跟训练抢 GPU 租约(设计 §6.2 第 1 步)

@@ -6,7 +6,7 @@ from compute_fixtures import FakeClient, fake_endpoint
 from compute.errors import ComputeBusyError, HelperError
 from controlplane.envelope import BigRef
 from mindtrainer.executor import CheckpointCorruptError
-from mindtrainer.roll_converter import EXPORT_FORMAT, EXPORT_MARKER, RollLoraConverter
+from mindtrainer.roll_converter import EXPORT_FORMAT, EXPORT_MARKER, EXPORT_PROGRAM, RollLoraConverter
 
 CKPT = "/srv/rise/work/runs/run-1/j-a1/checkpoint-1"
 SHA = "a1b2c3d4" + "0" * 56
@@ -18,11 +18,11 @@ def _ref(sha: str = SHA) -> BigRef:
 
 
 def _exporting_client(**kw) -> FakeClient:
-    """作业跑起来就往 --output 指的 tmp 目录里写几个文件。"""
+    """作业跑起来就往 ROLL_EXPORT_OUT 指的 tmp 目录里写几个文件。"""
     client = FakeClient(**kw)
 
     def hook(job_id, spec):
-        out = spec.argv[spec.argv.index("--output") + 1]
+        out = spec.env["ROLL_EXPORT_OUT"]
         for name in ("adapter_model.safetensors", "adapter_config.json"):
             client.files[f"{out}/{name}"] = b"weights"
 
@@ -58,7 +58,47 @@ def test_the_export_job_is_cpu_only_and_takes_no_lease():
     job_id, spec, lease = client.run_calls[0]
     assert spec.env["CUDA_VISIBLE_DEVICES"] == ""
     assert lease is False
-    assert "--checkpoint" in spec.argv and CKPT in spec.argv
+    assert spec.env["ROLL_EXPORT_ADAPTER"] == CKPT
+
+
+def test_the_export_is_a_python_call_with_paths_passed_by_environment():
+    """ROLL4ZenGen 的导出是 convert_checkpoint_to_hf 的 Python 调用,没有命令行入口(B1/B2 实测,
+    此前假定的 scripts/export_lora_for_vllm.py 不存在)。路径只经 env 传,不拼进 argv:
+    argv 里是固定的程序文本,不含任何来自引用的字符串,也就不存在被它们影响的解析面。"""
+    client = _exporting_client()
+    _converter(client).convert(_ref())
+    _, spec, _ = client.run_calls[0]
+    assert spec.argv[:2] == ("python3", "-c")
+    assert len(spec.argv) == 3 and spec.argv[2] == EXPORT_PROGRAM
+    for value in (CKPT, "/srv/models/qwen-4b", "exports"):
+        assert not any(value in part for part in spec.argv)
+    assert spec.env["ROLL_EXPORT_BASE"] == "/srv/models/qwen-4b"
+    assert spec.env["ROLL_EXPORT_OUT"].startswith("/srv/rise/work/exports/")
+    assert spec.cwd == "/srv/roll"
+
+
+def test_the_export_program_calls_the_real_entry_point_with_the_arguments_b2_proved():
+    """B2 在 .181 上实测可用的调用:convert_checkpoint_to_hf,low_mem=False(适配器不支持流式),
+    verbose=False。README 里的 LoRAHFConverter(...) 示例已过时:__init__ 现在要求 verbose,照抄会抛 TypeError。"""
+    assert "convert_checkpoint_to_hf" in EXPORT_PROGRAM
+    assert "low_mem=False" in EXPORT_PROGRAM and "verbose=False" in EXPORT_PROGRAM
+    assert "adapter_name_or_path" in EXPORT_PROGRAM
+    assert "LoRAHFConverter(" not in EXPORT_PROGRAM
+    compile(EXPORT_PROGRAM, "<export-program>", "exec")  # 至少是合法的 Python
+
+
+def test_a_changed_export_program_changes_the_job_identity(monkeypatch):
+    """job_id 包含程序文本的哈希:改了导出程序就是另一个作业,不会撞上旧程序留下的成功记录
+    (助手对「同 spec 的已存在作业」是直接返回当前状态,不重跑)。"""
+    from mindtrainer import roll_converter
+
+    before = roll_converter._job_identity("a" * 64, "/t/x.tmp-1")
+    monkeypatch.setattr(roll_converter, "PROGRAM_SHA8", "deadbeef")
+    after = roll_converter._job_identity("a" * 64, "/t/x.tmp-1")
+    assert before != after
+    # 同一个程序、同一个输入 -> 同一个 id(幂等重试要能接上)
+    monkeypatch.undo()
+    assert roll_converter._job_identity("a" * 64, "/t/x.tmp-1") == before
 
 
 def test_the_marker_lands_inside_the_final_directory():

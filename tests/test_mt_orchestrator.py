@@ -814,8 +814,8 @@ class TestRollConverterIntegration:
         endpoint = fake_endpoint()
 
         def hook(job_id, spec, lease=True):
-            if "--output" in spec.argv:  # 转换作业
-                out = spec.argv[spec.argv.index("--output") + 1]
+            if "ROLL_EXPORT_OUT" in spec.env:  # 转换作业
+                out = spec.env["ROLL_EXPORT_OUT"]
                 client.files[f"{out}/adapter_model.safetensors"] = b"w"
             else:  # 训练作业:留下真实布局的产物(completion.json 与存点里的 log_history)
                 out = spec.argv[spec.argv.index("--output-dir") + 1]
