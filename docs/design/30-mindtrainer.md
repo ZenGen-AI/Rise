@@ -3,7 +3,7 @@
 | 项 | 内容 |
 |---|---|
 | 一句话 | 权重级训练子系统:读训练指令与数据集清单,跑 SFT 与 GRPO 加 OPD,产出候选 checkpoint,崩溃后从存点续训 |
-| 状态 | 部分落地:配置、两种轨迹源、奖励管线、分组、mock 执行器、续训、编排、派发器 [已落地];ROLL LoRA SFT 真实执行器与适配器导出转换器 [已落地],但还没有入口装配、也没在真实主机上跑过;数据合成接线 [计划中];真实 GRPO 加 OPD 训练 [推迟] |
+| 状态 | 部分落地:配置、两种轨迹源、奖励管线、分组、mock 执行器、续训、编排、派发器 [已落地];ROLL LoRA SFT 真实执行器与适配器导出转换器 [已落地],已由 `factory run --executor roll` 装配,并各在真实主机上跑通一次(单段两步训练;对该存点的导出),多段与续训、端到端调和循环尚未在真机上跑过;数据合成接线 [计划中];真实 GRPO 加 OPD 训练 [推迟] |
 | 所在层 | 计算层 |
 | 代码位置 | `src/mindtrainer`;`src/mindtrainer/data_spec.py`、`src/mindtrainer/data_producer.py` [计划中] |
 | 基线提交 | `8dd295b`(2026-10-10) |
@@ -116,7 +116,7 @@ MindTrainer 把一条 `pending` 的训练指令变成一个 `pending_review` 的
 
 | 非目标或推迟项 | 状态 | V1 的处理 |
 |---|---|---|
-| ROLL LoRA SFT 真实执行器与 vLLM LoRA 适配器导出 | [已落地] | 代码与测试在主干上,但入口仍装配 `MockExecutor` 与 `MockConverter`;真实执行器只声明 `supported_phases = {"sft"}` |
+| ROLL LoRA SFT 真实执行器与 vLLM LoRA 适配器导出 | [已落地] | 默认入口仍装配 `MockExecutor` 与 `MockConverter`,`--executor roll` 才装配真实的一对(FC-15);真实执行器只声明 `supported_phases = {"sft"}` |
 | 真实 GRPO 加 OPD 训练、把适配器合并回完整 HF 权重 | [推迟] | `grpo_steps > 0` 与真实执行器混用在配置校验期失败 |
 | 异步派发 | [推迟] | 派发器同步返回;接真实 LoRA SFT 的这一轮作为有限定的例外接受同步阻塞(CP-15),异步派发留给下一轮 |
 | 缺清单时先合成数据 | [计划中] | 缺清单的指令判 `failed`,原因写明缺哪份清单 |
@@ -198,7 +198,7 @@ MindTrainer 分两层:入口与编排一层决定"从哪跑、跑不跑",模式�
 | `src/mindtrainer/data_spec.py` | `data_spec` 严格解析、要合成哪些阶段、`DataProducer` 协议 | `training_config` | [计划中] |
 | `src/mindtrainer/data_producer.py` | 默认数据生产器 `TemplateDataProducer` | `simulator` | [计划中] |
 | `src/mindtrainer/roll_executor.py` | `RollExecutor`:把 ROLL 的整段 LoRA SFT 作业映射到执行器协议,远端数据渲染、作业控制与指标回收 | `compute`、`executor`、`datamodel` | [已落地] |
-| `src/mindtrainer/roll_converter.py` | `RollLoraConverter`:调用 ROLL 的 LoRA 导出器产出 vLLM 适配器,幂等 | `compute`、`checkpoint` | [已落地] |
+| `src/mindtrainer/roll_converter.py` | `RollLoraConverter`:经 `python3 -c` 调 ROLL 的 `convert_checkpoint_to_hf` 产出 vLLM 适配器,路径只经环境变量传,幂等 | `compute`、`checkpoint` | [已落地] |
 
 依赖方向规则:
 
@@ -347,6 +347,16 @@ class StagedExecutor(TrainingExecutor, Protocol):
 `run_sft_stage` 一次跑一段连续的 SFT 步:`batches[i]` 是全局第 `first_step + i` 步的数据,与逐步路径里 `batch_for_step` 取到的相同,返回的 `StepResult` 按步排列、`step` 连续且从 `first_step` 起,编排器仍按全局计数逐个对账。`prior_batches` 是 `[0, first_step)` 各步的数据:执行器不在这些步上训练,但必须把它们写进训练数据的前缀,因为 ROLL 续训按位置跳过已消费的批次,前缀缺失会让它从错误的数据位置接着跑而且不报错。`stage_end` 可选,让执行器把段切得更细,返回值是开区间终点且必须满足 `first_step < 返回值 <= limit`,否则编排器抛 `RuntimeError`。`preflight` 在 `resume_or_run` 里 `decide_resume` 判定之后、`run_training` 之前调用,`noop` 与 `escalate` 不触发。`supported_phases` 不覆盖配置要求的阶段时,在配置校验期判 T2。
 
 行数与截断预检(执行器的可选方法 `validate_sft_data`,数据有问题时在动执行器之前确定性失败)属于真实后端设计,实施计划不含它,待主机验证之后再加 [计划中]。
+
+真实执行器在 8 张 H800 上跑过一次两步训练(单段,`first_step` 为 0),以下三处不同于最初的设计假设,以实测为准:
+
+- **指标取自存点,不取自日志。** 指标行混在 tqdm、NCCL 与各 worker 警告之间,第 0 步的指标行离日志末尾 40 行,而按步数取的日志尾巴只有 48 行,刚好踩线,步数一多会系统性丢掉早期步。训练器在每个存点里写 `pipeline/worker_state_pipeline.json`,其中 `log_history` 逐步记录完整指标,与日志里的损失逐位相同。执行器按 `system/step` 对账,不按下标;续训时全局步号是 `first_step` 加上作业内的 `system/step`。键保留 `@sum` 后缀(去后缀只作用于标准输出日志)。
+- **存点位置取自训练脚本的 `completion.json`,不去猜。** ROLL 框架无条件在存点根目录下追加一层时间戳,实际位置是 `<输出目录>/checkpoints/<时间戳>/checkpoint-<N>`,调用方事先猜不到。执行器读脚本自己写的 `completion.json`;读不到、不是合法记录、或报出的位置落在作业目录之外,都抛 `MetricsMissingError`,绝不退化成猜目录名。
+- **Ray 临时目录必须短。** Ray 用 Unix 域套接字,路径上限 107 字节,ROLL 因此要求 `ROLL_RAY_TEMP_DIR` 至多 37 个字符。`work_root` 可以很长,所以 Ray 临时目录不能放在它下面;执行器经 `JobSpec.env` 给每个作业一个 `/tmp/ray-<作业 id 前 8 位>`。
+
+ROLL 一步实际消耗 `数据并行度 × 梯度累积 × 每卡批大小` 行(实测为 8×1×1,即 8 行)。训练脚本要求实际步数恰好等于 `max_steps`,凑不够整批时 `drop_last` 会静默丢行或直接拒绝;这里的「一步」(`sft_batch_size` 个剧集,每个展开成若干行)与 ROLL 的「一步」不是同一个概念,上文的行数预检就是为此而设,目前尚未实现 [计划中]。
+
+转换器同样在真实主机上对一份真实存点(22 GB)跑过。导出是 `convert_checkpoint_to_hf` 的 Python 调用,ROLL4ZenGen 里没有命令行入口,最初假定的导出脚本(ROLL 仓库下 scripts 目录里的 export_lora_for_vllm.py)并不存在。转换器用 `python3 -c` 执行一段固定的程序文本,三个路径只经环境变量传入,所以 `argv` 里没有任何来自存点引用的字符串;`low_mem=False` 是适配器导出唯一合法的取值。ROLL 自带说明里直接构造 LoRAHFConverter 类的示例已经过时,它的构造函数现在要求 `verbose` 参数,照抄会抛 `TypeError`。作业身份包含程序文本的哈希,改了程序就是另一个作业,不会撞上旧程序留下的成功记录。实测:产物含 148,808 个 BF16 张量,`lora_A` 与 `lora_B` 各 74,404 个,布局标记为 `qwen4_exp_vllm_2d`,转换用时 22.9 秒,主机内存峰值 5.37 GiB,不创建 CUDA 上下文;经转换器整条流程(落到临时目录、算 `full` 哈希、写完成标记、原子改名)用时 47.8 秒,第二次调用 4.8 秒并返回同一个引用,没有重做导出。
 GRPO 与 OPD 只有一个方法,因为两者在同一个训练 step 里联合更新。`StepResult.step` 是执行器自己的全局计数,编排器发现它与自己的 step 不一致时抛 `RuntimeError`。
 
 | 指标 | 阶段 | 含义 |
@@ -657,7 +667,7 @@ T1 的上抛异常会让 `run_daemon` 退出,需要外部监督者重启。重�
 | 续训判定与崩溃续训 | [已落地] | 逐字节等价只在 mock 下有证据 |
 | 调和循环接线 | [已落地] | `scripts/run_controlplane.py` 用 mock 执行器与转换器 |
 | 数据合成接线 | [计划中] | 工作包 2 |
-| ROLL LoRA SFT 真实执行器、适配器导出转换器、阶段协议 | [已落地] | 远端计算层 `compute` 是它们的前置,已先于执行器与转换器落地;入口装配与真实主机验证仍待做 |
+| ROLL LoRA SFT 真实执行器、适配器导出转换器、阶段协议 | [已落地] | 远端计算层 `compute` 是它们的前置,已先于执行器与转换器落地;已在真实主机上各跑通一次,多段与续训、端到端调和循环仍待验证 |
 | 真实 GRPO 加 OPD 训练、适配器合并回完整权重 | [推迟] | |
 
 | 已知局限 | 影响 | 缓解 |
@@ -679,7 +689,9 @@ T1 的上抛异常会让 `run_daemon` 退出,需要外部监督者重启。重�
 | 未核实项 | 影响 | 核实办法 |
 |---|---|---|
 | ROLL 对离线分组 GRPO 数据的语义 | 算法正确性无保证 | 接入 ROLL 前对照其文档与源码 |
-| 远端容器内外的工作目录是否同一路径、宿主机的 `nvidia-smi` 能否看到别的容器的计算进程 | 助手的路径假设与预检的 GPU 占用判定都依赖这两点 | 在验证主机上从容器内外各建一个文件、各跑一次 `nvidia-smi` |
+| 多段训练与续训:`--resume` 的路径层级、`completion.json` 里 `last_step` 在续训时是全局下标还是作业内下标、`prior_batches` 前缀是否真能让 ROLL 按位置跳过已消费的批次 | 崩溃恢复设计的核心,至今只在假客户端下验证过,真机只跑过单段 | 在验证主机上跑两段,第二段带 `--resume`,对照 `log_history` 与存点 |
+| 一步的行数:`数据并行度 × 梯度累积 × 每卡批大小` 与 `sft_batch_size` 个剧集展开后的行数是否对得上 | 对不上时 `drop_last` 静默丢行,或训练脚本以「实际步数不等于 max_steps」拒绝 | 实现 `validate_sft_data` 预检;真机上已确认恰好 8 行一步时通过 |
+| 存点与导出产物的属主 | 容器内是 root,存点与导出目录里的权重文件权限为 `-rw-------`,宿主机上的普通用户读不了;若 vLLM 服务以别的用户或在别的容器里运行,读不到适配器 | 起 vLLM 服务时核对运行用户;或用 `docker run --user` 让容器以宿主机用户运行,并核对镜像内路径的写权限 |
 | 远端 Python 版本 | 助手按 3.8 语法写,实际版本更低则无法运行 | 在验证主机上跑一次助手的 `probe` |
 | 真实执行器下续训是否逐字节等价 | 取决于优化器与随机数状态是否存点、浮点归约顺序 | 真实执行器上做崩溃注入 |
 | 长跑 rollout 的 keepalive | 死连接可能不被及时发现 | 构造断连场景压测 |
