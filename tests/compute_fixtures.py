@@ -39,6 +39,30 @@ def metrics_log(first_step: int, last_step: int, *, loss: float = 0.5) -> str:
     )
 
 
+def training_artifacts(out_dir: str, last_step: int, *, losses=None, stamp: str = "20261018-010530") -> dict[str, bytes]:
+    """真实训练作业结束时留在输出目录里的文件(照 B1 在 .181 上的实测布局)。
+
+    - completion.json:训练脚本自己报的存点位置与实际步数。存点在 <out_dir>/checkpoints/<时间戳>/
+      checkpoint-<N>,时间戳是 ROLL 框架无条件追加的(base_config.py),调用方事先猜不到,只能读这份文件。
+    - pipeline/worker_state_pipeline.json:存点里的 log_history,每步一条完整指标。键保留 `@sum` 后缀
+      (strip_at_tag 只作用于 stdout 日志,不作用于这里)。
+    """
+    import json
+
+    losses = list(losses) if losses is not None else [2.6 - 0.1 * i for i in range(last_step)]
+    ckpt = f"{out_dir}/checkpoints/{stamp}/checkpoint-{last_step - 1}"
+    history = [{"sft_train/loss@sum": loss, "system/step": i} for i, loss in enumerate(losses)]
+    return {
+        f"{out_dir}/completion.json": json.dumps(
+            {"first_step": 0, "last_step": last_step - 1, "updates": last_step, "checkpoint": ckpt}
+        ).encode("utf-8"),
+        f"{ckpt}/pipeline/worker_state_pipeline.json": json.dumps(
+            {"kv": {}, "log_history": history, "step": last_step - 1}
+        ).encode("utf-8"),
+        f"{ckpt}/mca_config.json": b"{}",
+    }
+
+
 class FakeClient:
     """内存替身。files 是 {路径: 字节},jobs 是 {job_id: JobStatus}。
 

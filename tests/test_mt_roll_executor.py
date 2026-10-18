@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import pytest
-from compute_fixtures import FakeClient, fake_endpoint, metrics_log
+from compute_fixtures import FakeClient, fake_endpoint, training_artifacts
 from compute.errors import ComputeBusyError, HelperError
 from controlplane.envelope import BigRef
 from mindtrainer.executor import CheckpointCorruptError
@@ -146,16 +146,19 @@ def _staged(client: FakeClient, batches, *, first_step=0, prior=()):
     )
 
 
-def _ckpt_hook(last_step: int):
-    """模拟作业写出段尾存点目录。"""
+def _ckpt_hook(last_step: int, *, first_step: int = 0, losses=None):
+    """模拟作业结束时留在输出目录里的文件:布局照 B1 在 .181 上的实测(见 training_artifacts)。
+
+    losses 默认给 [first_step, last_step) 每步一个数;log_history 是从本次作业起点累积的,
+    所以它的下标是本次作业内的步号,system/step 也从 0 起。"""
     def hook(job_id, spec):
         out = dict(zip(spec.argv, spec.argv[1:]))["--output-dir"]
-        FakeClient.seed_dir.__get__(hook.client)(f"{out}/checkpoint-{last_step - 1}")
+        hook.client.files.update(training_artifacts(out, last_step - first_step, losses=losses))
     return hook
 
 
 def test_run_sft_stage_writes_rows_in_step_order_and_returns_roll_steps():
-    client = FakeClient(log=metrics_log(0, 2))
+    client = FakeClient()
     hook = _ckpt_hook(2)
     hook.client = client
     client.job_hook = hook
@@ -169,12 +172,12 @@ def test_run_sft_stage_writes_rows_in_step_order_and_returns_roll_steps():
 
 def test_prior_batches_become_the_file_prefix_and_change_the_job_id():
     """前缀进 train.jsonl 且进 job_id:ROLL 按位置跳过已消费的批次(设计 §5.2)。"""
-    first = FakeClient(log=metrics_log(0, 1))
+    first = FakeClient()
     h1 = _ckpt_hook(1); h1.client = first; first.job_hook = h1
     _staged(first, [[_episode("e0")]])
 
-    second = FakeClient(log=metrics_log(1, 2))
-    h2 = _ckpt_hook(2); h2.client = second; second.job_hook = h2
+    second = FakeClient()
+    h2 = _ckpt_hook(2, first_step=1); h2.client = second; second.job_hook = h2
     _staged(second, [[_episode("e1")]], first_step=1, prior=[[_episode("e0")]])
 
     assert first.run_calls[0][0] != second.run_calls[0][0]
@@ -182,32 +185,113 @@ def test_prior_batches_become_the_file_prefix_and_change_the_job_id():
     assert prefix_rows.decode("utf-8").splitlines()[0].count("u1") == 1  # 前缀行在最前
 
 
+def test_the_launch_command_points_at_the_real_training_entry():
+    """入口在 ROLL4ZenGen 的 scripts/qwen38/ 下,解释器是 python3(容器里没有 python)。
+    此前这里写的是 {roll_root}/run_sft_validation.py,路径漏了两层,到真机上才会发现。"""
+    client = FakeClient()
+    hook = _ckpt_hook(1); hook.client = client; client.job_hook = hook
+    _staged(client, [[_episode("e0")]], first_step=0, prior=[])
+    argv = client.run_calls[0][1].argv
+    assert argv[0] == "python3"
+    assert argv[1] == "/srv/roll/scripts/qwen38/run_sft_validation.py"
+
+
 def test_resume_adds_the_resume_flag():
-    client = FakeClient(log=metrics_log(2, 3))
-    hook = _ckpt_hook(3); hook.client = client; client.job_hook = hook
+    client = FakeClient()
+    hook = _ckpt_hook(3, first_step=2); hook.client = client; client.job_hook = hook
     _staged(client, [[_episode("e2")]], first_step=2, prior=[[_episode("e0")], [_episode("e1")]])
     argv = client.run_calls[0][1].argv
     assert "--resume" in argv and "--max-steps" in argv
     assert argv[argv.index("--max-steps") + 1] == "3"
 
 
-def test_metrics_missing_when_a_step_has_no_loss():
+def test_metrics_missing_when_the_history_is_shorter_than_the_steps_run():
     """条数不符一律失败,绝不按位置合成 step(设计 §5.2 第 7 步)。"""
-    client = FakeClient(log=metrics_log(0, 1))  # 只报了 1 步,却跑了 2 步
-    hook = _ckpt_hook(2); hook.client = client; client.job_hook = hook
+    client = FakeClient()
+    hook = _ckpt_hook(2, losses=[2.5]); hook.client = client; client.job_hook = hook  # 只记了 1 步,却跑了 2 步
     with pytest.raises(MetricsMissingError, match=r"no sft loss for step\(s\) \[1\]"):
         _staged(client, [[_episode("e0")], [_episode("e1")]])
 
 
 def test_metrics_missing_when_the_loss_key_is_absent():
-    client = FakeClient(log='metrics_tag: {"step": 0, "metrics": {"other": 1.0}}\n')
-    hook = _ckpt_hook(1); hook.client = client; client.job_hook = hook
+    import json
+
+    client = FakeClient()
+    hook = _ckpt_hook(1); hook.client = client
+
+    def broken(job_id, spec):
+        hook(job_id, spec)
+        state = next(k for k in client.files if k.endswith("worker_state_pipeline.json"))
+        client.files[state] = json.dumps({"log_history": [{"system/step": 0, "other": 1.0}]}).encode("utf-8")
+
+    client.job_hook = broken
     with pytest.raises(MetricsMissingError):
         _staged(client, [[_episode("e0")]])
 
 
+def test_metrics_missing_when_the_job_left_no_completion_marker():
+    """训练脚本没写 completion.json:存点位置不可知,只能失败,不能去猜带时间戳的目录名。"""
+    client = FakeClient()
+    with pytest.raises(MetricsMissingError, match=r"completion\.json"):
+        _staged(client, [[_episode("e0")]])
+
+
+@pytest.mark.parametrize("reported", [
+    "/etc/passwd",                                        # 作业目录之外的绝对路径
+    "/srv/rise/work/runs/run-1/elsewhere/checkpoint-0",   # 前缀像、但不在本作业目录之下
+    "{out}/../../../etc/checkpoint-0",                    # 用 .. 绕出去
+])
+def test_a_completion_record_pointing_outside_the_job_directory_is_refused(reported):
+    """completion.json 是远端写的,它报的存点位置会被拿去做 hash_tree 和进 BigRef。
+    越界的位置不能被采信:否则一个被改过的记录就能让我们对任意路径取摘要、并把它登记成存点。"""
+    import json
+
+    client = FakeClient()
+    hook = _ckpt_hook(1); hook.client = client
+
+    def lying(job_id, spec):
+        hook(job_id, spec)
+        out = dict(zip(spec.argv, spec.argv[1:]))["--output-dir"]
+        client.files[f"{out}/completion.json"] = json.dumps(
+            {"checkpoint": reported.format(out=out)}).encode("utf-8")
+
+    client.job_hook = lying
+    with pytest.raises(MetricsMissingError, match=r"outside the job directory"):
+        _staged(client, [[_episode("e0")]])
+
+
+def test_metrics_come_from_the_checkpoint_not_from_the_log_tail():
+    """指标行在混杂日志里离末尾很远(B1 实测第 0 步距末尾 40 行,而取的尾巴只有 48 行,刚好踩线),
+    步数一多会系统性丢掉早期步。所以数据源是存点里的 log_history,日志里有什么都不影响。"""
+    client = FakeClient(log="x" * 10 + "\nmetrics_tag: not json at all\n")
+    hook = _ckpt_hook(2, losses=[2.64, 2.45]); hook.client = client; client.job_hook = hook
+    _, results = _staged(client, [[_episode("e0")], [_episode("e1")]])
+    assert [(r.step, r.metrics["sft_loss"]) for r in results] == [(0, 2.64), (1, 2.45)]
+
+
+def test_steps_are_matched_by_system_step_not_by_position():
+    """对账按 system/step 取,不按下标:乱序、重复、多出来的步都不能被按位置收下。"""
+    import json
+
+    client = FakeClient()
+    hook = _ckpt_hook(2); hook.client = client
+
+    def shuffled(job_id, spec):
+        hook(job_id, spec)
+        state = next(k for k in client.files if k.endswith("worker_state_pipeline.json"))
+        client.files[state] = json.dumps({"log_history": [
+            {"system/step": 1, "sft_train/loss@sum": 2.45},
+            {"system/step": 0, "sft_train/loss@sum": 2.64},
+            {"system/step": 7, "sft_train/loss@sum": 9.99},  # 多出来的,不属于本段
+        ]}).encode("utf-8")
+
+    client.job_hook = shuffled
+    _, results = _staged(client, [[_episode("e0")], [_episode("e1")]])
+    assert [(r.step, r.metrics["sft_loss"]) for r in results] == [(0, 2.64), (1, 2.45)]
+
+
 def test_stage_checkpoint_reference_carries_the_roll_hint():
-    client = FakeClient(log=metrics_log(0, 1))
+    client = FakeClient()
     hook = _ckpt_hook(1); hook.client = client; client.job_hook = hook
     executor, _ = _staged(client, [[_episode("e0")]])
     ref = executor.save_checkpoint("step-1")
@@ -216,6 +300,28 @@ def test_stage_checkpoint_reference_carries_the_roll_hint():
     assert ref.fetch_hint["type"] == "roll_ssh"
     assert ref.fetch_hint["format"] == "roll_lora_legacy"
     assert len(ref.sha256) == 64
+
+
+def test_the_checkpoint_reference_follows_the_location_the_script_reported():
+    """存点在 <out_dir>/checkpoints/<时间戳>/checkpoint-N:时间戳是 ROLL 框架无条件追加的,
+    事先猜不到。B1 实测此前假定的 <out_dir>/checkpoint-N 是错的,引用会指向一个不存在的目录。"""
+    client = FakeClient()
+    hook = _ckpt_hook(1); hook.client = client; client.job_hook = hook
+    executor, _ = _staged(client, [[_episode("e0")]])
+    ref = executor.save_checkpoint("step-1")
+    assert "/checkpoints/20261018-010530/checkpoint-0" in ref.uri
+
+
+def test_the_launch_command_pins_the_checkpoint_dir_and_a_short_ray_temp_dir():
+    """B1 的第一次尝试死在 ROLL_RAY_TEMP_DIR 太长(Unix 套接字 107 字节上限,目录最多 37 字符);
+    work_root 本身可以很长,所以 Ray 临时目录不能落在它下面。"""
+    client = FakeClient()
+    hook = _ckpt_hook(1); hook.client = client; client.job_hook = hook
+    _staged(client, [[_episode("e0")]])
+    spec = client.run_calls[0][1]
+    assert len(spec.env["ROLL_RAY_TEMP_DIR"]) <= 37
+    assert not spec.env["ROLL_RAY_TEMP_DIR"].startswith("/srv/rise/work")
+    assert spec.env["ROLL_RAY_TEMP_DIR"] != "/tmp/ray"  # 要带上本作业的标识,否则两个作业会共用一个 Ray 会话
 
 
 def test_save_checkpoint_reclaims_the_loaded_one_when_no_stage_ran():

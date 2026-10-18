@@ -22,7 +22,8 @@ from mindtrainer.executor import CheckpointCorruptError
 from mindtrainer.training_config import InvalidTrainingConfigError
 from simulator.datamodel import Episode
 
-LAUNCHER_VERSION = "v0"  # 进 job_id 的哈希;改了启动命令的拼法就要改它
+LAUNCHER_VERSION = "v2"  # 进 job_id 的哈希;改了启动命令的拼法就要改它(v2:固定存点根目录并给作业独立的 Ray 临时目录;v1:入口改到 scripts/qwen38/、解释器改 python3)
+TRAIN_SCRIPT = "scripts/qwen38/run_sft_validation.py"  # 相对 roll_root;ROLL4ZenGen 仓库里的真实位置
 METRIC_PREFIX = "metrics_tag:"  # V2 未核实:ROLL 的逐步指标行前缀,主机验证后改这里
 MAX_ATTEMPTS = 8  # 同一 job_id 下的尝试序号上限,与 max_resume_attempts 分开记账(设计 §5.2)
 
@@ -209,12 +210,18 @@ class RollExecutor:
         out_dir = f"{work}/runs/{self.run_id}/{attempt_id}"
         self.client.put(train_path, data)
 
-        # 4. 启动命令(V2、V9 未核实:--max-steps 是否真能截到段尾、--resume 的路径层级)
+        # 4. 启动命令(V9 未核实:--max-steps 是否真能截到段尾、--resume 的路径层级)
+        #    入口在 ROLL4ZenGen 的 scripts/qwen38/ 下;解释器用 python3,镜像里没有 `python`。
+        #    --checkpoint-output-dir 不传的话,存点落在 <out_dir>/checkpoints/<时间戳>/,时间戳是
+        #    ROLL 框架无条件追加的(base_config.py),调用方事先猜不到;固定根目录之后,时间戳那一层
+        #    仍在,但位置落在我们给的目录之下,而最终位置以 completion.json 为准(见 _read_outcome)。
+        ckpt_root = f"{out_dir}/checkpoints"
         argv = [
-            "python", f"{self.endpoint.roll_root.rstrip('/')}/run_sft_validation.py",
+            "python3", f"{self.endpoint.roll_root.rstrip('/')}/{TRAIN_SCRIPT}",
             "--config", self.endpoint.sft_template,
             "--model-path", self.endpoint.base_model_path,
             "--output-dir", out_dir,
+            "--checkpoint-output-dir", ckpt_root,
             "--train-data", train_path,
             "--heldout-data", self.endpoint.heldout_jsonl,
             "--max-steps", str(last_step),
@@ -223,21 +230,28 @@ class RollExecutor:
         ]
         if first_step > 0:
             argv += ["--resume", self._remote_path(self._base_uri)]
-        spec = JobSpec(argv=tuple(argv), cwd=self.endpoint.roll_root)
+        # Ray 用 Unix 域套接字,路径上限 107 字节,ROLL 因此要求 ROLL_RAY_TEMP_DIR 至多 37 个字符
+        # (ray_temp_dir.py)。work_root 可以很长,所以不能放在它下面;用 job_id 的前 8 位区分作业,
+        # 否则两个作业会共用一个 Ray 会话。B1 的第一次尝试就死在这里。
+        spec = JobSpec(
+            argv=tuple(argv), cwd=self.endpoint.roll_root,
+            env={"ROLL_RAY_TEMP_DIR": f"/tmp/ray-{job_id[:8]}"},
+        )
 
         # 5. 整段跑。run_job 自己取租约、轮询、释放;非零退出抛 RemoteJobFailedError
         #    (日志尾巴在 log_tail 里,不进 reason),超时抛 RemoteJobTimeoutError,
         #    租约被占抛 ComputeBusyError——三者都是 DeferredError(Ruling 9、10)。
-        result = self.client.run_job(attempt_id, spec, tail_lines=40 + 4 * len(batches))
+        self.client.run_job(attempt_id, spec)
 
-        # 6. 回收指标。step 必须从 ROLL 自己的记录里读,不能按位置合成:否则
-        #    orchestrator 的 result.step != step 检查会恒为真,那道校验就被废掉了,
-        #    而真实后端最需要它(设计 §5.2 第 7 步)。
-        results = self._parse_metrics(result.log_tail, first_step, last_step)
+        # 6. 回收存点位置与逐步指标。指标行在混杂日志里离末尾很远(B1 实测第 0 步距末尾 40 行,
+        #    而按步数取的尾巴只有 48 行,刚好踩线),步数一多会系统性丢掉早期步;所以不从日志取,
+        #    而是读训练器写在存点里的 log_history。step 必须从 ROLL 自己的记录里读,不能按位置合成:
+        #    否则 orchestrator 的 result.step != step 检查会恒为真,那道校验就被废掉了(设计 §5.2 第 7 步)。
+        ckpt_dir = self._read_outcome(out_dir)
+        results = self._parse_metrics(ckpt_dir, first_step, last_step)
 
-        # 7. 段尾存点。编号是 checkpoint-{global_step},global_step 是零基索引,
-        #    所以段尾那份叫 checkpoint-{last_step - 1}(设计 §5.2 第 5 步)。
-        ckpt_dir = f"{out_dir}/checkpoint-{last_step - 1}"
+        # 7. 段尾存点。目录是 <ckpt_root>/<时间戳>/checkpoint-<global_step>,global_step 是零基索引,
+        #    所以段尾那份叫 checkpoint-{last_step - 1};完整路径取自 completion.json,不去猜时间戳。
         self._stage_ref = BigRef(
             uri=f"ssh://{self.endpoint.endpoint_id}{ckpt_dir}",
             sha256=self.client.hash_tree(ckpt_dir, "sampled"),
@@ -268,26 +282,53 @@ class RollExecutor:
             f"job {job_id} has already used {MAX_ATTEMPTS} attempts; a human should look at the logs"
         )
 
-    def _parse_metrics(self, log_tail: str, first_step: int, last_step: int) -> list[StepResult]:
-        """从日志里取 ROLL 的 global step 与 sft 损失,与 [first_step, last_step) 对账。
+    def _read_outcome(self, out_dir: str) -> str:
+        """读训练脚本的 completion.json,返回段尾存点目录。
 
-        读不到、条数不符、缺 loss 键都抛 MetricsMissingError:绝不退化成按位置编号。
-        _update_summary 直接读 metrics["sft_loss"],缺键会是 KeyError,所以这里
-        一并覆盖(设计 §5.2 第 7 步)。
+        存点路径里有一层 ROLL 框架追加的时间戳,事先猜不到,所以以脚本自己报的为准。
+        读不到、不是 JSON、没有 checkpoint 键、报的位置在 out_dir 之外,都抛 MetricsMissingError:
+        绝不退化成去猜目录名。"""
+        path = f"{out_dir}/completion.json"
+        try:
+            record = json.loads(self.client.get(path))
+            ckpt = str(record["checkpoint"])
+        except HelperError as exc:
+            if exc.code == "not_found":
+                raise MetricsMissingError(
+                    f"the training job left no completion.json at {path}; refusing to guess the checkpoint location"
+                ) from None
+            raise
+        except (ValueError, TypeError, KeyError):
+            raise MetricsMissingError(f"{path} is not a completion record with a checkpoint") from None
+        if not (ckpt == out_dir or ckpt.startswith(out_dir + "/")) or ".." in ckpt.split("/"):
+            raise MetricsMissingError(f"{path} reports a checkpoint outside the job directory")
+        return ckpt
+
+    def _parse_metrics(self, ckpt_dir: str, first_step: int, last_step: int) -> list[StepResult]:
+        """从存点里的 log_history 取每步的 sft 损失,与 [first_step, last_step) 对账。
+
+        log_history 的 system/step 是本次作业内的步号(从 0 起);续训时作业起点是 first_step,
+        所以全局步号 = first_step + system/step。按 system/step 对账、不按下标:乱序、重复、
+        多出来的步都不能被按位置收下。读不到、缺步、缺 loss 键都抛 MetricsMissingError:
+        绝不退化成按位置编号。_update_summary 直接读 metrics["sft_loss"],缺键会是 KeyError,
+        所以这里一并覆盖(设计 §5.2 第 7 步)。
         """
+        path = f"{ckpt_dir}/pipeline/worker_state_pipeline.json"
+        try:
+            history = json.loads(self.client.get(path))["log_history"]
+        except HelperError as exc:
+            if exc.code == "not_found":
+                raise MetricsMissingError(f"no training history at {path}") from None
+            raise
+        except (ValueError, TypeError, KeyError):
+            raise MetricsMissingError(f"{path} has no readable log_history") from None
         seen: dict[int, float] = {}
-        for line in log_tail.splitlines():
-            head, sep, body = line.partition(METRIC_PREFIX)
-            if not sep:
-                continue
+        for entry in history if isinstance(history, list) else []:
             try:
-                record = json.loads(body)
-                step = int(record["step"])
-                metrics = record["metrics"]
-                loss = float(metrics["sft_train/loss"])
+                local = int(entry["system/step"])
+                seen[first_step + local] = float(entry["sft_train/loss@sum"])
             except (ValueError, TypeError, KeyError):
                 continue
-            seen[step] = loss
         wanted = list(range(first_step, last_step))
         missing = [s for s in wanted if s not in seen]
         if missing:

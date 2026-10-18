@@ -48,8 +48,8 @@ from factory.compute_config import (  # noqa: E402
 )
 from factory.errors import FactoryConfigError  # noqa: E402
 
-TRAIN_SCRIPT = "run_sft_validation.py"          # roll_executor.py 里 argv 用的训练入口
-EXPORT_SCRIPT = "scripts/export_lora_for_vllm.py"  # roll_converter.EXPORT_SCRIPT,V15 待核实
+from mindtrainer.roll_executor import TRAIN_SCRIPT  # noqa: E402  训练入口,与执行器用同一个常量,不会各写各的
+EXPORT_SCRIPT = "mcore_adapter/src/mcore_adapter/models/converter/post_converter.py"  # 导出是 LoRAHFConverter 的 Python 调用,没有命令行脚本
 
 
 class Stop(Exception):
@@ -151,7 +151,7 @@ def run(repo_root: str, endpoint_name: str | None, *, local: bool) -> int:
         ep = ctx["ep"]
         roll = ep.roll_root.rstrip("/")
         missing = []
-        for rel, what in ((TRAIN_SCRIPT, "训练入口"), (EXPORT_SCRIPT, "导出脚本(V15 待核实)")):
+        for rel, what in ((TRAIN_SCRIPT, "训练入口"), (EXPORT_SCRIPT, "导出转换器模块")):
             path = f"{roll}/{rel}"
             # 用 get 探测存在性会把整个脚本读回来;hash-tree 又只认目录。用 `test -f` 走一个最小作业最省。
             r = ctx["client"]._transport.run(["test", "-f", path], timeout=30.0)

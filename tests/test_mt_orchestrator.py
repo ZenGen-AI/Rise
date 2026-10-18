@@ -806,20 +806,20 @@ class TestRollConverterIntegration:
 
     def test_the_candidate_carries_the_adapter_export_reference(self, store):
         """run_training 收尾时调 converter.convert(final_ref),产出进 candidate_checkpoint.yaml。"""
-        from compute_fixtures import FakeClient, fake_endpoint, metrics_log
+        from compute_fixtures import FakeClient, fake_endpoint, training_artifacts
         from mindtrainer.roll_converter import EXPORT_FORMAT, RollLoraConverter
         from mindtrainer.roll_executor import RollExecutor
 
-        client = FakeClient(log=metrics_log(0, 2))
+        client = FakeClient()
         endpoint = fake_endpoint()
 
         def hook(job_id, spec, lease=True):
             if "--output" in spec.argv:  # 转换作业
                 out = spec.argv[spec.argv.index("--output") + 1]
                 client.files[f"{out}/adapter_model.safetensors"] = b"w"
-            else:  # 训练作业
+            else:  # 训练作业:留下真实布局的产物(completion.json 与存点里的 log_history)
                 out = spec.argv[spec.argv.index("--output-dir") + 1]
-                client.files[f"{out}/checkpoint-1/config.json"] = b"c"
+                client.files.update(training_artifacts(out, 2))
 
         client.job_hook = hook
         client.seed_dir(endpoint.base_model_path)

@@ -23,10 +23,13 @@ LINUX = Path("/proc/meminfo").exists()
 @pytest.fixture
 def world(tmp_path):
     """一个假的"远端":本机上的一棵目录树,加指向它的端点配置与主机映射。"""
-    for sub in ("model", "roll/scripts", "work"):
+    # 目录布局与 ROLL4ZenGen 的真实布局一致(scripts/qwen38/ 下的训练入口、mcore_adapter 下的转换器模块)
+    for sub in ("model", "roll/scripts/qwen38", "roll/mcore_adapter/src/mcore_adapter/models/converter", "work"):
         (tmp_path / sub).mkdir(parents=True)
     (tmp_path / "model" / "config.json").write_text("{}")
-    for rel in ("roll/run_sft_validation.py", "roll/scripts/export_lora_for_vllm.py", "sft.yaml", "heldout.jsonl"):
+    for rel in ("roll/scripts/qwen38/run_sft_validation.py",
+                "roll/mcore_adapter/src/mcore_adapter/models/converter/post_converter.py",
+                "sft.yaml", "heldout.jsonl"):
         (tmp_path / rel).write_text("")
     store = GitStore(str(tmp_path / "cp"))
     store.init()
@@ -98,7 +101,7 @@ def test_the_first_failure_stops_the_run_and_exits_1(world, break_what, step):
         (tmp / "model" / "config.json").unlink()
         (tmp / "model").rmdir()
     else:
-        (tmp / "roll" / "scripts" / "export_lora_for_vllm.py").unlink()
+        (tmp / "roll/mcore_adapter/src/mcore_adapter/models/converter/post_converter.py").unlink()
     r = _smoke(repo, env)
     assert r.returncode == 1
     done = _steps(r.stdout)
