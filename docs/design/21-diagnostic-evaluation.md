@@ -3,13 +3,13 @@
 | 项 | 内容 |
 |---|---|
 | 一句话 | 对候选 checkpoint 跑静态轨与动态轨评测,逐层聚合成带置信区间的维度分,对照基线标出退化,写成诊断报告 |
-| 状态 | 部分落地:评测流水线与编排器 [已落地];接入调和循环的评估器与资产读写 [计划中] |
+| 状态 | 部分落地:评测流水线、编排器、评估器与资产读写 [已落地];SoMBench 经 SoMEval 的真实静态评测、题库导入、训练行污染准入检查 [计划中],施工时可能微调 |
 | 所在层 | 计算层,属于 SocialSimulator 的评测部分 |
-| 代码位置 | `src/diagnostic`;评估器 `src/diagnostic/evaluator.py` 与资产 `src/diagnostic/assets.py` [计划中] |
+| 代码位置 | `src/diagnostic`,含评估器 `evaluator.py` 与资产 `assets.py`;污染索引与准入检查 `src/diagnostic/contamination.py` [计划中];真实运行器与导入命令在 `src/factory` [计划中] |
 | 基线提交 | `8dd295b`(2026-10-10) |
 | 依赖 | ControlPlane 的产物树与信封(`controlplane.gitstore`、`controlplane.envelope`、`controlplane.paths`);SocialSimulator 的仿真运行器(`simulator.runner`) |
-| 被依赖 | ControlPlane 审核门①(读报告);RecipeStore 增益与战绩、TrainScheduler 规划上下文、factory 组合根 [计划中] |
-| 对应实施计划 | 工作包 8(任务 94 至 95)[计划中];工作包 9(任务 103,评估器装配与默认资产)[计划中] |
+| 被依赖 | ControlPlane 审核门①(读报告);factory 组合根(装配评估器与真实运行器)[已落地];RecipeStore 增益与战绩、TrainScheduler 规划上下文 [计划中] |
+| 对应实施计划 | 评估器与资产:工作包 8、9 [已落地];远端推理服务组件:计算层计划 [已落地];SoMBench 评测接入与污染准入检查:待写 [计划中] |
 
 ## 0. 系统速览
 
@@ -99,11 +99,11 @@
 </details>
 <!-- figure:end 21-diagnostic-context -->
 
-今天守护进程遇到 `request_diagnostic` 时,写的是 `simulator.stubs` 的占位报告,不调用编排器。编排器 `run_diagnostic(...)` 已实现并有测试,接入循环的评估器在工作包 8 [计划中]。评测执行经两个协议注入:SoMEval 运行器负责静态轨,judge 后端负责动态轨打分,V1 都注入 mock。报告写进 `runs/<run>/diagnostic_report.yaml`,下游只读产物,不调用诊断代码。
+默认入口里守护进程遇到 `request_diagnostic` 时,写的是 `simulator.stubs` 的占位报告,不调用编排器;闭环模式下换成 mock 评估器,`--evaluator someval` 换成真实评估器 [计划中]。评测执行经两个协议注入:SoMEval 运行器负责静态轨,judge 后端负责动态轨打分,V1 都注入 mock。报告写进 `runs/<run>/diagnostic_report.yaml`,下游只读产物,不调用诊断代码。
 
 ## 2. 目标、非目标与约束
 
-诊断评测保证分数带不确定性、两轨分数留痕、同版本才比较。真实评测后端与动态轨的接入不在 V1。
+诊断评测保证分数带不确定性、两轨分数留痕、同版本才比较。静态轨经真实 SoMEval 评测 SoMBench 全部四种题型 [计划中];动态轨与真实 judge 后端的接入不在 V1。SoMBench 的题目只用于评测诊断,不得以任何形式进入训练 [计划中]。
 
 | 编号 | 目标 | 验收方式 | 状态 |
 |---|---|---|---|
@@ -112,16 +112,21 @@
 | G3 | 按变体族通过模式归类错误类型 | `tests/test_diag_error_classifier.py` | [已落地] |
 | G4 | L3 到 L2 到 L1 逐层聚合,每个分数带 Wilson 置信区间与轨道标注 | `tests/test_diag_aggregator.py`、`tests/test_diag_stats.py` | [已落地] |
 | G5 | 对照基线,只在区间不相交时标退化 | `tests/test_diag_regression.py` | [已落地] |
-| G6 | 评估器从产物树读资产与基线,报告带 `backends` 标记 | 工作包 8 的两个新测试文件 | [计划中] |
+| G6 | 评估器从产物树读资产与基线,报告带 `backends` 标记 | `tests/test_diag_evaluator.py`、`tests/test_diag_assets.py` | [已落地] |
+| G7 | 静态轨以 SoMBench 为题库:3481 题、题型 Q1 到 Q4 全部评测,打分委托给 SoMEval,每题采样一次 | 运行器、导入命令、适配层的测试,真实主机上端到端一次 | [计划中] |
+| G8 | SoMBench 的题目不进训练:树内资产不含题面,SoMEval 的工作目录在树外,训练行上传前过污染准入检查,命中即整条指令失败 | `tests/test_diag_contamination.py` 与准入检查装配、树扫描测试 | [计划中] |
 
 | 非目标或推迟项 | 状态 | V1 的处理 |
 |---|---|---|
-| 真实 SoMEval 子进程,经远端 vLLM 服务推理 | [计划中] | 今天注入 `MockSoMEvalRunner`,报告标 `backends: mock` |
-| 真实 judge | [推迟] | 注入 `MockJudgeBackend`;含 mock judge 的报告等级仍是 `mock`,不升 `real` |
+| 真实 SoMEval 子进程,经远端 vLLM 服务推理 | [计划中] | 由 `--evaluator someval` 装配(DX-22);默认装配仍注入 `MockSoMEvalRunner`,报告标 `backends: mock` |
+| 动态轨的真实 judge 后端 | [推迟] | 注入 `MockJudgeBackend`。静态轨不调用它,所以真实 SoMEval 的报告等级是 `real`,见 DX-22;若有动态 spec 带 mock judge,报告等级仍是 `mock` |
+| 评测基座模型本身 | [推迟] | 没有基座的诊断报告,首个候选没有基线,不产生退化标记 |
+| 每题多次采样 | [推迟] | `sampling_k` 固定为 1(DX-17) |
+| 按档选题 | [推迟] | 真实运行器只支持 `full`,`quick` 在装配期被拒(DX-16) |
 | 评估器跑动态轨 | [推迟] | 评估器传空的动态 spec,只跑静态轨;没有情境与绑定的来源 |
 | G 组探针与 reward hacking 检测进报告 | [推迟] | 检测函数已实现,编排器不调用,报告里只有社会能力退化 |
 | 一致性信号 | [推迟] | 报告里恒为空映射与 0.0 |
-| 隔离校验器接入情境生成 | [推迟] | 函数已实现并独立暴露,没有调用方 |
+| 隔离校验器接入情境生成 | [推迟] | 旧的词元相似度函数已实现并独立暴露,没有调用方。它按空白切词,对中文无效:一篇 664 字的 SoMBench 故事只算 1 个词元,删掉一句其余逐字相同的近似拷贝相似度是 0.0。SoMBench 的隔离不靠它,靠 G8 的哈希准入检查 |
 | 晋级决定 | 非目标 | 只产标记与证据,决定归审核门①的人 |
 
 | 约束 | 内容 | 影响 |
@@ -132,6 +137,8 @@
 | judge 不能是候选的近亲 | judge 与候选的模型 id 互为前缀即拒绝 | 构造 judge 打分器时抛 `SelfEvalBiasError` |
 | 不需要 GPU 与外部服务 | 执行与打分全经协议注入 | 全部测试用固定输出跑 |
 | 不导入 MindTrainer | `diagnostic` 不导入 `mindtrainer` | 训练奖励拿不到,reward hacking 检测无输入 |
+| 评测题不进训练 | SoMBench 的题面、选项、答案、评分提示词在任何训练数据里都不得出现 | 准入检查在训练行上传前做哈希比对,命中则整条指令失败,不剔行(剔行会破坏训练步与行的对应) |
+| 评测凭证不进树、不进命令行 | 评测端点地址与密钥只在树外的本机配置里,权限必须是 0600 | 配置文件缺失、权限过宽、放进仓库目录都在装配期被拒 |
 
 ## 3. 架构
 
@@ -189,17 +196,20 @@
 | `report`、`store_adapter` | 组装报告;信封读写 | `controlplane` | 38、30 | [已落地] |
 | `stats` | Wilson 区间、通过率、总体方差、区间相交 | 标准库 `math` | 98 | [已落地] |
 | `benchmark_version` | 五段式版本记录与可比判定 | 无 | 52 | [已落地] |
-| `isolation` | 训练情境与题库的污染判定与过滤 | 无 | 137 | [已落地] |
-| `evaluator`、`assets` | 接入调和循环;分类表与题库的信封读写 | 编排器、`controlplane.evidence` | 111、74 | [计划中] |
+| `isolation` | 训练情境与题库的污染判定与过滤(词元相似度,对中文无效,无调用方) | 无 | 137 | [已落地] |
+| `contamination` | 污染索引:SoMBench 文本的 20 字滑窗哈希集合的构建、读取、命中计数 | 标准库 | 约 120 | [计划中] |
+| `evaluator`、`assets` | 接入调和循环;分类表与题库的信封读写 | 编排器、`controlplane.evidence` | 111、74 | [已落地] |
+| 真实运行器与导入命令 | 起服务、跑 SoMEval 子进程、解析结果;把 SoMBench 导入成分类表、题库与污染索引 | `compute`、`diagnostic`,在 `factory` 里装配 | 约 400 | [计划中] |
 
 依赖方向规则:
 
 | 规则 | 现状 |
 |---|---|
 | `diagnostic` 可以导入 `controlplane` 与 `simulator` | 已满足 |
-| `diagnostic` 不导入 `mindtrainer`、`trainscheduler`、`recipestore`、`factory` | 已满足;工作包 8 加一条语法树扫描测试,只强制不导入 `mindtrainer`,其余包靠约定 [计划中] |
+| `diagnostic` 不导入 `mindtrainer`、`trainscheduler`、`recipestore`、`factory`、`compute` | 已满足;一条语法树扫描测试强制不导入 `mindtrainer`,其余靠约定。真实运行器要用 `compute`,所以它住在 `factory`,只实现 `diagnostic` 定义的协议 |
 | 下游只读报告产物,不导入 `diagnostic` | RecipeStore 与 TrainScheduler 的施工计划照此执行 [计划中] |
-| 评估器的返回类型写成可调用对象,不导入守护模块 | 工作包 8 的约定 [计划中] |
+| 评估器的返回类型写成可调用对象,不导入守护模块 | 已满足 |
+| 污染准入检查由 `factory` 作为可调用对象注入训练执行器,`mindtrainer` 不导入 `diagnostic` | 准入检查是 `Callable[[bytes], int]`:收一段上传字节,返回命中滑窗数 [计划中] |
 
 ## 4. 数据模型与状态机
 
@@ -207,10 +217,11 @@
 
 | 实体 | 字段与含义 | 约束 |
 |---|---|---|
-| `DiagnosticTaxonomy` | `version`;`l1_dimensions`;`l2_dimensions` 从 L1 到 L2 列表;`l3_tasks` 从 L2 到 L3 列表;`g_probes` | 维度枚举是配置,不写死 |
-| `DiagnosticItem` | `id`、`l3_task`、`item_type`、`scoring_mode`(`rule` 或 `judge`)、`track`、`reference_answer`、`rubric`、`family_id` | 动态题的 `rubric` 可带 `goal_keyword` |
-| `VariantFamily` | `family_id`、`base_item_id`、`variant_item_ids` | 诊断的最小单元 |
-| `ItemResult` | 每题 k 个原始输出、各次得分、通过率、总体方差、轨道 | 得分是 0 或 1,judge 分可为小数 |
+| `DiagnosticTaxonomy` | `version`;`l1_dimensions`;`l2_dimensions` 从 L1 到 L2 列表;`l3_tasks` 从 L2 到 L3 列表;`g_probes` | 维度枚举是配置,不写死。SoMBench 导入的分类表直接用样本里的编号做键(3 个 L1、17 个 L2、71 个 L3,形如 `1`、`1.1`、`1.1.1`),`g_probes` 为空 |
+| `DiagnosticItem` | `id`、`l3_task`、`item_type`、`scoring_mode`(`rule`、`judge` 或 `someval`)、`track`、`reference_answer`、`rubric`、`family_id` | 动态题的 `rubric` 可带 `goal_keyword`。`someval` 模式的题只存 id、维度、题型和变体族,`reference_answer` 与 `rubric` 恒为空,题面、选项、答案一律不进树(DX-19);打分委托给 SoMEval,编排器不重打分 |
+| `VariantFamily` | `family_id`、`base_item_id`、`variant_item_ids` | 诊断的最小单元。SoMBench 导入时,一道基题加上它的 `varA`、`varB` 变体成一族(529 族,其中 39 族有两个变体);`hardest` 不入族,见 DX-18 |
+| `SampleOutcome` [计划中] | `score`(0 或 1)、`extracted`(SoMEval 抽出的答案字母,开放题为空)、`error_reason`(SoMEval 的原因码,正确时为空) | 真实运行器按题返回它;`ItemResult.raw_outputs` 存 `extracted`,从不存模型的完整输出 [计划中] |
+| `ItemResult` | 每题 k 个原始输出、各次得分、通过率、总体方差、轨道 | 得分是 0 或 1,judge 分可为小数。k 为 1 时方差恒为 0,`unstable` 归类不会出现 |
 | `DimensionScore` | `dimension`、`level`、`score`、`ci_low`、`ci_high`、`sample_size`、`track_provenance` | 每个分数都带区间与轨道 |
 | `ErrorProfile` | `l2_dimension`、`error_type_distribution`、`track` | 分布和为 1;空标签 `""` 表示没有错误 |
 | `RegressionFlags`、`ConsistencySignals` | 退化标记列表;规则与 judge 分歧、诊断与奖励分歧 | 一致性信号 V1 恒为空 |
@@ -219,10 +230,11 @@
 | 产物 | 路径 | 状态机 | 写方 | 状态 |
 |---|---|---|---|---|
 | 诊断报告 | `runs/<run>/diagnostic_report.yaml` | 非审核类,写入即 `executed` | 编排器或占位桩 | [已落地] |
-| 分类表 | `diagnostics/taxonomy_<版本>.yaml` | 写入即 `effective`,不走审核门 | `factory install-defaults` | 路径 [已落地],读写 [计划中] |
-| 题库 | `diagnostics/item_pool_<版本>.yaml` | 写入即 `effective`,不走审核门 | `factory install-defaults` | 路径 [已落地],读写 [计划中] |
+| 分类表 | `diagnostics/taxonomy_<版本>.yaml` | 写入即 `effective`,不走审核门 | `factory install-defaults`;`factory import-sombench` [计划中] | [已落地] |
+| 题库 | `diagnostics/item_pool_<版本>.yaml` | 写入即 `effective`,不走审核门 | `factory install-defaults`;`factory import-sombench` [计划中] | [已落地] |
+| 污染索引 | 树外,路径在本机评测配置里 | 无;内容寻址,头部记数据集哈希 | `factory import-sombench` [计划中] | [计划中] |
 
-真实报告的载荷形状如下。`backends` 键由评估器写入 [计划中],今天编排器写的报告没有这个键。
+真实报告的载荷形状如下。`backends` 键由评估器写入。真实 SoMEval 评测另带一个只作记录、不参与判级的 `someval` 块 [计划中]。
 
 ```yaml
 id: run-002              # 信封 id 与报告 id 都等于 run id
@@ -237,10 +249,17 @@ error_profiles: [{l2_dimension: belief, error_type_distribution: {unstable: 1.0}
 regression_flags: {flags: [...]}
 consistency_signals: {rule_vs_judge_divergence: {}, diagnostic_vs_reward_divergence: 0.0}
 links: [run-002]
-backends: mock           # [计划中] mock 或 real,必写;缺失的报告一律判 stub
+backends: mock           # mock 或 real,必写;缺失的报告一律判 stub
+someval:                 # [计划中] 仅真实 SoMEval 评测;只作记录,不参与判级,不含任何题面
+  protocol: cot
+  samples: 3481
+  extraction_failed: 12
+  content_none: 3
+  dataset_sha256: 5ace4bd4b8726e5b…
+  someval_commit: 6453a83        # SoMEval 检出的 HEAD;工作树有未提交改动时再记 dirty: true
 ```
 
-证据等级由 `controlplane.evidence.diagnostic_grade` 判定 [计划中],诊断评测自己不判等级。
+证据等级由 `controlplane.evidence.diagnostic_grade` 判定,诊断评测自己不判等级。
 
 | 载荷 | 证据等级 |
 |---|---|
@@ -259,7 +278,7 @@ backends: mock           # [计划中] mock 或 real,必写;缺失的报告一�
 
 ## 5. 接口契约
 
-编排器是唯一的已落地入口。调用方准备好分类表、题库、两个后端和基线分数,编排器跑完并写报告。
+编排器是入口。调用方准备好分类表、题库、两个后端和基线分数,编排器跑完并写报告。
 
 ```python
 @dataclass
@@ -269,56 +288,62 @@ class DiagnosticConfig:
 
 def run_diagnostic(cfg, taxonomy, pool, someval_runner, judge_backend, store, *,
                    baseline_scores: list[DimensionScore],
-                   dynamic_specs: list[dict]) -> DiagnosticReport: ...
+                   dynamic_specs: list[dict], backends: str) -> DiagnosticReport: ...
 
 class SoMEvalRunner(Protocol):
     def evaluate(self, items, candidate_ref: str, k: int) -> dict[str, list[str]]: ...
+class ScoredSoMEvalRunner(SoMEvalRunner, Protocol):          # [计划中]
+    def evaluate_scored(self, items, candidate_ref: str, k: int) -> dict[str, list[SampleOutcome]]: ...
 class JudgeBackend(Protocol):
     model_id: str
     def judge(self, item, response: str, sample_index: int) -> float: ...
 ```
 
+`scoring_mode` 为 `rule` 的题走 `evaluate`,拿回原始文本后由规则打分器重打分;为 `someval` 的题走 `evaluate_scored`,拿回 SoMEval 已判好的 `SampleOutcome` [计划中],编排器不再打分。SoMBench 的选项由 SoMEval 按「数据集、样本 id、重复序号」确定性打乱,正确字母每次不同,所以「输出等于参考答案」的精确匹配对它不成立;开放题(Q4)的分数来自外部大模型按评分细则打的总分,过阈值才算对,这些只有 SoMEval 自己能判。mock 运行器没有 `evaluate_scored`,题库里有 `someval` 题而运行器不支持时,在跑任何一题之前抛确定性错误。
+
 每条动态 spec 是一个字典,带 `item`、`scenario`、`assignment`、`personas`、`backends`,可选 `episode_id`。`assignment` 里必须恰有一个 `model_backend == "self_play"` 的绑定,它就是候选角色位。
 
-接入调和循环的评估器 [计划中],签名来自工作包 8,施工时可能微调:
+接入调和循环的评估器:
 
 ```python
-# diagnostic.evaluator [计划中]
+# diagnostic.evaluator
 def make_diagnostic_evaluator(*, taxonomy_version, item_pool_version, someval_runner,
         judge_backend, benchmark_version, tier="full", sampling_k=4,
         backends="mock") -> Callable[[GitStore, str, str], None]: ...
 def resolve_baseline(store, run_id, benchmark_version, *,
         backends: str) -> tuple[str, list[DimensionScore]]: ...
-# diagnostic.store_adapter 与 orchestrator 扩展 [计划中]
+# diagnostic.store_adapter 与 orchestrator
 def write_report(store, run_id, report, *, backends: str) -> None: ...
-def run_diagnostic(..., *, baseline_scores, dynamic_specs, backends: str): ...
 ```
 
-`backends` 是必填的关键字参数,载荷里一定有这个键;取值不在 `BACKENDS_VALUES` 里时写之前抛 `ValueError` [计划中]。既有测试里 `write_report` 与 `run_diagnostic` 的调用点(存储适配与编排器两个测试文件,共七处)补传 `backends="mock"`,这是工作包 8 唯一放宽的既有测试约束 [计划中]。
+`backends` 是必填的关键字参数,载荷里一定有这个键;取值不在 `BACKENDS_VALUES` 里时写之前抛 `ValueError`。
 
-评估器的行为 [计划中]:
+评估器的行为:
 
 | 项 | 规则 |
 |---|---|
-| 资产 | 每次调用时用 `read_taxonomy(...)` 与 `read_item_pool(...)` 从树里读,缺失或版本不符抛 `DiagnosticAssetError` [计划中] |
-| `backends` | 构造时校验,只接受 `BACKENDS_VALUES` 里的 `mock`、`real` [计划中] |
+| 资产 | 每次调用时用 `read_taxonomy(...)` 与 `read_item_pool(...)` 从树里读,缺失或版本不符抛 `DiagnosticAssetError` |
+| `backends` | 构造时校验,只接受 `BACKENDS_VALUES` 里的 `mock`、`real` |
 | 配置 | `candidate_model_id` 取候选 id,动态 spec 为空 |
 | 基线 | 版本号最大的 `effective` zengen 模型,取其 `links` 第二项那个 run 的报告 |
-| 无基线 | 没有模型、`links` 不足两项、基线 run 就是本 run、没有报告、报告是 `stub`、没有分数、`benchmark_version` 不同、证据等级与本次 `backends` 不同;返回 `NO_BASELINE` 即 `none` 与空列表 [计划中] |
+| 无基线 | 没有模型、`links` 不足两项、基线 run 就是本 run、没有报告、报告是 `stub`、没有分数、`benchmark_version` 不同、证据等级与本次 `backends` 不同;返回 `NO_BASELINE` 即 `none` 与空列表 |
 
-诊断资产的读写 [计划中]:`write_taxonomy`、`write_item_pool` 与常量 `TAXONOMY_TYPE`、`ITEM_POOL_TYPE` 放在 `diagnostic.assets`。产物类型是 `diagnostic_taxonomy` 与 `diagnostic_item_pool`,状态 `effective`,登记即生效,题库变更本身不走审核门。信封 id 为 `taxonomy-<版本>` 与 `item-pool-<版本>`。读取时校验信封类型与载荷里的版本号,路径上放错东西会明确报错。组合根的 `install-defaults` 调这两个写函数。
+诊断资产的读写:`write_taxonomy`、`write_item_pool` 与常量 `TAXONOMY_TYPE`、`ITEM_POOL_TYPE` 放在 `diagnostic.assets`。产物类型是 `diagnostic_taxonomy` 与 `diagnostic_item_pool`,状态 `effective`,登记即生效,题库变更本身不走审核门。信封 id 为 `taxonomy-<版本>` 与 `item-pool-<版本>`。读取时校验信封类型与载荷里的版本号,路径上放错东西会明确报错。组合根的 `install-defaults` 与 `import-sombench` [计划中] 调这两个写函数。
 
-`candidate_ref` 在 V1 是候选 id,mock 运行器忽略它。真实 SoMEval 运行器 [计划中] 的协议签名不变,仍收候选 id:它按候选 id 读 `candidate_checkpoint.yaml`,从里面取 `checkpoint_ref` 的 `BigRef`,再由 `fetch_hint` 的 `type` 与 `format` 判断存点是真实导出还是 mock。取不到或解不出,抛确定性错误,走下面的失败落点。
+`candidate_ref` 是候选 id,mock 运行器忽略它。真实 SoMEval 运行器 [计划中] 的协议签名不变,仍收候选 id:它按候选 id 读 `candidate_checkpoint.yaml`,从里面取 `checkpoint_ref` 的 `BigRef`,再由 `fetch_hint` 的 `type` 与 `format` 判断存点是真实导出还是 mock。存点所在的端点必须就是装配时选定的那个端点,因为服务要在存点所在主机上起。取不到、解不出、是 mock 导出或端点对不上,抛确定性错误,走下面的失败落点。
 
-触发条件:候选为 `pending_review` 或 `approved` 且没有诊断报告时,调和循环产生 `request_diagnostic`。今天执行它的是占位桩,工作包 9 的组合根在闭环模式下换成评估器 [计划中]。
+触发条件:候选为 `pending_review` 或 `approved` 且没有诊断报告时,调和循环产生 `request_diagnostic`。默认入口里执行它的是占位桩;闭环模式下组合根换成 mock 评估器;`--evaluator someval` 换成真实评估器 [计划中]。
 
 | 邻居 | 本文依赖它什么 | 它依赖本文什么 |
 |---|---|---|
-| ControlPlane | `GitStore` 的幂等写入;信封;路径函数;`request_diagnostic` 触发 | 报告文件存在即"有诊断";审核门①的 `review` 打印分数与退化标记 |
+| ControlPlane | `GitStore` 的幂等写入;信封;路径函数;`request_diagnostic` 触发;延后通道 `DeferredError` | 报告文件存在即"有诊断";审核门①的 `review` 打印分数与退化标记 |
 | SocialSimulator 运行器 | `run_episode` 的 `stop_predicate` 早停与 `terminated_reason` | 无 |
+| 远端计算层 `compute` | 真实运行器经它起 vLLM 服务、开隧道、持有 GPU 租约(DX-13 到 DX-15) | 无;`compute` 不认识评测 |
+| MindTrainer | 无 | 训练行上传前调用污染准入检查(DX-19);准入检查是 factory 注入的可调用对象,`mindtrainer` 不导入 `diagnostic` [计划中] |
+| SoMEval 检出目录 | 数据集 parquet、评测入口 `tasks/SoMBench/run.py`、结果文件格式;只读,不改它 | 无 |
 | RecipeStore [计划中] | 无 | 读 L1 分算增益;读 `regression_flags.flags` 判战绩退化 |
 | TrainScheduler [计划中] | 无 | 读 L1 分、退化标记、错误画像装配规划上下文;丢掉空标签 `""` |
-| factory [计划中] | 写入默认资产;装配 mock 后端 | 评估器构造函数 |
+| factory | 写入默认资产与 SoMBench 资产 [计划中];装配评估器、真实运行器与污染准入检查 | 评估器构造函数 |
 
 ## 6. 关键流程
 
@@ -439,7 +464,7 @@ def run_diagnostic(..., *, baseline_scores, dynamic_specs, backends: str): ...
 |---|---|---|
 | 任一步抛异常 | 不写报告,异常上抛给调用方 | 修好原因后重跑;报告缺失时调和循环下一轮再请求 |
 | 两份基准版本都给出且不可比 | `CrossVersionError` | 编排器不传版本记录,V1 不会发生 |
-| 基线版本不同或等级不同 | 评估器按无基线处理 [计划中] | 无需恢复;本轮没有退化标记 |
+| 基线版本不同或等级不同 | 评估器按无基线处理 | 无需恢复;本轮没有退化标记 |
 | 同一 run 重跑且结果相同 | 不产生新提交 | 无需恢复 |
 
 走查例子。一个一级维度 `mental_representation`,一个二级 `belief`,一个三级 `false_belief_transfer`。一个变体族:基题 `i1` 答案 `B`,变体 `i1v` 答案 `C`。`k` 为 4,`full` 档,只跑静态轨。数值由编排器实跑得出。
@@ -459,7 +484,7 @@ def run_diagnostic(..., *, baseline_scores, dynamic_specs, backends: str): ...
 
 | 编号 | 决策 | 备选 | 理由 | 判错的代价 |
 |---|---|---|---|---|
-| R17 | 诊断报告带 `backends` 标记,默认不接受 `mock` 证据驱动规划与提名 [计划中] | 不标记,mock 分数当真 | mock 分数在默认配置下不会让闭环自己转起来 | 开发时要显式打开开关 |
+| R17 | 诊断报告带 `backends` 标记,默认不接受 `mock` 证据驱动规划与提名 | 不标记,mock 分数当真 | mock 分数在默认配置下不会让闭环自己转起来 | 开发时要显式打开开关 |
 | R21 | 错误画像里的空标签 `""` 表示没有错误,规划上下文装配前丢掉 | 诊断侧不写空标签 | 诊断侧原样计数,分布和为 1,信息不丢 | 丢掉后规划器看不到二级维度答对的比例 |
 | DX-1 | 编排器是薄协调层,统计与判定都在纯函数模块里 | 一个大函数 | 每个模块能单独用合成数据测 | 编排器的调用顺序只有端到端测试覆盖 |
 | DX-2 | 置信区间用标准库手写 Wilson 区间,z 为 1.96 | 正态近似;引入统计库 | 小样本与 0、1 边界下 Wilson 不越界,零新依赖 | 置信水平写死,改要动默认参数 |
@@ -467,15 +492,22 @@ def run_diagnostic(..., *, baseline_scores, dynamic_specs, backends: str): ...
 | DX-4 | 退化要求区间不相交,不设固定下降阈值 | 下降超过固定值就标 | 区间内的波动不当作信号 | 样本小时区间宽,真实下降可能漏标 |
 | DX-5 | 退化比较按维度、层级、轨道三元组配对 | 只按维度配对 | 两轨分数不能互相比较 | 基线只有静态分、候选有融合分时,该 L2 不比较 |
 | DX-6 | judge 与候选的模型 id 互为前缀即拒绝 | 只拒绝相同 id | 微调版与其基座互评都有偏差 | 名字恰好共享前缀的无关模型也被拒绝 |
-| DX-7 | 评估器缺资产时抛 `DiagnosticAssetError`,不写空报告 [计划中] | 写一份没有分数的报告 | 空报告会被判 `stub`,候选卡在门前且看不出原因 | 资产缺失时守护进程每次启动都在同一处退出 |
-| DX-8 | 基线是最新 `effective` 模型所在 run 的报告;版本或等级不同就视为无基线 [计划中] | 跨版本也比较 | 跨版本、跨等级的分数不可比 | 换版本或切到真实后端后的第一轮没有退化标记 |
-| DX-9 | 评估器只跑静态轨,`candidate_model_id` 取候选 id [计划中] | 接入动态轨 | V1 没有动态轨的情境与绑定来源 | 接入动态轨时要换成真实模型 id,否则自评偏差守卫形同虚设 |
-| DX-10 | `backends` 作为 `write_report` 的参数一次写入 [计划中] | 写完后再改信封 | 两次提交之间会有一份无标记、被判 `real` 的 mock 报告 | `run_diagnostic` 多一个参数 |
+| DX-7 | 评估器缺资产时抛 `DiagnosticAssetError`,不写空报告 [已落地] | 写一份没有分数的报告 | 空报告会被判 `stub`,候选卡在门前且看不出原因 | 资产缺失时守护进程每次启动都在同一处退出 |
+| DX-8 | 基线是最新 `effective` 模型所在 run 的报告;版本或等级不同就视为无基线 | 跨版本也比较 | 跨版本、跨等级的分数不可比 | 换版本或切到真实后端后的第一轮没有退化标记 |
+| DX-9 | 评估器只跑静态轨,`candidate_model_id` 取候选 id [已落地] | 接入动态轨 | V1 没有动态轨的情境与绑定来源 | 接入动态轨时要换成真实模型 id,否则自评偏差守卫形同虚设 |
+| DX-10 | `backends` 作为 `write_report` 的参数一次写入 | 写完后再改信封 | 两次提交之间会有一份无标记、被判 `real` 的 mock 报告 | `run_diagnostic` 多一个参数 |
 | DX-11 | 退化标记在 L3、L2、L1 各层独立产出,产出侧不去重;只看某一层时在消费侧按 `level` 筛选 | 只在最低层标记;产出侧合并 | 标记是随聚合层级向上传播的证据,审核门①与 RecipeStore 战绩回看都消费它 | 消费方若数标记条数,会把一次退化读成三次 |
-| DX-12 | 证据等级失败关闭:只有 `backends` 为 `real` 才判 `real`,缺失一律判 `stub`;`run_diagnostic`、`write_report`、`resolve_baseline` 的 `backends` 必填 [计划中] | 失败开放:有分数就判 `real` | 直接调用编排器写出的 mock 报告不会被当作真证据,默认不接受 mock 的规则无法被绕过 | 七个既有调用点要补传参数;手写的无标记报告永远不可接受,要人补标记 |
-| DX-13 | 推理服务当作一个不会退出的远端作业,由远端计算层的 `start`、`status`、`stop` 托管,不新增助手命令 [计划中] | 为服务加专用助手命令;评测改走 ROLL 的 worker | 作业控制本来就把启动、查询、停止分开,`stop` 对整个进程组先发终止信号再强杀,能收拾 vLLM 的多进程树;不动助手就不用重钉哈希,已部署的助手继续有效 | 服务的就绪判定要自己做(作业状态只说进程在不在,不说端口通不通) |
-| DX-14 | 服务的接入密钥由本机现生成,只经作业的 `secret_env` 通道交给服务,不出现在命令行、日志、磁盘与报告里;每次启动换新的 [计划中] | 配置里存一个长期密钥;靠回环地址隔离、不设密钥 | vLLM 的 HTTP 接口没有别的访问控制,同机其他容器共用主机网络能连到回环端口;密钥每次换,泄露的窗口就是一次评测 | 因为密钥只在启动那一刻存在,服务一旦在守护进程崩溃后残留,接不回去,只能停掉重起,所以每次启动都用带尝试序号的新作业目录,绝不接管旧的 |
-| DX-15 | 服务存活期间持有 GPU 租约,无论评测成败都按「关隧道、停服务、放租约」的顺序收尾 [计划中] | 只在起服务时取租约 | 服务一直占着显存,训练作业此时不得起来;任何一步收尾失败都不能挡住后面几步 | 收尾顺序里服务没停成功就放租约,会让训练撞上还没释放的显存,所以放租约前要核对作业确已不在运行 |
+| DX-12 | 证据等级失败关闭:只有 `backends` 为 `real` 才判 `real`,缺失一律判 `stub`;`run_diagnostic`、`write_report`、`resolve_baseline` 的 `backends` 必填 | 失败开放:有分数就判 `real` | 直接调用编排器写出的 mock 报告不会被当作真证据,默认不接受 mock 的规则无法被绕过 | 七个既有调用点要补传参数;手写的无标记报告永远不可接受,要人补标记 |
+| DX-13 | 推理服务当作一个不会退出的远端作业,由远端计算层的 `start`、`status`、`stop` 托管,不新增助手命令 [已落地] | 为服务加专用助手命令;评测改走 ROLL 的 worker | 作业控制本来就把启动、查询、停止分开,`stop` 对整个进程组先发终止信号再强杀,能收拾 vLLM 的多进程树;不动助手就不用重钉哈希,已部署的助手继续有效 | 服务的就绪判定要自己做(作业状态只说进程在不在,不说端口通不通) |
+| DX-14 | 服务的接入密钥由本机现生成,只经作业的 `secret_env` 通道交给服务,不出现在命令行、日志、磁盘与报告里;每次启动换新的 [已落地] | 配置里存一个长期密钥;靠回环地址隔离、不设密钥 | vLLM 的 HTTP 接口没有别的访问控制,同机其他容器共用主机网络能连到回环端口;密钥每次换,泄露的窗口就是一次评测 | 因为密钥只在启动那一刻存在,服务一旦在守护进程崩溃后残留,接不回去,只能停掉重起,所以每次启动都用带尝试序号的新作业目录,绝不接管旧的 |
+| DX-15 | 服务存活期间持有 GPU 租约,无论评测成败都按「关隧道、停服务、放租约」的顺序收尾 [已落地] | 只在起服务时取租约 | 服务一直占着显存,训练作业此时不得起来;任何一步收尾失败都不能挡住后面几步 | 收尾顺序里服务没停成功就放租约,会让训练撞上还没释放的显存,所以放租约前要核对作业确已不在运行 |
+| DX-16 | SoMBench 评测范围是 Q1 到 Q4 全部 3481 题,打分全部委托给 SoMEval 自己的判定(选择题抽 `\boxed{}` 字母比对,开放题由外部大模型按评分细则打总分、过阈值 7.0 才算对),不用本包的规则打分器重打分;真实运行器只支持 `full` 档 [计划中] | 只评 Q1 到 Q3;自己重写判分;按题生成子集数据文件以支持 `quick` | 选项被确定性打乱、答案以文本存放,精确匹配对不上;SoMEval 不能按 id 选题,要评子集就得生成只含这些样本的数据文件,而全量一次的耗时只有一个粗略参照:SoMEval 的历史日志里,同类模型一次预测加判分加出图共 2 小时 06 分,服务配置与硬件和我们的不同,未在本系统验证。是否值得为 `quick` 档维护子集生成代码,等真机测出实际耗时再定 | 判分逻辑跟着 SoMEval 走:SoMEval 改了判分,同一个检出目录下的分数就不可比,所以版本里记 SoMEval 的提交,工作树不干净时在报告里标 `dirty` |
+| DX-17 | 每题采样一次(`sampling_k` 为 1),协议用 `cot` [计划中] | 每题多次;`del_tom` 八次投票 | 与 SoMEval 历史口径一致,成本最低;SoMEval 设了协议后重复次数由协议决定,`cot` 就是 1 | 方差恒为 0,`unstable` 归类不会出现,L3 只有 42 到 53 道题所以区间很宽,退化主要在 L1(700 到 1450 道)和部分 L2 上才检得出 |
+| DX-18 | 变体族只由基题和它的 `varA`、`varB` 构成;`hardest` 题计入各维度分但不入族 [计划中] | `hardest` 也入族 | `varA`、`varB` 换了故事、题干多数不变,是「同一个问题换个表面」,基题通过而变体失败才说得上表面匹配;`hardest` 故事不变但题干整个换了(1209 道里题干相同的是 0),是另一个更难的问题,把它的失败算成表面匹配会误导 | 一个基题的变体少于完整的 `hardest`,`surface_match` 只在 529 个有变体的基题上判得出 |
+| DX-19 | 评测题不进训练,四道防线 [计划中]:① 树内的题库只存 id、维度、题型、变体族,不存题面、选项、答案;② SoMEval 的工作目录(含带完整题面的 `prediction.jsonl`)在树外且不在 SoMEval 检出目录内,装配时校验;③ 训练行上传前做 20 字滑窗哈希比对,命中即整条指令失败;④ 报告只带维度级聚合,不带题目 id 之外的任何题面 | 只靠词元相似度过滤;只靠约定 | 词元相似度对中文无效(按空白切词,整篇故事算一个词元);约定拦不住「把评测集当素材合成数据」这种最容易发生的事。准入检查放在上传前的最后一道,不论数据从哪条路径来都要经过 | 滑窗比对只抓逐字的重叠,改写与释义抓不到;基座模型预训练时见过 SoMBench 的情况我们管不了。命中的是整条指令而不是行,因为 ROLL 要求每步行数固定,剔行会让训练步与数据错位 |
+| DX-20 | 评测所用的端点地址与密钥放在树外的本机配置文件,权限必须是 0600,路径由环境变量 `RISMFORGE_EVAL_CONFIG` 指定;只经子进程环境变量交给 SoMEval,不进命令行、日志、报告、树;每次运行后扫描工作目录,出现任一凭证字面值即删除该目录并让守护进程退出 [计划中] | 写进树里的配置信封;写进 SoMEval 的配置文件 | 用户明确要求评测凭证可由配置文件提供;SoMEval 自己的 `config.json` 会脱敏,但日志与预测文件是否会带出凭证没有保证,所以不信它,自己扫 | 凭证放在 SoMEval 检出目录里会被他人的未提交改动一起带走,所以工作目录与配置都不放那里 |
+| DX-21 | 为 SoMEval 起的服务把上下文上限提到 40960 [计划中] | 沿用默认的 4096 | `cot` 协议把单次生成上限固定为 32768,再加最长约 1700 字符的提示;上限不够时 vLLM 会拒绝请求,SoMEval 的客户端把失败当作无答案,整批被判错 | 显存占用和吞吐随之变化,验证时 4096、关图捕获的数据不再适用,需要在真机上重测 |
+| DX-22 | 真实评估器由 `--evaluator someval` 装配,必须同时给 `--executor roll`,暂不能与 `--enable` 同用 [计划中] | 并入 `--enable`;让 `--executor roll` 自动带上 | 评估要真实存点,所以依赖真实执行器;两个开关各管一件事,装配期一次校验完;与闭环处理器叠加的排队语义尚未验证,先单链路跑通 | 想只换评估器、不要真实训练做不到;真实评估期间持有 GPU 租约,守护进程同步阻塞整个评测时长(估计为数小时,真机未测) |
 
 ## 8. 失败处理与可观测
 
@@ -484,23 +516,24 @@ def run_diagnostic(..., *, baseline_scores, dynamic_specs, backends: str): ...
 | 失败点 | 类 | 处理 | 留痕 |
 |---|---|---|---|
 | SoMEval 运行器或 judge 后端瞬时出错 | T1 | 原样上抛;接入循环后守护进程退出,重启后重新请求 | 无报告 |
-| 资产缺失、类型不对、版本不符 [计划中] | T1 | 抛 `DiagnosticAssetError`,写明路径,补齐资产后重启 | 无报告 |
+| 资产缺失、类型不对、版本不符 | T1 | 抛 `DiagnosticAssetError`,写明路径,补齐资产后重启 | 无报告 |
 | judge 是候选近亲 | T2 | 构造打分器时抛 `SelfEvalBiasError` | 无报告 |
 | 未知档位、mock 缺题目的固定输出、judge 缺固定分 | T2 | 抛 `ValueError` 或 `KeyError` | 无报告 |
 | 基准版本不可比 | T2 | 抛 `CrossVersionError`;V1 不触发 | 无报告 |
 | 报告分数可疑或画像异常 | T3 | 不自动处理,审核门①的人读报告判断 | 报告本身 |
-| 真实 SoMEval 的确定性失败:题库条目没有对应的 SoMBench 样本、候选存点解不出、某题输出条数不等于 k [计划中] | T2 | 评估器内部捕获,写一份 `stub: true` 的报告,载荷带 `failure_reason` 与缺失清单;`request_diagnostic` 动作正常结束,该候选此后不再触发评测 | 报告本身,等级为 `stub` |
-| 真实 SoMEval 的瞬态失败:服务启动超时、隧道建立失败、GPU 被占用 [计划中] | 延后 | 抛 `DeferredError` 的子类,守护进程不写树、按退避重试;不写报告,租约在失败时释放 | 守护进程结构化日志 |
+| 真实 SoMEval 的确定性失败:题库条目在 SoMEval 的结果里找不到、数据集哈希与题库版本对不上、候选存点解不出或是 mock 导出、存点端点与装配的端点不一致 [计划中] | T2 | 评估器内部捕获,写一份 `stub: true` 的报告,载荷带 `failure_reason` 与缺失清单(只有题目 id 的数量与前若干个,不含题面);`request_diagnostic` 动作正常结束,该候选此后不再触发评测 | 报告本身,等级为 `stub` |
+| 真实 SoMEval 的瞬态失败:服务启动超时、隧道建立失败、GPU 被占用、SoMEval 子进程非零退出、裁判端点出错(`judge_error`)、没有答案的样本占比超过阈值 [计划中] | 延后 | 抛 `DeferredError` 的子类,守护进程不写树、按退避重试;不写报告,租约在失败时释放。连续失败到上限升级为需要人看 | 守护进程结构化日志 |
+| 评测凭证出现在 SoMEval 工作目录的任何文件里 [计划中] | T3 | 删除该次运行的工作目录,抛不继承 `DeferredError` 的异常,守护进程带着原因退出,等人处理 | 守护进程退出原因,只写文件相对路径,不写密钥 |
 
 写 `stub` 报告而不是让动作一直失败:报告是评测的结论载体,`diagnostic_grade` 对 `stub: true` 已经失败关闭,闭环里记录、提名、规划下一轮都要求证据可接受,所以不推进。晋级本身只看对应报告是否在场、不看等级,这条语义不变,拦它的是人工审核门:`review` 对 `stub` 报告标 `[STUB]` [计划中] 并打印 `failure_reason`,批准的人能区分「占位」和「评测没跑成」。判错的代价:把确定性错误当瞬态,守护进程会无限重试同一个必然失败的评测。
 
-**含 mock 组件的真实评测不升级。** 真实 SoMEval 加 mock judge 的报告,`backends` 仍写 `mock`,`diagnostic_grade` 与下游门控一行不改。报告载荷另加一个只作记录、不参与判级的字段 `component_backends`,形如 `{executor: real, converter: real, someval: real, judge: mock}`,让人看出缺口只剩 judge。`executor` 与 `converter` 两项由候选存点引用的 `fetch_hint.type` 推出(`roll_ssh` 即训练与转换都是真实的,`mock` 即都是 mock),`someval` 与 `judge` 两项由评估器装配时声明。该字段与 `backends` 在同一次 `write_report` 里落盘。
+**哪些组件产生了分数,报告的等级就看哪些组件。** 真实 SoMEval 的静态轨不调用 `JudgeBackend`(动态 spec 为空),分数全部来自真实存点加真实 SoMEval,所以这类报告的 `backends` 写 `real`,即使装配里的 judge 后端仍是 mock。只要动态 spec 非空而 judge 是 mock,`backends` 仍写 `mock`,`diagnostic_grade` 与下游门控一行不改。报告载荷另加一个只作记录、不参与判级的字段 `component_backends`,形如 `{executor: real, converter: real, someval: real, judge: unused}`,让人看出每个组件是真实、mock 还是没被用到。`executor` 与 `converter` 两项由候选存点引用的 `fetch_hint.type` 推出(`roll_ssh` 即训练与转换都是真实的,`mock` 即都是 mock),`someval` 与 `judge` 两项由评估器装配时声明。该字段与 `backends` 在同一次 `write_report` 里落盘 [计划中]。
 
 只读观测手段:
 
 | 手段 | 看什么 |
 |---|---|
-| `review <候选 id>` 命令 | 报告头部、各级分数、退化标记;占位报告标 `[STUB]`;mock 报告标 `[MOCK BACKENDS]` [计划中] |
+| `review <候选 id>` 命令 | 报告头部、各级分数、退化标记;占位报告标 `[STUB]`;mock 报告标 `[MOCK BACKENDS]` |
 | 读 `runs/<run>/diagnostic_report.yaml` | 完整载荷,含错误画像与区间 |
 | `git log` 该文件 | 每次重写的提交;内容相同不提交 |
 
@@ -521,23 +554,28 @@ def run_diagnostic(..., *, baseline_scores, dynamic_specs, backends: str): ...
 | 判定与报告 | 退化、探针、reward hacking;报告组装 | 合成分数 | `tests/test_diag_regression.py` 8;`tests/test_diag_report.py` 1 |
 | 隔离 | 相似与不相似样本对 | 无 | `tests/test_diag_isolation.py` 6 |
 | 端到端 | 双轨跑完并写报告 | 上述全部 mock 与临时仓库 | `tests/test_diag_orchestrator.py` 3 |
-| 资产与标记 [计划中] | 资产信封读写、`backends` 参数、证据等级 | 临时仓库 | 工作包 8 新增 15 个 |
-| 评估器 [计划中] | 基线解析、注入调和循环、不导入 `mindtrainer` | mock 后端与 `reconcile_once` | 工作包 8 新增 21 个 |
+| 资产与标记 | 资产信封读写、`backends` 参数、证据等级 | 临时仓库 | `tests/test_diag_assets.py` |
+| 评估器 | 基线解析、注入调和循环、不导入 `mindtrainer` | mock 后端与 `reconcile_once` | `tests/test_diag_evaluator.py`;`tests/test_factory_evaluation.py` |
+| SoMBench 导入 [计划中] | 3 个 L1、17 个 L2、71 个 L3;题 id 全部取自样本;变体族 529 个;树内资产扫描不含任何题面片段 | 合成的小 parquet(只造 ID 结构与长文本) | 新增 |
+| 真实运行器 [计划中] | 配置与权限校验、SoMEval 子进程命令、结果解析成 `SampleOutcome` [计划中]、`judge_error` 与无答案占比超阈值走延后、凭证扫描、数据集哈希对不上走 T2 | 假的 SoMEval 入口脚本(写固定的 `detailed_metrics.jsonl`) | 新增 |
+| 污染准入检查 [计划中] | 索引构建与读取、逐字拷贝命中、删一句仍命中、无关中文不命中、数据集哈希对不上拒绝装配、命中则整条指令失败且原因里只有数量 | 合成文本 | 新增 |
+
+真实运行器的测试不起任何服务,SoMEval 入口换成一个读环境变量、写固定结果文件的脚本;服务生命周期已由 `compute` 自己的测试覆盖。
 
 ## 10. 现状、局限与未核实项
 
-编排器与全部流水线模块已落地,但还没有任何生产路径调用它。闭环要等工作包 8 的评估器与工作包 9 的组合根。
+编排器、全部流水线模块、评估器与资产读写已落地,默认入口(闭环模式)里的评估器注入 mock 后端。真实评测要等 SoMBench 的导入、真实运行器、污染准入检查与 `--evaluator someval` 装配。
 
 | 能力 | 状态 | 说明 |
 |---|---|---|
 | 静态轨、规则打分、错误归类、聚合、退化判定、报告写入 | [已落地] | 经编排器端到端测试 |
 | 动态轨与 judge 打分 | [已落地] | 只有编排器测试调用;评估器不跑 |
-| 隔离校验器、G 组探针检测、reward hacking 检测 | [已落地] | 没有调用方 |
-| 评估器、资产读写、`backends` 标记、基线解析 | [计划中] | 工作包 8 |
-| 默认资产 `factory-tax-v1`、`factory-pool-v1` 与 mock 装配 | [计划中] | 工作包 9 |
-| vLLM 服务加载并应用 LoRA 适配器导出 | [计划中] | 代码还没写。启动方式已在真实主机上手工验证一次:不打 ROLL 的补丁,原生 `vllm serve` 带 LoRA 参数即可加载并生效,见下文「vLLM 服务」 |
-| 真实 SoMEval | [计划中] | 子进程运行,推理经远端 vLLM 服务;题库与 SoMBench 样本之间没有对应关系,要从 SoMBench 重建分类表与题库,见下文「题库」 |
-| 真实 judge | [推迟] | 接入后报告才可能标 `backends: real`;切换后的头几轮基线等级不同,没有可比增益 |
+| 隔离校验器(词元相似度)、G 组探针检测、reward hacking 检测 | [已落地] | 没有调用方;隔离校验器对中文无效,不作 SoMBench 的保证 |
+| 评估器、资产读写、`backends` 标记、基线解析 | [已落地] | 评估器每次从树里读资产 |
+| 默认资产 `factory-tax-v1`、`factory-pool-v1` 与 mock 装配 | [已落地] | 默认题库只有 2 道占位题 |
+| vLLM 服务组件(命令拼装、SSH 隧道、生命周期) | [已落地] | 对替身与真实本机 socket 测过;真机端到端等 GPU 空闲后补 |
+| SoMBench 导入、真实运行器、污染索引与准入检查、`--evaluator someval` | [计划中] | 见 DX-16 到 DX-22 与下文「SoMBench 评测」 |
+| 动态轨的真实 judge 后端 | [推迟] | 静态轨的 SoMEval 已含裁判(Q4),与这里的 `JudgeBackend` 无关 |
 
 | 已知局限 | 影响 | 缓解 |
 |---|---|---|
@@ -547,7 +585,14 @@ def run_diagnostic(..., *, baseline_scores, dynamic_specs, backends: str): ...
 | 报告只带 `benchmark_version` 字符串,不带五段式版本 | 换题库或 judge 提示而不换该字符串,会跨版本比较 | 换任何资产都同时换 `benchmark_version` |
 | RecipeStore 与 TrainPlanner 的施工说明对标记种类说法不一,一处两种、一处三种 | 下游按不同假设写读取逻辑 | 以代码为准:今天只产出 `social_regression`,下游对另两种按"可能出现"处理 |
 | 一次下降在 L3、L2、L1 各标一条 | 标记数不等于独立问题数,单个 L3 下降会产出三条标记 | 消费侧按 `level` 筛选,不在产出侧去重 |
-| `quick` 档只取每个 L3 的第一道题 | 变体族不完整,错误画像为空 | 审核门①前用 `full` 档 |
+| `quick` 档只取每个 L3 的第一道题 | 变体族不完整,错误画像为空 | 审核门①前用 `full` 档;真实运行器只支持 `full` |
+| 每题只采样一次 | 方差恒为 0,`unstable` 归类不出现;L3 只有 42 到 53 道题,区间宽 | 看 L1 与有足够题量的 L2 的退化,L3 的升降只作线索 |
+| SoMEval 把「模型没给出答案」记成答错 | 服务偶发失败会被当成模型能力差 | 无答案样本占比超过阈值就按瞬态失败延后重跑,不出报告;阈值与计数写进报告的 `someval` 块 |
+| 污染准入检查只抓逐字重叠 | 改写、释义、翻译后的 SoMBench 内容抓不到 | 不依赖准入检查以外的东西声称「已隔离」;基座预训练是否见过 SoMBench 不在我们控制内 |
+| 评测用的留出集(`heldout_jsonl`)是人工填写的远端路径 | 准入检查检查不到它的来源;它只用来算训练期的验证损失,不产生梯度,但若它取自 SoMBench,检查点选择会间接受影响 | 填写端点配置的人确认它不取自 SoMBench |
+| 首个候选没有基线 | 首个候选的报告没有退化标记 | 基座本身的评测不在 V1,第二个候选起才有对照 |
+| 同一检出目录里 SoMEval 的判分逻辑被改动 | 分数与之前不可比 | 报告记录 SoMEval 的提交与是否 `dirty`,换提交时同时换 `benchmark_version` |
+| 判分用的裁判模型由 SoMEval 的任务配置写死(gpt-5.5) | 换裁判要改 SoMEval 的配置,不在我们的配置里 | 报告不记裁判型号;换裁判前先确认 SoMEval 配置并换 `benchmark_version` |
 | judge 模式的静态题按精确匹配打分 | 这类题的分数没有意义 | V1 题库只放规则式静态题 |
 | 占位报告的信封 id 是 `diag-<run>`,真实报告是 `<run>` | 按信封 id 找报告的工具要兼容两种写法 | 按路径找报告,不按 id |
 | 不检测目标维度的显著提升 | 增益由 RecipeStore 用 L1 分直接相减 [计划中],不看区间 | 审核人对照报告里的区间读增益 |
@@ -556,25 +601,48 @@ def run_diagnostic(..., *, baseline_scores, dynamic_specs, backends: str): ...
 
 服务起来之前要关掉 NVLS:这类主机的多播绑定会失败(NCCL 报 `Failed to bind NVLink SHARP (NVLS) Multicast memory … CUDA error 401`),进而使 vLLM 建立张量并行通信组时抛 `NCCL error: unhandled cuda error`,进程在加载模型之前就退出。把环境变量 `NCCL_NVLS_ENABLE` 设为 0 之后一次起来。同机另一个任务的全部训练脚本、ROLL 自己的 CUDA 平台代码都同样关掉了它;原因在主机的交换芯片配置,不在软件侧。起初把失败归因于容器的 IPC 模式,被日志否定。
 
-**服务组件的接口 [计划中]。** 组件放在远端计算层包内,只依赖标准库与该包自己的模块,不认识评测与 SoMEval(依赖表规定评测包不得导入它,所以由评测的调用方在装配时注入)。分三块:一块按配置拼出 `vllm serve` 的命令与环境,配置项有基座路径、适配器名与路径、张量并行数、最大适配器秩、上下文长度上限、显存占用比例和远端端口;并行数不写死,因为它取决于主机的卡数。第二块是一条本机到远端回环端口的 SSH 隧道,选一个空闲本地端口,端口真能连上才算建好,退出时终止隧道进程。第三块是服务的生命周期:取租约、挑一个没用过的尝试序号起作业、轮询健康检查直到就绪或超时、交还一个可用的本地地址与密钥,退出时无论成败按固定顺序收尾。
+**服务组件的接口 [已落地]。** 组件放在远端计算层包内(`compute.vllm_service`、`compute.tunnel`、`compute.service`),只依赖标准库与该包自己的模块,不认识评测与 SoMEval(依赖表规定评测包不得导入它,所以由评测的调用方在装配时注入)。分三块:一块按配置拼出 `vllm serve` 的命令与环境,配置项有基座路径、适配器名与路径、张量并行数、最大适配器秩、上下文长度上限、显存占用比例和远端端口;并行数不写死,因为它取决于主机的卡数。第二块是一条本机到远端回环端口的 SSH 隧道,选一个空闲本地端口,端口真能连上才算建好,退出时终止隧道进程。第三块是服务的生命周期:取租约、挑一个没用过的尝试序号起作业、轮询健康检查直到就绪或超时、交还一个可用的本地地址与密钥,退出时无论成败按固定顺序收尾。
 
 起服务时固定带 `NCCL_NVLS_ENABLE=0`、只绑回环、接入密钥走 `secret_env`。就绪判定要同时看两件事:作业仍在运行,且健康检查返回 200;作业提前退出就立刻失败,不等到超时。启动失败(超时、提前退出、隧道建不起来)抛远端计算层异常的一个新子类,继承延后通道的基类,所以守护进程按退避重试、不写树;服务日志的尾巴放在异常的属性里,不进 `reason`,理由与作业失败相同:日志里可能有请求内容。
 
-**题库。** SoMBench 有 3481 条样本,三级维度 71 个(编号形如 `1.1.1`),样本 id 形如 `1.1.1_0_first_person|base|Q1`,全部唯一,题型 Q1 713、Q2 626、Q3 1661、Q4 481。当前默认题库只有 2 道占位题,id 为 `fi1`、`fi1v`,维度是一个名为 `false_belief_transfer` 的 L3 任务。两边的 id、维度体系、题型都对不上,所以不存在一张能补出来的映射表:要接入真实 SoMEval,须从 SoMBench 重建分类表与题库,让题目 id 直接取样本的 id。SoMEval 的预测入口是 `run_eval.py --experiment-config`,按配置里的数据集逐个起子进程,只能按 `max_samples` 取前若干条,不能按 id 选题,要评子集就得生成只含这些样本的数据文件。Q4 开放题要外部大模型判分,这是被推迟的真实 judge,所以第一版只能评 Q1 到 Q3。
+**SoMBench 评测 [计划中]。** SoMBench 的 test 切分有 3481 条样本,数据集卡片登记的样本数与文件大小(2969502 字节)都与本地文件一致。题型 Q1 713、Q2 626、Q3 1661、Q4 481;变体 `base` 1704、`hardest` 1209、`varA` 284、`varB` 284;3 个一级、17 个二级、71 个三级维度,每个三级维度 42 到 53 道题;样本 id 形如 `1.1.1_0_first_person|base|Q1`,全部唯一。`meta.review_pass` 只在 `base` 上为真,其余变体为假且 `review_fail_reason` 全空,SoMEval 的指标代码声明所有样本默认合格,所以这个字段不用来过滤,含义没有查清。
+
+默认题库只有 2 道占位题,与 SoMBench 的 id、维度体系、题型都对不上,不存在能补出来的映射表,须从 SoMBench 重建。导入命令 `factory import-sombench` 读取 SoMEval 检出目录里的 parquet,写三样东西:分类表(编号做键)、题库(只存 id、三级维度、题型、变体族,打分模式 `someval`)、污染索引(树外)。版本号带数据集哈希前缀,例如 `sombench-5ace4bd4b872`,运行器与准入检查装配时重新算 parquet 的哈希并与版本比对,数据集变了就拒绝。导入命令需要读 parquet,依赖放在可选的 `sombench` 依赖组里,运行时的评测与准入检查只用标准库。
+
+一次评测的流程:
+1. 读候选的 `candidate_checkpoint.yaml`,取适配器导出的路径,校验端点与装配的一致。
+2. 经 `compute.service.serve` 在该端点上起 vLLM(基座加适配器,上下文上限 40960,DX-21),开隧道,持有 GPU 租约。
+3. 在本机写一份 SoMEval 实验配置到工作目录:数据集 SoMBench、协议 `cot`、模型地址指向隧道、模型密钥用环境变量占位;以工作目录为当前目录,分两次起子进程,先 `predict`,再 `metric`(出图阶段不跑:它不产生分数,而绘图失败会让子进程以非零码退出,此时分数其实已经写好)。
+4. 评测凭证只经子进程环境变量传入(DX-20)。SoMEval 的任务配置里裁判端点与密钥是环境变量占位符,由它自己展开。
+5. 读 `detailed_metrics.jsonl`,每条记录取 `is_correct`、`extracted`、`error_reason`,按样本 id 对回题库,组成 `SampleOutcome`;这一步的返回类型是 [计划中] 的新实体。题库里有而结果里没有的,走确定性失败。
+6. 扫描工作目录里所有文件,任一凭证字面值出现即删目录并让守护进程退出。收尾:关隧道、停服务、放租约。
+
+SoMEval 的 `error_reason` 要分开对待:`wrong_answer`、`below_threshold`、`extraction_failed` 是模型的真实表现,计为错;`judge_error` 是裁判端点出了问题,整次评测作废并按瞬态失败延后;`content_none` 是模型客户端重试耗尽后没有任何内容,可能是模型没写完(思考耗尽长度)也可能是服务异常,单独计数,占比超过阈值(默认 1%)就按瞬态失败处理,不超过则计为错并把数量写进报告的 `someval` 块。阈值是估计值,需用真机数据校准。
+
+进入分数的是 `is_correct` 的 0 或 1;开放题的 0 到 10 分总分不单独进报告,只用「是否过 7.0」这一位,因为 Wilson 区间要求二项结果。
+
+SoMEval 的结果目录名由「数据集、模型名、时间戳」决定。模型名固定为 `forge`,时间戳取一次运行的开始时间,每次运行使用全新的工作目录,不复用旧结果。工作目录放在树外,与 SoMEval 检出目录也不在一起:检出目录里有他人未提交的改动,我们不读写除数据集、任务配置和入口脚本之外的任何东西,也不把我们的输出写进去。
+
+**污染索引与准入检查 [计划中]。** 索引由导入命令从 SoMBench 的故事、问题、全部选项和 Q4 参考答案生成:每段文本做 NFKC 规范化、转小写、只保留字母数字(含汉字),取每个 20 字符窗口的 8 字节 blake2b 哈希,去重排序后写成二进制文件(约 76 万个窗口,约 6 MiB),头部记数据集的完整 sha256。索引存哈希而不是原文,但窗口只有 20 字符,逐一穷举并不可行,所以文件放在树外,不进 git。训练执行器在上传 `train.jsonl` 之前,对每一行的 `instruction` 与 `output` 做同样的规范化与窗口哈希,在索引里二分查找,返回命中窗口数;命中数大于 0 就抛确定性异常,整条训练指令失败(T2),失败原因里只有命中行数与窗口数,不含文本。
+
+准入检查装配在 `--executor roll` 的路径上,不依赖是否开了 `--evaluator someval`:只要会真的训练,就必须有索引,没有或哈希对不上就拒绝装配。mock 执行器不接触真实权重,不装准入检查。窗口长度 20 的取值依据是:SoMBench 自身 20 字窗口里,出现在 10 段以上不同文本中的只有 37 个,多是「判断哪些成立,选出所有正确项」这类题干模板,没有任何窗口出现在 50 段以上,说明模板重复很少;但对模拟器生成的对话是否会误命中,没有实测,要拿已有的 episode 跑一遍确认。
 
 下表第 1、2、4 项都要接入真实后端才能核实,mock 输出给不出答案。
 
 | 未核实项 | 影响 | 核实办法 |
 |---|---|---|
-| 真实 SoMEval 的输出格式能否直接映射到每题 k 个回答 | 适配层要改 | 接入时用 SoMEval 固定输出样本写适配测试 |
+| 真实 SoMEval 的输出能否按样本 id 完整对回题库 | 适配层要改 | 用 SoMEval 的一份历史结果目录做适配测试,再在真机上跑一次 |
 | 默认阈值 0.5、0.2、0.7、0.15 是否合适 | 归类与探针判定偏松或偏严 | 用真实报告分布与人工标注校准 |
 | judge 与人工的一致率 | judge 漂移无监控 | 建小型人工标注校准集,定期比对 |
-| k 为 4 时区间宽度是否足以检出真实退化 | 真实退化漏标 | 用真实后端对已知退化的 checkpoint 做灵敏度试验 |
-| 不打 ROLL 的 `split_k` 补丁时,同一请求多次采样的结果是否可重复 | 评测的 k 次采样与跨轮比较可能带入浮点噪声 | 同一提示重复请求若干次,比较对数概率的方差;有差异再评估是否纳入该补丁 |
+| k 为 1 时区间宽度是否足以检出真实退化 | 真实退化漏标 | 用真实后端对已知退化的 checkpoint 做灵敏度试验 |
+| 不打 ROLL 的 `split_k` 补丁时,同一请求多次采样的结果是否可重复 | 评测跨轮比较可能带入浮点噪声 | 同一提示重复请求若干次,比较对数概率的方差;有差异再评估是否纳入该补丁 |
 | 适配器在真实训练后的效果是否变好 | 只验证了「被加载且改变了输出」,训练只有两步,不说明变对 | 用更长的训练产出适配器,在固定题上比基座与适配器的正确率 |
-| 长上下文与吞吐 | 验证时上下文限 4096 且关了图捕获,SoMBench 的题干有数百字,长度上限与批量吞吐没有评估 | 用真实题库的最长样本和目标并发各跑一次 |
+| 上下文上限 40960 下的显存、吞吐与单次评测耗时 | 验证时上下文限 4096 且关了图捕获;SoMEval 历史上一次预测加判分约 2 小时,与我们的配置不同 | 在真机上整套跑一次,记录耗时、峰值显存、`content_none` 占比 |
+| 服务端是否把思考内容与答案分开(`--reasoning-parser`) | 不分开时,开放题送给裁判的文本带着整段思考,分数与 SoMEval 历史结果可能不可比 | 起服务时带与不带该参数各跑一批 Q4,比较裁判分数 |
+| 滑窗准入检查对模拟器生成的对话是否误命中 | 误命中会让正常训练指令整条失败 | 用已有 episode 跑一遍,统计命中率 |
+| `content_none` 占比阈值 1% | 过严则频繁延后,过松则把服务异常算成模型差 | 用真机数据校准 |
 
-明确不做:晋级、规划与配方决定;动态轨的情境与对手人格池生成;隔离校验器之外的数据去重;按目标维度定制题库;多租户与鉴权。
+明确不做:晋级、规划与配方决定;动态轨的情境与对手人格池生成;SoMBench 污染准入检查之外的数据去重;按目标维度定制题库;多租户与鉴权。
 
 ## 附 本文术语
 
@@ -589,6 +657,6 @@ def run_diagnostic(..., *, baseline_scores, dynamic_specs, backends: str): ...
 | 错误画像 | 每个 L2 下各错误类型的占比 |
 | 退化标记 | 候选相对基线在某维度上的显著下降,附证据 |
 | 基线 | 被比较的已晋级模型所在 run 的报告 |
-| 评估器 | 注入调和循环、执行 `request_diagnostic` 的可调用对象 [计划中] |
+| 评估器 | 注入调和循环、执行 `request_diagnostic` 的可调用对象 |
 | 自评偏差守卫 | 拒绝用候选本身或其近亲做 judge |
 | 分类表、题库 | 诊断资产:维度树与题目池,都是版本化产物 |
