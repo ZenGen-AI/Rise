@@ -209,10 +209,14 @@ class SomevalRunner:
             "figures_path": str(run_root / "figures"),
         }
 
-    def _env(self, handle: ServiceHandle) -> dict[str, str]:
-        """子进程只拿到它需要的四个变量。RUN_TIMESTAMP 不传:run_eval.py 会用自己的时间戳覆盖。"""
+    def _env(self, handle: ServiceHandle, run_root: Path) -> dict[str, str]:
+        """子进程只拿到它需要的变量。RUN_TIMESTAMP 不传:run_eval.py 会用自己的时间戳覆盖。
+
+        HF_HOME 指到本次的工作目录:datasets 库读 parquet 时会把含题面的 Arrow 缓存写到这里,
+        不写到用户家目录,也落在凭证扫描与树外隔离的范围之内。"""
         return {
             "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "HF_HOME": str(run_root / "hf"),
             "VLLM_API_KEY": handle.api_key,
             "OPENAI_API_KEY": self.cfg.judge_api_key,
             "OPENAI_BASE_URL": self.cfg.judge_base_url,
@@ -241,7 +245,7 @@ class SomevalRunner:
             config_path.write_text(
                 yaml.safe_dump(config, sort_keys=True, allow_unicode=True), encoding="utf-8")
             completed = self.run(
-                argv, cwd=str(self.cfg.someval_root), env=self._env(handle),
+                argv, cwd=str(self.cfg.someval_root), env=self._env(handle, run_root),
                 capture_output=True, timeout=timeout, check=False,
             )
             if completed.returncode != 0:

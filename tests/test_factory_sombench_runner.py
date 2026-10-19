@@ -183,6 +183,8 @@ def test_two_subprocesses_run_in_the_checkout_with_predict_then_metric(tmp_path)
     assert first["argv"][1:3] == ["run_eval.py", "--experiment-config"]
     assert "--exp-dir" not in first["argv"] and second["argv"][-2] == "--exp-dir"
     assert "RUN_TIMESTAMP" not in first["env"]        # run_eval.py 自己生成,传了也会被覆盖
+    # datasets 的缓存含题面:落在本次工作目录,不落用户家目录
+    assert first["env"]["HF_HOME"] == str(tmp_path / "work" / "run-1" / STAMP / "hf")
     assert first["env"]["OPENAI_API_KEY"] == SECRET
     assert SECRET not in " ".join(first["argv"]) and SECRET not in json.dumps(first["env"]).replace(SECRET, "")
 
