@@ -52,7 +52,7 @@
 6. **`error_reason` 的处理。** `judge_error` → 整次评测作废,抛延后异常。`content_none` → 计数,占比超过 `content_none_ratio_max`(默认 0.01)即抛延后异常;不超过则计为错,数量写进报告 `someval` 块。`extraction_failed`、`wrong_answer`、`below_threshold` → 计为错。未知原因码 → 计为错并写进 `someval` 块的 `unknown_error_reasons` 计数。理由:延后通道会重试,而确定性内容问题重试无益,要同时避免两类误判。
 7. **`someval` 块写在报告载荷,** 由 `diagnostic.report.build_report` 增加一个可选参数 `someval: dict | None = None`,不进 `DiagnosticReport` 数据类(它只承载判级相关字段),由 `write_report` 原样放进载荷。`diagnostic_grade` 不看它。
 8. **版本号。** 分类表与题库版本都是 `sombench-<parquet 的 sha256 前 12 位>`,例如 `sombench-5ace4bd4b872`。运行器与准入检查装配时重新算 parquet 哈希,与版本里的前缀比对,不一致拒绝。`benchmark_version` 仍是 `evaluator.yaml` 里人写的那个字符串,建议写 `benchmark-sombench-v1`,换版本号由人做。
-9. **索引文件格式。** 头部 40 字节:`b"SBIDX1\0\0"`(8)+ 窗口数(8,小端无符号)+ parquet 完整 sha256 的 32 字节原始值;其后是窗口数个小端无符号 64 位整数,升序。读取时校验魔数、长度与文件大小完全一致,并把头部哈希与 parquet 现算哈希比对。
+9. **索引文件格式。** 头部 48 字节:`b"SBIDX1\0\0"`(8)+ 窗口数(8,小端无符号)+ parquet 完整 sha256 的 32 字节原始值;其后是窗口数个小端无符号 64 位整数,升序。读取时校验魔数、长度与文件大小完全一致,并把头部哈希与 parquet 现算哈希比对。
 10. **索引与配置都不进树。** 索引路径、SoMEval 检出目录、工作根、远端服务端口、裁判凭证全在树外本机配置 `RISMFORGE_EVAL_CONFIG` 指向的文件里,权限必须 0600,且路径不得落在仓库根之下。
 11. **准入检查先解析 `train.jsonl` 再查。** 每一行是 `{"instruction": ..., "output": ...}`,对两个值做规范化与滑窗;解析失败同样按确定性失败处理(那说明数据本身坏了)。返回 `(bad_lines, hits)`,零命中才放行。
 12. **`RollExecutor` 的注入点是可选关键字参数 `row_gate: Callable[[bytes], tuple[int, int]] | None = None`,** 为 `None` 时不检查;`factory` 在 `--executor roll` 下**恒构造并注入**;直接构造 `RollExecutor` 的既有测试因此不受影响。判错的代价:绕过组合根手写脚本仍能跳过检查,设计上以「真训练只经组合根」为前提。
