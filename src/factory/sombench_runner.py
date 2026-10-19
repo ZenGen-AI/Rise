@@ -103,10 +103,10 @@ class SomevalRunner:
         run_root.mkdir(parents=True, exist_ok=False)
         try:
             with self._served(ref) as handle:
-                self._run_someval(handle, run_root)
+                result_dir = self._run_someval(handle, run_root)
             # 先扫凭证再解读结果:可疑文件不留在盘上,也不让它的内容进入任何异常信息。
             self._scan_for_secrets(run_root)
-            outcomes, stats = self._read_outcomes(run_root, items)
+            outcomes, stats = self._read_outcomes(result_dir, items)
             self._last_stats = stats
             return outcomes
         except EvalSecretLeakError:
@@ -191,32 +191,39 @@ class SomevalRunner:
             "figures_path": str(run_root / "figures"),
         }
 
-    def _env(self, handle: ServiceHandle, stamp: str) -> dict[str, str]:
+    def _env(self, handle: ServiceHandle) -> dict[str, str]:
+        """子进程只拿到它需要的四个变量。RUN_TIMESTAMP 不传:run_eval.py 会用自己的时间戳覆盖。"""
         return {
             "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
             "VLLM_API_KEY": handle.api_key,
             "OPENAI_API_KEY": self.cfg.judge_api_key,
             "OPENAI_BASE_URL": self.cfg.judge_base_url,
-            "RUN_TIMESTAMP": stamp,
         }
 
-    def _run_someval(self, handle: ServiceHandle, run_root: Path) -> None:
-        stamp = run_root.name.replace("-", "_")
+    def _run_someval(self, handle: ServiceHandle, run_root: Path) -> Path:
+        """跑 predict 与 metric,返回结果目录。
+
+        目录名里的时间戳由 run_eval.py 自己生成(它会覆盖 RUN_TIMESTAMP),我们事先猜不到,
+        所以 predict 前后各列一次目录,新增的那个就是本次的。"""
+        before = self._existing_experiments(run_root)
         config_path = run_root / "experiment_config.yaml"
         config_path.write_text(
             yaml.safe_dump(self._experiment_config(handle, run_root), sort_keys=True, allow_unicode=True),
             encoding="utf-8",
         )
+        result_dir: Path | None = None
         for stage, timeout in (("predict", PREDICT_TIMEOUT_S), ("metric", METRIC_TIMEOUT_S)):
             argv = [str(self.cfg.someval_python), "run_eval.py", "--experiment-config", str(config_path)]
             if stage == "metric":
-                argv.extend(["--exp-dir", f"exp_{stamp}"])
+                if result_dir is None:
+                    raise EvalOutputError("cannot run metric: the predict stage left no experiment directory")
+                argv.extend(["--exp-dir", result_dir.name])
             config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
             config["stage"] = stage
             config_path.write_text(
                 yaml.safe_dump(config, sort_keys=True, allow_unicode=True), encoding="utf-8")
             completed = self.run(
-                argv, cwd=str(self.cfg.someval_root), env=self._env(handle, stamp),
+                argv, cwd=str(self.cfg.someval_root), env=self._env(handle),
                 capture_output=True, timeout=timeout, check=False,
             )
             if completed.returncode != 0:
@@ -227,6 +234,19 @@ class SomevalRunner:
                     f"stderr in {log_name} (redacted)",
                     log_tail=stderr[-400:],
                 )
+            if stage == "predict":
+                fresh = self._existing_experiments(run_root) - before
+                if len(fresh) != 1:
+                    raise EvalOutputError(
+                        f"the predict stage left {len(fresh)} new experiment directories, expected exactly one"
+                    )
+                result_dir = (run_root / "results" / "SoMBench" / MODEL / fresh.pop())
+        assert result_dir is not None
+        return result_dir
+
+    def _existing_experiments(self, run_root: Path) -> set[str]:
+        base = run_root / "results" / "SoMBench" / MODEL
+        return {p.name for p in base.glob("exp_*")} if base.is_dir() else set()
 
     def _redact(self, text: str) -> str:
         """把已知凭证从子进程输出里抹掉。宁可多抹,也不让密钥进日志与异常。"""
@@ -245,14 +265,9 @@ class SomevalRunner:
             handle.write(text)
         return f"logs/{path.name}"
 
-    def _result_dir(self, run_root: Path, stamp: str) -> Path:
-        return run_root / "results" / "SoMBench" / MODEL / f"exp_{stamp}"
-
     def _read_outcomes(
-        self, run_root: Path, items: list[DiagnosticItem]
+        self, result_dir: Path, items: list[DiagnosticItem]
     ) -> tuple[dict[str, list[SampleOutcome]], dict]:
-        stamp = run_root.name.replace("-", "_")
-        result_dir = self._result_dir(run_root, stamp)
         metrics_path = result_dir / "detailed_metrics.jsonl"
         if not metrics_path.is_file():
             raise EvalOutputError(f"SoMEval wrote no detailed metrics under {result_dir}")

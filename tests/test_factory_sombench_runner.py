@@ -113,7 +113,8 @@ class FakeRun:
         self.calls.append({"argv": argv, "cwd": cwd, "env": env, "timeout": timeout})
         if "--exp-dir" not in argv and self.returncode == 0:
             config = __import__("yaml").safe_load(Path(argv[argv.index("--experiment-config") + 1]).read_text())
-            stamp = env["RUN_TIMESTAMP"]
+            # 真实的 run_eval.py 用自己生成的时间戳覆盖 RUN_TIMESTAMP,替身照此行为
+            stamp = f"20261019_1200{len(self.calls):02d}"
             out = Path(config["results_path"]) / "SoMBench" / "forge" / f"exp_{stamp}"
             out.mkdir(parents=True, exist_ok=True)
             (out / "config.json").write_text(json.dumps({
@@ -179,7 +180,7 @@ def test_two_subprocesses_run_in_the_checkout_with_predict_then_metric(tmp_path)
     assert first["cwd"] == str(tmp_path / "SoMEval")
     assert first["argv"][1:3] == ["run_eval.py", "--experiment-config"]
     assert "--exp-dir" not in first["argv"] and second["argv"][-2] == "--exp-dir"
-    assert first["env"]["RUN_TIMESTAMP"] == second["env"]["RUN_TIMESTAMP"] == "20261019_120000"
+    assert "RUN_TIMESTAMP" not in first["env"]        # run_eval.py 自己生成,传了也会被覆盖
     assert first["env"]["OPENAI_API_KEY"] == SECRET
     assert SECRET not in " ".join(first["argv"]) and SECRET not in json.dumps(first["env"]).replace(SECRET, "")
 
@@ -244,23 +245,23 @@ def test_a_nonzero_subprocess_is_transient(tmp_path):
 
 
 def test_a_mismatched_result_directory_is_deterministic(tmp_path):
+    """结果目录里的实验指纹不是本次的:不采信它,按确定性失败处理。"""
     store = _store(tmp_path)
     _candidate(store)
+    runner = _runner(tmp_path, rows=[_row("i1")], store=store)
+    inner = runner.run
 
-    def on_run(argv, env):
-        if "--exp-dir" in argv:
-            return
-        out = Path(argv[argv.index("--experiment-config") + 1])
-        config = __import__("yaml").safe_load(out.read_text())
-        target = Path(config["results_path"]) / "SoMBench" / "forge" / f"exp_{env['RUN_TIMESTAMP']}"
-        target.mkdir(parents=True, exist_ok=True)
-        (target / "config.json").write_text(json.dumps({
-            "experiment_config": {"protocol": "direct", "llm_config": {"model_name": "forge"}}}))
-        (target / "detailed_metrics.jsonl").write_text(json.dumps({"sample_id": "i1"}) + "\n")
+    def rewrite_config(argv, **kw):
+        result = inner(argv, **kw)
+        if "--exp-dir" not in argv:
+            base = tmp_path / "work" / "run-1" / STAMP / "results" / "SoMBench" / "forge"
+            (next(base.glob("exp_*")) / "config.json").write_text(json.dumps({
+                "experiment_config": {"protocol": "direct", "llm_config": {"model_name": "forge"}}}))
+        return result
 
-    run = FakeRun(tmp_path, rows=[], on_run=on_run)
+    runner.run = rewrite_config
     with pytest.raises(EvalOutputError, match="different experiment"):
-        _runner(tmp_path, rows=[], store=store, run=run).evaluate_scored(_items("i1"), "run-1", 1)
+        runner.evaluate_scored(_items("i1"), "run-1", 1)
 
 
 def test_a_leaked_credential_deletes_the_work_directory_and_is_not_deferred(tmp_path):
@@ -297,7 +298,8 @@ def test_the_someval_stats_are_recorded(tmp_path):
     rows = [_row("i1"), _row("i1", False, "extraction_failed", "")]
     runner = _runner(tmp_path, rows=rows, store=store)
     runner.evaluate_scored(_items("i1"), "run-1", 1)
-    _, stats = runner._read_outcomes(tmp_path / "work" / "run-1" / STAMP, _items("i1"))
+    result_dir = next((tmp_path / "work" / "run-1" / STAMP / "results" / "SoMBench" / "forge").glob("exp_*"))
+    _, stats = runner._read_outcomes(result_dir, _items("i1"))
     assert stats["protocol"] == "cot" and stats["samples"] == 2
     assert stats["extraction_failed"] == 1 and stats["someval_commit"] == "6453a83"
 
