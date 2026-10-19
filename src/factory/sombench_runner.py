@@ -158,10 +158,10 @@ class SomevalRunner:
         )
         factory = self.tunnel_factory
         if factory is None:
-            alias_host = getattr(self.client, "alias", None)
-            if alias_host is None:
+            alias = getattr(self.client, "alias", None)
+            if not alias:
                 raise ComputeError("the compute client does not expose its ssh alias for the tunnel")
-            factory = lambda: SshTunnel(alias_host, remote_port=cfg.remote_port)  # noqa: E731
+            factory = lambda: SshTunnel(alias, remote_port=cfg.remote_port)  # noqa: E731
         with self.serve(
             self.client, cfg, build_job=self.build_job, tunnel_factory=factory, probe=self.probe,
             startup_timeout_s=SERVE_TIMEOUT_S, poll_s=POLL_SECONDS,

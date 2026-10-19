@@ -45,6 +45,7 @@ class SshTransport:
     def __init__(self, alias: str, *, connect_timeout_s: float = 10.0, runner: Runner = subprocess_runner) -> None:
         if not isinstance(alias, str) or not _ALIAS.match(alias):
             raise ComputeError("the ssh alias has an invalid form")
+        self.alias = alias
         self._alias = alias
         self._connect_timeout = max(1, int(connect_timeout_s))
         self._runner = runner

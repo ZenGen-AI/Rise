@@ -57,6 +57,8 @@ class ComputeClient:
                  clock: Callable[[], float] = time.monotonic) -> None:
         self.endpoint = endpoint
         self._transport = transport
+        # 推理服务的隧道要用同一个 ssh 别名;别名只在传输层与本机映射里,不进 git 树。
+        self.alias = getattr(transport, "alias", None)
         self._python = python
         self._sleep = sleep
         self._clock = clock

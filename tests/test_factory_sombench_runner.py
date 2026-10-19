@@ -333,3 +333,41 @@ def test_a_failing_subprocess_never_puts_raw_stderr_in_the_reason(tmp_path):
     log = tmp_path / "work" / "run-1" / STAMP / "logs" / "someval-predict.stderr.log"
     assert log.is_file() and SECRET not in log.read_text(encoding="utf-8")
     assert oct(log.stat().st_mode & 0o777) == "0o600"
+
+
+def test_the_production_client_carries_the_alias_the_tunnel_needs():
+    """生产装配不传 tunnel_factory:运行器从客户端拿别名造隧道。客户端必须带着别名。"""
+    from compute.endpoint import ComputeEndpoint
+    from factory.compute_config import build_compute_client
+
+    endpoint = ComputeEndpoint(
+        endpoint_id="gpu-1", work_root="/work", roll_root="/work/roll", launch_prefix=(),
+        base_model_path="/models/base", heldout_jsonl="/work/h.jsonl", sft_template="t",
+        min_free_host_mem_gib=1.0, min_free_disk_gib=1.0, poll_seconds=1.0, job_timeout_seconds=60.0,
+    )
+    client = build_compute_client(endpoint, {"gpu-1": "gpu-181"})
+    assert client.alias == "gpu-181"
+
+
+def test_without_a_tunnel_factory_the_runner_builds_an_ssh_tunnel_from_the_client_alias(tmp_path):
+    from compute.tunnel import SshTunnel
+
+    store = _store(tmp_path)
+    _candidate(store)
+    seen = {}
+
+    class Client:
+        alias = "gpu-181"
+
+    def capture_serve(client, cfg, *, tunnel_factory, **kw):
+        seen["tunnel"] = tunnel_factory()
+        raise ComputeError("stop here")
+
+    runner = SomevalRunner(
+        store=store, client=Client(), endpoint=FakeEndpoint(), cfg=_config(tmp_path),
+        serve=capture_serve, now=lambda: __import__("datetime").datetime(2026, 10, 19, 12, 0, 0),
+        commit_of=lambda root: "x",
+    )
+    with pytest.raises(ComputeError, match="stop here"):
+        runner.evaluate_scored(_items("i1"), "run-1", 1)
+    assert isinstance(seen["tunnel"], SshTunnel)
