@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from compute.client import ComputeClient, JobSpec
@@ -26,6 +27,20 @@ LAUNCHER_VERSION = "v2"  # 进 job_id 的哈希;改了启动命令的拼法就�
 TRAIN_SCRIPT = "scripts/qwen38/run_sft_validation.py"  # 相对 roll_root;ROLL4ZenGen 仓库里的真实位置
 METRIC_PREFIX = "metrics_tag:"  # V2 未核实:ROLL 的逐步指标行前缀,主机验证后改这里
 MAX_ATTEMPTS = 8  # 同一 job_id 下的尝试序号上限,与 max_resume_attempts 分开记账(设计 §5.2)
+
+
+class TrainingDataRejectedError(RuntimeError):
+    """上传前准入检查命中:训练数据里出现诊断题的内容。确定性失败,整条指令判 failed。
+
+    原因里只有行数与窗口数,不带任何文本:命中的内容就是评测题面。"""
+
+    def __init__(self, bad_lines: int, hits: int) -> None:
+        super().__init__(
+            f"{bad_lines} training row(s) overlap the diagnostic benchmark "
+            f"({hits} matching 20-character windows); refusing to upload"
+        )
+        self.bad_lines = bad_lines
+        self.hits = hits
 
 
 class MetricsMissingError(RuntimeError):
@@ -71,6 +86,11 @@ class RollExecutor:
 
     supported_phases = frozenset({"sft"})  # 设计 §5.1:真实后端本轮只做 SFT
     checkpoint_type = "roll_ssh"  # 跨模式续训检查比对的就是它(设计 §6.1)
+
+    # 上传前的准入检查(设计 21 的 DX-19、设计 30 的 MT-15):收整份 train.jsonl 字节,
+    # 返回 (有命中的行数, 命中窗口数)。由组合根注入,mindtrainer 不认识 diagnostic。
+    # 缺省不检查:直接构造执行器的既有测试与 mock 路径不受影响;真训练经组合根装配时恒有它。
+    row_gate: Callable[[bytes], tuple[int, int]] | None = None
 
     _base_uri: str | None = field(default=None, init=False, repr=False)
     _stage_ref: BigRef | None = field(default=None, init=False, repr=False)
@@ -191,6 +211,10 @@ class RollExecutor:
                 rows.extend(_render_rows(episode, trained_slot))
         payload = "".join(json.dumps(row, sort_keys=True, ensure_ascii=False) + "\n" for row in rows)
         data = payload.encode("utf-8")
+        if self.row_gate is not None:
+            bad_lines, hits = self.row_gate(data)
+            if hits:
+                raise TrainingDataRejectedError(bad_lines, hits)
 
         # 2. 作业身份。run_id 与起点存点必须进哈希,否则起点不同而数据相同的两次续训
         #    会撞同一目录(设计 §5.2 第 4 步)。last_step 是开区间终点。

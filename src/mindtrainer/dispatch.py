@@ -16,6 +16,7 @@ from mindtrainer.data_spec import (
     data_spec_from_directive, manifest_data_run, required_stages, stages_to_synthesize,
 )
 from mindtrainer.executor import MockExecutor, TrainingExecutor
+from mindtrainer.roll_executor import TrainingDataRejectedError
 from mindtrainer.grouping import DegenerateGroupError
 from mindtrainer.orchestrator import NotEnoughGroupsError, resume_or_run
 from mindtrainer.resume import NeedsHumanError
@@ -36,7 +37,7 @@ from simulator.dataset import DatasetIntegrityError, DatasetManifest, read_manif
 # 其余异常原样上抛,directive 保持 pending,下一轮重新派发(瞬态恢复)。
 _DETERMINISTIC = (
     DatasetIntegrityError, DegenerateGroupError, AttributionError,
-    NotEnoughGroupsError, InvalidTrainingConfigError, NeedsHumanError,
+    NotEnoughGroupsError, InvalidTrainingConfigError, TrainingDataRejectedError, NeedsHumanError,
 )
 
 

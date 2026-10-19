@@ -12,6 +12,7 @@ from mindtrainer.checkpoint import (
 )
 from mindtrainer.datamodel import StepResult, TrainingRun
 from mindtrainer.executor import TrainingExecutor
+from mindtrainer.roll_executor import TrainingDataRejectedError
 from mindtrainer.grouping import DegenerateGroupError, group_by_id, validate_groups
 from mindtrainer.resume import NeedsHumanError, decide_resume
 from mindtrainer.reward_pipeline import (
@@ -36,7 +37,7 @@ class NotEnoughGroupsError(ValueError):
 # 其余异常一律不吞,run 保持 pending,交给 decide_resume 判定。
 _DETERMINISTIC = (
     DatasetIntegrityError, DegenerateGroupError, AttributionError,
-    NotEnoughGroupsError, InvalidTrainingConfigError,
+    NotEnoughGroupsError, InvalidTrainingConfigError, TrainingDataRejectedError,
 )
 
 # start_grpo_step -> {"sft": 源, "grpo_opd": 源}。用工厂而不是现成的源,因为续训时
