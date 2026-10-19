@@ -306,3 +306,28 @@ def test_the_transient_failure_rides_the_deferred_channel():
     from controlplane.deferred import DeferredError
 
     assert issubclass(EvalTransientError, DeferredError)
+
+
+def test_a_failing_subprocess_never_puts_raw_stderr_in_the_reason(tmp_path):
+    """子进程 stderr 可能回显请求头或配置。密钥抹掉,尾巴进属性,完整一份落在 0600 的文件里。"""
+    store = _store(tmp_path)
+    _candidate(store)
+    run = FakeRun(tmp_path, rows=[])
+    run.returncode = 3
+    original = FakeRun.__call__
+
+    def run_with_secret(argv, **kw):
+        import subprocess
+        result = original(run, argv, **kw)
+        return subprocess.CompletedProcess(argv, 3, b"", f"HTTP 401 key={SECRET} retry later".encode())
+
+    runner = _runner(tmp_path, rows=[], store=store, run=run_with_secret)
+    with pytest.raises(EvalTransientError) as caught:
+        runner.evaluate_scored(_items("i1"), "run-1", 1)
+    message = str(caught.value)
+    assert SECRET not in message
+    assert "someval-predict.stderr.log" in message and "code 3" in message
+    assert SECRET not in caught.value.log_tail and "<redacted>" in caught.value.log_tail
+    log = tmp_path / "work" / "run-1" / STAMP / "logs" / "someval-predict.stderr.log"
+    assert log.is_file() and SECRET not in log.read_text(encoding="utf-8")
+    assert oct(log.stat().st_mode & 0o777) == "0o600"

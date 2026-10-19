@@ -10,6 +10,7 @@ SoMEval 的 log_dir 与 task_dir 都相对当前目录,而 tasks/ 在检出目�
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from collections.abc import Callable, Iterator
@@ -58,7 +59,14 @@ class EvalSecretLeakError(Exception):
 
 
 class EvalTransientError(DeferredError):
-    """可重试的失败:子进程非零退出、裁判端点出错、无答案占比超阈值。守护进程按退避重试,不写树。"""
+    """可重试的失败:子进程非零退出、裁判端点出错、无答案占比超阈值。守护进程按退避重试,不写树。
+
+    子进程的 stderr 可能带凭证,所以尾巴放在 `log_tail` 属性里,不进 `reason`;写进日志的
+    那一份已经过 `_redact`,完整一份落在工作目录 0600 的日志文件里。"""
+
+    def __init__(self, reason: str, *, log_tail: str = "") -> None:
+        super().__init__(reason)
+        self.log_tail = log_tail
 
 
 @dataclass
@@ -158,7 +166,11 @@ class SomevalRunner:
             self.client, cfg, build_job=self.build_job, tunnel_factory=factory, probe=self.probe,
             startup_timeout_s=SERVE_TIMEOUT_S, poll_s=POLL_SECONDS,
         ) as handle:
-            yield handle
+            self._serving_key = handle.api_key
+            try:
+                yield handle
+            finally:
+                self._serving_key = None
 
     # ---------- 子进程 ----------
 
@@ -208,10 +220,30 @@ class SomevalRunner:
                 capture_output=True, timeout=timeout, check=False,
             )
             if completed.returncode != 0:
-                tail = (completed.stderr or b"").decode("utf-8", "replace")[-400:]
+                stderr = self._redact((completed.stderr or b"").decode("utf-8", "replace"))
+                log_name = self._write_stderr(run_root, stage, stderr)
                 raise EvalTransientError(
-                    f"SoMEval {stage} exited with code {completed.returncode}; tail: {tail!r}"
+                    f"SoMEval {stage} exited with code {completed.returncode}; "
+                    f"stderr in {log_name} (redacted)",
+                    log_tail=stderr[-400:],
                 )
+
+    def _redact(self, text: str) -> str:
+        """把已知凭证从子进程输出里抹掉。宁可多抹,也不让密钥进日志与异常。"""
+        for secret in (self.cfg.judge_api_key, getattr(self, "_serving_key", None)):
+            if secret:
+                text = text.replace(secret, "<redacted>")
+        return text
+
+    def _write_stderr(self, run_root: Path, stage: str, text: str) -> str:
+        """完整 stderr 落到工作目录,0600。返回相对工作目录的文件名,不返回绝对路径。"""
+        logs = run_root / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        path = logs / f"someval-{stage}.stderr.log"
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        return f"logs/{path.name}"
 
     def _result_dir(self, run_root: Path, stamp: str) -> Path:
         return run_root / "results" / "SoMBench" / MODEL / f"exp_{stamp}"
