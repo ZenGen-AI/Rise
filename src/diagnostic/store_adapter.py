@@ -14,7 +14,8 @@ BACKENDS_VALUES = ("mock", "real")
 
 
 def write_report(
-    store: GitStore, run_id: str, report: DiagnosticReport, *, backends: str
+    store: GitStore, run_id: str, report: DiagnosticReport, *, backends: str,
+    extra: dict | None = None,
 ) -> None:
     """backends("mock" 或 "real")必填,写进载荷的 backends 键:没有标记的报告按失败关闭判 stub。
     标记与报告在同一次写入里落盘,不存在"报告已写、标记未写"的窗口。"""
@@ -22,6 +23,8 @@ def write_report(
         raise ValueError(f"backends must be one of {BACKENDS_VALUES}, got {backends!r}")
     payload = report.to_dict()
     payload[BACKENDS_KEY] = backends
+    if extra:
+        payload.update(extra)
     env = Envelope(
         id=report.id,
         type="diagnostic_report",

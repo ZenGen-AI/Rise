@@ -34,7 +34,7 @@ from diagnostic.dynamic_track import run_dynamic_item
 from diagnostic.regression import detect_regressions
 from diagnostic.report import build_report
 from diagnostic.scorer import JudgeBackend, LLMJudgeScorer, RuleScorer
-from diagnostic.someval_adapter import SoMEvalRunner, run_static_items
+from diagnostic.someval_adapter import SoMEvalRunner, run_static_items, run_static_items_scored
 from diagnostic.store_adapter import write_report
 from diagnostic.taxonomy_loader import ItemPool, select_items, variant_families_in
 
@@ -61,11 +61,14 @@ def run_diagnostic(
     baseline_scores: list[DimensionScore],
     dynamic_specs: list[dict],
     backends: str,
+    someval: dict | None = None,
 ) -> DiagnosticReport:
     """Run one full diagnostic pass and persist the resulting report.
 
     backends ("mock" | "real") is written into the persisted payload by
-    write_report in the same write (R17); required, no default (DX-12)."""
+    write_report in the same write (R17); required, no default (DX-12).
+    someval, when given, is written into the payload verbatim as a record-only
+    block (protocol, sample counts, error tallies); diagnostic_grade ignores it."""
 
     # 1. Select items for this run's tier.
     selected_items = select_items(pool, cfg.tier)
@@ -76,14 +79,28 @@ def run_diagnostic(
     # hit is an exact-match shortcut; judge-mode static routing is
     # deferred -- out of scope for V1 fixtures, which are all rule-mode).
     static_results: dict[str, ItemResult] = {}
-    if static_items:
+    rule_items = [item for item in static_items if item.scoring_mode != "someval"]
+    scored_items = [item for item in static_items if item.scoring_mode == "someval"]
+    if rule_items:
         raw_results = run_static_items(
-            static_items, someval_runner, cfg.candidate_ref, cfg.sampling_k
+            rule_items, someval_runner, cfg.candidate_ref, cfg.sampling_k
         )
         rule_scorer = RuleScorer()
-        for item, result in zip(static_items, raw_results):
+        for item, result in zip(rule_items, raw_results):
             if item.scoring_mode == "rule":
                 result = rule_scorer.score_samples(item, result.raw_outputs)
+            static_results[item.id] = result
+    if scored_items:
+        # SoMEval 已经判好:选项被打乱、答案以文本存放,规则打分器对它不成立(DX-16)。
+        if not hasattr(someval_runner, "evaluate_scored"):
+            raise ValueError(
+                "the item pool has someval items but the runner has no evaluate_scored(); "
+                "refusing before running anything"
+            )
+        for item, result in zip(
+            scored_items,
+            run_static_items_scored(scored_items, someval_runner, cfg.candidate_ref, cfg.sampling_k),
+        ):
             static_results[item.id] = result
 
     # 3. Dynamic track: run_episode + judge scoring of candidate utterances.
@@ -199,7 +216,7 @@ def run_diagnostic(
         consistency_signals=consistency_signals,
         run_id=cfg.run_id,
     )
-    write_report(store, cfg.run_id, report, backends=backends)
+    write_report(store, cfg.run_id, report, backends=backends, extra={"someval": someval} if someval else None)
     return report
 
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from diagnostic.datamodel import DiagnosticItem, ItemResult
+from diagnostic.datamodel import DiagnosticItem, ItemResult, SampleOutcome
 from diagnostic.stats import pass_rate, variance
 
 
@@ -24,6 +24,36 @@ class SoMEvalRunner(Protocol):
             Dictionary mapping item_id to list of k raw outputs
         """
         ...
+
+
+class ScoredSoMEvalRunner(SoMEvalRunner, Protocol):
+    """能直接给出每样本判定的运行器。选项被打乱、答案以文本存放,规则打分器对这类题不成立。"""
+
+    def evaluate_scored(
+        self, items: list[DiagnosticItem], candidate_ref: str, k: int
+    ) -> dict[str, list[SampleOutcome]]: ...
+
+
+def run_static_items_scored(
+    items: list[DiagnosticItem], runner: ScoredSoMEvalRunner, candidate_ref: str, k: int
+) -> list[ItemResult]:
+    """把已判好的结果转成 `ItemResult`;`raw_outputs` 存抽出的字母,不存模型全文。"""
+    raw = runner.evaluate_scored(items, candidate_ref, k)
+    results = []
+    for item in items:
+        outcomes = raw[item.id]
+        scores = [o.score for o in outcomes]
+        results.append(
+            ItemResult(
+                item_id=item.id,
+                raw_outputs=[o.extracted for o in outcomes],
+                per_sample_scores=scores,
+                pass_rate=pass_rate(scores),
+                variance=variance(scores),
+                track=item.track,
+            )
+        )
+    return results
 
 
 class MockSoMEvalRunner:

@@ -26,6 +26,26 @@ class VariantFamily:
 
 
 @dataclass
+class SampleOutcome:
+    """一道题的一次判定。真实运行器返回它;`extracted` 是抽出的答案字母,不是模型的完整输出。"""
+
+    score: int
+    extracted: str
+    error_reason: str | None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.score, bool) or self.score not in (0, 1):
+            raise ValueError(f"score must be 0 or 1, got {self.score!r}")
+
+    def to_dict(self) -> dict:
+        return {"score": self.score, "extracted": self.extracted, "error_reason": self.error_reason}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> SampleOutcome:
+        return cls(score=d["score"], extracted=d["extracted"], error_reason=d["error_reason"])
+
+
+@dataclass
 class DiagnosticItem:
     id: str
     l3_task: str
