@@ -44,3 +44,31 @@ def write_report(
 def read_report(store: GitStore, run_id: str) -> DiagnosticReport:
     env = store.read_product(diagnostic_report_file(run_id))
     return DiagnosticReport.from_dict(env.payload)
+
+
+def write_failure_report(
+    store: GitStore, run_id: str, *, candidate_ref: str, benchmark_version: str, failure_reason: str
+) -> None:
+    """确定性失败的评测:写一份 stub 报告,而不是让动作一直失败(设计 21 的失败处理表)。
+
+    diagnostic_grade 对 stub 失败关闭,所以它不会驱动规划与提名;审核门 review 标 [STUB]。
+    failure_reason 只能是不含题面、凭证的简短说明,调用方负责。"""
+    env = Envelope(
+        id=run_id,
+        type="diagnostic_report",
+        version=1,
+        created_at=_NOW,
+        created_by=OwnerRef(),
+        status="executed",
+        schema_version=CURRENT_SCHEMA_VERSION,
+        links=[run_id],
+        payload={
+            "candidate_ref": candidate_ref,
+            "benchmark_version": benchmark_version,
+            "stub": True,
+            "failure_reason": failure_reason,
+        },
+    )
+    store.write_product(
+        diagnostic_report_file(run_id), env, message=f"diagnostic_report: evaluation of {candidate_ref} failed"
+    )

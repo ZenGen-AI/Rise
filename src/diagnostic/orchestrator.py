@@ -102,6 +102,9 @@ def run_diagnostic(
             run_static_items_scored(scored_items, someval_runner, cfg.candidate_ref, cfg.sampling_k),
         ):
             static_results[item.id] = result
+        # 运行器跑完才有统计(协议、样本数、错误计数);调用方显式给了就以调用方为准。
+        if someval is None and hasattr(someval_runner, "last_stats"):
+            someval = someval_runner.last_stats()
 
     # 3. Dynamic track: run_episode + judge scoring of candidate utterances.
     # Each spec carries item + scenario/assignment/personas/backends; the

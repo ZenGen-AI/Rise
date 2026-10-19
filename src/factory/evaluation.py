@@ -94,11 +94,15 @@ def _someval_evaluator(*, store: GitStore, runner, cfg: dict):
     """真实评估器(设计 FC-16、DX-22):评估器每次仍从树里读资产与基线。
 
     静态轨全部是 SoMEval 判好的题,动态 spec 为空,judge 后端不被调用,所以报告的
-    backends 写 real;component_backends 记下每个组件的真实身份,只作记录不参与判级。
-    成功时把运行器留下的 someval 统计写进报告载荷(只作记录)。
+    backends 写 real。成功时把运行器留下的 someval 统计写进报告载荷(只作记录)。
+
+    确定性失败(候选不可用、结果不完整或不一致)写一份 stub 报告并正常返回:报告是评测的
+    结论载体,让动作一直失败会让守护进程反复重试同一个必然失败的评测(设计 21 的失败处理表)。
+    瞬态失败(延后通道)与凭证泄漏原样上抛。
     """
     from diagnostic.orchestrator import DiagnosticConfig, run_diagnostic
-
+    from diagnostic.store_adapter import write_failure_report
+    from factory.sombench_runner import CandidateUnusableError, EvalOutputError
 
     def evaluate(store: GitStore, run_id: str, candidate_id: str) -> None:
         taxonomy = read_taxonomy(store, cfg["taxonomy_version"])
@@ -110,11 +114,18 @@ def _someval_evaluator(*, store: GitStore, runner, cfg: dict):
             baseline_ref=baseline_ref, tier=cfg["tier"], sampling_k=cfg["sampling_k"],
             benchmark_version=cfg["benchmark_version"],
         )
-        stats = runner.last_stats()
-        run_diagnostic(
-            config, taxonomy, pool, runner, MockJudgeBackend(MOCK_JUDGE_ID, {}), store,
-            baseline_scores=baseline_scores, dynamic_specs=[], backends="real",
-            someval=stats,
-        )
+        runner.bind(run_id)
+        try:
+            # someval 统计由编排器在静态轨跑完之后向运行器取(last_stats),与报告同一次落盘。
+            run_diagnostic(
+                config, taxonomy, pool, runner, MockJudgeBackend(MOCK_JUDGE_ID, {}), store,
+                baseline_scores=baseline_scores, dynamic_specs=[], backends="real",
+            )
+        except (CandidateUnusableError, EvalOutputError) as exc:
+            write_failure_report(
+                store, run_id, candidate_ref=candidate_id,
+                benchmark_version=cfg["benchmark_version"],
+                failure_reason=f"{type(exc).__name__}: {exc}",
+            )
 
     return evaluate

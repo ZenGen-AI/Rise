@@ -137,7 +137,7 @@ def _row(sample_id, correct=True, reason=None, extracted="C"):
 def _runner(tmp_path, *, rows, store=None, run=None, serve=None, trace=None, **cfg_over):
     store = store or _store(tmp_path)
     trace = trace if trace is not None else []
-    return SomevalRunner(
+    runner = SomevalRunner(
         store=store, client=object(), endpoint=FakeEndpoint(), cfg=_config(tmp_path, **cfg_over),
         serve=serve or FakeServe(trace), build_job=lambda cfg: ("job", cfg),
         tunnel_factory=lambda: object(), probe=lambda url, key: True,
@@ -145,13 +145,15 @@ def _runner(tmp_path, *, rows, store=None, run=None, serve=None, trace=None, **c
         now=lambda: __import__("datetime").datetime(2026, 10, 19, 12, 0, 0),
         commit_of=lambda root: "6453a83",
     )
+    runner.bind("run-1")
+    return runner
 
 
 def test_a_clean_run_yields_one_outcome_per_item(tmp_path):
     store = _store(tmp_path)
     _candidate(store)
     runner = _runner(tmp_path, rows=[_row("i1"), _row("i2", False, "wrong_answer", "A")], store=store)
-    out = runner.evaluate_scored(_items("i1", "i2"), "run-1", 1)
+    out = runner.evaluate_scored(_items("i1", "i2"), "cand-run-1", 1)
     assert out["i1"] == [__import__("diagnostic.datamodel", fromlist=["SampleOutcome"]).SampleOutcome(1, "C", None)]
     assert out["i2"][0].score == 0 and out["i2"][0].error_reason == "wrong_answer"
 
@@ -161,7 +163,7 @@ def test_the_server_gets_the_export_and_the_large_context(tmp_path):
     _candidate(store)
     trace = []
     serve = FakeServe(trace)
-    _runner(tmp_path, rows=[_row("i1")], store=store, serve=serve).evaluate_scored(_items("i1"), "run-1", 1)
+    _runner(tmp_path, rows=[_row("i1")], store=store, serve=serve).evaluate_scored(_items("i1"), "cand-run-1", 1)
     cfg, kw = serve.configs[0]
     assert cfg.model_path == "/models/base"
     assert cfg.adapter_name == "forge" and cfg.adapter_path == "/work/exports/abc123"
@@ -174,7 +176,7 @@ def test_two_subprocesses_run_in_the_checkout_with_predict_then_metric(tmp_path)
     _candidate(store)
     run = FakeRun(tmp_path, rows=[_row("i1")])
     runner = _runner(tmp_path, rows=[], store=store, run=run)
-    runner.evaluate_scored(_items("i1"), "run-1", 1)
+    runner.evaluate_scored(_items("i1"), "cand-run-1", 1)
     assert len(run.calls) == 2
     first, second = run.calls
     assert first["cwd"] == str(tmp_path / "SoMEval")
@@ -189,7 +191,7 @@ def test_the_work_directory_is_outside_the_repository(tmp_path):
     store = _store(tmp_path)
     _candidate(store)
     runner = _runner(tmp_path, rows=[_row("i1")], store=store)
-    runner.evaluate_scored(_items("i1"), "run-1", 1)
+    runner.evaluate_scored(_items("i1"), "cand-run-1", 1)
     assert (tmp_path / "work" / "run-1" / STAMP).is_dir()
     assert not (tmp_path / "repo" / "work").exists()
 
@@ -198,26 +200,28 @@ def test_a_mock_export_is_refused(tmp_path):
     store = _store(tmp_path)
     _candidate(store, fmt="mock")
     with pytest.raises(CandidateUnusableError, match="adapter export"):
-        _runner(tmp_path, rows=[], store=store).evaluate_scored(_items("i1"), "run-1", 1)
+        _runner(tmp_path, rows=[], store=store).evaluate_scored(_items("i1"), "cand-run-1", 1)
 
 
 def test_an_export_on_another_endpoint_is_refused(tmp_path):
     store = _store(tmp_path)
     _candidate(store, endpoint_id="gpu-2")
     with pytest.raises(CandidateUnusableError, match="another endpoint"):
-        _runner(tmp_path, rows=[], store=store).evaluate_scored(_items("i1"), "run-1", 1)
+        _runner(tmp_path, rows=[], store=store).evaluate_scored(_items("i1"), "cand-run-1", 1)
 
 
 def test_a_missing_candidate_is_refused(tmp_path):
+    runner = _runner(tmp_path, rows=[])
+    runner.bind("run-9")
     with pytest.raises(CandidateUnusableError, match="no candidate"):
-        _runner(tmp_path, rows=[]).evaluate_scored(_items("i1"), "run-9", 1)
+        runner.evaluate_scored(_items("i1"), "cand-run-9", 1)
 
 
 def test_an_item_missing_from_the_results_is_a_deterministic_failure(tmp_path):
     store = _store(tmp_path)
     _candidate(store)
     with pytest.raises(EvalOutputError, match="1 of 2"):
-        _runner(tmp_path, rows=[_row("i1")], store=store).evaluate_scored(_items("i1", "i2"), "run-1", 1)
+        _runner(tmp_path, rows=[_row("i1")], store=store).evaluate_scored(_items("i1", "i2"), "cand-run-1", 1)
 
 
 def test_a_judge_failure_discards_the_whole_run(tmp_path):
@@ -225,7 +229,7 @@ def test_a_judge_failure_discards_the_whole_run(tmp_path):
     _candidate(store)
     rows = [_row("i1", False, "judge_error"), _row("i2")]
     with pytest.raises(EvalTransientError, match="judge"):
-        _runner(tmp_path, rows=rows, store=store).evaluate_scored(_items("i1", "i2"), "run-1", 1)
+        _runner(tmp_path, rows=rows, store=store).evaluate_scored(_items("i1", "i2"), "cand-run-1", 1)
 
 
 def test_too_many_empty_samples_is_transient_and_at_the_threshold_passes(tmp_path):
@@ -233,7 +237,7 @@ def test_too_many_empty_samples_is_transient_and_at_the_threshold_passes(tmp_pat
     _candidate(store)
     rows = [_row("i1", False, "content_none")] + [_row(f"f{n}") for n in range(99)]
     runner = _runner(tmp_path, rows=rows, store=store)
-    assert runner.evaluate_scored(_items("i1"), "run-1", 1)["i1"][0].score == 0
+    assert runner.evaluate_scored(_items("i1"), "cand-run-1", 1)["i1"][0].score == 0
 
 
 def test_a_nonzero_subprocess_is_transient(tmp_path):
@@ -241,7 +245,7 @@ def test_a_nonzero_subprocess_is_transient(tmp_path):
     _candidate(store)
     run = FakeRun(tmp_path, rows=[], returncode=3)
     with pytest.raises(EvalTransientError, match="code 3"):
-        _runner(tmp_path, rows=[], store=store, run=run).evaluate_scored(_items("i1"), "run-1", 1)
+        _runner(tmp_path, rows=[], store=store, run=run).evaluate_scored(_items("i1"), "cand-run-1", 1)
 
 
 def test_a_mismatched_result_directory_is_deterministic(tmp_path):
@@ -261,7 +265,7 @@ def test_a_mismatched_result_directory_is_deterministic(tmp_path):
 
     runner.run = rewrite_config
     with pytest.raises(EvalOutputError, match="different experiment"):
-        runner.evaluate_scored(_items("i1"), "run-1", 1)
+        runner.evaluate_scored(_items("i1"), "cand-run-1", 1)
 
 
 def test_a_leaked_credential_deletes_the_work_directory_and_is_not_deferred(tmp_path):
@@ -278,7 +282,7 @@ def test_a_leaked_credential_deletes_the_work_directory_and_is_not_deferred(tmp_
 
     runner.run = run_with_leak
     with pytest.raises(EvalSecretLeakError, match="leak.txt") as caught:
-        runner.evaluate_scored(_items("i1"), "run-1", 1)
+        runner.evaluate_scored(_items("i1"), "cand-run-1", 1)
     assert SECRET not in str(caught.value)
     assert not (tmp_path / "work" / "run-1" / STAMP).exists()
 
@@ -288,7 +292,7 @@ def test_k_other_than_one_is_refused_before_anything_runs(tmp_path):
     _candidate(store)
     trace = []
     with pytest.raises(Exception, match="repeats at 1"):
-        _runner(tmp_path, rows=[], store=store, trace=trace).evaluate_scored(_items("i1"), "run-1", 2)
+        _runner(tmp_path, rows=[], store=store, trace=trace).evaluate_scored(_items("i1"), "cand-run-1", 2)
     assert trace == []
 
 
@@ -297,7 +301,7 @@ def test_the_someval_stats_are_recorded(tmp_path):
     _candidate(store)
     rows = [_row("i1"), _row("i1", False, "extraction_failed", "")]
     runner = _runner(tmp_path, rows=rows, store=store)
-    runner.evaluate_scored(_items("i1"), "run-1", 1)
+    runner.evaluate_scored(_items("i1"), "cand-run-1", 1)
     result_dir = next((tmp_path / "work" / "run-1" / STAMP / "results" / "SoMBench" / "forge").glob("exp_*"))
     _, stats = runner._read_outcomes(result_dir, _items("i1"))
     assert stats["protocol"] == "cot" and stats["samples"] == 2
@@ -325,7 +329,7 @@ def test_a_failing_subprocess_never_puts_raw_stderr_in_the_reason(tmp_path):
 
     runner = _runner(tmp_path, rows=[], store=store, run=run_with_secret)
     with pytest.raises(EvalTransientError) as caught:
-        runner.evaluate_scored(_items("i1"), "run-1", 1)
+        runner.evaluate_scored(_items("i1"), "cand-run-1", 1)
     message = str(caught.value)
     assert SECRET not in message
     assert "someval-predict.stderr.log" in message and "code 3" in message
@@ -368,8 +372,9 @@ def test_without_a_tunnel_factory_the_runner_builds_an_ssh_tunnel_from_the_clien
         serve=capture_serve, now=lambda: __import__("datetime").datetime(2026, 10, 19, 12, 0, 0),
         commit_of=lambda root: "x",
     )
+    runner.bind("run-1")
     with pytest.raises(ComputeError, match="stop here"):
-        runner.evaluate_scored(_items("i1"), "run-1", 1)
+        runner.evaluate_scored(_items("i1"), "cand-run-1", 1)
     assert isinstance(seen["tunnel"], SshTunnel)
 
 
@@ -388,5 +393,21 @@ def test_the_serving_key_is_also_scanned_for(tmp_path):
 
     runner.run = run_with_leak
     with pytest.raises(EvalSecretLeakError, match="dump.txt") as caught:
-        runner.evaluate_scored(_items("i1"), "run-1", 1)
+        runner.evaluate_scored(_items("i1"), "cand-run-1", 1)
     assert FakeHandle.api_key not in str(caught.value)
+
+
+def test_an_unbound_runner_refuses_before_anything_runs(tmp_path):
+    store = _store(tmp_path)
+    _candidate(store)
+    runner = _runner(tmp_path, rows=[_row("i1")], store=store)
+    runner._bound_run = None
+    with pytest.raises(CandidateUnusableError, match="not bound"):
+        runner.evaluate_scored(_items("i1"), "cand-run-1", 1)
+
+
+def test_a_candidate_id_that_does_not_match_the_run_is_refused(tmp_path):
+    store = _store(tmp_path)
+    _candidate(store)
+    with pytest.raises(CandidateUnusableError, match="holds candidate"):
+        _runner(tmp_path, rows=[_row("i1")], store=store).evaluate_scored(_items("i1"), "cand-run-7", 1)

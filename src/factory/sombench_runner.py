@@ -86,6 +86,13 @@ class SomevalRunner:
     commit_of: Callable[[Path], str] | None = None
     _last_stats: dict | None = field(default=None, init=False, repr=False)
     _scan_keys: set = field(default_factory=set, init=False, repr=False)
+    _bound_run: str | None = field(default=None, init=False, repr=False)
+
+    def bind(self, run_id: str) -> None:
+        """评估器在调用编排器之前告诉运行器这次评的是哪个 run。
+
+        协议只传候选 id,而候选文件按 run 存放:候选 id 与 run id 不是同一个东西。"""
+        self._bound_run = run_id
 
     def evaluate(
         self, items: list[DiagnosticItem], candidate_ref: str, k: int
@@ -101,7 +108,7 @@ class SomevalRunner:
             )
         ref = self._export_ref(candidate_ref)
         self._scan_keys = set()
-        run_root = self.cfg.work_root / candidate_ref / self.now().strftime("%Y%m%d-%H%M%S")
+        run_root = self.cfg.work_root / self._bound_run / self.now().strftime("%Y%m%d-%H%M%S")
         run_root.mkdir(parents=True, exist_ok=False)
         try:
             with self._served(ref) as handle:
@@ -124,10 +131,18 @@ class SomevalRunner:
     # ---------- 候选 ----------
 
     def _export_ref(self, candidate_ref: str) -> BigRef:
-        rel = candidate_checkpoint_file(candidate_ref)
+        run_id = self._bound_run
+        if run_id is None:
+            raise CandidateUnusableError("the runner was not bound to a run before evaluation")
+        rel = candidate_checkpoint_file(run_id)
         if not self.store.exists(rel):
-            raise CandidateUnusableError(f"there is no candidate checkpoint for {candidate_ref!r}")
-        payload = self.store.read_product(rel).payload
+            raise CandidateUnusableError(f"there is no candidate checkpoint in run {run_id!r}")
+        envelope = self.store.read_product(rel)
+        if envelope.id != candidate_ref:
+            raise CandidateUnusableError(
+                f"run {run_id!r} holds candidate {envelope.id!r}, not {candidate_ref!r}"
+            )
+        payload = envelope.payload
         raw = payload.get("checkpoint_ref")
         if not isinstance(raw, dict):
             raise CandidateUnusableError("the candidate checkpoint carries no checkpoint_ref")

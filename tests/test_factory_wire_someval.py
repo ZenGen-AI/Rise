@@ -150,3 +150,94 @@ def test_the_default_path_is_unchanged(tmp_path):
     store = _repo(tmp_path)
     asm = assemble(store, FactoryOptions(), env={})
     assert asm.evaluator is None and asm.executor_factory is None
+
+
+# ---------------- 守护进程真实路径:reconcile_once 产生 request_diagnostic,真实评估器接住 ----------------
+
+def _pending_candidate(store, run_id="run-1", *, fmt="qwen4_exp_vllm_2d"):
+    from controlplane.envelope import CURRENT_SCHEMA_VERSION, BigRef
+    from controlplane.paths import candidate_checkpoint_file
+
+    ref = BigRef(uri=f"ssh://gpu-1/work/exports/{run_id}", sha256="a" * 64, size_bytes=0,
+                 fetch_hint={"type": "roll_ssh", "format": fmt})
+    store.write_product(candidate_checkpoint_file(run_id), Envelope(
+        id=f"cand-{run_id}", type="candidate_checkpoint", version=1, created_at="2026-10-19T00:00:00Z",
+        created_by=OwnerRef(), status="pending_review", schema_version=CURRENT_SCHEMA_VERSION,
+        links=[run_id], payload={"checkpoint_ref": ref.to_dict()}), "candidate")
+
+
+class _ScriptedRunner:
+    """运行器替身:记录 bind 与候选 id,按脚本返回或抛错。"""
+
+    def __init__(self, behaviour):
+        self.behaviour, self.bound, self.asked = behaviour, None, None
+
+    def bind(self, run_id):
+        self.bound = run_id
+
+    def evaluate(self, items, candidate_ref, k):
+        raise AssertionError("not used")
+
+    def evaluate_scored(self, items, candidate_ref, k):
+        from diagnostic.datamodel import SampleOutcome
+
+        self.asked = candidate_ref
+        if isinstance(self.behaviour, Exception):
+            raise self.behaviour
+        return {item.id: [SampleOutcome(1, "A", None)] for item in items}
+
+    def last_stats(self):
+        return {"protocol": "cot", "samples": 1}
+
+
+def _evaluator_with(store, digest, runner):
+    from factory.evaluation import _someval_evaluator, read_evaluator_config
+
+    _install_sombench_assets(store, digest)
+    return _someval_evaluator(store=store, runner=runner, cfg=read_evaluator_config(store))
+
+
+def test_the_daemon_path_binds_the_run_and_passes_the_candidate_id(tmp_path):
+    from controlplane.daemon import reconcile_once
+
+    store = _repo(tmp_path)
+    _, digest = _env(tmp_path)
+    _pending_candidate(store)
+    runner = _ScriptedRunner(None)
+    kinds = [a.kind for a in reconcile_once(store, evaluator=_evaluator_with(store, digest, runner))]
+    assert kinds == ["request_diagnostic"]
+    assert runner.bound == "run-1" and runner.asked == "cand-run-1"
+    payload = store.read_product("control-plane/runs/run-1/diagnostic_report.yaml").payload
+    assert payload["backends"] == "real" and payload["someval"] == {"protocol": "cot", "samples": 1}
+    # 有了报告,下一轮就只等人审
+    assert [a.kind for a in reconcile_once(store, evaluator=_evaluator_with(store, digest, runner))] == ["await_review"]
+
+
+def test_a_deterministic_failure_writes_a_stub_report_and_the_action_completes(tmp_path):
+    from controlplane.daemon import reconcile_once
+    from controlplane.evidence import diagnostic_grade
+    from factory.sombench_runner import CandidateUnusableError
+
+    store = _repo(tmp_path)
+    _, digest = _env(tmp_path)
+    _pending_candidate(store)
+    runner = _ScriptedRunner(CandidateUnusableError("the candidate is not a real adapter export"))
+    reconcile_once(store, evaluator=_evaluator_with(store, digest, runner))
+    payload = store.read_product("control-plane/runs/run-1/diagnostic_report.yaml").payload
+    assert payload["stub"] is True and diagnostic_grade(payload) == "stub"
+    assert "not a real adapter export" in payload["failure_reason"]
+    # 不再触发评测
+    assert [a.kind for a in reconcile_once(store, evaluator=_evaluator_with(store, digest, runner))] == ["await_review"]
+
+
+def test_a_transient_failure_writes_nothing_and_is_retried(tmp_path):
+    from controlplane.daemon import DeferralBook, reconcile_once
+    from factory.sombench_runner import EvalTransientError
+
+    store = _repo(tmp_path)
+    _, digest = _env(tmp_path)
+    _pending_candidate(store)
+    runner = _ScriptedRunner(EvalTransientError("judge down"))
+    book = DeferralBook()
+    reconcile_once(store, evaluator=_evaluator_with(store, digest, runner), deferrals=book)
+    assert not store.exists("control-plane/runs/run-1/diagnostic_report.yaml")
