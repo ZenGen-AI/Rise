@@ -21,7 +21,7 @@
 | 子系统 | 职责 | 所在层 | 现状 |
 |---|---|---|---|
 | ControlPlane | 协调层:git 版本化产物树、状态机、调和循环、三个审核门 | 控制层 | 核心 [已落地],闭环扩展 [计划中] |
-| SocialSimulator | 情境与人格生成、多智能体仿真、实时环境服务、诊断评测 | 计算层 | [已落地],诊断用 mock 后端;vLLM 加 SoMEval 的真实运行器 [计划中] |
+| SocialSimulator | 情境与人格生成、多智能体仿真、实时环境服务、诊断评测 | 计算层 | [已落地];诊断默认用 mock 后端,`--evaluator someval` 装配 vLLM 加 SoMEval 的真实运行器 [已落地],真机只验证到预测阶段 |
 | MindTrainer | 权重级训练:BatchTrain(SFT 后接 GRPO 加 OPD)与 InteractTrain | 计算层 | [已落地],默认入口的训练执行器是 mock;ROLL LoRA SFT 真实执行器 [已落地],由 `--executor roll` 装配,已在真实主机上端到端跑通一次 |
 | MindAgent | 部署态智能体的技能与记忆自进化,不改权重 | 计算层 | [计划中] |
 | RecipeStore | 验证有效的训练配方的版本化仓库 | 控制层 | [计划中] |
@@ -119,7 +119,7 @@ factory 是组合根:系统里唯一知道所有包的地方。它把各子系�
 | 非目标 | 状态 | V1 的处理 |
 |---|---|---|
 | 真实 GRPO 加 OPD 训练、真实 judge | [推迟] | 仍用 mock |
-| 真实 SoMEval、真实 vLLM(经远端计算层) | [计划中] | 今天诊断用 mock 后端,MindAgent 用罐头后端;开关形状同下,实施时定 |
+| 真实 SoMEval、真实 vLLM(经远端计算层) | [已落地] | 由 `--evaluator someval` 显式启用(FC-16),默认仍是 mock 后端;真机只验证到预测阶段。MindAgent 仍用罐头后端 |
 | 真实 ROLL LoRA SFT(经远端计算层) | [已落地] | 由 `--executor roll` 显式启用(FC-15);默认仍是 mock 执行器。装配与配置错误路径有测试;已在真实主机上从训练指令端到端跑到待审候选一次,只覆盖单段两步 |
 | 桥接的 API 形态 | [推迟] | `invocation_form` 不是 `cli` 时装配报错 |
 | 运行中热加载配置 | [推迟] | 改 `evaluator.yaml`、`backends.yaml`、`agent.yaml` 要重启 |
@@ -185,11 +185,11 @@ factory 是组合根:系统里唯一知道所有包的地方。它把各子系�
 | `factory.cli` | argparse 子命令、开关、退出码、`main`、`dev_main` | `factory.wire`、`factory.readonly` | [已落地] |
 | `factory.readonly` | `trace`、`cost`(即观测函数)、`collect_log_refs`、`render_logs` | `controlplane.observe` | [已落地] |
 | `factory.bridges` | `BRIDGE_ROLES`、`build_bridge` | `inference_bridge`、`controlplane.config` | [已落地] |
-| `factory.evaluation` | `EVALUATOR_CONFIG`、`read_evaluator_config`、`build_mock_evaluator`;真实 SoMEval 运行器与污染准入检查的装配 [计划中] | `diagnostic`;真实运行器另加 `compute` | [已落地],真实部分 [计划中] |
+| `factory.evaluation` | `EVALUATOR_CONFIG`、`read_evaluator_config`、`build_mock_evaluator`;真实 SoMEval 运行器与污染准入检查的装配 | `diagnostic`;真实运行器另加 `compute` | [已落地] |
 | `factory.handlers` | `DEFAULT_BUILDERS`、`scheduler_config_loader` | `recipestore`、`trainscheduler`、`trainplanner`、`mindagent` | [已落地] |
 | `factory.agent` | `agent.yaml` 读取、`AgentRuntime`、`DeadlineStub`、`CannedGuidedBackend` | `mindagent`、`simulator.realtime` | [已落地] |
 | `factory.defaults` | 默认诊断资产、评估器配置、部署素材、`install_defaults` | `diagnostic`、`simulator`、`trainplanner`、`trainscheduler` | [已落地] |
-| `factory.sombench` | `import-sombench` 子命令:读 SoMEval 检出目录里的 parquet,写分类表、题库与污染索引;镜像 `run_someval` 子命令。索引模块与可选依赖组都在施工时新增 [计划中] | `diagnostic.assets`,以及施工时新增的索引模块 [计划中] | [计划中] |
+| `factory.sombench` | `import-sombench` 子命令:读 SoMEval 检出目录里的 parquet,写分类表、题库与污染索引;pyarrow 放在可选依赖组 `sombench` | `diagnostic.assets`、`diagnostic.contamination` | [已落地] |
 | `factory.compute_config` | 读树内 `compute/endpoints.yaml` 出 `ComputeEndpoint` 列表,读本机主机映射出 `ComputeClient`;缺文件、键缺失或多余、取值不合、映射里查不到 `endpoint_id` 一律 `FactoryConfigError`,退出码 2,只写键名与路径,不回显取值 | `compute`、`factory.configio` | [已落地] |
 
 两个入口脚本 `scripts/run_factory.py` 与 `scripts/run_factory_dev.py` 都是 `factory.cli` 的薄壳 [计划中]。前者默认不接受 mock 证据,后者对 `run`、`reconcile` 自动加 `--allow-mock-evidence`。
@@ -267,13 +267,13 @@ factory 是组合根:系统里唯一知道所有包的地方。它把各子系�
 | 调度配置与训练默认值 | `config/scheduler.yaml`、`config/training_defaults.yaml` | 配置信封 | `install-defaults`,之后由人改 | [计划中] |
 | 默认部署情境与人格 | `scenarios/` 下 `factory-deploy-s1` 至 `s3`,`personas/` 下两个人格 | 情境与人格产物 | `install-defaults` | [计划中] |
 | 桥接配置 | `config/backends.yaml` | 配置信封 | 人 | 路径函数 [已落地],角色形状 [计划中] |
-| 默认分类表与题库 | `diagnostics/` 下 `factory-tax-v1`、`factory-pool-v1`;SoMBench 导入的 `sombench-<哈希前缀>` [计划中] | 登记即 `effective` | `install-defaults`;`import-sombench` [计划中] | 默认 [已落地],SoMBench [计划中] |
-| 本机评测配置 | 树外,路径由环境变量 `RISMFORGE_EVAL_CONFIG` 给出,权限 0600 | 无;不进树 | 人 | [计划中] |
+| 默认分类表与题库 | `diagnostics/` 下 `factory-tax-v1`、`factory-pool-v1`;SoMBench 导入的 `sombench-<哈希前缀>` | 登记即 `effective` | `install-defaults`;`import-sombench` | 默认 [已落地],SoMBench [计划中] |
+| 本机评测配置 | 树外,路径由环境变量 `RISMFORGE_EVAL_CONFIG` 给出,权限 0600 | 无;不进树 | 人 | [已落地] |
 | 候选 checkpoint | `runs/<run>/candidate_checkpoint.yaml` | 需审核 | 命令行改 `approved` 或 `rejected` | [已落地] |
 | 配方候选、技能提案 | `recipe_candidates/`、`skill_memory_proposals/` | 需审核 | 命令行改状态 | [计划中] |
 | 训练指令 | `runs/<run>/directive.yaml` | 非审核 | `confirm` 改 `pending` | [计划中] |
 
-`evaluator.yaml` 的载荷恰好五个键,`backends` 不可配置,恒为 `mock` [计划中]:
+`evaluator.yaml` 的载荷恰好五个键,`backends` 不可配置:mock 评估器恒为 `mock`,`--evaluator someval` 恒为 `real`:
 
 ```yaml
 taxonomy_version: factory-tax-v1
@@ -373,9 +373,9 @@ TypeScript 命令行:`rismforge <review|approve|reject|status> [id] [reason]` [�
 
 | 邻居 | 本文依赖它什么 | 它依赖本文什么 |
 |---|---|---|
-| ControlPlane | `run_daemon`、`reconcile_once` 接受 `dispatcher`;闭环模式还接受 `handlers`、`evaluator`、`accept_mock_evidence` [计划中] | 有人注入处理器,闭环动作才会产生(R2) |
+| ControlPlane | `run_daemon`、`reconcile_once` 接受 `dispatcher`;闭环模式还接受 `handlers`、`evaluator`、`accept_mock_evidence`;非闭环的 `--evaluator someval` 也传 `evaluator` | 有人注入处理器,闭环动作才会产生(R2) |
 | MindTrainer | `make_mindtrainer_dispatcher()`;闭环模式传 `data_producer` [计划中] | 无 |
-| 诊断评测 | `make_diagnostic_evaluator` 与资产读写 [计划中] | 无 |
+| 诊断评测 | `make_diagnostic_evaluator` 与资产读写;`ScoredSoMEvalRunner` 协议、`write_failure_report` | 无 |
 | TrainScheduler | `make_plan_handler`、`make_nominate_handler`、`install_default_configs` [计划中] | 传入 `accept_mock_evidence`、`repo_commit` 与带覆盖的 loader |
 | TrainPlanner | `install_default_template`、`BridgeDecisionBackend`、`HeuristicBackend` [计划中] | 选后端、安装默认模板由本文负责 |
 | SocialSimulator | `create_server`、`EnvironmentServiceClient`、`read_persona`、`read_scenario`、`write_persona`、`write_scenario` | 无 |
@@ -431,9 +431,9 @@ TypeScript 命令行:`rismforge <review|approve|reject|status> [id] [reason]` [�
 | 1 | 解析 `--enable`,经 `ENABLE_MAP` 得到处理器键 | 未知开关或空项,退出码 2 |
 | 2 | 处理器键为空:只构造 `make_mindtrainer_dispatcher()`,调 `run_daemon` 时只传派发器 | 无 |
 | 3 | 读 `evaluator.yaml`,要求恰好五个键 | `FactoryConfigError`,退出码 2 |
-| 4 | 校验分类表与题库在树里,构造 mock 评估器;`--evaluator someval` 时改为校验本机评测配置与 SoMEval 检出目录,构造真实运行器与真实评估器 | 同上;凭证只写键名,不回显取值 [计划中] |
+| 4 | 校验分类表与题库在树里,构造 mock 评估器;`--evaluator someval` 时改为校验本机评测配置与 SoMEval 检出目录,构造真实运行器与真实评估器 | 同上;凭证只写键名,不回显取值 |
 | 4a | `--executor roll` 时:读 `compute/endpoints.yaml` 与本机主机映射,选定端点,造 `ComputeClient`,再造执行器工厂与转换器 [已落地] | `FactoryConfigError`,退出码 2;缺文件、键缺失或多余、映射里查不到端点、别名形态不合、`--endpoint` 点名了不存在的端点、有多个端点却没点名,全在第一个 tick 之前报 |
-| 4b | `--executor roll` 时:读污染索引,校验数据集哈希,把准入检查注入执行器;`--evaluator someval` 时另把真实运行器注入评估器 [计划中] | `FactoryConfigError`,退出码 2;索引缺失、哈希对不上、stub 前端断言失败 |
+| 4b | `--executor roll` 时:读污染索引,校验数据集哈希,把准入检查注入执行器;`--evaluator someval` 时另把真实运行器注入评估器 | `FactoryConfigError`,退出码 2;索引缺失、哈希对不上、stub 前端断言失败 |
 | 5 | 按 `DEFAULT_BUILDERS` 逐个构造处理器,需要时经 `build_bridge(store, role, *, env=None, log_dir=None)` 建桥接、读凭证、读 `agent.yaml`。`planner` 角色只在 `--planner-backend bridge` 时必需,`agent` 角色可选,缺了就不建桥接,提案生成回到规则模板 [计划中] | 同上;已登记的收尾函数逆序调用 |
 | 6 | 注入派发器(带数据生产器)、处理器、评估器、证据开关,启动调和循环 | 运行中的异常原样上抛,进程退出 |
 
@@ -607,7 +607,7 @@ factory 是最后一个工作包,前八个全部落地后才能施工。
 | 开关与边界 | 映射表;无包导入 factory | 无 | `tests/test_factory_switches.py`、`tests/test_factory_boundaries.py` | 17、2 [计划中] |
 | 只读 | `trace`、`cost`、`logs` | 临时仓库 | `tests/test_factory_readonly.py` | 10 [计划中] |
 | 桥接装配 | 角色、凭证不外露 | `sys.executable -c` 假可执行体 | `tests/test_factory_bridges.py` | 14 [计划中] |
-| 评估器装配 | 配置校验、默认资产 | `MockSoMEvalRunner`、`MockJudgeBackend` | `tests/test_factory_evaluation.py` | 12 [计划中] |
+| 评估器装配 | 配置校验、默认资产 | `MockSoMEvalRunner`、`MockJudgeBackend` | `tests/test_factory_evaluation.py` | 12 |
 | 组合根与命令行 | 逐字节相同、注入、装配错误、退出码、仓库锁被占用时的退出与只读照常 | 记录调用的假处理器 | `tests/test_factory_wire.py`、`tests/test_factory_cli.py` | 18、9 [计划中] |
 | 端到端框架 | 空闭环一个 tick、mock 证据默认不转 | 假处理器 | `tests/test_factory_e2e_frame.py` | 4 [计划中] |
 | 处理器构造 | 六个构造器、证据开关单一来源、Interact 流超时 | 罐头后端 | `tests/test_factory_handlers.py` | 18 [计划中] |
