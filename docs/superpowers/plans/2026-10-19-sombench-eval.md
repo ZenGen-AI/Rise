@@ -387,3 +387,8 @@ python3 tools/sync_docs.py && python3 tools/check_docs.py && python3 tools/check
 - [ ] **Step 3:** 带与不带 `--reasoning-parser` 各跑一批 Q4,比较裁判分数(设计 21 的未核实项)。
 - [ ] **Step 4:** 用已有的 episode 跑一遍准入检查,统计误命中率(设计 21 的未核实项)。
 - [ ] **Step 5:** 把实测数字回填设计 21 的「未核实项」与「已知局限」两表,把新增的发现写进去。
+
+## 实施记录(施工时补)
+
+- Task 7 的 `SomevalRunner` 增加 `last_stats()`:评估器把最近一次评测的统计写进报告载荷的 `someval` 块。
+- Task 8 的装配:真实 SoMEval 评测只允许 `tier: full`、`sampling_k: 1`;其它取值在装配期拒绝。

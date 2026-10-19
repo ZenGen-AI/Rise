@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Mapping
+from pathlib import Path
 
 from controlplane.gitstore import GitStore
 from controlplane.lock import RepoLockedError
@@ -23,7 +24,8 @@ from controlplane.paths import run_dir
 from factory import readonly
 from factory.errors import FactoryConfigError
 from factory.switches import SWITCHES, UnknownSwitchError, parse_enable
-from factory.wire import EXECUTORS, PLANNER_BACKENDS, FactoryOptions, HandlerBuilder, reconcile_one_tick, run
+from factory.wire import (EVALUATORS, EXECUTORS, PLANNER_BACKENDS, FactoryOptions, HandlerBuilder,
+                          reconcile_one_tick, run)
 
 
 def _assembly_flags(p: argparse.ArgumentParser) -> None:
@@ -44,6 +46,9 @@ def _assembly_flags(p: argparse.ArgumentParser) -> None:
                         "一次训练会同步占住调和循环数小时,且暂不能与 --enable 同用")
     p.add_argument("--endpoint", default=None,
                    help="只在 --executor roll 时有意义:点名 compute/endpoints.yaml 里的端点 id;只有一个端点时可省")
+    p.add_argument("--evaluator", choices=EVALUATORS, default="mock",
+                   help="诊断评估器:mock 是确定性替身(默认);someval 起 vLLM 服务并用 SoMEval 评测真实候选,"
+                        "必须同时给 --executor roll,且暂不能与 --enable 同用")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -61,6 +66,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_def = sub.add_parser("install-defaults", help="写入闭环模式的默认诊断资产、评估器配置与提示模板")
     p_def.add_argument("repo_root")
+
+    p_imp = sub.add_parser("import-sombench", help="把 SoMEval 检出目录里的 SoMBench 导入成树内资产与树外污染索引")
+    p_imp.add_argument("repo_root")
+    p_imp.add_argument("--someval-root", required=True, help="SoMEval 检出目录")
+    p_imp.add_argument("--index", required=True, help="污染索引写到哪个树外路径")
 
     for name, text in (("trace", "打印一轮的全链路产物"), ("cost", "打印一轮的成本明细与汇总")):
         p = sub.add_parser(name, help=text)
@@ -83,6 +93,7 @@ def _options(args: argparse.Namespace) -> FactoryOptions:
         repo_commit=args.repo_commit,
         executor=args.executor,
         endpoint=args.endpoint,
+        evaluator=getattr(args, "evaluator", "mock"),
     )
 
 
@@ -106,6 +117,19 @@ def main(
                 print("no actions")
             return 0
         store = GitStore(args.repo_root)
+        if args.command == "import-sombench":
+            from factory.sombench import import_sombench
+
+            try:
+                result = import_sombench(store, someval_root=Path(args.someval_root),
+                                         index_path=Path(args.index))
+            except FactoryConfigError as exc:
+                print(f"factory: error: {exc}", file=sys.stderr)
+                return 2
+            print(f"taxonomy {result.taxonomy_version} items {result.items} "
+                  f"families {result.families} windows {result.windows}")
+            print(result.index_path)
+            return 0
         if args.command == "install-defaults":
             from factory.defaults import install_defaults  # 惰性导入:它拖进 grpc 与计划 4、5、7 的包(Ruling 16)
             for rel in install_defaults(store):

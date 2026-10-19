@@ -76,6 +76,7 @@ class SomevalRunner:
     run: Callable[..., subprocess.CompletedProcess] = subprocess.run
     now: Callable[[], datetime] = datetime.now
     commit_of: Callable[[Path], str] | None = None
+    _last_stats: dict | None = field(default=None, init=False, repr=False)
 
     def evaluate(
         self, items: list[DiagnosticItem], candidate_ref: str, k: int
@@ -98,10 +99,17 @@ class SomevalRunner:
             # 先扫凭证再解读结果:可疑文件不留在盘上,也不让它的内容进入任何异常信息。
             self._scan_for_secrets(run_root)
             outcomes, stats = self._read_outcomes(run_root, items)
+            self._last_stats = stats
             return outcomes
         except EvalSecretLeakError:
             shutil.rmtree(run_root, ignore_errors=True)
             raise
+
+    def last_stats(self) -> dict | None:
+        """最近一次评测的统计(协议、样本数、各类错误计数、数据集哈希与 SoMEval 提交)。
+
+        只作记录,写进报告载荷的 someval 块,不参与判级。"""
+        return None if self._last_stats is None else dict(self._last_stats)
 
     # ---------- 候选 ----------
 

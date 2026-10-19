@@ -12,7 +12,7 @@ from collections.abc import Callable
 from controlplane.gitstore import GitStore
 from controlplane.paths import CONTROL_PLANE_ROOT
 from diagnostic.assets import DiagnosticAssetError, read_item_pool, read_taxonomy
-from diagnostic.evaluator import make_diagnostic_evaluator
+from diagnostic.evaluator import make_diagnostic_evaluator, resolve_baseline
 from diagnostic.scorer import MockJudgeBackend
 from diagnostic.someval_adapter import MockSoMEvalRunner
 from factory.configio import key_names, read_tree_config
@@ -88,3 +88,33 @@ def build_mock_evaluator(store: GitStore) -> Evaluator:
         sampling_k=cfg["sampling_k"],
         backends="mock",
     )
+
+
+def _someval_evaluator(*, store: GitStore, runner, cfg: dict):
+    """真实评估器(设计 FC-16、DX-22):评估器每次仍从树里读资产与基线。
+
+    静态轨全部是 SoMEval 判好的题,动态 spec 为空,judge 后端不被调用,所以报告的
+    backends 写 real;component_backends 记下每个组件的真实身份,只作记录不参与判级。
+    成功时把运行器留下的 someval 统计写进报告载荷(只作记录)。
+    """
+    from diagnostic.orchestrator import DiagnosticConfig, run_diagnostic
+
+
+    def evaluate(store: GitStore, run_id: str, candidate_id: str) -> None:
+        taxonomy = read_taxonomy(store, cfg["taxonomy_version"])
+        pool = read_item_pool(store, cfg["item_pool_version"])
+        baseline_ref, baseline_scores = resolve_baseline(
+            store, run_id, cfg["benchmark_version"], backends="real")
+        config = DiagnosticConfig(
+            run_id=run_id, candidate_ref=candidate_id, candidate_model_id=candidate_id,
+            baseline_ref=baseline_ref, tier=cfg["tier"], sampling_k=cfg["sampling_k"],
+            benchmark_version=cfg["benchmark_version"],
+        )
+        stats = runner.last_stats()
+        run_diagnostic(
+            config, taxonomy, pool, runner, MockJudgeBackend(MOCK_JUDGE_ID, {}), store,
+            baseline_scores=baseline_scores, dynamic_specs=[], backends="real",
+            someval=stats,
+        )
+
+    return evaluate

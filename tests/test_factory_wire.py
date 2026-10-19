@@ -244,6 +244,37 @@ def _hosts(tmp_path, text):
     return {"RISMFORGE_COMPUTE_HOSTS": str(path)}
 
 
+def _eval_env(tmp_path):
+    """真训练路径现在还要本机评测配置(污染索引与 SoMBench 数据集)。
+
+    SoMBench 的哈希在资产版本里,而这里不导入真实数据集,所以版本由同一个桩数据集算出:
+    写一个小 parquet 替身,装配期算出的哈希与它一致。"""
+    import os
+
+    from diagnostic.contamination import build_index
+    from factory.sombench import file_sha256, sombench_parquet
+
+    root = tmp_path / "SoMEval"
+    parquet = sombench_parquet(root)
+    parquet.parent.mkdir(parents=True, exist_ok=True)
+    parquet.write_bytes(b"stub parquet for the assembly tests")
+    digest = file_sha256(parquet)
+    index = tmp_path / "sombench.idx"
+    index.write_bytes(build_index(["教学情境里的普通一句话，与评测无关。"], digest))
+    config = tmp_path / "eval.yaml"
+    config.write_text(
+        f"someval_root: {root}\n"
+        f"someval_python: {root}/.venv/bin/python\n"
+        f"work_root: {tmp_path / 'work'}\n"
+        f"index_path: {index}\n"
+        "judge_base_url: https://judge.example/v1\n"
+        "judge_api_key: sk-test\n",
+        encoding="utf-8",
+    )
+    os.chmod(config, 0o600)
+    return {"RISMFORGE_EVAL_CONFIG": str(config)}
+
+
 @pytest.fixture
 def real_repo(tmp_path):
     s = GitStore(str(tmp_path / "cp"))
@@ -267,7 +298,7 @@ def test_roll_assembles_a_dispatcher_whose_factory_builds_a_roll_executor(real_r
     from mindtrainer.roll_executor import RollExecutor
 
     _write_endpoints(real_repo, "gpu-1")
-    asm = assemble(real_repo, FactoryOptions(executor="roll"), env=_hosts(tmp_path, "gpu-1: gpu-181\n"))
+    asm = assemble(real_repo, FactoryOptions(executor="roll"), env=_hosts(tmp_path, "gpu-1: gpu-181\n") | _eval_env(tmp_path))
     assert asm.executor_factory is not None
     built = asm.executor_factory("run-007")
     assert isinstance(built, RollExecutor)
@@ -278,13 +309,13 @@ def test_roll_pairs_the_executor_with_the_adapter_converter(real_repo, tmp_path)
     from mindtrainer.roll_converter import RollLoraConverter
 
     _write_endpoints(real_repo, "gpu-1")
-    asm = assemble(real_repo, FactoryOptions(executor="roll"), env=_hosts(tmp_path, "gpu-1: gpu-181\n"))
+    asm = assemble(real_repo, FactoryOptions(executor="roll"), env=_hosts(tmp_path, "gpu-1: gpu-181\n") | _eval_env(tmp_path))
     assert isinstance(asm.converter, RollLoraConverter)
 
 
 def test_roll_picks_the_named_endpoint(real_repo, tmp_path):
     _write_endpoints(real_repo, "gpu-1", "gpu-2")
-    env = _hosts(tmp_path, "gpu-1: gpu-181\ngpu-2: gpu-182\n")
+    env = _hosts(tmp_path, "gpu-1: gpu-181\ngpu-2: gpu-182\n") | _eval_env(tmp_path)
     asm = assemble(real_repo, FactoryOptions(executor="roll", endpoint="gpu-2"), env=env)
     assert asm.executor_factory("r").endpoint.endpoint_id == "gpu-2"
 
@@ -294,7 +325,7 @@ def test_roll_misconfiguration_fails_at_assembly_not_at_the_first_tick(real_repo
     """设计 4a:这些全在第一个 tick 之前报 FactoryConfigError,树里一个字节都不写。"""
     from factory.errors import FactoryConfigError
 
-    env = _hosts(tmp_path, "gpu-1: gpu-181\n")
+    env = _hosts(tmp_path, "gpu-1: gpu-181\n") | _eval_env(tmp_path)
     opts = FactoryOptions(executor="roll")
     if what == "no_endpoints_file":
         pass
@@ -323,7 +354,7 @@ def test_roll_and_a_closed_loop_switch_are_mutually_exclusive(real_repo, tmp_pat
     _write_endpoints(real_repo, "gpu-1")
     with pytest.raises(FactoryConfigError, match=r"--executor roll.*--enable"):
         assemble(real_repo, FactoryOptions(executor="roll", switches=("plan",)),
-                 env=_hosts(tmp_path, "gpu-1: gpu-181\n"))
+                 env=_hosts(tmp_path, "gpu-1: gpu-181\n") | _eval_env(tmp_path))
 
 
 def test_an_endpoint_name_without_roll_is_a_usage_error(real_repo):
@@ -372,7 +403,7 @@ def test_roll_without_endpoints_config_exits_2_with_one_line_and_writes_nothing(
 def test_roll_with_enable_exits_2(real_repo, tmp_path, capsys):
     _write_endpoints(real_repo, "gpu-1")
     code = main(["run", str(real_repo.repo_root), "--executor", "roll", "--enable", "plan", "--max-ticks", "1"],
-                env=_hosts(tmp_path, "gpu-1: gpu-181\n"))
+                env=_hosts(tmp_path, "gpu-1: gpu-181\n") | _eval_env(tmp_path))
     assert code == 2
     assert "cannot be combined" in capsys.readouterr().err
 
@@ -386,7 +417,7 @@ def test_the_assembled_dispatcher_calls_its_factory_with_the_directive_id(real_r
     from mindtrainer import roll_executor
 
     _write_endpoints(real_repo, "gpu-1")
-    asm = assemble(real_repo, FactoryOptions(executor="roll"), env=_hosts(tmp_path, "gpu-1: gpu-181\n"))
+    asm = assemble(real_repo, FactoryOptions(executor="roll"), env=_hosts(tmp_path, "gpu-1: gpu-181\n") | _eval_env(tmp_path))
     write_directive(real_repo, RUN)
     produce_datasets(real_repo, real_repo.read_product(f"{run_dir(RUN)}/directive.yaml"))
 

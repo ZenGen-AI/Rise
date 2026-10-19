@@ -29,6 +29,7 @@ from mindtrainer.dispatch import make_mindtrainer_dispatcher
 
 PLANNER_BACKENDS = ("bridge", "heuristic")
 EXECUTORS = ("mock", "roll")
+EVALUATORS = ("mock", "someval")  # 设计 FC-16
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,7 @@ class FactoryOptions:
     repo_commit: str | None = None  # None:取代码仓库的 git rev-parse HEAD(取不到仍是 None)
     executor: str = "mock"  # roll:真实 ROLL LoRA SFT 执行器(设计 FC-15),默认 mock
     endpoint: str | None = None  # 只在 executor == "roll" 时有意义:点名 compute/endpoints.yaml 里的端点
+    evaluator: str = "mock"  # someval:真实 SoMEval 评测(设计 FC-16);必须与 --executor roll 同用
 
 
 CODE_ROOT = Path(__file__).resolve().parents[2]  # src/factory/wire.py -> 代码仓库根
@@ -119,19 +121,68 @@ def _assemble_roll(store: GitStore, options: FactoryOptions, *, env: Mapping[str
     from mindtrainer.roll_converter import RollLoraConverter
     from mindtrainer.roll_executor import RollExecutor
 
+    from diagnostic.contamination import load_index_file, make_train_gate
+    from factory.eval_config import read_eval_config
+
     environ = os.environ if env is None else env
     endpoint = select_endpoint(read_endpoints_config(store), options.endpoint)
     client = build_compute_client(endpoint, read_host_map(env=environ))
+    eval_config = read_eval_config(env=environ, repo_root=store.repo_root)
+    dataset_sha = _sombench_sha(eval_config)
+    row_gate = make_train_gate(load_index_file(eval_config.index_path, dataset_sha))
 
     def executor_factory(run_id: str) -> RollExecutor:
-        return RollExecutor(client=client, endpoint=endpoint, run_id=run_id)
+        return RollExecutor(client=client, endpoint=endpoint, run_id=run_id, row_gate=row_gate)
 
     converter = RollLoraConverter(client=client, endpoint=endpoint)
+    evaluator = None
+    if options.evaluator == "someval":
+        evaluator = _build_someval_evaluator(store, client, endpoint, eval_config, dataset_sha)
     return Assembly(
         make_mindtrainer_dispatcher(executor_factory=executor_factory, converter=converter),
-        {}, None, False,
+        {}, evaluator, False,
         executor_factory=executor_factory, converter=converter,
     )
+
+
+def _sombench_sha(eval_config) -> str:
+    """重新算数据集哈希并与资产版本比对:数据集变了就拒绝,不拿旧索引去拦新数据。"""
+    from factory.errors import FactoryConfigError
+    from factory.sombench import check_sombench_version, file_sha256, sombench_parquet
+
+    parquet = sombench_parquet(eval_config.someval_root)
+    if not parquet.is_file():
+        raise FactoryConfigError(f"the SoMBench parquet is not at {parquet}")
+    return file_sha256(parquet)
+
+
+def _build_someval_evaluator(store, client, endpoint, eval_config, dataset_sha: str):
+    """真实评估器:资产与版本在装配期校验一次,运行期每次仍从树里读。"""
+    from diagnostic.evaluator import make_diagnostic_evaluator
+    from diagnostic.scorer import MockJudgeBackend
+    from factory.evaluation import _someval_evaluator
+    from factory.sombench import check_sombench_version
+    from factory.sombench_runner import SomevalRunner
+
+    cfg = read_evaluator_config_dict(store)
+    check_sombench_version(cfg["taxonomy_version"], dataset_sha)
+    check_sombench_version(cfg["item_pool_version"], dataset_sha)
+    if cfg["tier"] != "full":
+        raise FactoryConfigError(
+            "--evaluator someval evaluates the whole benchmark; evaluator.yaml must say tier: full"
+        )
+    if cfg["sampling_k"] != 1:
+        raise FactoryConfigError(
+            "--evaluator someval samples each item once; evaluator.yaml must say sampling_k: 1"
+        )
+    runner = SomevalRunner(store=store, client=client, endpoint=endpoint, cfg=eval_config)
+    return _someval_evaluator(store=store, runner=runner, cfg=cfg)
+
+
+def read_evaluator_config_dict(store) -> dict:
+    from factory.evaluation import read_evaluator_config
+
+    return read_evaluator_config(store)
 
 
 def assemble(
@@ -151,6 +202,15 @@ def assemble(
         raise FactoryConfigError(f"executor must be one of {list(EXECUTORS)}, got {options.executor!r}")
     if options.endpoint is not None and options.executor != "roll":
         raise FactoryConfigError("--endpoint only makes sense with --executor roll")
+    if options.evaluator not in EVALUATORS:
+        raise FactoryConfigError(f"evaluator must be one of {list(EVALUATORS)}, got {options.evaluator!r}")
+    if options.evaluator == "someval" and options.executor != "roll":
+        raise FactoryConfigError("--evaluator someval needs --executor roll: it evaluates a real checkpoint")
+    if options.evaluator == "someval" and keys:
+        raise FactoryConfigError(
+            "--evaluator someval cannot be combined with --enable yet: a real evaluation holds "
+            "the reconcile loop and the GPU lease for hours"
+        )
     if options.executor == "roll":
         if keys:
             # 设计保证 7:真训练同步占住调和循环数小时(CP-15),闭环处理器的排队语义是按 mock
