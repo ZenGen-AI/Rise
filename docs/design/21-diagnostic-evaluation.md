@@ -113,12 +113,12 @@
 | G4 | L3 到 L2 到 L1 逐层聚合,每个分数带 Wilson 置信区间与轨道标注 | `tests/test_diag_aggregator.py`、`tests/test_diag_stats.py` | [已落地] |
 | G5 | 对照基线,只在区间不相交时标退化 | `tests/test_diag_regression.py` | [已落地] |
 | G6 | 评估器从产物树读资产与基线,报告带 `backends` 标记 | `tests/test_diag_evaluator.py`、`tests/test_diag_assets.py` | [已落地] |
-| G7 | 静态轨以 SoMBench 为题库:3481 题、题型 Q1 到 Q4 全部评测,打分委托给 SoMEval,每题采样一次 | 运行器、导入命令、适配层的测试,真实主机上端到端一次 | [计划中] |
-| G8 | SoMBench 的题目不进训练:树内资产不含题面,SoMEval 的工作目录在树外,训练行上传前过污染准入检查,命中即整条指令失败 | `tests/test_diag_contamination.py` 与准入检查装配、树扫描测试 | [计划中] |
+| G7 | 静态轨以 SoMBench 为题库:3481 题、题型 Q1 到 Q4 全部评测,打分委托给 SoMEval,每题采样一次 | `tests/test_factory_sombench_import.py`、`tests/test_factory_sombench_runner.py`、`tests/test_diag_someval_scored.py`;真实主机上端到端一次 | [已落地],真机待补 |
+| G8 | SoMBench 的题目不进训练:树内资产不含题面,SoMEval 的工作目录在树外,训练行上传前过污染准入检查,命中即整条指令失败 | `tests/test_diag_contamination.py`、`tests/test_mt_roll_gate.py`、`tests/test_factory_wire_someval.py` 与树扫描测试 | [已落地] |
 
 | 非目标或推迟项 | 状态 | V1 的处理 |
 |---|---|---|
-| 真实 SoMEval 子进程,经远端 vLLM 服务推理 | [计划中] | 由 `--evaluator someval` 装配(DX-22);默认装配仍注入 `MockSoMEvalRunner`,报告标 `backends: mock` |
+| 真实 SoMEval 子进程,经远端 vLLM 服务推理 | [已落地],未在真机验证 | 由 `--evaluator someval` 装配(DX-22);默认装配仍注入 `MockSoMEvalRunner`,报告标 `backends: mock` |
 | 动态轨的真实 judge 后端 | [推迟] | 注入 `MockJudgeBackend`。静态轨不调用它,所以真实 SoMEval 的报告等级是 `real`,见 DX-22;若有动态 spec 带 mock judge,报告等级仍是 `mock` |
 | 评测基座模型本身 | [推迟] | 没有基座的诊断报告,首个候选没有基线,不产生退化标记 |
 | 每题多次采样 | [推迟] | `sampling_k` 固定为 1(DX-17) |
@@ -197,9 +197,9 @@
 | `stats` | Wilson 区间、通过率、总体方差、区间相交 | 标准库 `math` | 98 | [已落地] |
 | `benchmark_version` | 五段式版本记录与可比判定 | 无 | 52 | [已落地] |
 | `isolation` | 训练情境与题库的污染判定与过滤(词元相似度,对中文无效,无调用方) | 无 | 137 | [已落地] |
-| `contamination` | 污染索引:SoMBench 文本的 20 字滑窗哈希集合的构建、读取、命中计数 | 标准库 | 约 120 | [计划中] |
+| `contamination` | 污染索引:SoMBench 文本的 20 字滑窗哈希集合的构建、读取、命中计数;训练数据的准入检查 | 标准库 | 150 | [已落地] |
 | `evaluator`、`assets` | 接入调和循环;分类表与题库的信封读写 | 编排器、`controlplane.evidence` | 111、74 | [已落地] |
-| 真实运行器与导入命令 | 起服务、跑 SoMEval 子进程、解析结果;把 SoMBench 导入成分类表、题库与污染索引 | `compute`、`diagnostic`,在 `factory` 里装配 | 约 400 | [计划中] |
+| 真实运行器与导入命令 | 起服务、跑 SoMEval 子进程、解析结果;把 SoMBench 导入成分类表、题库与污染索引 | `compute`、`diagnostic`,在 `factory` 里装配 | 约 500 | [已落地] |
 
 依赖方向规则:
 
@@ -574,7 +574,7 @@ def write_report(store, run_id, report, *, backends: str) -> None: ...
 | 评估器、资产读写、`backends` 标记、基线解析 | [已落地] | 评估器每次从树里读资产 |
 | 默认资产 `factory-tax-v1`、`factory-pool-v1` 与 mock 装配 | [已落地] | 默认题库只有 2 道占位题 |
 | vLLM 服务组件(命令拼装、SSH 隧道、生命周期) | [已落地] | 对替身与真实本机 socket 测过;真机端到端等 GPU 空闲后补 |
-| SoMBench 导入、真实运行器、污染索引与准入检查、`--evaluator someval` | [计划中] | 见 DX-16 到 DX-22 与下文「SoMBench 评测」 |
+| SoMBench 导入、真实运行器、污染索引与准入检查、`--evaluator someval` | [已落地],未在真机验证 | 代码与单测在主干上;真实主机上的端到端等 GPU 空闲后补(设计 21 的未核实项)。导入已在真实数据集上跑过一次:3481 题、529 个变体族、71 个 L3、索引 5.82 MiB |
 | 动态轨的真实 judge 后端 | [推迟] | 静态轨的 SoMEval 已含裁判(Q4),与这里的 `JudgeBackend` 无关 |
 
 | 已知局限 | 影响 | 缓解 |
