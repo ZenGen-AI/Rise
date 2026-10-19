@@ -168,6 +168,23 @@ describe("gate cli", () => {
       expect(out).not.toContain("l1 ");
     });
 
+    it("prints the failure reason of a stub report written by a failed evaluation", () => {
+      writeCandidate(root, "run-001", "pending_review");
+      writeDiagnostic(root, "run-001", {
+        ...STUB_REPORT,
+        failure_reason: "CandidateUnusableError: the candidate is not a real adapter export",
+      });
+      const out = review(root, "cand-run-001");
+      expect(out).toContain("[STUB]");
+      expect(out).toContain("failure_reason: CandidateUnusableError: the candidate is not a real adapter export");
+    });
+
+    it("does not print a failure_reason line for a stub without one", () => {
+      writeCandidate(root, "run-001", "pending_review");
+      writeDiagnostic(root, "run-001", STUB_REPORT);
+      expect(review(root, "cand-run-001")).not.toContain("failure_reason");
+    });
+
     it("prints l1 scores with confidence interval, sample size and track provenance", () => {
       writeCandidate(root, "run-001", "pending_review");
       writeDiagnostic(root, "run-001", REAL_REPORT);

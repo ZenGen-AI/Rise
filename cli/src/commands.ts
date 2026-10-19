@@ -117,10 +117,16 @@ function summarizeDiagnostic(report: Envelope | null, rel: string): string[] {
   // stub 标记 ↔ Python simulator/stubs.py 的 diagnostic_evaluator_stub；等级判定 ↔ controlplane/evidence.py diagnostic_grade
   if (p.stub === true) {
     // 占位报告没有分数也没有退化检查：醒目标出，别让人把它当真评测
-    return [
+    const stubLines = [
       `diagnostic: [STUB] ${report.id} — placeholder, NOT a real evaluation; it carries no scores or regression checks`,
       `  candidate_ref=${String(p.candidate_ref)}`,
     ];
+    // 真实评估器的确定性失败会写 stub 报告并带原因（↔ Python diagnostic/store_adapter.py 的 write_failure_report）；
+    // 占位桩写的报告没有这个键，所以只在场时打印。
+    if (typeof p.failure_reason === "string" && p.failure_reason) {
+      stubLines.push(`  failure_reason: ${p.failure_reason}`);
+    }
+    return stubLines;
   }
   // 后端标记（闭环集成设计 R17）↔ Python diagnostic/store_adapter.py 的 BACKENDS_KEY，
   // 等级判定 ↔ controlplane/evidence.py diagnostic_grade
