@@ -146,9 +146,11 @@ def _assemble_roll(store: GitStore, options: FactoryOptions, *, env: Mapping[str
 
 
 def _sombench_sha(eval_config) -> str:
-    """重新算数据集哈希并与资产版本比对:数据集变了就拒绝,不拿旧索引去拦新数据。"""
+    """现算数据集哈希。索引与资产版本都拿它比对:数据集换了,旧索引与旧题库都不许再用。
+
+    版本比对在两处:索引由 `load_index_file` 校验头部,资产由 `check_sombench_version` 校验。"""
     from factory.errors import FactoryConfigError
-    from factory.sombench import check_sombench_version, file_sha256, sombench_parquet
+    from factory.sombench import file_sha256, sombench_parquet
 
     parquet = sombench_parquet(eval_config.someval_root)
     if not parquet.is_file():
