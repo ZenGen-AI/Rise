@@ -371,3 +371,22 @@ def test_without_a_tunnel_factory_the_runner_builds_an_ssh_tunnel_from_the_clien
     with pytest.raises(ComputeError, match="stop here"):
         runner.evaluate_scored(_items("i1"), "run-1", 1)
     assert isinstance(seen["tunnel"], SshTunnel)
+
+
+def test_the_serving_key_is_also_scanned_for(tmp_path):
+    """服务密钥每次现生成,同样不能落盘:扫描范围包括它。"""
+    store = _store(tmp_path)
+    _candidate(store)
+    runner = _runner(tmp_path, rows=[_row("i1")], store=store)
+    inner = runner.run
+
+    def run_with_leak(argv, **kw):
+        result = inner(argv, **kw)
+        if "--exp-dir" in argv:
+            (tmp_path / "work" / "run-1" / STAMP / "dump.txt").write_text(FakeHandle.api_key)
+        return result
+
+    runner.run = run_with_leak
+    with pytest.raises(EvalSecretLeakError, match="dump.txt") as caught:
+        runner.evaluate_scored(_items("i1"), "run-1", 1)
+    assert FakeHandle.api_key not in str(caught.value)

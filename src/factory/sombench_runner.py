@@ -85,6 +85,7 @@ class SomevalRunner:
     now: Callable[[], datetime] = datetime.now
     commit_of: Callable[[Path], str] | None = None
     _last_stats: dict | None = field(default=None, init=False, repr=False)
+    _scan_keys: set = field(default_factory=set, init=False, repr=False)
 
     def evaluate(
         self, items: list[DiagnosticItem], candidate_ref: str, k: int
@@ -99,6 +100,7 @@ class SomevalRunner:
                 f"the SoMEval runner evaluates every item once; the protocol fixes repeats at 1, got k={k}"
             )
         ref = self._export_ref(candidate_ref)
+        self._scan_keys = set()
         run_root = self.cfg.work_root / candidate_ref / self.now().strftime("%Y%m%d-%H%M%S")
         run_root.mkdir(parents=True, exist_ok=False)
         try:
@@ -167,6 +169,7 @@ class SomevalRunner:
             startup_timeout_s=SERVE_TIMEOUT_S, poll_s=POLL_SECONDS,
         ) as handle:
             self._serving_key = handle.api_key
+            self._scan_keys.add(handle.api_key)
             try:
                 yield handle
             finally:
@@ -346,7 +349,7 @@ class SomevalRunner:
     # ---------- 凭证 ----------
 
     def _scan_for_secrets(self, run_root: Path) -> None:
-        needles = {self.cfg.judge_api_key.encode("utf-8")}
+        needles = {self.cfg.judge_api_key.encode("utf-8")} | {k.encode("utf-8") for k in self._scan_keys if k}
         for path in sorted(run_root.rglob("*")):
             if not path.is_file():
                 continue
