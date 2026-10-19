@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from compute.client import JobSpec
 from compute.endpoint import is_clean_abs_path
 from compute.errors import ComputeError
+from compute.sizing import DEFAULT_OVERHEAD_GIB, MemorySizing, check_memory_fits
 
 SECRET_ENV = "VLLM_API_KEY"
 BASE_MODEL_NAME = "base"
@@ -34,6 +35,11 @@ class VllmServeConfig:
     max_lora_rank: int = 64
     max_model_len: int = 4096
     gpu_memory_utilization: float = 0.85
+    enforce_eager: bool = True          # 关图优化:启动快、显存峰值低,代价是解码慢(见 sizing.py)
+    # 权重体积(GiB),只用于起服务前的核算;None 表示不知道,跳过预检
+    model_weights_gib: float | None = None
+    # 非权重显存开销,只用于起服务前的核算,不进命令行;留 0 表示跳过预检(见 sizing.py)
+    memory_overhead_gib: float = DEFAULT_OVERHEAD_GIB
 
     def __post_init__(self) -> None:
         for name in ("model_path", "adapter_path"):
@@ -69,7 +75,7 @@ def build_serve_job(cfg: VllmServeConfig) -> JobSpec:
         "--lora-modules", f"{cfg.adapter_name}={cfg.adapter_path}",
         "--trust-remote-code",
         "--max-model-len", str(cfg.max_model_len),
-        "--enforce-eager",
+        *(["--enforce-eager"] if cfg.enforce_eager else []),
         "--gpu-memory-utilization", str(cfg.gpu_memory_utilization),
     )
     return JobSpec(argv=argv, env={"NCCL_NVLS_ENABLE": "0"}, secret_env=SECRET_ENV)

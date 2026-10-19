@@ -273,3 +273,62 @@ def test_the_lease_holder_is_the_job_id():
     _run(client)
     holder = next(c[1] for c in client.calls if c[0] == "lease_acquire")
     assert holder == client.started[0][0]
+
+
+# ---------------- 起服务前的显存核算(不占租约) ----------------
+
+class SizingClient(FakeServiceClient):
+    def __init__(self, *, card_gib=79.17, cards=8, **kw):
+        super().__init__(**kw)
+        self._card_gib, self._cards = card_gib, cards
+
+    def gpu_memory_gib(self):
+        return self._card_gib, self._cards
+
+
+def _sized_cfg(**over):
+    from dataclasses import replace
+
+    return replace(CFG, model_weights_gib=335.276, **over)
+
+
+def test_a_model_that_cannot_fit_fails_before_the_lease_is_taken():
+    """真机实测的那组参数(335 GiB / 8 卡 / 0.85)要在这里被拦下:不占租约、不起作业。"""
+    from compute.errors import ComputeError
+
+    client = SizingClient()
+    with pytest.raises(ComputeError, match="does not fit"):
+        with serve(client, _sized_cfg(), build_job=build_serve_job, tunnel_factory=lambda: FakeTunnel(client.calls),
+                   probe=lambda u, k: True, startup_timeout_s=60.0, poll_s=5.0,
+                   clock=Clock(), sleep=Clock().sleep):
+            pass
+    assert _order(client) == []
+
+
+def test_a_sizing_that_fits_starts_normally():
+    client = SizingClient()
+    _run_sized(client)
+    assert _order(client)[0] == "lease_acquire"
+
+
+def test_the_sizing_is_skipped_when_the_weight_size_is_unknown():
+    client = FakeServiceClient()          # 没有 gpu_memory_gib
+    _run(client)                          # CFG 没有 model_weights_gib,预检直接跳过
+    assert _order(client)[0] == "lease_acquire"
+
+
+def test_fewer_cards_than_tensor_parallel_is_refused():
+    from compute.errors import ComputeError
+
+    client = SizingClient(cards=4)
+    with pytest.raises(ComputeError, match="4 GPU"):
+        _run_sized(client)
+    assert _order(client) == []
+
+
+def _run_sized(client):
+    clock = Clock()
+    with serve(client, _sized_cfg(enforce_eager=True, gpu_memory_utilization=0.95), build_job=build_serve_job,
+               tunnel_factory=lambda: FakeTunnel(client.calls), probe=lambda u, k: True,
+               startup_timeout_s=60.0, poll_s=5.0, clock=clock, sleep=clock.sleep):
+        pass

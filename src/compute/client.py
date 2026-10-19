@@ -21,6 +21,7 @@ from compute.transport import RunResult, Transport
 _STDERR_TAIL = 300
 _TRANSIENT_CODES = ("job_starting", "internal")  # 助手返回这些时重试有意义,按 TransportError 走延后通道
 NVIDIA_SMI = ("nvidia-smi", "--query-compute-apps=pid", "--format=csv,noheader")
+NVIDIA_SMI_MEMORY = ("nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits")
 
 
 @dataclass(frozen=True)
@@ -181,6 +182,25 @@ class ComputeClient:
         if result.returncode != 0:
             raise TransportError(f"nvidia-smi failed (exit {result.returncode}): {_tail_of(result.stderr)}")
         return sum(1 for ln in result.stdout.decode("utf-8", "replace").splitlines() if ln.strip())
+
+    def gpu_memory_gib(self) -> tuple[float, int]:
+        """每张卡的总显存(GiB)与卡数,取各卡的最小值,宿主机视角。
+
+        读不到或数字不合形态抛 TransportError:瞬态语义,由调用方决定是否延后。"""
+        result = self._transport.run(list(NVIDIA_SMI_MEMORY), timeout=60.0)
+        if result.returncode != 0:
+            raise TransportError(f"nvidia-smi failed (exit {result.returncode}): {_tail_of(result.stderr)}")
+        values = []
+        for line in result.stdout.decode("utf-8", "replace").splitlines():
+            line = line.strip()
+            if line:
+                try:
+                    values.append(float(line))
+                except ValueError:
+                    raise TransportError("nvidia-smi reported a memory figure that is not a number") from None
+        if not values:
+            raise TransportError("the host did not report any GPU memory")
+        return min(values) / 1024.0, len(values)
 
     def preflight(self, *, own_holder: str | None = None) -> None:
         """GPU、内存、磁盘检查;不过抛 ComputeBusyError。不取租约、不终止任何进程(设计 §3.3、D8)。

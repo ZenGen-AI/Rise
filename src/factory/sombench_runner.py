@@ -24,6 +24,7 @@ import yaml
 from compute.errors import ComputeError
 from compute.service import ServiceHandle, serve as real_serve
 from compute.tunnel import SshTunnel, http_probe
+from compute.sizing import weights_gib_from_index
 from compute.vllm_service import VllmServeConfig, build_serve_job
 from controlplane.deferred import DeferredError
 from controlplane.envelope import BigRef
@@ -172,6 +173,8 @@ class SomevalRunner:
             adapter_path=self._adapter_path(ref),
             remote_port=self.cfg.serve_port,
             max_model_len=SOMBENCH_MAX_MODEL_LEN,
+            # 权重体积只有宿主机的索引文件里有;读不到就跳过预检,由 vLLM 自己裁决。
+            model_weights_gib=self._weights_gib(),
         )
         factory = self.tunnel_factory
         if factory is None:
@@ -189,6 +192,15 @@ class SomevalRunner:
                 yield handle
             finally:
                 self._serving_key = None
+
+    def _weights_gib(self) -> float | None:
+        """从基座目录的 safetensors 索引里读权重总体积。读不到返回 None。"""
+        try:
+            raw = self.client.get(f"{self.endpoint.base_model_path}/model.safetensors.index.json")
+            payload = json.loads(raw.decode("utf-8"))
+        except Exception:  # noqa: BLE001  读不到不是评测失败,只是少一道预检
+            return None
+        return weights_gib_from_index(payload)
 
     # ---------- 子进程 ----------
 

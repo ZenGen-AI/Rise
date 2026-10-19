@@ -413,3 +413,31 @@ def test_a_candidate_id_that_does_not_match_the_run_is_refused(tmp_path):
     _candidate(store)
     with pytest.raises(CandidateUnusableError, match="holds candidate"):
         _runner(tmp_path, rows=[_row("i1")], store=store).evaluate_scored(_items("i1"), "cand-run-7", 1)
+
+
+def test_the_weight_size_comes_from_the_index_file_when_the_host_has_one(tmp_path):
+    store = _store(tmp_path)
+    _candidate(store)
+
+    class Client:
+        alias = "gpu-181"
+
+        def get(self, path):
+            assert path == "/models/base/model.safetensors.index.json"
+            return json.dumps({"metadata": {"total_size": 360000192888}}).encode()
+
+    runner = SomevalRunner(store=store, client=Client(), endpoint=FakeEndpoint(), cfg=_config(tmp_path),
+                           commit_of=lambda root: "x")
+    assert runner._weights_gib() == __import__("pytest").approx(335.28, abs=0.01)
+
+
+def test_an_unreadable_index_skips_the_sizing_instead_of_failing(tmp_path):
+    class Client:
+        alias = "gpu-181"
+
+        def get(self, path):
+            raise OSError("no such file")
+
+    runner = SomevalRunner(store=_store(tmp_path), client=Client(), endpoint=FakeEndpoint(),
+                           cfg=_config(tmp_path), commit_of=lambda root: "x")
+    assert runner._weights_gib() is None

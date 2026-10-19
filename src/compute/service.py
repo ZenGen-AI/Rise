@@ -18,7 +18,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from compute.client import JobSpec
-from compute.errors import ComputeBusyError, ServeStartupError, TransportError
+from compute.errors import ComputeBusyError, ComputeError, ServeStartupError, TransportError
+from compute.sizing import MemorySizing, check_memory_fits
 from compute.vllm_service import BASE_MODEL_NAME
 
 MAX_ATTEMPTS = 8  # 同一份配置下的尝试序号上限;满了说明旧的作业目录没人清,该人看一眼
@@ -70,6 +71,7 @@ def serve(
     sleep: Callable[[float], None] = time.sleep,
 ) -> Iterator[ServiceHandle]:
     spec = build_job(cfg)
+    _check_memory(client, cfg)
     job_id = _pick_attempt(client, spec)
     if not client.lease_acquire(job_id):
         holder, _ = client.lease_holder()
@@ -106,6 +108,26 @@ def serve(
                 # 服务还占着显存:不放租约,让训练撞不上它。租约在作业退出或丢失后会被助手判为陈旧。
                 raise ServeStartupError(f"job {job_id} is still running after stop; the GPU lease was kept")
         client.lease_release(job_id)
+
+
+def _check_memory(client: Any, cfg: Any) -> None:
+    """起服务前的显存核算:放不下就确定性失败,不占租约、不起作业(DX-15 的补充)。
+
+    预检是启发式的,只拦"算出来明显放不下"的配置;最终裁决仍是 vLLM 自己的启动错误。
+    算不出来的量(权重体积、读不到卡容量)一律跳过,不拿猜测去拦正常启动。"""
+    overhead = getattr(cfg, "memory_overhead_gib", 0.0)
+    weights = getattr(cfg, "model_weights_gib", None)
+    if not overhead or weights is None:
+        return
+    card_gib, cards = client.gpu_memory_gib()
+    if cards < cfg.tensor_parallel_size:
+        raise ComputeError(
+            f"the host has {cards} GPU(s) but tensor_parallel_size is {cfg.tensor_parallel_size}"
+        )
+    check_memory_fits(MemorySizing(
+        weights_gib=weights, cards=cfg.tensor_parallel_size, card_gib=card_gib,
+        utilization=cfg.gpu_memory_utilization, enforce_eager=cfg.enforce_eager, overhead_gib=overhead,
+    ))
 
 
 def _wait_ready(client, job_id, health_url, api_key, probe, timeout_s, poll_s, clock, sleep) -> None:
