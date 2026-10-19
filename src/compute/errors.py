@@ -37,3 +37,14 @@ class RemoteJobFailedError(DeferredError):
 
 class RemoteJobTimeoutError(DeferredError):
     """作业超过 job_timeout_seconds,已先 stop。"""
+
+
+class ServeStartupError(DeferredError):
+    """推理服务没能就绪:启动超时、进程提前退出、隧道建不起来,或收尾时发现服务仍在运行。
+
+    服务日志的尾巴放在 log_tail,不进 reason:日志里可能有请求内容(与 RemoteJobFailedError 同理)。
+    继承 DeferredError,所以守护进程按退避重试、不写树;连续失败到上限会升级为需要人看。"""
+
+    def __init__(self, reason: str, *, log_tail: str = "", retry_after_seconds: int | None = None) -> None:
+        super().__init__(reason, retry_after_seconds=retry_after_seconds)
+        self.log_tail = log_tail
