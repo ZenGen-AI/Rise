@@ -241,3 +241,41 @@ def test_a_transient_failure_writes_nothing_and_is_retried(tmp_path):
     book = DeferralBook()
     reconcile_once(store, evaluator=_evaluator_with(store, digest, runner), deferrals=book)
     assert not store.exists("control-plane/runs/run-1/diagnostic_report.yaml")
+
+
+def test_the_entry_point_hands_the_someval_evaluator_to_the_loop(tmp_path, monkeypatch):
+    """--evaluator someval 不开闭环;入口仍须把评估器交给调和循环,否则 request_diagnostic 走占位桩。"""
+    import factory.wire as wire
+
+    store = _repo(tmp_path)
+    env, digest = _env(tmp_path)
+    _install_sombench_assets(store, digest)
+    _pending_candidate(store, "run-1")
+    calls = []
+
+    def fake_build(store_, client, endpoint, eval_config, dataset_sha):
+        def evaluate(store__, run_id, candidate_id):
+            calls.append((run_id, candidate_id))
+        return evaluate
+
+    monkeypatch.setattr(wire, "_build_someval_evaluator", fake_build)
+    actions = wire.reconcile_one_tick(str(store.repo_root),
+                                      FactoryOptions(executor="roll", evaluator="someval"), env=env)
+    assert [a.kind for a in actions] == ["request_diagnostic"]
+    assert calls == [("run-1", "cand-run-1")]
+    # 占位桩没有写报告:报告由(这里被替换的)真实评估器负责
+    assert not store.exists("control-plane/runs/run-1/diagnostic_report.yaml")
+
+
+def test_the_daemon_entry_point_also_hands_over_the_evaluator(tmp_path, monkeypatch):
+    import factory.wire as wire
+
+    store = _repo(tmp_path)
+    env, digest = _env(tmp_path)
+    _install_sombench_assets(store, digest)
+    _pending_candidate(store, "run-1")
+    seen = {}
+    monkeypatch.setattr(wire, "_build_someval_evaluator", lambda *a: (lambda *b: None))
+    monkeypatch.setattr(wire, "run_daemon", lambda store_, interval_s, **kw: seen.update(kw))
+    wire.run(str(store.repo_root), FactoryOptions(executor="roll", evaluator="someval"), max_ticks=1, env=env)
+    assert callable(seen.get("evaluator"))

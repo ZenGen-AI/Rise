@@ -267,7 +267,7 @@ def run(
     store = GitStore(repo_root)
     a = assemble(store, options, env=env, log_dir=log_dir, builders=builders)
     if not a.closed_loop:
-        run_daemon(store, interval_s, max_ticks=max_ticks, dispatcher=a.dispatcher)
+        run_daemon(store, interval_s, max_ticks=max_ticks, dispatcher=a.dispatcher, evaluator=a.evaluator)
         return
     try:
         run_daemon(
@@ -292,7 +292,8 @@ def reconcile_one_tick(
     with acquire_repo_lock(repo_root):
         a = assemble(store, options, env=env, log_dir=log_dir, builders=builders)
         if not a.closed_loop:
-            return reconcile_once(store, dispatcher=a.dispatcher)
+            # --evaluator someval 不开闭环,但评估器必须交给调和循环,否则 request_diagnostic 走占位桩
+            return reconcile_once(store, dispatcher=a.dispatcher, evaluator=a.evaluator)
         try:
             return reconcile_once(
                 store, dispatcher=a.dispatcher, handlers=a.handlers, evaluator=a.evaluator,
