@@ -443,6 +443,89 @@ def test_payload_keeps_perturbation_values_out_of_the_bucket():
     assert payload["value_examples"] == {"opd_coefficient": {"0.2": 2}}
 
 
+def test_deprecation_counts_every_contradiction_not_just_the_stored_five():
+    """反例超过五条时,阈值必须用全部反例计数;否则高支持数条目会被洗成 effective。"""
+    records = [rec(f"run-{n:03d}", gain=-0.01, regressions=["social_regression"])
+               for n in range(3, 14)]
+    [entry] = recompute_entries(records, [], benchmark_version="bench-v1")
+    assert entry.support == 11
+    assert len(entry.contradictions) == 5          # 载荷只存最近五条
+    assert entry.status == "deprecated"            # 但十一次反例足以废弃
+
+
+def test_a_non_positive_mean_never_becomes_effective():
+    records = [rec("run-003", gain=0.1), rec("run-005", gain=0.1),
+               rec("run-007", gain=0.1), rec("run-009", gain=-0.9)]
+    [entry] = recompute_entries(records, [], benchmark_version="bench-v1")
+    assert entry.mean_gain < 0
+    assert entry.status != "effective"
+
+
+def test_a_zero_mean_never_becomes_effective():
+    records = [rec("run-003", gain=0.0), rec("run-005", gain=0.0)]
+    [entry] = recompute_entries(records, [], benchmark_version="bench-v1")
+    assert entry.status != "effective"
+
+
+def test_stale_does_not_overwrite_a_human_status():
+    [old] = recompute_entries([rec("run-003"), rec("run-005", benchmark="bench-v0")], [],
+                              benchmark_version="bench-v0")
+    pinned = old.with_overrides({"status": "deprecated"})
+    [now] = recompute_entries([], [pinned], benchmark_version="bench-v1")
+    assert now.status == "deprecated"
+    assert now.overrides == {"status": "deprecated"}
+
+
+def test_overrides_apply_to_other_fields_too():
+    [entry] = recompute_entries([rec("run-003"), rec("run-005")], [],
+                                benchmark_version="bench-v1")
+    pinned = entry.with_overrides({"mean_gain": 9.0})
+    [again] = recompute_entries([rec("run-003"), rec("run-005")], [pinned],
+                                benchmark_version="bench-v1")
+    assert again.mean_gain == 9.0
+    assert again.support == 2          # 没被覆盖的字段仍然刷新
+
+
+def test_an_unknown_override_key_is_kept_but_not_applied():
+    [entry] = recompute_entries([rec("run-003"), rec("run-005")], [],
+                                benchmark_version="bench-v1")
+    pinned = entry.with_overrides({"nonsense": 1})
+    assert pinned.status == entry.status
+    assert pinned.overrides == {"nonsense": 1}
+    unknown_status = entry.with_overrides({"status": "maybe"})
+    assert unknown_status.status == entry.status
+
+
+def test_contradictions_are_kept_in_numeric_run_order_under_shuffled_input():
+    records = [rec(f"run-{n:03d}", gain=-0.01, regressions=["social_regression"])
+               for n in (12, 3, 9, 5, 7)]
+    [entry] = recompute_entries(records, [], benchmark_version="bench-v1")
+    assert [c["run_id"] for c in entry.contradictions] == [
+        "run-003", "run-005", "run-007", "run-009", "run-012"
+    ]
+
+
+def test_unpadded_run_ids_order_numerically():
+    records = [rec(f"run-{n}", gain=-0.01, regressions=["social_regression"])
+               for n in (10, 9)]
+    [entry] = recompute_entries(records, [], benchmark_version="bench-v1")
+    assert [c["run_id"] for c in entry.contradictions] == ["run-9", "run-10"]
+
+
+def test_a_record_without_a_baseline_is_skipped_not_fatal():
+    bad = rec("run-003")
+    bad["evidence"]["baseline_model_id"] = None
+    good = [rec("run-005"), rec("run-007")]
+    entries = recompute_entries([bad] + good, [], benchmark_version="bench-v1")
+    assert len(entries) == 1 and entries[0].support == 2
+
+
+def test_integer_perturbations_render_without_a_decimal_point():
+    key = strategy_key(dimension="tom", action="clone", mode="batch",
+                       perturbation={"sft_steps": 4}, source_recipe_id="r")
+    assert key["perturbation"]["sft_steps"] == {"num": "4"}
+
+
 def test_untouched_entries_become_stale():
     [old] = recompute_entries([rec("run-003"), rec("run-005", benchmark="bench-v0")], [],
                               benchmark_version="bench-v0")
@@ -469,7 +552,7 @@ import hashlib
 import json
 import math
 import re
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from typing import Any
 
 ATTR_HIGH = "high"
@@ -510,7 +593,10 @@ def _canonical_value(value: object) -> dict[str, Any]:
         number = float(value)
         if not math.isfinite(number):
             raise ValueError(f"perturbation value {value!r} is not a finite number")
-        return {"num": repr(number)}
+        text = repr(number)
+        if text.endswith(".0"):
+            text = text[:-2]   # 整数值显示成 4,不是 4.0
+        return {"num": text}
     if isinstance(value, str):
         return {"str": value}
     raise ValueError(
@@ -595,10 +681,16 @@ class EntryState:
     overrides: dict = field(default_factory=dict)
 
     def with_overrides(self, overrides: dict) -> EntryState:
-        applied = replace(self, overrides=dict(overrides))
-        if "status" in overrides:
-            applied = replace(applied, status=overrides["status"])
-        return applied
+        """人写过的字段原样保留。status 只认四个已知取值;不认识的键不应用,仍留在覆盖表里让人看见。"""
+        known = {f.name for f in fields(self)} - {"overrides"}
+        changes: dict = {}
+        for name, value in overrides.items():
+            if name not in known:
+                continue
+            if name == "status" and value not in STATUSES:
+                continue
+            changes[name] = value
+        return replace(self, overrides=dict(overrides), **changes)
 
     def to_payload(self) -> dict:
         return {
@@ -650,19 +742,23 @@ class EntryState:
 
 
 def _eligible(record: dict, *, benchmark_version: str) -> bool:
-    """能不能进聚合:设计 6.3 的资格表。"""
+    """能不能进聚合:设计 6.3 的资格表。缺对照基线的记录跳过,不让一条坏记录终止整次重算。"""
     if record.get("attribution") != ATTR_MEDIUM:
         return False
     outcome, evidence = record.get("outcome") or {}, record.get("evidence") or {}
-    if not isinstance(outcome.get("gain"), (int, float)) or isinstance(outcome.get("gain"), bool):
+    if not isinstance(outcome, dict) or not isinstance(evidence, dict):
         return False
-    if not math.isfinite(float(outcome["gain"])):
+    base = evidence.get("baseline_model_id")
+    if not isinstance(base, str) or not base:
+        return False
+    gain = outcome.get("gain")
+    if isinstance(gain, bool) or not isinstance(gain, (int, float)):
+        return False
+    if not math.isfinite(float(gain)):
         return False
     if evidence.get("grade") != "real":
         return False
-    if evidence.get("benchmark_version") != benchmark_version:
-        return False
-    return True
+    return evidence.get("benchmark_version") == benchmark_version
 
 
 def _run_order(run_id: str) -> tuple[int, str]:
@@ -676,11 +772,13 @@ def recompute_entries(
     *,
     benchmark_version: str,
 ) -> list[EntryState]:
-    """由全部记录加当前基座与基准重算条目。纯函数。
+    """由全部记录与基准版本重算条目。纯函数。
 
-    - 只有 attribution 为 medium、有可比增益、real 证据、同基座同基准的记录参与聚合。
-    - 支持的求和顺序按 run 编号数值序,与输入顺序无关。
-    - 本轮没有匹配记录、而旧条目属于别的基准版本时,旧条目转 stale。
+    - 只有 attribution 为 medium、有可比增益、real 证据、同基准、且带对照基线的记录参与聚合。
+    - 每个对照基线各自成桶:不同基座的证据不会互相覆盖。
+    - 求和与反例排序都按 run 编号数值序,与输入顺序无关。
+    - 废弃阈值用全部反例计数;载荷只存最近五条。平均增益不为正也不给 effective。
+    - 本轮没有匹配记录、而旧条目属于别的基准版本时,旧条目转 stale,但人写过的字段不动。
     """
     grouped: dict[Bucket, list[dict]] = {}
     for record in records:
@@ -696,7 +794,7 @@ def recompute_entries(
         wins = sum(1 for g in gains if g > 0)
         losses = sum(1 for g in gains if g < 0)
         mean = round(sum(gains) / len(gains), 6)
-        contradictions = tuple(
+        all_contradictions = [
             {
                 "run_id": r["run_id"],
                 "gain": float(r["outcome"]["gain"]),
@@ -704,11 +802,16 @@ def recompute_entries(
             }
             for r in ordered
             if float(r["outcome"]["gain"]) < 0 or (r["outcome"].get("regressions") or [])
-        )[-MAX_CONTRADICTIONS:]
+        ]
+        # 阈值用全部反例计数;只把最近五条存进载荷
+        contradictions = tuple(all_contradictions[-MAX_CONTRADICTIONS:])
         support = len(ordered)
         if support < MIN_SUPPORT:
             status = STATUS_INSUFFICIENT
-        elif len(contradictions) * 2 >= support:
+        elif len(all_contradictions) * 2 >= support:
+            status = STATUS_DEPRECATED
+        elif mean <= 0:
+            # 支持数够但平均增益不为正:它没有变好,不给注入
             status = STATUS_DEPRECATED
         else:
             status = STATUS_EFFECTIVE
@@ -738,11 +841,12 @@ def recompute_entries(
         if previous.entry_id in touched:
             continue
         if previous.benchmark_version != benchmark_version:
-            out.append(replace(previous, status=STATUS_STALE))
+            # 转 stale 也不能盖掉人写过的状态
+            out.append(replace(previous, status=STATUS_STALE).with_overrides(previous.overrides))
     return out
 ```
 
-注意 `previous.with_overrides(previous.overrides)` 一行：旧条目存在时，重算出的数值字段取新的，覆盖表保留旧的；`with_overrides` 会在 `overrides` 含 `status` 时把状态也设回人写的值。
+注意 `state = state.with_overrides(previous.overrides)` 一行：旧条目存在时，重算出的数值字段取新的，覆盖表里列出的字段取人写的值；覆盖表本身原样保留。
 
 - [ ] **Step 4: 运行确认通过**
 
@@ -1125,7 +1229,7 @@ def _all_records(store: GitStore) -> tuple[list[dict], list[str]]:
         env = store.read_product(rel)
         record = env.payload
         try:
-            bucket_key(record["strategy_key"])
+            bucket_key(record["strategy_key"], record["evidence"]["baseline_model_id"])
         except (KeyError, TypeError):
             ignored.append(f"{env.id}: unreadable record payload")
             continue
@@ -1408,7 +1512,11 @@ def install_default_template(store: GitStore) -> str:
     return install_template(store, PLANNER_V2_VERSION, PLANNER_V2)
 ```
 
-`src/trainplanner/examples.py`：`example_context_dict()` 的返回字典里加 `"strategy_experience": []`（若它由 `to_dict()` 生成，这一步不需要改）。
+`src/trainplanner/examples.py`：`_EXAMPLE_CONTEXT` 的返回字典里加 `"strategy_experience": []`。
+
+这一处不能跳过：`tests/test_tp_context.py::test_the_example_round_trips_exactly` 断言
+`ctx.to_dict() == example_context_dict()`。`to_dict()` 加上第七个键之后，示例字典没有这个键，
+往返就不等了。同批把它补上，测试才能过。
 
 - [ ] **Step 4: 运行确认通过**
 
