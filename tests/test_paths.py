@@ -20,6 +20,7 @@ def test_subdirs_match_spec():
         "runs", "recipes", "skill_memory_proposals", "models", "compute", "config", "scenarios",
         "personas", "diagnostics",
         "recipe_candidates", "skill_library", "memory_library", "agent_rounds",
+        "experience",
     ]
 
 

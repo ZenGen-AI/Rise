@@ -6,6 +6,8 @@ SUBDIRS = [
     "personas", "diagnostics",
     # 闭环集成设计 §4.1:追加在末尾,顺序固定
     "recipe_candidates", "skill_library", "memory_library", "agent_rounds",
+    # 策略经验:记录放 run 目录,条目放全局目录
+    "experience",
 ]
 
 
@@ -151,3 +153,13 @@ def planner_prompt_file(version: str) -> str:
     """planner 提示模板信封(type: prompt_template)。prompts/ 不在 SUBDIRS 里:
     GitStore.write_product 会自己建父目录。"""
     return f"{CONTROL_PLANE_ROOT}/config/prompts/planner-{version}.yaml"
+
+
+def strategy_experience_note_file(run_id: str) -> str:
+    """一轮的策略经验记录(落账的幂等键)。放 run 顶层,list_products 的非递归扫描能扫到。"""
+    return f"{run_dir(run_id)}/strategy_experience.yaml"
+
+
+def strategy_entry_file(entry_id: str) -> str:
+    """跨 run 聚合出的策略条目。entry_id 已由调用方做过路径安全校验。"""
+    return f"{CONTROL_PLANE_ROOT}/experience/{entry_id}.yaml"
