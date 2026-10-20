@@ -8,7 +8,7 @@ import hashlib
 import json
 import math
 import re
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from typing import Any
 
 ATTR_HIGH = "high"
@@ -49,7 +49,10 @@ def _canonical_value(value: object) -> dict[str, Any]:
         number = float(value)
         if not math.isfinite(number):
             raise ValueError(f"perturbation value {value!r} is not a finite number")
-        return {"num": repr(number)}
+        text = repr(number)
+        if text.endswith(".0"):
+            text = text[:-2]   # 整数值显示成 4,不是 4.0
+        return {"num": text}
     if isinstance(value, str):
         return {"str": value}
     raise ValueError(
@@ -134,10 +137,16 @@ class EntryState:
     overrides: dict = field(default_factory=dict)
 
     def with_overrides(self, overrides: dict) -> EntryState:
-        applied = replace(self, overrides=dict(overrides))
-        if "status" in overrides:
-            applied = replace(applied, status=overrides["status"])
-        return applied
+        """人写过的字段原样保留。status 只认四个已知取值;不认识的键不应用,仍留在覆盖表里让人看见。"""
+        known = {f.name for f in fields(self)} - {"overrides"}
+        changes: dict = {}
+        for name, value in overrides.items():
+            if name not in known:
+                continue
+            if name == "status" and value not in STATUSES:
+                continue
+            changes[name] = value
+        return replace(self, overrides=dict(overrides), **changes)
 
     def to_payload(self) -> dict:
         return {
@@ -189,19 +198,23 @@ class EntryState:
 
 
 def _eligible(record: dict, *, benchmark_version: str) -> bool:
-    """能不能进聚合:设计 6.3 的资格表。"""
+    """能不能进聚合:设计 6.3 的资格表。缺对照基线的记录跳过,不让一条坏记录终止整次重算。"""
     if record.get("attribution") != ATTR_MEDIUM:
         return False
     outcome, evidence = record.get("outcome") or {}, record.get("evidence") or {}
-    if not isinstance(outcome.get("gain"), (int, float)) or isinstance(outcome.get("gain"), bool):
+    if not isinstance(outcome, dict) or not isinstance(evidence, dict):
         return False
-    if not math.isfinite(float(outcome["gain"])):
+    base = evidence.get("baseline_model_id")
+    if not isinstance(base, str) or not base:
+        return False
+    gain = outcome.get("gain")
+    if isinstance(gain, bool) or not isinstance(gain, (int, float)):
+        return False
+    if not math.isfinite(float(gain)):
         return False
     if evidence.get("grade") != "real":
         return False
-    if evidence.get("benchmark_version") != benchmark_version:
-        return False
-    return True
+    return evidence.get("benchmark_version") == benchmark_version
 
 
 def _run_order(run_id: str) -> tuple[int, str]:
@@ -215,11 +228,13 @@ def recompute_entries(
     *,
     benchmark_version: str,
 ) -> list[EntryState]:
-    """由全部记录加当前基座与基准重算条目。纯函数。
+    """由全部记录与基准版本重算条目。纯函数。
 
-    - 只有 attribution 为 medium、有可比增益、real 证据、同基座同基准的记录参与聚合。
-    - 支持的求和顺序按 run 编号数值序,与输入顺序无关。
-    - 本轮没有匹配记录、而旧条目属于别的基准版本时,旧条目转 stale。
+    - 只有 attribution 为 medium、有可比增益、real 证据、同基准、且带对照基线的记录参与聚合。
+    - 每个对照基线各自成桶:不同基座的证据不会互相覆盖。
+    - 求和与反例排序都按 run 编号数值序,与输入顺序无关。
+    - 废弃阈值用全部反例计数;载荷只存最近五条。平均增益不为正也不给 effective。
+    - 本轮没有匹配记录、而旧条目属于别的基准版本时,旧条目转 stale,但人写过的字段不动。
     """
     grouped: dict[Bucket, list[dict]] = {}
     for record in records:
@@ -235,7 +250,7 @@ def recompute_entries(
         wins = sum(1 for g in gains if g > 0)
         losses = sum(1 for g in gains if g < 0)
         mean = round(sum(gains) / len(gains), 6)
-        contradictions = tuple(
+        all_contradictions = [
             {
                 "run_id": r["run_id"],
                 "gain": float(r["outcome"]["gain"]),
@@ -243,11 +258,16 @@ def recompute_entries(
             }
             for r in ordered
             if float(r["outcome"]["gain"]) < 0 or (r["outcome"].get("regressions") or [])
-        )[-MAX_CONTRADICTIONS:]
+        ]
+        # 阈值用全部反例计数;只把最近五条存进载荷
+        contradictions = tuple(all_contradictions[-MAX_CONTRADICTIONS:])
         support = len(ordered)
         if support < MIN_SUPPORT:
             status = STATUS_INSUFFICIENT
-        elif len(contradictions) * 2 >= support:
+        elif len(all_contradictions) * 2 >= support:
+            status = STATUS_DEPRECATED
+        elif mean <= 0:
+            # 支持数够但平均增益不为正:它没有变好,不给注入
             status = STATUS_DEPRECATED
         else:
             status = STATUS_EFFECTIVE
@@ -277,5 +297,6 @@ def recompute_entries(
         if previous.entry_id in touched:
             continue
         if previous.benchmark_version != benchmark_version:
-            out.append(replace(previous, status=STATUS_STALE))
+            # 转 stale 也不能盖掉人写过的状态
+            out.append(replace(previous, status=STATUS_STALE).with_overrides(previous.overrides))
     return out

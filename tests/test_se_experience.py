@@ -205,6 +205,89 @@ def test_payload_keeps_perturbation_values_out_of_the_bucket():
     assert payload["value_examples"] == {"opd_coefficient": {"0.2": 2}}
 
 
+def test_deprecation_counts_every_contradiction_not_just_the_stored_five():
+    """反例超过五条时,阈值必须用全部反例计数;否则高支持数条目会被洗成 effective。"""
+    records = [rec(f"run-{n:03d}", gain=-0.01, regressions=["social_regression"])
+               for n in range(3, 14)]
+    [entry] = recompute_entries(records, [], benchmark_version="bench-v1")
+    assert entry.support == 11
+    assert len(entry.contradictions) == 5          # 载荷只存最近五条
+    assert entry.status == "deprecated"            # 但十一次反例足以废弃
+
+
+def test_a_non_positive_mean_never_becomes_effective():
+    records = [rec("run-003", gain=0.1), rec("run-005", gain=0.1),
+               rec("run-007", gain=0.1), rec("run-009", gain=-0.9)]
+    [entry] = recompute_entries(records, [], benchmark_version="bench-v1")
+    assert entry.mean_gain < 0
+    assert entry.status != "effective"
+
+
+def test_a_zero_mean_never_becomes_effective():
+    records = [rec("run-003", gain=0.0), rec("run-005", gain=0.0)]
+    [entry] = recompute_entries(records, [], benchmark_version="bench-v1")
+    assert entry.status != "effective"
+
+
+def test_stale_does_not_overwrite_a_human_status():
+    [old] = recompute_entries([rec("run-003"), rec("run-005", benchmark="bench-v0")], [],
+                              benchmark_version="bench-v0")
+    pinned = old.with_overrides({"status": "deprecated"})
+    [now] = recompute_entries([], [pinned], benchmark_version="bench-v1")
+    assert now.status == "deprecated"
+    assert now.overrides == {"status": "deprecated"}
+
+
+def test_overrides_apply_to_other_fields_too():
+    [entry] = recompute_entries([rec("run-003"), rec("run-005")], [],
+                                benchmark_version="bench-v1")
+    pinned = entry.with_overrides({"mean_gain": 9.0})
+    [again] = recompute_entries([rec("run-003"), rec("run-005")], [pinned],
+                                benchmark_version="bench-v1")
+    assert again.mean_gain == 9.0
+    assert again.support == 2          # 没被覆盖的字段仍然刷新
+
+
+def test_an_unknown_override_key_is_kept_but_not_applied():
+    [entry] = recompute_entries([rec("run-003"), rec("run-005")], [],
+                                benchmark_version="bench-v1")
+    pinned = entry.with_overrides({"nonsense": 1})
+    assert pinned.status == entry.status
+    assert pinned.overrides == {"nonsense": 1}
+    unknown_status = entry.with_overrides({"status": "maybe"})
+    assert unknown_status.status == entry.status
+
+
+def test_contradictions_are_kept_in_numeric_run_order_under_shuffled_input():
+    records = [rec(f"run-{n:03d}", gain=-0.01, regressions=["social_regression"])
+               for n in (12, 3, 9, 5, 7)]
+    [entry] = recompute_entries(records, [], benchmark_version="bench-v1")
+    assert [c["run_id"] for c in entry.contradictions] == [
+        "run-003", "run-005", "run-007", "run-009", "run-012"
+    ]
+
+
+def test_unpadded_run_ids_order_numerically():
+    records = [rec(f"run-{n}", gain=-0.01, regressions=["social_regression"])
+               for n in (10, 9)]
+    [entry] = recompute_entries(records, [], benchmark_version="bench-v1")
+    assert [c["run_id"] for c in entry.contradictions] == ["run-9", "run-10"]
+
+
+def test_a_record_without_a_baseline_is_skipped_not_fatal():
+    bad = rec("run-003")
+    bad["evidence"]["baseline_model_id"] = None
+    good = [rec("run-005"), rec("run-007")]
+    entries = recompute_entries([bad] + good, [], benchmark_version="bench-v1")
+    assert len(entries) == 1 and entries[0].support == 2
+
+
+def test_integer_perturbations_render_without_a_decimal_point():
+    key = strategy_key(dimension="tom", action="clone", mode="batch",
+                       perturbation={"sft_steps": 4}, source_recipe_id="r")
+    assert key["perturbation"]["sft_steps"] == {"num": "4"}
+
+
 def test_untouched_entries_become_stale():
     [old] = recompute_entries([rec("run-003"), rec("run-005", benchmark="bench-v0")], [],
                               benchmark_version="bench-v0")
