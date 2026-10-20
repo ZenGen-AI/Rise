@@ -77,6 +77,25 @@ The object must have exactly these seven keys:
 - "rationale": non-empty string. Why this choice, citing the evidence above.
 """
 
+PLANNER_V2_VERSION = "v2"
+
+_STRATEGY_SECTION = """
+## Strategy experience from earlier rounds
+Each line summarises a past strategy family: the action and mode, the exact
+perturbation values that were tried, how many comparable rounds support it, the
+mean gain, and how many of those rounds contradicted it. These lines come only
+from rounds whose evidence grade was real and whose baseline model and benchmark
+version match the current ones. Treat them as prior evidence, not as rules:
+a strategy with many contradictions is weak, and a strategy that is absent may
+simply be untested. Reuse a perturbation value that worked rather than inventing
+a new one when the evidence points that way.
+{{strategy_experience}}
+"""
+
+PLANNER_V2 = PLANNER_V1.replace(
+    "\n## Your answer\n", _STRATEGY_SECTION + "\n## Your answer\n"
+)
+
 
 class TemplateError(ValueError):
     """树里的模板缺失、形状不对,或与要写入的模板冲突。确定性错误,重试无益。"""
@@ -129,7 +148,10 @@ def install_template(store: GitStore, version: str, text: str) -> str:
 
 
 def install_default_template(store: GitStore) -> str:
-    return install_template(store, PLANNER_V1_VERSION, PLANNER_V1)
+    """装好 v1 与 v2,返回 v1 的路径:调用方与既有测试都按 v1 的契约走。"""
+    rel = install_template(store, PLANNER_V1_VERSION, PLANNER_V1)
+    install_template(store, PLANNER_V2_VERSION, PLANNER_V2)
+    return rel
 
 
 def load_template(store: GitStore, version: str) -> PromptTemplate:

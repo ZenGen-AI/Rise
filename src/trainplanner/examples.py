@@ -57,6 +57,7 @@ _EXAMPLE_CONTEXT = {
         {"run_id": "run-002", "target_dimension": "empathy", "gpu_hours": None, "tokens": None, "gain": None},
         {"run_id": "run-003", "target_dimension": "tom", "gpu_hours": 2.0, "tokens": 12000, "gain": 0.03},
     ],
+    "strategy_experience": [],
 }
 
 

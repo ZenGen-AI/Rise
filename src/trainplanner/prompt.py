@@ -24,6 +24,7 @@ PLACEHOLDERS = (
     "recipes",
     "recent_decisions",
     "cost_gain",
+    "strategy_experience",
     "context",
 )
 
@@ -59,6 +60,7 @@ def placeholder_values(ctx: PlanningContext) -> dict[str, str]:
         "recipes": _json(d["recipes"]),
         "recent_decisions": _json(d["recent_decisions"]),
         "cost_gain": _json(d["cost_gain"]),
+        "strategy_experience": _json(list(ctx.strategy_experience)),
         "context": _json(d),
     }
 

@@ -9,6 +9,7 @@ from trainplanner.prompt import PLACEHOLDERS, check_template, render_prompt
 from trainplanner.templates import (
     PLANNER_V1,
     PLANNER_V1_VERSION,
+    PLANNER_V2,
     TemplateError,
     install_default_template,
     install_template,
@@ -29,7 +30,12 @@ def _commits(store):
 
 
 def test_planner_v1_uses_every_section_of_the_context():
-    assert set(check_template(PLANNER_V1)) == set(PLACEHOLDERS) - {"context"}
+    # v1 早于第七段:它不引用 strategy_experience,所以模板契约是"除这两项之外的全部"
+    assert set(check_template(PLANNER_V1)) == set(PLACEHOLDERS) - {"context", "strategy_experience"}
+
+
+def test_planner_v2_uses_every_section_of_the_context():
+    assert set(check_template(PLANNER_V2)) == set(PLACEHOLDERS) - {"context"}
 
 
 def test_planner_v1_names_every_decision_key_and_demands_one_json_object():

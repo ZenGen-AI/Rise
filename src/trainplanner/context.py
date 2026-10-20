@@ -345,8 +345,12 @@ class PlanningContext:
     recipes: list[RecipeSummary] = field(default_factory=list)
     recent_decisions: list[DecisionOutcome] = field(default_factory=list)
     cost_gain: list[CostGainEntry] = field(default_factory=list)
+    strategy_experience: list[str] = field(default_factory=list)
 
-    _KEYS = ("run_id", "candidate", "diagnostic", "recipes", "recent_decisions", "cost_gain")
+    _KEYS = ("run_id", "candidate", "diagnostic", "recipes", "recent_decisions", "cost_gain",
+             "strategy_experience")
+    # 第七段是本轮新增的可选键:旧决策的上下文没有它,仍要能读回
+    _OPTIONAL_KEYS = ("strategy_experience",)
 
     def __post_init__(self) -> None:
         _check_str(self.run_id, "run_id")
@@ -357,6 +361,13 @@ class PlanningContext:
         _check_list_of(self.recipes, RecipeSummary, "recipes")
         _check_list_of(self.recent_decisions, DecisionOutcome, "recent_decisions")
         _check_list_of(self.cost_gain, CostGainEntry, "cost_gain")
+        if not isinstance(self.strategy_experience, list):
+            raise InvalidContextError("strategy_experience: expected a list")
+        for line in self.strategy_experience:
+            if not isinstance(line, str) or not line.strip():
+                raise InvalidContextError(
+                    "strategy_experience: every entry must be a non-empty string"
+                )
 
     def to_dict(self) -> dict:
         return {
@@ -366,11 +377,17 @@ class PlanningContext:
             "recipes": [r.to_dict() for r in self.recipes],
             "recent_decisions": [r.to_dict() for r in self.recent_decisions],
             "cost_gain": [c.to_dict() for c in self.cost_gain],
+            "strategy_experience": list(self.strategy_experience),
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> PlanningContext:
-        _exact_keys(d, cls._KEYS, "context")
+        # 第七段是新增的可选键:旧产物没有它也要读得回。按"字典里有没有这个键"选键集合,
+        # 而不是把校验从 _exact_keys 里拿掉——后者会丢掉"missing keys / unknown keys"的报错措辞,
+        # 而既有测试正是按那两句话断言的。
+        keys = cls._KEYS if isinstance(d, dict) and "strategy_experience" in d \
+            else tuple(k for k in cls._KEYS if k not in cls._OPTIONAL_KEYS)
+        _exact_keys(d, keys, "context")
         return cls(
             run_id=d["run_id"],
             candidate=CandidateSummary.from_dict(d["candidate"]),
@@ -380,4 +397,5 @@ class PlanningContext:
                 DecisionOutcome.from_dict(x) for x in _list_field(d, "recent_decisions", "context")
             ],
             cost_gain=[CostGainEntry.from_dict(x) for x in _list_field(d, "cost_gain", "context")],
+            strategy_experience=list(d.get("strategy_experience") or []),
         )
