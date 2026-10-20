@@ -70,7 +70,7 @@ def test_switch_off_writes_nothing(tmp_path):
     _round(store, "run-003")
     record_and_recompute(store, "run-003", config=SchedulerConfig())
     assert not store.exists(strategy_experience_note_file("run-003"))
-    assert load_entries(store) == []
+    assert load_entries(store) == ([], [])
 
 
 def test_single_witness_writes_an_insufficient_entry(tmp_path):
@@ -78,7 +78,8 @@ def test_single_witness_writes_an_insufficient_entry(tmp_path):
     _baseline(store)
     _round(store, "run-003")
     record_and_recompute(store, "run-003", config=SchedulerConfig(strategy_experience=True))
-    entries = load_entries(store)
+    entries, broken = load_entries(store)
+    assert not broken
     assert len(entries) == 1 and entries[0].status == "insufficient"
     assert entries[0].support == 1
     assert store.exists(strategy_entry_file(entries[0].entry_id))
@@ -92,7 +93,9 @@ def test_second_witness_promotes_the_entry(tmp_path):
     record_and_recompute(store, "run-003", config=cfg)
     _round(store, "run-005", score=0.43)
     record_and_recompute(store, "run-005", config=cfg)
-    [entry] = load_entries(store)
+    entries, broken = load_entries(store)
+    assert not broken
+    [entry] = entries
     assert entry.status == "effective" and entry.support == 2
     assert entry.value_examples == {"opd_coefficient": {"0.2": 2}}
 
@@ -104,7 +107,7 @@ def test_stub_report_is_ignored_not_crashed(tmp_path):
     write_report(store, "run-003", {"tom": 0.45}, stub=True)
     record_and_recompute(store, "run-003", config=SchedulerConfig(strategy_experience=True))
     assert not store.exists(strategy_experience_note_file("run-003"))
-    assert load_entries(store) == []
+    assert load_entries(store) == ([], [])
 
 
 def test_missing_decision_is_ignored(tmp_path):
@@ -174,6 +177,53 @@ def test_rendered_line_carries_the_perturbation_value(tmp_path):
     assert summary.rendered
     assert "opd_coefficient" in summary.rendered[0]
     assert "0.2" in summary.rendered[0]
+
+
+def test_a_truncated_record_file_does_not_crash_selection(tmp_path):
+    """半截 YAML(崩溃留下的)要降级成 ignored,不能让 select_entries 抛。"""
+    store = make_store(tmp_path)
+    _baseline(store)
+    _round(store, "run-003")
+    record_and_recompute(store, "run-003", config=SchedulerConfig(strategy_experience=True))
+    rel = strategy_experience_note_file("run-003")
+    (store.repo_root / rel).write_text("id: strategy-run-003\npayload: {broken", encoding="utf-8")
+    summary = select_entries(store, dimension="tom", benchmark_version=BENCH, base_model_id=BASE)
+    assert summary.ignored_records
+
+
+def test_a_record_missing_run_id_is_skipped_not_fatal(tmp_path):
+    store = make_store(tmp_path)
+    _baseline(store)
+    _round(store, "run-003")
+    cfg = SchedulerConfig(strategy_experience=True)
+    record_and_recompute(store, "run-003", config=cfg)
+    rel = strategy_experience_note_file("run-003")
+    env_ = store.read_product(rel)
+    payload = dict(env_.payload)
+    payload.pop("run_id", None)
+    store.write_product(rel, env(env_.id, env_.type, env_.status, payload, [payload.get("run_id") or "run-003"]),
+                        "テスト: drop run_id")
+    _round(store, "run-005")
+    record_and_recompute(store, "run-005", config=cfg)      # 不许抛
+    summary = select_entries(store, dimension="tom", benchmark_version=BENCH, base_model_id=BASE)
+    assert summary.ignored_records
+
+
+def test_an_unparseable_entry_is_not_overwritten(tmp_path):
+    """手改坏的条目文件原样留着:重算跳过它,不重建、不丢覆盖表。"""
+    store = make_store(tmp_path)
+    _baseline(store)
+    cfg = SchedulerConfig(strategy_experience=True)
+    _round(store, "run-003", score=0.45)
+    record_and_recompute(store, "run-003", config=cfg)
+    entries, _ = load_entries(store)
+    [entry] = entries
+    rel = strategy_entry_file(entry.entry_id)
+    (store.repo_root / rel).write_text("not: a valid entry\n", encoding="utf-8")
+    before = (store.repo_root / rel).read_text(encoding="utf-8")
+    _round(store, "run-005", score=0.43)
+    record_and_recompute(store, "run-005", config=cfg)
+    assert (store.repo_root / rel).read_text(encoding="utf-8") == before
 
 
 def test_writes_outside_the_artifact_tree_are_refused(tmp_path):
