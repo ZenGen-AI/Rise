@@ -1077,7 +1077,6 @@ Expected: FAIL，`ModuleNotFoundError: No module named 'trainscheduler.experienc
 """策略经验的读写层(设计 4、5、6)。唯一的 I/O 入口;增益只经 recipes_port 转导。"""
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 
 from controlplane.envelope import CURRENT_SCHEMA_VERSION, Envelope, OwnerRef
@@ -1558,7 +1557,9 @@ ON = SchedulerConfig(strategy_experience=True)
 
 
 def _baseline(store):
-    write_round(store, "run-001", {"tom": 0.40, "empathy": 0.70}, model_n=1)
+    """基线轮必须在 real 级:compute_gain 拒绝"real 候选对非 real 基线"的跨级比较(R17),
+    基线若是默认的 mock,增益恒为空,条目一条也写不出来。"""
+    write_round(store, "run-001", {"tom": 0.40, "empathy": 0.70}, model_n=1, backends="real")
 
 
 def _round(store, run_id, *, score=0.45, dimension="tom", perturbation=None, backends="real"):
