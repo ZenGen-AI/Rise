@@ -875,7 +875,7 @@ git commit -m "feat(trainscheduler): 策略经验的纯函数层:签名、分桶
   - `collect_record(store, run_id) -> tuple[dict | None, list[str]]`：记录与忽略原因
   - `record_and_recompute(store, run_id, *, config) -> None`
   - `select_entries(store, *, dimension, benchmark_version, base_model_id, limit=3) -> StrategyExperienceSummary`
-  - `load_entries(store) -> list[EntryState]`
+  - `load_entries(store) -> tuple[list[EntryState], list[str]]`：条目与读不出的文件
 
 - [ ] **Step 1: 写失败测试**
 
@@ -951,7 +951,7 @@ def test_switch_off_writes_nothing(tmp_path):
     _round(store, "run-003")
     record_and_recompute(store, "run-003", config=SchedulerConfig())
     assert not store.exists(strategy_experience_note_file("run-003"))
-    assert load_entries(store) == []
+    assert load_entries(store) == ([], [])
 
 
 def test_single_witness_writes_an_insufficient_entry(tmp_path):
@@ -959,7 +959,8 @@ def test_single_witness_writes_an_insufficient_entry(tmp_path):
     _baseline(store)
     _round(store, "run-003")
     record_and_recompute(store, "run-003", config=SchedulerConfig(strategy_experience=True))
-    entries = load_entries(store)
+    entries, broken = load_entries(store)
+    assert not broken
     assert len(entries) == 1 and entries[0].status == "insufficient"
     assert entries[0].support == 1
     assert store.exists(strategy_entry_file(entries[0].entry_id))
@@ -973,7 +974,9 @@ def test_second_witness_promotes_the_entry(tmp_path):
     record_and_recompute(store, "run-003", config=cfg)
     _round(store, "run-005", score=0.43)
     record_and_recompute(store, "run-005", config=cfg)
-    [entry] = load_entries(store)
+    entries, broken = load_entries(store)
+    assert not broken
+    [entry] = entries
     assert entry.status == "effective" and entry.support == 2
     assert entry.value_examples == {"opd_coefficient": {"0.2": 2}}
 
@@ -985,7 +988,7 @@ def test_stub_report_is_ignored_not_crashed(tmp_path):
     write_report(store, "run-003", {"tom": 0.45}, stub=True)
     record_and_recompute(store, "run-003", config=SchedulerConfig(strategy_experience=True))
     assert not store.exists(strategy_experience_note_file("run-003"))
-    assert load_entries(store) == []
+    assert load_entries(store) == ([], [])
 
 
 def test_missing_decision_is_ignored(tmp_path):
@@ -1055,6 +1058,53 @@ def test_rendered_line_carries_the_perturbation_value(tmp_path):
     assert summary.rendered
     assert "opd_coefficient" in summary.rendered[0]
     assert "0.2" in summary.rendered[0]
+
+
+def test_a_truncated_record_file_does_not_crash_selection(tmp_path):
+    """半截 YAML(崩溃留下的)要降级成 ignored,不能让 select_entries 抛。"""
+    store = make_store(tmp_path)
+    _baseline(store)
+    _round(store, "run-003")
+    record_and_recompute(store, "run-003", config=SchedulerConfig(strategy_experience=True))
+    rel = strategy_experience_note_file("run-003")
+    (store.repo_root / rel).write_text("id: strategy-run-003\npayload: {broken", encoding="utf-8")
+    summary = select_entries(store, dimension="tom", benchmark_version=BENCH, base_model_id=BASE)
+    assert summary.ignored_records
+
+
+def test_a_record_missing_run_id_is_skipped_not_fatal(tmp_path):
+    store = make_store(tmp_path)
+    _baseline(store)
+    _round(store, "run-003")
+    cfg = SchedulerConfig(strategy_experience=True)
+    record_and_recompute(store, "run-003", config=cfg)
+    rel = strategy_experience_note_file("run-003")
+    env_ = store.read_product(rel)
+    payload = dict(env_.payload)
+    payload.pop("run_id", None)
+    store.write_product(rel, env(env_.id, env_.type, env_.status, payload, [payload.get("run_id") or "run-003"]),
+                        "テスト: drop run_id")
+    _round(store, "run-005")
+    record_and_recompute(store, "run-005", config=cfg)      # 不许抛
+    summary = select_entries(store, dimension="tom", benchmark_version=BENCH, base_model_id=BASE)
+    assert summary.ignored_records
+
+
+def test_an_unparseable_entry_is_not_overwritten(tmp_path):
+    """手改坏的条目文件原样留着:重算跳过它,不重建、不丢覆盖表。"""
+    store = make_store(tmp_path)
+    _baseline(store)
+    cfg = SchedulerConfig(strategy_experience=True)
+    _round(store, "run-003", score=0.45)
+    record_and_recompute(store, "run-003", config=cfg)
+    entries, _ = load_entries(store)
+    [entry] = entries
+    rel = strategy_entry_file(entry.entry_id)
+    (store.repo_root / rel).write_text("not: a valid entry\n", encoding="utf-8")
+    before = (store.repo_root / rel).read_text(encoding="utf-8")
+    _round(store, "run-005", score=0.43)
+    record_and_recompute(store, "run-005", config=cfg)
+    assert (store.repo_root / rel).read_text(encoding="utf-8") == before
 
 
 def test_empty_store_renders_nothing(tmp_path):
@@ -1145,7 +1195,8 @@ def collect_record(store: GitStore, run_id: str) -> tuple[dict | None, list[str]
 
     dimension = decision.get("target_dimension")
     if not safe_dimension(dimension):
-        ignored.append(f"{run_id}: dimension {dimension!r} is not a safe path segment")
+        # 失败关闭:不安全的维度不进记录。记成 "None" 会造出一个假的桶,比丢掉这一轮更糟
+        return None, [f"{run_id}: dimension {dimension!r} is not a safe path segment"]
 
     action = str(decision.get("action") or "")
     perturbation = decision.get("perturbation") or {}
@@ -1198,34 +1249,68 @@ def _write(store: GitStore, rel: str, *, id_: str, type_: str, links: list[str],
     store.write_product(rel, env, message)
 
 
-def load_entries(store: GitStore) -> list[EntryState]:
-    """读全部能解析的条目;解析不了的由 select_entries 计入 ignored。"""
-    out: list[EntryState] = []
+def load_entries(store: GitStore) -> tuple[list[EntryState], list[str]]:
+    """读全部能解析的条目。返回 (条目, 读不出的文件名)。
+
+    读不出的条目不许静默消失:调用方要把它当"不许覆盖"的名单,否则一次手编坏文件
+    会在下一次重算里被无痕重建,人写过的覆盖表随之丢失。
+    """
+    entries: list[EntryState] = []
+    broken: list[str] = []
     for rel in store.list_products(EXPERIENCE_DIR):
-        env = store.read_product(rel)
         try:
-            out.append(EntryState.from_payload(env.id, env.payload))
-        except (KeyError, TypeError, ValueError):
-            continue
-    return out
+            env = store.read_product(rel)
+            entries.append(EntryState.from_payload(env.id, env.payload))
+        except Exception:                       # YAML 解析失败、缺键、类型错,一律当读不出
+            broken.append(rel)
+    return entries, broken
+
+
+def _record_is_usable(record: object) -> bool:
+    """记录必须正好具备 recompute_entries 消费的形状;缺一项就整条跳过,不让它终止整次重算。"""
+    if not isinstance(record, dict):
+        return False
+    run_id = record.get("run_id")
+    if not isinstance(run_id, str) or not run_id:
+        return False
+    evidence, outcome = record.get("evidence"), record.get("outcome")
+    if not isinstance(evidence, dict) or not isinstance(outcome, dict):
+        return False
+    base = evidence.get("baseline_model_id")
+    if not isinstance(base, str) or not base:
+        return False
+    key = record.get("strategy_key")
+    if not isinstance(key, dict):
+        return False
+    try:
+        bucket_key(key, base)
+    except (KeyError, TypeError, ValueError):
+        return False
+    perturbation = key.get("perturbation")
+    if not isinstance(perturbation, dict):
+        return False
+    if not all(isinstance(v, dict) for v in perturbation.values()):
+        return False
+    return True
 
 
 def _all_records(store: GitStore) -> tuple[list[dict], list[str]]:
-    """全部记录。list_products 不递归,所以先列 run 目录再逐目录读记录文件。"""
+    """全部可用记录。list_products 不递归,所以先列 run 目录再逐目录读记录文件。"""
     records: list[dict] = []
     ignored: list[str] = []
     for run_id in list_run_dirs(store):
         rel = strategy_experience_note_file(run_id)
         if not store.exists(rel):
             continue
-        env = store.read_product(rel)
-        record = env.payload
         try:
-            bucket_key(record["strategy_key"], record["evidence"]["baseline_model_id"])
-        except (KeyError, TypeError):
-            ignored.append(f"{env.id}: unreadable record payload")
+            env = store.read_product(rel)
+        except Exception:                       # 半截 YAML 之类:跳过,不抛
+            ignored.append(f"{rel}: unreadable file")
             continue
-        records.append(record)
+        if not _record_is_usable(env.payload):
+            ignored.append(f"{env.id}: unusable record payload")
+            continue
+        records.append(env.payload)
     return records, ignored
 
 
@@ -1246,9 +1331,13 @@ def record_and_recompute(store: GitStore, run_id: str, *, config: SchedulerConfi
     if not isinstance(benchmark, str):
         return
     records, _ = _all_records(store)
-    existing = load_entries(store)
+    existing, broken = load_entries(store)
+    # 读不出的条目按文件名记下来:id 相同的那条不许被重算覆盖
+    broken_ids = {rel.rsplit("/", 1)[-1][:-5] for rel in broken}
     states = recompute_entries(records, existing, benchmark_version=benchmark)
     for state in states:
+        if state.entry_id in broken_ids:
+            continue                            # 手改坏的文件留给人看,不覆盖
         previous = next((e for e in existing if e.entry_id == state.entry_id), None)
         if previous is not None and previous.to_payload() == state.to_payload():
             continue
@@ -1277,26 +1366,30 @@ def select_entries(
     store: GitStore, *, dimension: str, benchmark_version: str,
     base_model_id: str, limit: int = 3,
 ) -> StrategyExperienceSummary:
-    """筛可用条目,排序截断,渲染。从不抛。"""
+    """筛可用条目,排序截断,渲染。从不抛:任何读不出的文件都降级成 ignored。"""
     _, ignored = _all_records(store)
+    entries, broken = load_entries(store)
     usable = [
-        e for e in load_entries(store)
+        e for e in entries
         if e.status == "effective" and e.bucket[0] == dimension
         and e.benchmark_version == benchmark_version
         and e.baseline_model_id == base_model_id
     ]
     usable.sort(key=lambda e: (-e.support, -e.mean_gain, e.entry_id))
-    truncated = max(0, len(usable) - limit)
+    limit = max(0, limit)
+    chosen: list = []
     lines: list[str] = []
     used = 0
     for entry in usable[:limit]:
         line = _render(entry)
         if used + len(line) > RENDER_BUDGET:
-            truncated += 1
-            continue
+            break                               # 预算用尽就停,不放矮的进来挤掉高的
+        chosen.append(entry)
         lines.append(line)
         used += len(line)
-    return StrategyExperienceSummary(tuple(usable[:limit]), tuple(lines), truncated, tuple(ignored))
+    truncated = len(usable) - len(chosen)
+    return StrategyExperienceSummary(tuple(chosen), tuple(lines), truncated,
+                                     tuple(ignored) + tuple(broken))
 ```
 
 - [ ] **Step 4: 运行确认通过**
