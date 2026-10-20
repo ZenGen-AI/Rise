@@ -388,6 +388,9 @@ class PlanningContext:
         keys = cls._KEYS if isinstance(d, dict) and "strategy_experience" in d \
             else tuple(k for k in cls._KEYS if k not in cls._OPTIONAL_KEYS)
         _exact_keys(d, keys, "context")
+        # 第七段:list 复制一份;非 list 原样交给 __post_init__ 去拒绝,
+        # 不在 from_dict 里静默强转(否则 "abc" 会被拆成 ['a','b','c'],None 会变成 [])
+        raw_experience = d["strategy_experience"] if "strategy_experience" in d else []
         return cls(
             run_id=d["run_id"],
             candidate=CandidateSummary.from_dict(d["candidate"]),
@@ -397,5 +400,7 @@ class PlanningContext:
                 DecisionOutcome.from_dict(x) for x in _list_field(d, "recent_decisions", "context")
             ],
             cost_gain=[CostGainEntry.from_dict(x) for x in _list_field(d, "cost_gain", "context")],
-            strategy_experience=list(d.get("strategy_experience") or []),
+            strategy_experience=(
+                list(raw_experience) if isinstance(raw_experience, list) else raw_experience
+            ),
         )
