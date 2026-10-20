@@ -902,6 +902,12 @@ BENCH = "bench-v1"
 BASE = "zengen-v1"
 
 
+def _previous_run(run_id: str) -> str:
+    """产出这一轮的那次规划的来源 run:run-005 -> run-004。测试里编号都是整数。"""
+    number = int(run_id.split("-")[1])
+    return f"run-{number - 1:03d}"
+
+
 def _baseline(store):
     """基线轮:分数 0.40,晋级为 zengen-v1。后面各轮的增益都以它为对照。"""
     write_round(store, "run-001", {"tom": 0.40, "empathy": 0.70}, model_n=1)
@@ -912,7 +918,10 @@ def _round(store, run_id, *, score=0.45, perturbation=None, dimension="tom",
     write_round(store, run_id, {dimension: score, "empathy": 0.70}, backends=backends,
                 flags=list(flags))
     if decision:
-        write_decision(store, run_id, None, action="clone", dimension=dimension,
+        # 决策属于产出这一轮的那次规划:source 是上一个 run,next_run 是本 run。
+        # 指令里的 planner_decision_ref 指回它,落账靠这条链找到本轮的策略。
+        write_decision(store, _previous_run(run_id), run_id, action="clone",
+                       dimension=dimension,
                        perturbation={"opd_coefficient": 0.2} if perturbation is None else perturbation,
                        source_recipe_id="recipe-run-002")
     write_report(store, run_id, {dimension: score, "empathy": 0.70}, baseline_ref=BASE,
@@ -1176,15 +1185,34 @@ def _cost(store: GitStore, run_id: str) -> dict:
     return {"calls": int(sum(calls)) if calls else None}
 
 
+def _decision_that_produced(store: GitStore, run_id: str) -> dict | None:
+    """找到产出这一轮的决策。
+
+    不能读 runs/<run_id>/planner_decision.yaml:那是"这一轮结束后为下一轮做的规划",
+    在规划这一轮的当下还不存在(plan_handler 只有在它为某 run 尚无决策时才做新规划)。
+    真正的来源是指令里的 planner_decision_ref——它指向的决策,其 next_run_id 正是这一轮。
+    人写的指令没有这个引用,返回 None(人写的命令没有策略可归因)。
+    """
+    path = f"{run_dir(run_id)}/directive.yaml"
+    if not store.exists(path):
+        return None
+    ref = store.read_product(path).payload.get("planner_decision_ref")
+    if not isinstance(ref, str) or not ref.startswith("planner-"):
+        return None
+    source = ref[len("planner-"):]
+    decision_path = planner_decision_file(source)
+    if not store.exists(decision_path):
+        return None
+    decision = store.read_product(decision_path).payload.get("decision")
+    return decision if isinstance(decision, dict) else None
+
+
 def collect_record(store: GitStore, run_id: str) -> tuple[dict | None, list[str]]:
     """把一轮压成记录载荷。返回 (载荷或 None, 忽略原因)。只读。"""
     ignored: list[str] = []
-    decision_path = planner_decision_file(run_id)
-    if not store.exists(decision_path):
-        return None, [f"{run_id}: no planner decision"]
-    decision = store.read_product(decision_path).payload.get("decision")
-    if not isinstance(decision, dict):
-        return None, [f"{run_id}: planner decision has no decision payload"]
+    decision = _decision_that_produced(store, run_id)
+    if decision is None:
+        return None, [f"{run_id}: no planner decision produced this run"]
 
     payload = read_report_payload(store, run_id)
     if payload is None:
@@ -1712,7 +1740,8 @@ def _baseline(store):
 def _round(store, run_id, *, score=0.45, dimension="tom", perturbation=None, backends="real"):
     """一整轮加一条已执行的规划决策。基线固定是 zengen-v1,所以增益 = score - 0.40。"""
     write_round(store, run_id, {dimension: score, "empathy": 0.70}, backends=backends)
-    write_decision(store, run_id, None, action="clone", dimension=dimension,
+    # 决策属于产出这一轮的那次规划:source 是上一个 run,next_run 是本 run
+    write_decision(store, _previous_run(run_id), run_id, action="clone", dimension=dimension,
                    perturbation={"opd_coefficient": 0.2} if perturbation is None else perturbation,
                    source_recipe_id="recipe-run-002")
     write_report(store, run_id, {dimension: score, "empathy": 0.70}, baseline_ref=BASE,
@@ -1741,15 +1770,19 @@ def test_on_injects_matching_entries(tmp_path):
 
 
 def test_handler_records_before_it_assembles(tmp_path):
-    """落账在装配之前:即使后续规划因缺训练默认值而抛错,记录也已经写下。"""
+    """落账在装配之前:即使后面规划失败,这一轮的记录也已经写下。
+
+    run-005 自己的决策必须还不存在,否则处理器走 (c) 分支直接返回,什么都不做。
+    """
     store = make_store(tmp_path)
     _baseline(store)
     _round(store, "run-005")
     handler = make_plan_handler(
         backend=HeuristicBackend(),
         config_loader=lambda _store: ON,
+        defaults_loader=lambda _store: (_ for _ in ()).throw(RuntimeError("boom")),
     )
-    with pytest.raises(Exception):
+    with pytest.raises(RuntimeError):
         handler(store, Action(kind="plan_next_round", target_id="run-005",
                               detail={"run_id": "run-005"}))
     from controlplane.paths import strategy_experience_note_file
