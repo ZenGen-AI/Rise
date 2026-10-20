@@ -267,7 +267,7 @@ def rec(run_id, *, dimension="tom", gain=0.05, grade="real", regressions=(),
         "outcome": {"gain": gain, "promoted": True, "regressions": list(regressions),
                     "cost": {"calls": 6}},
         "evidence": {"grade": grade, "baseline_ref": base, "benchmark_version": benchmark,
-                     "base_model_id": base},
+                     "baseline_model_id": base},
         "attribution": attribution,
         "ignored": [],
     }
@@ -279,7 +279,7 @@ def test_signature_records_values_not_only_key_names():
     b = strategy_key(dimension="tom", action="clone", mode="batch",
                      perturbation={"opd_coefficient": 0.3}, source_recipe_id="recipe-run-002")
     assert a != b
-    assert bucket_key(a) == bucket_key(b)
+    assert bucket_key(a, BASE) == bucket_key(b, BASE)
 
 
 def test_signature_ignores_key_order():
@@ -290,6 +290,12 @@ def test_signature_ignores_key_order():
                      perturbation={"opd_coefficient": 0.2, "sft_steps": 4},
                      source_recipe_id="r")
     assert a == b
+
+
+def test_different_baselines_never_share_an_entry_id():
+    key = strategy_key(dimension="tom", action="clone", mode="batch",
+                       perturbation={"opd_coefficient": 0.2}, source_recipe_id="r")
+    assert entry_id("tom", bucket_key(key, "zengen-v1")) != entry_id("tom", bucket_key(key, "zengen-v2"))
 
 
 def test_int_and_float_of_the_same_number_share_a_signature():
@@ -316,8 +322,8 @@ def test_safe_dimension(dimension, ok):
 
 
 def test_entry_id_falls_back_to_the_digest_for_bad_dimensions():
-    good = entry_id("tom", ("tom", "clone", "batch", ("opd_coefficient",), "recipe-run-002"))
-    bad = entry_id(None, ("..", "clone", "batch", (), ""))
+    good = entry_id("tom", ("tom", "clone", "batch", ("opd_coefficient",), "recipe-run-002", BASE))
+    bad = entry_id(None, ("..", "clone", "batch", (), "", BASE))
     assert good.startswith("exp-tom-")
     assert bad.startswith("exp-") and "/" not in bad and ".." not in bad
 
@@ -334,15 +340,14 @@ def test_attribution(action, perturbation, expected):
 
 
 def test_single_witness_is_insufficient():
-    [entry] = recompute_entries([rec("run-003")], [], base_model_id=BASE,
-                                benchmark_version="bench-v1")
+    [entry] = recompute_entries([rec("run-003")], [], benchmark_version="bench-v1")
     assert entry.status == "insufficient"
     assert entry.support == 1
 
 
 def test_two_witnesses_become_effective_with_a_mean():
     entries = recompute_entries([rec("run-003"), rec("run-005", gain=0.03)], [],
-                                base_model_id=BASE, benchmark_version="bench-v1")
+                                benchmark_version="bench-v1")
     [entry] = entries
     assert entry.status == "effective"
     assert entry.support == 2 and entry.wins == 2
@@ -352,41 +357,41 @@ def test_two_witnesses_become_effective_with_a_mean():
 def test_low_attribution_never_aggregates():
     entries = recompute_entries([rec("run-003", attribution="low"),
                                  rec("run-005", attribution="low")], [],
-                                base_model_id=BASE, benchmark_version="bench-v1")
+                                benchmark_version="bench-v1")
     assert entries == []
 
 
 def test_null_gain_and_mock_evidence_never_aggregate():
     assert recompute_entries([rec("run-003", gain=None), rec("run-005", gain=None)], [],
-                             base_model_id=BASE, benchmark_version="bench-v1") == []
+                             benchmark_version="bench-v1") == []
     assert recompute_entries([rec("run-003", grade="mock"), rec("run-005", grade="mock")], [],
-                             base_model_id=BASE, benchmark_version="bench-v1") == []
+                             benchmark_version="bench-v1") == []
 
 
 def test_other_baseline_and_other_benchmark_never_aggregate():
     assert recompute_entries([rec("run-003", base="zengen-v1"),
                               rec("run-005", base="zengen-v1")], [],
-                             base_model_id=BASE, benchmark_version="bench-v1") == []
+                             benchmark_version="bench-v1") == []
     assert recompute_entries([rec("run-003", benchmark="bench-v0"),
                               rec("run-005", benchmark="bench-v0")], [],
-                             base_model_id=BASE, benchmark_version="bench-v1") == []
+                             benchmark_version="bench-v1") == []
 
 
 def test_half_the_support_deprecates():
     records = [rec("run-003"), rec("run-005", gain=0.03), rec("run-008", gain=-0.06,
                                                               regressions=["social_regression"])]
-    [entry] = recompute_entries(records, [], base_model_id=BASE, benchmark_version="bench-v1")
+    [entry] = recompute_entries(records, [], benchmark_version="bench-v1")
     assert entry.support == 3 and entry.losses == 1
     assert entry.status == "effective"      # 一条反例未达半数
     records.append(rec("run-011", gain=-0.02, regressions=["social_regression"]))
-    [entry] = recompute_entries(records, [], base_model_id=BASE, benchmark_version="bench-v1")
+    [entry] = recompute_entries(records, [], benchmark_version="bench-v1")
     assert entry.status == "deprecated"
 
 
 def test_contradictions_keep_the_five_latest_by_run_number():
     records = [rec(f"run-{n:03d}", gain=-0.01, regressions=["social_regression"])
                for n in range(3, 13)]
-    [entry] = recompute_entries(records, [], base_model_id=BASE, benchmark_version="bench-v1")
+    [entry] = recompute_entries(records, [], benchmark_version="bench-v1")
     assert [c["run_id"] for c in entry.contradictions] == [
         "run-008", "run-009", "run-010", "run-011", "run-012"
     ]
@@ -394,26 +399,26 @@ def test_contradictions_keep_the_five_latest_by_run_number():
 
 def test_summing_is_independent_of_input_order():
     records = [rec("run-003", gain=0.1), rec("run-005", gain=0.2), rec("run-007", gain=0.3)]
-    a = recompute_entries(records, [], base_model_id=BASE, benchmark_version="bench-v1")
-    b = recompute_entries(list(reversed(records)), [], base_model_id=BASE,
+    a = recompute_entries(records, [], benchmark_version="bench-v1")
+    b = recompute_entries(list(reversed(records)), [],
                           benchmark_version="bench-v1")
     assert a[0].to_payload() == b[0].to_payload()
 
 
 def test_overrides_survive_a_recompute():
     [first] = recompute_entries([rec("run-003"), rec("run-005")], [],
-                                base_model_id=BASE, benchmark_version="bench-v1")
+                                benchmark_version="bench-v1")
     existing = [first.with_overrides({"status": "deprecated"})]
     [again] = recompute_entries([rec("run-003"), rec("run-005")], existing,
-                                base_model_id=BASE, benchmark_version="bench-v1")
+                                benchmark_version="bench-v1")
     assert again.status == "deprecated"
     assert again.support == 2
 
 
 def test_untouched_entries_become_stale():
     [old] = recompute_entries([rec("run-003"), rec("run-005", benchmark="bench-v0")], [],
-                              base_model_id=BASE, benchmark_version="bench-v0")
-    [now] = recompute_entries([], [old], base_model_id=BASE, benchmark_version="bench-v1")
+                              benchmark_version="bench-v0")
+    [now] = recompute_entries([], [old], benchmark_version="bench-v1")
     assert now.status == "stale"
 ```
 
@@ -456,7 +461,8 @@ MAX_CONTRADICTIONS = 5
 # 维度取自诊断载荷,要拼进文件名:只允许单段、无控制字符、不以点开头
 _DIMENSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
-Bucket = tuple[str, str, str, tuple[str, ...], str]   # dimension, action, mode, 键名, 源配方
+# dimension, action, mode, 扰动键名, 源配方, 对照基线
+Bucket = tuple[str, str, str, tuple[str, ...], str, str]
 
 
 def safe_dimension(dimension: object) -> str | None:
@@ -500,14 +506,15 @@ def strategy_key(
     }
 
 
-def bucket_key(key: dict) -> Bucket:
-    """分桶键:只看扰动有哪些键,不看值。"""
+def bucket_key(key: dict, baseline_model_id: str) -> Bucket:
+    """分桶键:扰动只看键名不看值;对照基线进桶,否则不同基座的同类策略会撞同一个 id。"""
     return (
         key["dimension"],
         key["action"],
         key["mode"],
         tuple(sorted(key["perturbation"])),
         key["source_recipe_id"],
+        baseline_model_id,
     )
 
 
@@ -609,7 +616,7 @@ class EntryState:
         )
 
 
-def _eligible(record: dict, *, base_model_id: str, benchmark_version: str) -> bool:
+def _eligible(record: dict, *, benchmark_version: str) -> bool:
     """能不能进聚合:设计 6.3 的资格表。"""
     if record.get("attribution") != ATTR_MEDIUM:
         return False
@@ -619,8 +626,6 @@ def _eligible(record: dict, *, base_model_id: str, benchmark_version: str) -> bo
     if not math.isfinite(float(outcome["gain"])):
         return False
     if evidence.get("grade") != "real":
-        return False
-    if evidence.get("base_model_id") != base_model_id:
         return False
     if evidence.get("benchmark_version") != benchmark_version:
         return False
@@ -636,7 +641,6 @@ def recompute_entries(
     records: list[dict],
     existing: list[EntryState],
     *,
-    base_model_id: str,
     benchmark_version: str,
 ) -> list[EntryState]:
     """由全部记录加当前基座与基准重算条目。纯函数。
@@ -647,11 +651,10 @@ def recompute_entries(
     """
     grouped: dict[Bucket, list[dict]] = {}
     for record in records:
-        if not isinstance(record, dict) or not _eligible(
-            record, base_model_id=base_model_id, benchmark_version=benchmark_version
-        ):
+        if not isinstance(record, dict) or not _eligible(record, benchmark_version=benchmark_version):
             continue
-        grouped.setdefault(bucket_key(record["strategy_key"]), []).append(record)
+        base = record["evidence"]["baseline_model_id"]
+        grouped.setdefault(bucket_key(record["strategy_key"], base), []).append(record)
 
     out: list[EntryState] = []
     for bucket, group in sorted(grouped.items()):
@@ -688,7 +691,7 @@ def recompute_entries(
             value_examples=_value_examples(ordered),
             status=status,
             evidence_scope="real",
-            baseline_model_id=base_model_id,
+            baseline_model_id=bucket[5],
             benchmark_version=benchmark_version,
         )
         previous = next((e for e in existing if e.entry_id == state.entry_id), None)
@@ -979,6 +982,7 @@ class StrategyExperienceSummary:
 
 
 def _current_base(store: GitStore) -> str | None:
+    """注入侧的选取基线:下一轮从它训练,诊断报告里的 baseline_ref 也就是它。"""
     base = latest_promoted_checkpoint(store)
     return None if base is None else base.model_id
 
@@ -1044,9 +1048,10 @@ def collect_record(store: GitStore, run_id: str) -> tuple[dict | None, list[str]
         },
         "evidence": {
             "grade": grade,
+            # 对照基线取自报告:增益是"候选减它",条目必须按它分桶,而不是按当前晋级模型
             "baseline_ref": payload.get("baseline_ref"),
+            "baseline_model_id": payload.get("baseline_ref"),
             "benchmark_version": payload.get("benchmark_version"),
-            "base_model_id": _current_base(store),
         },
         "attribution": attribution_for(action, perturbation),
         "ignored": ignored,
@@ -1108,15 +1113,12 @@ def record_and_recompute(store: GitStore, run_id: str, *, config: SchedulerConfi
         payload=record, message=f"trainscheduler: strategy experience for {run_id}",
     )
 
-    base_model_id = _current_base(store)
     benchmark = (record["evidence"] or {}).get("benchmark_version")
-    if not isinstance(base_model_id, str) or not isinstance(benchmark, str):
+    if not isinstance(benchmark, str):
         return
     records, _ = _all_records(store)
     existing = load_entries(store)
-    states = recompute_entries(
-        records, existing, base_model_id=base_model_id, benchmark_version=benchmark
-    )
+    states = recompute_entries(records, existing, benchmark_version=benchmark)
     for state in states:
         previous = next((e for e in existing if e.entry_id == state.entry_id), None)
         if previous is not None and previous.to_payload() == state.to_payload():
