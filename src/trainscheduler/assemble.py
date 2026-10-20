@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from controlplane.evidence import diagnostic_grade
 from controlplane.gitstore import GitStore
+from controlplane.models import latest_promoted_checkpoint
 from controlplane.paths import candidate_checkpoint_file, planner_decision_file, run_dir, run_trace_file
 from trainplanner.context import (
     CANDIDATE_TERMINAL_STATES,
@@ -20,6 +21,7 @@ from trainplanner.context import (
 )
 from trainscheduler.config import SchedulerConfig, load_scheduler_config
 from trainscheduler.errors import ContextAssemblyError
+from trainscheduler.experience_port import select_entries
 from trainscheduler.recipes_port import compute_gain, find_recipes, read_report_payload, regression_flags
 from trainscheduler.run_ids import list_run_dirs, run_order_key
 
@@ -219,6 +221,25 @@ def _cost_gain(store: GitStore, runs: list[str], window: int) -> list[CostGainEn
     return out[-window:]
 
 
+def _strategy_experience(store: GitStore, run_id: str, config: SchedulerConfig) -> list[str]:
+    """设计 6.2:最低一级分维度、同基座同基准、最多三条。关闭时为空。"""
+    if not config.strategy_experience:
+        return []
+    base = latest_promoted_checkpoint(store)
+    if base is None:
+        return []
+    payload = read_report_payload(store, run_id)
+    benchmark = payload.get("benchmark_version") if isinstance(payload, dict) else None
+    if not isinstance(benchmark, str) or not benchmark:
+        return []
+    scores = l1_scores(payload)
+    dimension = min(scores, key=lambda name: (scores[name], name))
+    summary = select_entries(
+        store, dimension=dimension, benchmark_version=benchmark, base_model_id=base.model_id
+    )
+    return list(summary.rendered)
+
+
 def assemble_context(
     store: GitStore, run_id: str, *, config: SchedulerConfig | None = None
 ) -> PlanningContext:
@@ -233,6 +254,7 @@ def assemble_context(
             recipes=_recipes(store),
             recent_decisions=_recent_decisions(store, runs, config.recent_decision_window),
             cost_gain=_cost_gain(store, runs, config.cost_gain_window),
+            strategy_experience=_strategy_experience(store, run_id, config),
         )
     except InvalidContextError as exc:
         raise ContextAssemblyError(f"cannot assemble planning context for {run_id}: {exc}") from exc

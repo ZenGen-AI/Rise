@@ -39,6 +39,7 @@ from trainscheduler.config import (
 )
 from trainscheduler.directive import construct_directive
 from trainscheduler.errors import ResolveError, SchedulerError
+from trainscheduler.experience_port import record_and_recompute
 from trainscheduler.resolve import resolve_action, validate_decision
 from trainscheduler.run_ids import allocate_run_id, run_number
 
@@ -177,6 +178,11 @@ def make_plan_handler(
             return
 
         config = config_loader(store)
+        try:
+            record_and_recompute(store, run_id, config=config)
+        except Exception:
+            # 落账是旁路:它坏了不能挡住规划。坏输入已在 collect_record 里降级为 ignored
+            pass
         defaults = defaults_loader(store)
         template = template_loader(store, config.template_version)
         payload = _base_payload(run_id, template.version, backend.name)
