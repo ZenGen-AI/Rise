@@ -869,7 +869,7 @@ git commit -m "feat(trainscheduler): 策略经验的纯函数层:签名、分桶
 - Test: `tests/test_se_port.py`（新建）
 
 **Interfaces:**
-- Consumes: `experience.*`（Task 3）、`recipes_port.compute_gain`、`controlplane.envelope`、`controlplane.gitstore`、`controlplane.paths`、`controlplane.evidence`、`controlplane.models.latest_promoted_checkpoint`
+- Consumes: `experience.*`（Task 3）、`recipes_port.compute_gain`、`controlplane.envelope`、`controlplane.gitstore`、`controlplane.paths`、`controlplane.evidence`
 - Produces:
   - `StrategyExperienceSummary`（冻结）：`entries: tuple[EntryState, ...]`、`rendered: tuple[str, ...]`、`truncated: int`、`ignored_records: tuple[str, ...]`
   - `collect_record(store, run_id) -> tuple[dict | None, list[str]]`：记录与忽略原因
@@ -1082,7 +1082,6 @@ from dataclasses import dataclass
 
 from controlplane.envelope import CURRENT_SCHEMA_VERSION, Envelope, OwnerRef
 from controlplane.gitstore import GitStore
-from controlplane.models import latest_promoted_checkpoint
 from controlplane.paths import (
     candidate_checkpoint_file,
     planner_decision_file,
@@ -1116,12 +1115,6 @@ class StrategyExperienceSummary:
     rendered: tuple[str, ...]
     truncated: int
     ignored_records: tuple[str, ...]
-
-
-def _current_base(store: GitStore) -> str | None:
-    """注入侧的选取基线:下一轮从它训练,诊断报告里的 baseline_ref 也就是它。"""
-    base = latest_promoted_checkpoint(store)
-    return None if base is None else base.model_id
 
 
 def _cost(store: GitStore, run_id: str) -> dict:
@@ -1627,7 +1620,6 @@ Expected: FAIL，`assert ctx.strategy_experience` 为空
 `src/trainscheduler/assemble.py`：加导入与一段取材。
 
 ```python
-from controlplane.models import latest_promoted_checkpoint
 from trainscheduler.experience_port import select_entries
 ```
 
