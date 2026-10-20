@@ -175,11 +175,11 @@ TrainScheduler 的规划处理器调用它落账与重算,再调 `assemble_conte
 
 | 实体 | 字段与含义 | 约束 |
 |---|---|---|
-| 策略签名 | `dimension`、`action`、`mode`、`perturbation`(键到值的映射)、`source_recipe_id` | 键排序、值按类型规范化后取摘要;同签名同摘要 |
+| 策略签名 | `dimension`、`action`、`mode`、`perturbation`(键到值的映射)、`source_recipe_id` | 键排序、值按类型规范化;记录用它区分"试了哪个值",分桶只用键名 |
 | 记录 | `run_id`、`strategy_key`、`outcome`、`evidence`、`attribution`、`ignored` | 一个 run 至多一条;`attribution` 取 `high`、`medium`、`low` |
 | 结果 | `gain`、`promoted`、`regressions`、`cost`、`perturbation` | `gain` 可为空;`regressions` 是退化标记种类列表 |
-| 证据 | `grade`、`baseline_ref`、`benchmark_version`、`base_model_id` | `grade` 只接受 `mock`、`real`;桩报告永不落账 |
-| 条目 | `id`、`strategy_key`、`support`、`wins`、`losses`、`mean_gain`、`contradictions`、`value_examples`、`status`、`evidence_scope`、`baseline_model_id`、`overrides` | id 为 `exp-<维度>-<签名摘要前八位>` |
+| 证据 | `grade`、`baseline_ref`、`baseline_model_id`、`benchmark_version` | `baseline_model_id` 就是报告的 `baseline_ref`,即这一轮的对照基线;`grade` 只接受 `mock`、`real`;桩报告永不落账 |
+| 条目 | `id`、`strategy_key`、`support`、`wins`、`losses`、`mean_gain`、`contradictions`、`value_examples`、`status`、`evidence_scope`、`baseline_model_id`、`benchmark_version`、`overrides` | 条目的 `strategy_key` 只存扰动键名(`perturbation_keys`),值在 `value_examples`;id 为 `exp-<维度>-<桶摘要前八位>`,桶是(维度、动作、模式、扰动键名、源配方、对照基线) |
 | `value_examples` | 扰动键到"值 → 出现次数"的映射 | 只在聚合记录里出现过的值;已排序 |
 | `overrides` | 人写过的字段名到值的映射 | 重算跳过其中列出的字段 |
 | 反例 | `run_id`、`gain`、`regression_kinds` | 按 run 编号数值序保留最近五条 |
@@ -191,7 +191,7 @@ TrainScheduler 的规划处理器调用它落账与重算,再调 `assemble_conte
 
 信封字段齐备:`id`、`type`、`version`、`created_at`、`created_by`、`status`、`schema_version`、`links`、`payload`。信封 schema 不枚举 `type`,新增两种类型不需要改 schema。`experience/` 追加在 `SUBDIRS` 末尾,`tests/test_paths.py` 的精确断言同步加一项;记录放 run 目录顶层,`list_products` 的非递归扫描能扫到。
 
-路径安全:维度取自诊断载荷,拼进文件名前必须匹配 `^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`、不含 `..`、不是 `.`;不合法时条目 id 退回只用签名摘要,并在记录里记一条 `ignored`。
+路径安全:维度取自诊断载荷,拼进文件名前必须整串匹配 `^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`(整串匹配,不是行首匹配,否则末尾换行会被放过)、不含 `..`、不是 `.`;不合法时条目 id 退回只用签名摘要,并在记录里记一条 `ignored`。
 
 载荷示例:
 
@@ -201,7 +201,8 @@ run_id: run-003
 strategy_key: {dimension: tom, action: clone, mode: batch,
                perturbation: {opd_coefficient: 0.2}, source_recipe_id: recipe-run-002}
 outcome: {gain: 0.05, promoted: true, regressions: [], cost: {calls: 6}}
-evidence: {grade: real, baseline_ref: zengen-v2, benchmark_version: bench-v1, base_model_id: zengen-v2}
+evidence: {grade: real, baseline_ref: zengen-v2, baseline_model_id: zengen-v2,
+           benchmark_version: bench-v1}
 attribution: medium
 ignored: []
 ```
@@ -209,7 +210,7 @@ ignored: []
 ```yaml
 # experience/exp-tom-3f9c1a2b.yaml 的 payload
 strategy_key: {dimension: tom, action: clone, mode: batch,
-               perturbation: {opd_coefficient: 0.2}, source_recipe_id: recipe-run-002}
+               perturbation_keys: [opd_coefficient], source_recipe_id: recipe-run-002}
 support: 3
 wins: 2
 losses: 1
@@ -268,20 +269,21 @@ overrides: {}
 结论:两个入口函数,一个冻结摘要类型与一个冻结状态类型;全部 [计划中],签名施工时可能微调。
 
 ```python
-def record_and_recompute(store, run_id, *, config, base_model_id) -> None: ...
+def record_and_recompute(store, run_id, *, config) -> None: ...
 def select_entries(store, *, dimension, benchmark_version, base_model_id,
                    limit=3) -> StrategyExperienceSummary: ...
-def recompute_entries(records, *, base_model_id) -> list[EntryState]: ...
+def recompute_entries(records, existing, *, benchmark_version) -> list[EntryState]: ...
 def strategy_key(dimension, action, mode, perturbation, source_recipe_id) -> dict: ...
+def bucket_key(key, baseline_model_id) -> tuple: ...
 ```
 
 | 入口 | 行为 | 失败时 |
 |---|---|---|
 | `record_and_recompute` | 读终态 run 的决策、候选、报告、账本与当前基座;记录内容变化才重写;随后由全部记录重算条目 | 坏记录计入 `ignored` 并在摘要里可见,不上抛 |
 | `select_entries` | 筛 `effective`、同 `benchmark_version`、同 `baseline_model_id` 的条目,按支持数与平均增益排序,截断 | 返回空摘要,不抛 |
-| `recompute_entries` | 纯函数;输入记录与基座 id,输出全部条目状态 | 不抛;坏记录被跳过并计数 |
+| `recompute_entries` | 纯函数;输入全部记录、既有条目与基准版本,按各自对照基线分组输出条目状态 | 不抛;坏记录被跳过并计数 |
 
-`StrategyExperienceSummary` 字段为 `entries`、`rendered`、`truncated`、`ignored_records`。`rendered` 是拼好的文本行元组,每条含"策略 · 扰动值 · 证据数 · 平均增益 · 反例数";`ignored_records` 让损坏输入不会被静默吞掉。
+`StrategyExperienceSummary` 是冻结数据类 [计划中],字段为 `entries`、`rendered`、`truncated`、`ignored_records`。`rendered` 是拼好的文本行元组,每条含"策略 · 扰动值 · 证据数 · 平均增益 · 反例数";`ignored_records` 让损坏输入不会被静默吞掉。
 
 触发条件:落账挂在 `plan_next_round` 的处理器里,在 `assemble_context` 之前执行,且仅当 `config.strategy_experience` 为真。关闭时该段为空元组,上下文与现状逐字节相同。
 
