@@ -229,7 +229,7 @@ git commit -m "feat(trainscheduler): scheduler.yaml 增加 strategy_experience �
   - `safe_dimension(dimension: object) -> str | None`
   - `entry_id(dimension: str | None, bucket: tuple) -> str`
   - `attribution_for(action: str, perturbation: dict) -> str`：`high`／`medium`／`low`
-  - `recompute_entries(records, existing, *, base_model_id, benchmark_version) -> list[EntryState]`
+  - `recompute_entries(records, existing, *, benchmark_version) -> list[EntryState]`
   - `EntryState`（冻结数据类）：`entry_id`、`bucket`、`support`、`wins`、`losses`、`mean_gain`、`contradictions`、`value_examples`、`status`、`evidence_scope`、`baseline_model_id`、`benchmark_version`、`overrides`，以及 `to_payload()`。
 
 - [ ] **Step 1: 写失败测试**
@@ -368,10 +368,18 @@ def test_null_gain_and_mock_evidence_never_aggregate():
                              benchmark_version="bench-v1") == []
 
 
-def test_other_baseline_and_other_benchmark_never_aggregate():
-    assert recompute_entries([rec("run-003", base="zengen-v1"),
-                              rec("run-005", base="zengen-v1")], [],
-                             benchmark_version="bench-v1") == []
+def test_records_under_different_baselines_form_separate_entries():
+    """对照基线进桶:两组各两条,得到两个互不覆盖的条目,而不是互相污染或只剩一个。"""
+    v1 = [rec("run-003", base="zengen-v1"), rec("run-005", base="zengen-v1")]
+    v2 = [rec("run-007", base="zengen-v2"), rec("run-009", base="zengen-v2")]
+    entries = recompute_entries(v1 + v2, [], benchmark_version="bench-v1")
+    assert len(entries) == 2
+    assert {e.baseline_model_id for e in entries} == {"zengen-v1", "zengen-v2"}
+    assert entries[0].entry_id != entries[1].entry_id
+    assert all(e.status == "effective" and e.support == 2 for e in entries)
+
+
+def test_other_benchmark_never_aggregates():
     assert recompute_entries([rec("run-003", benchmark="bench-v0"),
                               rec("run-005", benchmark="bench-v0")], [],
                              benchmark_version="bench-v1") == []
@@ -487,7 +495,7 @@ Bucket = tuple[str, str, str, tuple[str, ...], str, str]
 
 def safe_dimension(dimension: object) -> str | None:
     """能安全拼进文件名的维度;不合法返回 None。"""
-    if not isinstance(dimension, str) or not _DIMENSION.match(dimension):
+    if not isinstance(dimension, str) or not _DIMENSION.fullmatch(dimension):
         return None
     if ".." in dimension:
         return None
