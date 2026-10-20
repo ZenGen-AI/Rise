@@ -896,7 +896,8 @@ from trainscheduler.experience_port import (
     record_and_recompute,
     select_entries,
 )
-from ts_fixtures import env, make_store, write_decision, write_report, write_round, write_trace
+from ts_fixtures import (env, make_store, write_decision, write_directive, write_report,
+                         write_round, write_trace)
 
 BENCH = "bench-v1"
 BASE = "zengen-v1"
@@ -927,6 +928,7 @@ def _round(store, run_id, *, score=0.45, perturbation=None, dimension="tom",
     write_round(store, run_id, {dimension: score, "empathy": 0.70}, backends=backends,
                 flags=list(flags))
     if decision:
+        _link_directive(store, run_id, dimension)
         # 决策属于产出这一轮的那次规划:source 是上一个 run,next_run 是本 run。
         # 指令里的 planner_decision_ref 指回它,落账靠这条链找到本轮的策略。
         write_decision(store, _previous_run(run_id), run_id, action="clone",
@@ -1125,6 +1127,15 @@ def test_an_unparseable_entry_is_not_overwritten(tmp_path):
     assert (store.repo_root / rel).read_text(encoding="utf-8") == before
 
 
+def test_a_directive_without_a_decision_ref_is_not_recorded(tmp_path):
+    """人写的指令没有 planner_decision_ref:没有策略可归因,如实不落账。"""
+    store = make_store(tmp_path)
+    _baseline(store)
+    write_round(store, "run-003", {"tom": 0.45, "empathy": 0.70}, backends="real")
+    record_and_recompute(store, "run-003", config=SchedulerConfig(strategy_experience=True))
+    assert not store.exists(strategy_experience_note_file("run-003"))
+
+
 def test_empty_store_renders_nothing(tmp_path):
     store = make_store(tmp_path)
     summary = select_entries(store, dimension="tom", benchmark_version=BENCH, base_model_id=BASE)
@@ -1152,6 +1163,7 @@ from controlplane.gitstore import GitStore
 from controlplane.paths import (
     candidate_checkpoint_file,
     planner_decision_file,
+    run_dir,
     run_trace_file,
     strategy_entry_file,
     strategy_experience_note_file,
