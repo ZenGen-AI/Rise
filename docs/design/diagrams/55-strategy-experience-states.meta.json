@@ -1,0 +1,5 @@
+{
+ "title": "策略条目的生命周期",
+ "desc": "条目首次写出时证据不足,支持数到二且平均增益为正才转为可用;反例过半即废弃,基准版本变更则整体失效。状态写在条目载荷里,由重算决定;人直接改写过的条目不再被机器改写。",
+ "describe": "**节点**\n\n- 条目 insufficient:支持数不足二\n- 条目 effective:可注入\n- 条目 deprecated:反例过半\n- 条目 stale:基准版本已换\n- 人工保留:机器不再改写\n\n**连线**\n\n- 条目 insufficient → 条目 effective:支持数 ≥ 2\n- 条目 insufficient → 条目 deprecated:反例过半\n- 条目 effective → 条目 deprecated:反例过半\n- 条目 effective → 条目 stale:换基准版本\n- 条目 insufficient → 条目 stale:换基准版本\n- 条目 effective → 人工保留:人直接改载荷(虚线)"
+}

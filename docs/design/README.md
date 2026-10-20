@@ -20,6 +20,7 @@
 | 训练怎么跑、奖励怎么算、怎么续训 | `30-mindtrainer.md` |
 | 技能、记忆、激活轨迹 | `40-actio.md` |
 | 部署态智能体怎么自进化 | `50-mindagent.md` |
+| 策略经验怎么沉淀、怎么注入下一轮规划 | `55-strategy-experience.md` |
 | 配方怎么校验、检索、记战绩 | `60-recipestore.md` |
 | 下一轮怎么装配上下文、校验决策、构造指令 | `70-trainscheduler.md` |
 | 决策怎么生成、怎么严格解析 | `71-trainplanner.md` |

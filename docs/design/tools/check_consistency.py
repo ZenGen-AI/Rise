@@ -21,15 +21,17 @@ ROOT = Path(__file__).resolve().parent.parent
 REPO = ROOT.parent.parent
 BASELINE = "8dd295b"
 EXPECTED = ["00-overview.md", "10-controlplane.md", "20-socialsimulator.md", "21-diagnostic-evaluation.md",
-            "30-mindtrainer.md", "40-actio.md", "50-mindagent.md", "60-recipestore.md",
+            "30-mindtrainer.md", "40-actio.md", "50-mindagent.md", "55-strategy-experience.md",
+            "60-recipestore.md",
             "70-trainscheduler.md", "71-trainplanner.md", "80-inference-bridge.md", "90-factory-and-cli.md"]
-PREFIX = {"00": "SYS", "10": "CP", "20": "SS", "21": "DX", "30": "MT", "40": "AC", "50": "MA",
+PREFIX = {"00": "SYS", "10": "CP", "20": "SS", "21": "DX", "30": "MT", "40": "AC", "50": "MA", "55": "SE",
           "60": "RS", "70": "TS", "71": "TP", "80": "BR", "90": "FC"}
 OWN_PKG = {"10": "controlplane", "20": "simulator", "21": "diagnostic", "30": "mindtrainer", "40": "actio",
-           "50": "mindagent", "60": "recipestore", "70": "trainscheduler", "71": "trainplanner",
-           "80": "inference_bridge", "90": "factory"}
+           "50": "mindagent", "55": "trainscheduler", "60": "recipestore", "70": "trainscheduler",
+           "71": "trainplanner", "80": "inference_bridge", "90": "factory"}
 STATUS_REQUIRED = {"10": {"已落地", "计划中"}, "20": {"已落地"}, "21": {"已落地"}, "30": {"已落地"},
-                   "40": {"计划中"}, "50": {"计划中"}, "60": {"计划中"}, "70": {"计划中"}, "71": {"计划中"},
+                   "40": {"计划中"}, "50": {"计划中"}, "55": {"计划中"}, "60": {"计划中"},
+                   "70": {"计划中"}, "71": {"计划中"},
                    "80": {"已落地", "计划中"}, "90": {"已落地", "计划中"}}
 # 总览 3.3 的依赖方向表。controlplane 对 simulator 的回指是骨架桩,总览已说明。
 ALLOWED_DEPS = {

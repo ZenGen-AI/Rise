@@ -1,0 +1,5 @@
+{
+ "title": "策略经验的上下文",
+ "desc": "TrainScheduler 的规划处理器在装配上下文之前先落账,把一轮的决策与结果压成一条经验记录,再由全部记录重算出长期条目;随后装配的规划上下文带上选中的条目,交给 TrainPlanner 渲染。策略经验只读写产物树,不调用外部模型,也不碰外部推理桥接。",
+ "describe": "**节点**\n\n- TrainScheduler:plan_handler · assemble_context / 落账在装配之前\n- strategy_experience:落账 · 聚合 · 选取 / 纯函数 + 一次幂等写\n- TrainPlanner:把条目渲染进提示 / 模板 PLANNER_V2\n- ControlPlane 产物树:runs/<run>/strategy_experience.yaml / experience/exp-<维度>-<哈希>.yaml\n- 诊断与账本:diagnostic_report.yaml / run_trace.yaml\n\n**连线**\n\n- TrainScheduler → strategy_experience:终态 run\n- strategy_experience → ControlPlane 产物树:写记录与条目\n- ControlPlane 产物树 → strategy_experience:读全部记录\n- 诊断与账本 → strategy_experience:分数 · 成本 · 退化\n- TrainScheduler → TrainPlanner:含第七段的上下文"
+}

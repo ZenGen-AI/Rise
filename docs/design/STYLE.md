@@ -14,6 +14,7 @@
 | `30-mindtrainer.md` | MindTrainer |
 | `40-actio.md` | Actio |
 | `50-mindagent.md` | MindAgent |
+| `55-strategy-experience.md` | 策略经验:TrainScheduler 的长期策略记忆 |
 | `60-recipestore.md` | RecipeStore |
 | `70-trainscheduler.md` | TrainScheduler |
 | `71-trainplanner.md` | TrainPlanner |
@@ -64,7 +65,7 @@
 
 头部元信息表的行固定为:一句话、状态、所在层、代码位置、基线提交、依赖、被依赖、对应实施计划。骨架见 `TEMPLATE.md`。「对应实施计划」只写工作包编号与任务范围,不写文件路径。
 
-决策编号:闭环集成阶段已有的 R1 到 R21 保留原编号。其余用"缩写-序号",缩写为 SYS、CP、SS、DX、MT、AC、MA、RS、TS、TP、BR、FC,依次对应系统总体、ControlPlane、SocialSimulator、诊断评测、MindTrainer、Actio、MindAgent、RecipeStore、TrainScheduler、TrainPlanner、外部推理桥接、factory。
+决策编号:闭环集成阶段已有的 R1 到 R21 保留原编号。其余用"缩写-序号",缩写为 SYS、CP、SS、DX、MT、AC、MA、RS、SE、TS、TP、BR、FC,依次对应系统总体、ControlPlane、SocialSimulator、诊断评测、MindTrainer、Actio、MindAgent、RecipeStore、策略经验、TrainScheduler、TrainPlanner、外部推理桥接、factory。
 
 总览文档的结构不同,见其自身目录,但同样遵守本文第 2、3、5、6 节。
 
