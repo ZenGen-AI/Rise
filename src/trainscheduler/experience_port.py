@@ -179,8 +179,13 @@ def _record_is_usable(record: object) -> bool:
     perturbation = key.get("perturbation")
     if not isinstance(perturbation, dict):
         return False
-    if not all(isinstance(v, dict) for v in perturbation.values()):
-        return False
+    for encoded in perturbation.values():
+        # _value_examples 只会读 bool / num / str 三种标记之一;缺了它会在聚合处 KeyError
+        if not isinstance(encoded, dict):
+            return False
+        marks = [m for m in ("bool", "num", "str") if m in encoded]
+        if len(marks) != 1 or not isinstance(encoded[marks[0]], (bool, str)):
+            return False
     return True
 
 

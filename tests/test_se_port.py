@@ -237,6 +237,53 @@ def test_writes_outside_the_artifact_tree_are_refused(tmp_path):
             _write(store, bad, id_="mine", type_="t", links=[], payload={}, message="m")
 
 
+def test_a_record_with_a_markerless_perturbation_value_is_skipped(tmp_path):
+    """扰动值没有 bool/num/str 标记时整条记录跳过,不许在聚合处 KeyError。"""
+    store = make_store(tmp_path)
+    _baseline(store)
+    _round(store, "run-003")
+    cfg = SchedulerConfig(strategy_experience=True)
+    record_and_recompute(store, "run-003", config=cfg)
+    rel = strategy_experience_note_file("run-003")
+    envelope = store.read_product(rel)
+    payload = dict(envelope.payload)
+    key = dict(payload["strategy_key"])
+    key["perturbation"] = {name: {} for name in key["perturbation"]}
+    payload["strategy_key"] = key
+    store.write_product(rel, env(envelope.id, envelope.type, envelope.status, payload, [envelope.id]),
+                        "test: markerless perturbation value")
+    summary = select_entries(store, dimension="tom", benchmark_version=BENCH, base_model_id=BASE)
+    assert summary.ignored_records
+    assert summary.entries == ()
+
+
+def test_record_is_usable_accepts_only_well_formed_values(tmp_path):
+    from trainscheduler.experience_port import _record_is_usable
+
+    good = {
+        "run_id": "run-003",
+        "strategy_key": {"dimension": "tom", "action": "clone", "mode": "batch",
+                         "perturbation": {"opd_coefficient": {"num": "0.2"}},
+                         "source_recipe_id": "recipe-run-002"},
+        "outcome": {"gain": 0.05, "promoted": True, "regressions": [], "cost": {"calls": 1}},
+        "evidence": {"grade": "real", "baseline_ref": BASE, "baseline_model_id": BASE,
+                     "benchmark_version": BENCH},
+        "attribution": "medium",
+        "ignored": [],
+    }
+    assert _record_is_usable(good)
+
+    for marks in ({"bool": True}, {"num": "4"}, {"str": "x"}):
+        variant = dict(good)
+        variant["strategy_key"] = dict(good["strategy_key"], perturbation={"k": marks})
+        assert _record_is_usable(variant)
+
+    for bad_marks in ({}, {"bool": True, "num": "4"}):
+        variant = dict(good)
+        variant["strategy_key"] = dict(good["strategy_key"], perturbation={"k": bad_marks})
+        assert not _record_is_usable(variant)
+
+
 def test_empty_store_renders_nothing(tmp_path):
     store = make_store(tmp_path)
     summary = select_entries(store, dimension="tom", benchmark_version=BENCH, base_model_id=BASE)
