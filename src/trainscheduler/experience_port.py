@@ -9,6 +9,7 @@ from controlplane.paths import (
     CONTROL_PLANE_ROOT,
     candidate_checkpoint_file,
     planner_decision_file,
+    run_dir,
     run_trace_file,
     strategy_entry_file,
     strategy_experience_note_file,
@@ -51,15 +52,34 @@ def _cost(store: GitStore, run_id: str) -> dict:
     return {"calls": int(sum(calls)) if calls else None}
 
 
+def _decision_that_produced(store: GitStore, run_id: str) -> dict | None:
+    """找到产出这一轮的决策。
+
+    不能读 runs/<run_id>/planner_decision.yaml:那是"这一轮结束后为下一轮做的规划",
+    在规划这一轮的当下还不存在(plan_handler 只有在它为某 run 尚无决策时才做新规划)。
+    真正的来源是指令里的 planner_decision_ref——它指向的决策,其 next_run_id 正是这一轮。
+    人写的指令没有这个引用,返回 None(人写的命令没有策略可归因)。
+    """
+    path = f"{run_dir(run_id)}/directive.yaml"
+    if not store.exists(path):
+        return None
+    ref = store.read_product(path).payload.get("planner_decision_ref")
+    if not isinstance(ref, str) or not ref.startswith("planner-"):
+        return None
+    source = ref[len("planner-"):]
+    decision_path = planner_decision_file(source)
+    if not store.exists(decision_path):
+        return None
+    decision = store.read_product(decision_path).payload.get("decision")
+    return decision if isinstance(decision, dict) else None
+
+
 def collect_record(store: GitStore, run_id: str) -> tuple[dict | None, list[str]]:
     """把一轮压成记录载荷。返回 (载荷或 None, 忽略原因)。只读。"""
     ignored: list[str] = []
-    decision_path = planner_decision_file(run_id)
-    if not store.exists(decision_path):
-        return None, [f"{run_id}: no planner decision"]
-    decision = store.read_product(decision_path).payload.get("decision")
-    if not isinstance(decision, dict):
-        return None, [f"{run_id}: planner decision has no decision payload"]
+    decision = _decision_that_produced(store, run_id)
+    if decision is None:
+        return None, [f"{run_id}: no planner decision produced this run"]
 
     payload = read_report_payload(store, run_id)
     if payload is None:

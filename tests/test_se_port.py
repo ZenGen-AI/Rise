@@ -14,7 +14,15 @@ from trainscheduler.experience_port import (
     record_and_recompute,
     select_entries,
 )
-from ts_fixtures import env, make_store, write_decision, write_report, write_round, write_trace
+from ts_fixtures import (
+    env,
+    make_store,
+    write_decision,
+    write_directive,
+    write_report,
+    write_round,
+    write_trace,
+)
 
 BENCH = "bench-v1"
 BASE = "zengen-v1"
@@ -26,12 +34,28 @@ def _baseline(store):
     write_round(store, "run-001", {"tom": 0.40, "empathy": 0.70}, model_n=1, backends="real")
 
 
+def _previous_run(run_id: str) -> str:
+    """产出这一轮的那次规划的来源 run:run-005 -> run-004。测试里编号都是整数。"""
+    number = int(run_id.split("-")[1])
+    return f"run-{number - 1:03d}"
+
+
+def _link_directive(store, run_id, dimension="tom"):
+    """把指令的 planner_decision_ref 指回产出这一轮的那次规划。
+
+    write_round 写的指令没有这个引用(人写指令的形状),而落账靠它找到本轮策略。
+    """
+    write_directive(store, run_id, dimension=dimension,
+                    extra={"planner_decision_ref": f"planner-{_previous_run(run_id)}"})
+
+
 def _round(store, run_id, *, score=0.45, perturbation=None, dimension="tom",
            flags=(), backends="real", decision=True):
     write_round(store, run_id, {dimension: score, "empathy": 0.70}, backends=backends,
                 flags=list(flags))
     if decision:
-        write_decision(store, run_id, None, action="clone", dimension=dimension,
+        _link_directive(store, run_id, dimension=dimension)
+        write_decision(store, _previous_run(run_id), run_id, action="clone", dimension=dimension,
                        perturbation={"opd_coefficient": 0.2} if perturbation is None else perturbation,
                        source_recipe_id="recipe-run-002")
     write_report(store, run_id, {dimension: score, "empathy": 0.70}, baseline_ref=BASE,
@@ -282,6 +306,15 @@ def test_record_is_usable_accepts_only_well_formed_values(tmp_path):
         variant = dict(good)
         variant["strategy_key"] = dict(good["strategy_key"], perturbation={"k": bad_marks})
         assert not _record_is_usable(variant)
+
+
+def test_a_directive_without_a_decision_ref_is_not_recorded(tmp_path):
+    """人写的指令没有 planner_decision_ref:没有策略可归因,如实不落账。"""
+    store = make_store(tmp_path)
+    _baseline(store)
+    write_round(store, "run-003", {"tom": 0.45, "empathy": 0.70}, backends="real")
+    record_and_recompute(store, "run-003", config=SchedulerConfig(strategy_experience=True))
+    assert not store.exists(strategy_experience_note_file("run-003"))
 
 
 def test_empty_store_renders_nothing(tmp_path):
