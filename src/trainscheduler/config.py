@@ -73,6 +73,7 @@ class SchedulerConfig:
     recent_decision_window: int = 5
     max_plan_attempts: int = 3
     template_version: str = PLANNER_V1_VERSION
+    strategy_experience: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -85,6 +86,7 @@ class SchedulerConfig:
             "recent_decision_window": self.recent_decision_window,
             "max_plan_attempts": self.max_plan_attempts,
             "template_version": self.template_version,
+            "strategy_experience": self.strategy_experience,
         }
 
 
@@ -149,6 +151,7 @@ def parse_scheduler_config(raw: object) -> SchedulerConfig:
         recent_decision_window=_int(values, "recent_decision_window", 1, 100),
         max_plan_attempts=_int(values, "max_plan_attempts", 1, 10),
         template_version=template_version,
+        strategy_experience=_bool(values, "strategy_experience"),
     )
 
 
