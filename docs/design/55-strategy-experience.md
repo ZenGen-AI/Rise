@@ -182,7 +182,7 @@ TrainScheduler 的规划处理器调用它落账与重算,再调 `assemble_conte
 | 条目 | `id`、`strategy_key`、`support`、`wins`、`losses`、`mean_gain`、`contradictions`、`value_examples`、`status`、`evidence_scope`、`baseline_model_id`、`benchmark_version`、`overrides` | 条目的 `strategy_key` 只存扰动键名(`perturbation_keys`),值在 `value_examples`;id 为 `exp-<维度>-<桶摘要前八位>`,桶是(维度、动作、模式、扰动键名、源配方、对照基线) |
 | `value_examples` | 扰动键到"值 → 出现次数"的映射 | 只在聚合记录里出现过的值;已排序 |
 | `overrides` | 人写过的字段名到值的映射 | 重算跳过其中列出的字段 |
-| 反例 | `run_id`、`gain`、`regression_kinds` | 按 run 编号数值序保留最近五条 |
+| 反例 | `run_id`、`gain`、`regression_kinds` | 按 run 编号数值序保留最近五条;废弃阈值用全部反例计数,不数截断后的五条 |
 
 | 产物类型 | 路径(`control-plane/` 下) | 信封 | 写方 | 状态 |
 |---|---|---|---|---|
@@ -401,7 +401,9 @@ def bucket_key(key, baseline_model_id) -> tuple: ...
 | 规划 run-009 | 该条目仍 `effective`,提示带"反例 1" | 反例未达一半 |
 | run-011 | 同签名再次退化 | 反例两条,达到半数,转 `deprecated` |
 
-阈值固定为"反例数不低于支持数的一半":`support=2` 时一条反例不构成废弃,`support=3` 时两条即废弃。
+阈值固定为「反例数不低于支持数的一半」,反例按全部记录计数,不按载荷里存下的五条:`support=3` 时两条即废弃。
+
+未达阈值但平均增益不为正(含零)的条目也不转 `effective`。它属于"没有变好",不是"证据不足"或"被推翻",所以以 `deprecated` 结束,不再注入。
 
 ## 7. 关键决策
 
