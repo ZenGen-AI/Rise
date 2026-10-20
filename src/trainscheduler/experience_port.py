@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from controlplane.envelope import CURRENT_SCHEMA_VERSION, Envelope, OwnerRef
 from controlplane.gitstore import GitStore
 from controlplane.paths import (
+    CONTROL_PLANE_ROOT,
     candidate_checkpoint_file,
     planner_decision_file,
     run_trace_file,
@@ -112,8 +113,23 @@ def collect_record(store: GitStore, run_id: str) -> tuple[dict | None, list[str]
     return record, ignored
 
 
+def _safe_rel_path(rel: str) -> bool:
+    """写入前确认路径落在产物树内:不以 / 开头、不含 ..、不是绝对路径或控制字符。"""
+    if not isinstance(rel, str) or not rel:
+        return False
+    if rel.startswith("/") or "\\" in rel:
+        return False
+    parts = rel.split("/")
+    if any(part in ("", ".", "..") for part in parts):
+        return False
+    return parts[0] == CONTROL_PLANE_ROOT and not any(ch in rel for ch in "\x00\n\r")
+
+
 def _write(store: GitStore, rel: str, *, id_: str, type_: str, links: list[str],
            payload: dict, message: str) -> None:
+    """唯一的写入点。路径不安全就拒绝,不依赖调用方事先校验。"""
+    if not _safe_rel_path(rel):
+        raise ValueError(f"refusing to write outside the artifact tree: {rel!r}")
     env = Envelope(
         id=id_, type=type_, version=1, created_at=NOW, created_by=OwnerRef(),
         status=ENTRY_STATUS, schema_version=CURRENT_SCHEMA_VERSION,

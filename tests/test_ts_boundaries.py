@@ -10,7 +10,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1] / "src"
 PROJECT_ALLOWED = {"trainscheduler", "controlplane", "recipestore", "trainplanner", "inference_bridge", "mindtrainer"}
-STDLIB_ALLOWED = {"__future__", "collections", "copy", "dataclasses", "math", "re"}
+STDLIB_ALLOWED = {"__future__", "collections", "copy", "dataclasses", "hashlib", "json",
+                  "math", "re", "typing"}
 # mindtrainer 只允许这两个模块:不能把编排器、执行器、派发器拉进调度器
 ALLOWED_MINDTRAINER = {"mindtrainer.training_config", "mindtrainer.data_spec"}
 FORBIDDEN = {"diagnostic", "simulator", "actio", "mindagent", "factory"}

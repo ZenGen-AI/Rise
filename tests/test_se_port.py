@@ -176,6 +176,17 @@ def test_rendered_line_carries_the_perturbation_value(tmp_path):
     assert "0.2" in summary.rendered[0]
 
 
+def test_writes_outside_the_artifact_tree_are_refused(tmp_path):
+    """写入点自己把关:调用方传了越界路径也不写。"""
+    from trainscheduler.experience_port import _write
+
+    store = make_store(tmp_path)
+    for bad in ("/etc/passwd", "control-plane/../../escape.yaml",
+                "control-plane/experience/../x.yaml", "elsewhere/x.yaml"):
+        with pytest.raises(ValueError, match="outside the artifact tree"):
+            _write(store, bad, id_="mine", type_="t", links=[], payload={}, message="m")
+
+
 def test_empty_store_renders_nothing(tmp_path):
     store = make_store(tmp_path)
     summary = select_entries(store, dimension="tom", benchmark_version=BENCH, base_model_id=BASE)
