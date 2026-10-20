@@ -1530,13 +1530,12 @@ Expected: FAIL，`AttributeError: module 'trainplanner.templates' has no attribu
 ```python
     @classmethod
     def from_dict(cls, d: dict) -> PlanningContext:
-        allowed = (frozenset(cls._KEYS), frozenset(cls._KEYS) - frozenset(cls._OPTIONAL_KEYS))
-        if not isinstance(d, dict) or frozenset(d) not in allowed:
-            raise InvalidContextError(
-                f"context: expected exactly {sorted(cls._KEYS)} "
-                f"(optionally without {list(cls._OPTIONAL_KEYS)}), "
-                f"got {sorted(d) if isinstance(d, dict) else type(d).__name__}"
-            )
+        # 第七段是新增的可选键:旧产物没有它也要读得回。按"字典里有没有这个键"选键集合,
+        # 而不是把校验从 _exact_keys 里拿掉——后者会丢掉"missing keys / unknown keys"的报错措辞,
+        # 而既有测试正是按那两句话断言的。
+        keys = cls._KEYS if isinstance(d, dict) and "strategy_experience" in d \
+            else tuple(k for k in cls._KEYS if k not in cls._OPTIONAL_KEYS)
+        _exact_keys(d, keys, "context")
         return cls(
             run_id=d["run_id"],
             candidate=CandidateSummary.from_dict(d["candidate"]),
@@ -1616,7 +1615,28 @@ def install_default_template(store: GitStore) -> str:
 - [ ] **Step 4: 运行确认通过**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_se_context.py tests/test_tp_context.py tests/test_tp_prompt.py tests/test_tp_templates.py -q`
-Expected: PASS。`test_tp_context.py` 与 `test_tp_templates.py` 无需改动:示例字典已补第七个键,`install_default_template` 仍返回 v1 的路径。若它们仍红,停下来报 NEEDS_CONTEXT。
+Expected: PASS。两处既有测试需要同批改动,改法如下。
+
+`tests/test_tp_context.py` 不需要改:`from_dict` 仍走 `_exact_keys`,`missing keys` /
+`unknown keys` 的报错措辞不变,缺键与拼错键的断言照旧成立。
+
+`tests/test_tp_templates.py` 第 32 行必须改。它断言 v1 用满了除 `context` 之外的每个占位符,
+而 `PLACEHOLDERS` 现在多了 `strategy_experience`,v1 又不该引用它:
+
+```python
+def test_planner_v1_uses_every_section_of_the_context():
+    # v1 早于第七段:它不引用 strategy_experience,所以模板契约是"除这两项之外的全部"
+    assert set(check_template(PLANNER_V1)) == set(PLACEHOLDERS) - {"context", "strategy_experience"}
+
+
+def test_planner_v2_uses_every_section_of_the_context():
+    assert set(check_template(PLANNER_V2)) == set(PLACEHOLDERS) - {"context"}
+```
+
+第二条是新增的:v2 必须用满除 `context` 以外的全部占位符,否则以后再加占位符时没人会发现 v2 漏了它。
+`check_template` 与 `PLACEHOLDERS` 该文件已经导入。
+
+若改完仍有红,停下来报 NEEDS_CONTEXT。
 
 - [ ] **Step 5: 提交**
 
