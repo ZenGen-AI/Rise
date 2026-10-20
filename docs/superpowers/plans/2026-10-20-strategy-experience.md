@@ -1617,11 +1617,14 @@ Expected: FAIL，`assert ctx.strategy_experience` 为空
 
 - [ ] **Step 3: 实现**
 
-`src/trainscheduler/assemble.py`：加导入与一段取材。
+`src/trainscheduler/assemble.py`：加两处导入与一段取材。
 
 ```python
+from controlplane.models import latest_promoted_checkpoint
 from trainscheduler.experience_port import select_entries
 ```
+
+（`read_report_payload` 已由 `trainscheduler.recipes_port` 导入，`l1_scores` 已在本模块定义，都不必再加。）
 
 在 `assemble_context` 的返回值里加第七项：
 
@@ -1741,10 +1744,15 @@ def test_no_forbidden_imports():
         assert not (_imports(path) & FORBIDDEN), path.name
 
 
-def test_future_import_is_the_first_statement():
+def test_future_import_comes_before_any_other_statement():
+    """仓库的写法是模块 docstring 在前、__future__ 紧随其后,所以断言的是"文档字符串之后的第一个语句"。"""
     for path in FILES:
         tree = ast.parse(path.read_text(encoding="utf-8"))
-        first = tree.body[0]
+        body = list(tree.body)
+        if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+            body = body[1:]          # 跳过模块文档字符串
+        assert body, path.name
+        first = body[0]
         assert isinstance(first, ast.ImportFrom) and first.module == "__future__", path.name
 
 
