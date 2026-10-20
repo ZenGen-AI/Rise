@@ -415,6 +415,26 @@ def test_overrides_survive_a_recompute():
     assert again.support == 2
 
 
+def test_payload_round_trips_through_entry_state():
+    """条目写盘再读回要等值:这条路径曾经因为 bucket_key 少一个参数而必然抛 TypeError。"""
+    [entry] = recompute_entries([rec("run-003"), rec("run-005", gain=0.03)], [],
+                                benchmark_version="bench-v1")
+    again = EntryState.from_payload(entry.entry_id, entry.to_payload())
+    assert again.to_payload() == entry.to_payload()
+    assert again.entry_id == entry.entry_id
+    assert again.bucket == entry.bucket
+
+
+def test_payload_keeps_perturbation_values_out_of_the_bucket():
+    """bucket 只存键名;值与次数在 value_examples 里。"""
+    [entry] = recompute_entries([rec("run-003"), rec("run-005", gain=0.03)], [],
+                                benchmark_version="bench-v1")
+    payload = entry.to_payload()
+    assert payload["strategy_key"]["perturbation_keys"] == ["opd_coefficient"]
+    assert "perturbation" not in payload["strategy_key"]
+    assert payload["value_examples"] == {"opd_coefficient": {"0.2": 2}}
+
+
 def test_untouched_entries_become_stale():
     [old] = recompute_entries([rec("run-003"), rec("run-005", benchmark="bench-v0")], [],
                               benchmark_version="bench-v0")
@@ -576,7 +596,9 @@ class EntryState:
         return {
             "strategy_key": {
                 "dimension": self.bucket[0], "action": self.bucket[1], "mode": self.bucket[2],
-                "perturbation": dict(self.bucket[3]), "source_recipe_id": self.bucket[4],
+                # 条目按扰动键名分桶;具体的值在 value_examples 里
+                "perturbation_keys": list(self.bucket[3]),
+                "source_recipe_id": self.bucket[4],
             },
             "support": self.support,
             "wins": self.wins,
@@ -594,11 +616,14 @@ class EntryState:
     @classmethod
     def from_payload(cls, entry_id_: str, payload: dict) -> EntryState:
         key = payload["strategy_key"]
-        bucket = bucket_key({
-            "dimension": key["dimension"], "action": key["action"], "mode": key["mode"],
-            "perturbation": {name: {} for name in key["perturbation"]},
-            "source_recipe_id": key["source_recipe_id"],
-        })
+        bucket = bucket_key(
+            {
+                "dimension": key["dimension"], "action": key["action"], "mode": key["mode"],
+                "perturbation": {name: None for name in key["perturbation_keys"]},
+                "source_recipe_id": key["source_recipe_id"],
+            },
+            payload["baseline_model_id"],
+        )
         return cls(
             entry_id=entry_id_,
             bucket=bucket,
