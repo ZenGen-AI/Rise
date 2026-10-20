@@ -913,6 +913,15 @@ def _baseline(store):
     write_round(store, "run-001", {"tom": 0.40, "empathy": 0.70}, model_n=1)
 
 
+def _link_directive(store, run_id, dimension="tom"):
+    """把指令的 planner_decision_ref 指回产出这一轮的那次规划。
+
+    write_round 写的指令没有这个引用(人写指令的形状),而落账靠它找到本轮策略。
+    """
+    write_directive(store, run_id, dimension=dimension,
+                    extra={"planner_decision_ref": f"planner-{_previous_run(run_id)}"})
+
+
 def _round(store, run_id, *, score=0.45, perturbation=None, dimension="tom",
            flags=(), backends="real", decision=True):
     write_round(store, run_id, {dimension: score, "empathy": 0.70}, backends=backends,
