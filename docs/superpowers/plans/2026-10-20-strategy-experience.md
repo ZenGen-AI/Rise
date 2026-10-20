@@ -1496,12 +1496,17 @@ PLANNER_V2 = PLANNER_V1.replace(
 )
 ```
 
-`install_default_template` 同时安装两份：
+`install_default_template` 同时安装两份，但**返回值仍是 v1 的路径**：既有测试
+`test_tp_templates.py::test_the_default_template_is_installed_as_an_envelope` 断言
+`rel == planner_prompt_file(PLANNER_V1_VERSION)` 并逐字段检查那份信封。改返回值会破坏这个契约，
+而且"默认模板"本来就是 v1——v2 是给显式选择用的。
 
 ```python
 def install_default_template(store: GitStore) -> str:
-    install_template(store, PLANNER_V1_VERSION, PLANNER_V1)
-    return install_template(store, PLANNER_V2_VERSION, PLANNER_V2)
+    """装好 v1 与 v2,返回 v1 的路径:调用方与既有测试都按 v1 的契约走。"""
+    rel = install_template(store, PLANNER_V1_VERSION, PLANNER_V1)
+    install_template(store, PLANNER_V2_VERSION, PLANNER_V2)
+    return rel
 ```
 
 `src/trainplanner/examples.py`：`_EXAMPLE_CONTEXT` 的返回字典里加 `"strategy_experience": []`。
@@ -1513,7 +1518,7 @@ def install_default_template(store: GitStore) -> str:
 - [ ] **Step 4: 运行确认通过**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_se_context.py tests/test_tp_context.py tests/test_tp_prompt.py tests/test_tp_templates.py -q`
-Expected: PASS。`test_tp_context.py` 若断言了 `_KEYS` 的完整集合或 `to_dict()` 的键，把第七项加进去；`test_tp_templates.py` 若断言 `install_default_template` 只写一份，改成两份。
+Expected: PASS。`test_tp_context.py` 与 `test_tp_templates.py` 无需改动:示例字典已补第七个键,`install_default_template` 仍返回 v1 的路径。若它们仍红,停下来报 NEEDS_CONTEXT。
 
 - [ ] **Step 5: 提交**
 
