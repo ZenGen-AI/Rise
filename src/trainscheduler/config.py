@@ -83,12 +83,12 @@ class SchedulerConfig:
         """
         if not self.strategy_experience:
             return
-        from trainplanner.templates import PLANNER_V2_VERSION
+        from trainplanner.templates import STRATEGY_TEMPLATE_VERSIONS
 
-        if self.template_version != PLANNER_V2_VERSION:
+        if self.template_version not in STRATEGY_TEMPLATE_VERSIONS:
             raise SchedulerConfigError(
                 f"strategy_experience is on but template_version is {self.template_version!r}; "
-                f"only {PLANNER_V2_VERSION!r} renders the strategy section"
+                f"the strategy section is only rendered by {list(STRATEGY_TEMPLATE_VERSIONS)}"
             )
 
     def to_dict(self) -> dict:

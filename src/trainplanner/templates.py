@@ -78,6 +78,8 @@ The object must have exactly these seven keys:
 """
 
 PLANNER_V2_VERSION = "v2"
+# 能渲染第七段的模板版本。新增一个渲染该段的模板时加进来,配置校验据此判断。
+STRATEGY_TEMPLATE_VERSIONS = (PLANNER_V2_VERSION,)
 
 _STRATEGY_SECTION = """
 ## Strategy experience from earlier rounds

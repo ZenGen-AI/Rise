@@ -229,13 +229,15 @@ def test_a_zero_mean_never_becomes_effective():
     assert entry.status != "effective"
 
 
-def test_stale_does_not_overwrite_a_human_status():
+def test_stale_wins_over_a_human_status_but_keeps_the_other_overrides():
+    """证据不在了是事实,不是质量判断:它压过人工设定的状态,但覆盖表本身保留。"""
     [old] = recompute_entries([rec("run-003"), rec("run-005", benchmark="bench-v0")], [],
                               benchmark_version="bench-v0")
-    pinned = old.with_overrides({"status": "deprecated"})
+    pinned = old.with_overrides({"status": "deprecated", "mean_gain": 9.0})
     [now] = recompute_entries([], [pinned], benchmark_version="bench-v1")
-    assert now.status == "deprecated"
-    assert now.overrides == {"status": "deprecated"}
+    assert now.status == "stale"
+    assert now.overrides == {"status": "deprecated", "mean_gain": 9.0}
+    assert now.mean_gain == 9.0
 
 
 def test_overrides_apply_to_other_fields_too():
@@ -326,6 +328,25 @@ def test_identity_fields_cannot_be_overridden():
     assert pinned.baseline_model_id == entry.baseline_model_id
     assert pinned.benchmark_version == entry.benchmark_version
     assert pinned.mean_gain == 9.0          # 非身份字段仍可覆盖
+
+
+def test_a_mistyped_override_is_kept_but_not_applied_or_fatal():
+    """人手写错一个覆盖值,不能把条目变成读不出:读不出的文件不会被重算覆盖,
+    等于这条证据被永久钉死在树上。坏值留痕、不生效。"""
+    [entry] = recompute_entries([rec("run-003"), rec("run-005")], [],
+                                benchmark_version="bench-v1")
+    payload = entry.to_payload()
+    payload["overrides"] = {"support": "two", "mean_gain": 9.0}
+
+    again = EntryState.from_payload(entry.entry_id, payload)   # 不许抛
+    assert again.overrides["support"] == "two"                 # 留给人看
+
+    # 真正应用覆盖表的是重算:坏值必须在这里被挡下,否则 support 变成字符串,
+    # 排序处的 -support 会抛 TypeError,整个选取流程连坐。
+    records = [rec("run-003"), rec("run-005")]
+    [applied] = recompute_entries(records, [again], benchmark_version="bench-v1")
+    assert applied.support == 2                                # 坏值不生效
+    assert applied.mean_gain == 9.0                            # 好值照常生效
 
 
 def test_an_entry_whose_evidence_disappeared_goes_stale():

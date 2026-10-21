@@ -8,7 +8,7 @@ import hashlib
 import json
 import math
 import re
-from dataclasses import dataclass, field, fields, replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 ATTR_HIGH = "high"
@@ -143,14 +143,17 @@ class EntryState:
         """人写过的字段原样保留。
 
         身份与出处字段不可覆盖:改了 baseline_model_id 或 benchmark_version,旧证据就会
-        冒充新实验的证据通过筛选。status 只认四个已知取值;其余未知键只留在覆盖表里供人查看。
+        冒充新实验的证据通过筛选。取值不合规或键不认识的覆盖项只留在覆盖表里供人查看。
         """
-        known = {f.name for f in fields(self)} - {"overrides"} - set(IMMUTABLE_FIELDS)
         changes: dict = {}
         for name, value in overrides.items():
-            if name not in known:
+            if name not in OVERRIDABLE_FIELDS:
                 continue
-            if name == "status" and value not in STATUSES:
+            try:
+                _check_field(name, value)
+            except ValueError:
+                # 写坏的值照样留在覆盖表里给人看,但不参与替换:替换会让条目读不回,
+                # 而读不回的文件又不会被重算覆盖,等于把这条条目永久钉死。
                 continue
             changes[name] = value
         return replace(self, overrides=dict(overrides), **changes)
@@ -210,6 +213,35 @@ class EntryState:
         )
 
 
+_INT_FIELDS = ("support", "wins", "losses")
+_STR_FIELDS = ("baseline_model_id", "benchmark_version", "evidence_scope")
+# 覆盖表能改的字段:除身份字段外的全部字段。身份与出处不在此列,见 IMMUTABLE_FIELDS。
+OVERRIDABLE_FIELDS = ("support", "wins", "losses", "mean_gain", "contradictions",
+                      "value_examples", "status", "evidence_scope")
+
+
+def _check_field(name: str, value: object) -> None:
+    """单个可覆盖字段的类型检查。载荷校验与覆盖表校验共用同一套规则。"""
+    if name in _INT_FIELDS:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"{name} must be a non-negative int")
+    elif name == "mean_gain":
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+            raise ValueError("mean_gain must be a finite number")
+    elif name == "status":
+        if value not in STATUSES:
+            raise ValueError(f"unknown status {value!r}")
+    elif name == "contradictions":
+        if not isinstance(value, (list, tuple)) or not all(isinstance(c, dict) for c in value):
+            raise ValueError("contradictions must be a list of mappings")
+    elif name == "value_examples":
+        if not isinstance(value, dict):
+            raise ValueError("value_examples must be a mapping")
+    elif name in ("evidence_scope", "baseline_model_id", "benchmark_version"):
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"{name} must be a non-empty str")
+
+
 def _check_payload(payload: object) -> None:
     if not isinstance(payload, dict):
         raise ValueError("entry payload must be a mapping")
@@ -222,24 +254,12 @@ def _check_payload(payload: object) -> None:
     names = key.get("perturbation_keys")
     if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
         raise ValueError("strategy_key.perturbation_keys must be a list of str")
-    for name in ("baseline_model_id", "benchmark_version", "evidence_scope", "status"):
-        if not isinstance(payload.get(name), str) or not payload[name]:
-            raise ValueError(f"{name} must be a non-empty str")
-    if payload["status"] not in STATUSES:
-        raise ValueError(f"unknown status {payload['status']!r}")
-    for name in ("support", "wins", "losses"):
-        value = payload.get(name)
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-            raise ValueError(f"{name} must be a non-negative int")
-    mean = payload.get("mean_gain")
-    if isinstance(mean, bool) or not isinstance(mean, (int, float)) or not math.isfinite(float(mean)):
-        raise ValueError("mean_gain must be a finite number")
-    contradictions = payload.get("contradictions")
-    if not isinstance(contradictions, list) or not all(isinstance(c, dict) for c in contradictions):
-        raise ValueError("contradictions must be a list of mappings")
+    for name in _STR_FIELDS:
+        _check_field(name, payload.get(name))
+    for name in ("support", "wins", "losses", "mean_gain", "contradictions", "status"):
+        _check_field(name, payload.get(name))
     examples = payload.get("value_examples")
-    if not isinstance(examples, dict):
-        raise ValueError("value_examples must be a mapping")
+    _check_field("value_examples", examples)
     for per_key in examples.values():
         if not isinstance(per_key, dict):
             raise ValueError("value_examples values must be mappings")
@@ -251,6 +271,8 @@ def _check_payload(payload: object) -> None:
     overrides = payload.get("overrides", {})
     if not isinstance(overrides, dict):
         raise ValueError("overrides must be a mapping")
+    # 覆盖表在这里只校验形状不校验取值:人可能手写错值,读入时抛错会让文件变"读不出",
+    # 而读不出的条目不会被重算覆盖,这条证据就永久失效了。取值由 with_overrides 把关。
 
 
 def _eligible(record: dict, *, benchmark_version: str) -> bool:
@@ -354,6 +376,8 @@ def recompute_entries(
             continue
         # 没有记录再支撑它:换基准版本或证据被删/损坏。两种情况都必须失效,
         # 否则旧条目会一直留在树上被选中——它引用的证据已经不存在了。
-        # 转 stale 也不能盖掉人写过的状态。
-        out.append(replace(previous, status=STATUS_STALE).with_overrides(previous.overrides))
+        # stale 是"证据不在了"这个事实,不是质量判断,所以它压过人工覆盖的状态;
+        # 覆盖表的其余字段照旧保留,人写过的数字不会被抹掉。
+        revived = replace(previous, status=STATUS_STALE).with_overrides(previous.overrides)
+        out.append(replace(revived, status=STATUS_STALE))
     return out

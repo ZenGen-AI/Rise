@@ -32,8 +32,16 @@ def test_unknown_keys_are_still_rejected():
 
 def test_switch_on_with_v1_template_is_rejected():
     """开关打开但模板不渲染第七段,就是"配置了却没生效":必须启动即报错,不许静默空转。"""
-    with pytest.raises(SchedulerConfigError, match="only 'v2' renders"):
+    with pytest.raises(SchedulerConfigError, match="only rendered by \\['v2'\\]"):
         SchedulerConfig(strategy_experience=True)
+
+
+def test_a_future_template_that_renders_the_section_is_accepted(monkeypatch):
+    """校验认的是"这个模板能不能渲染第七段",不是"是不是 v2":新增 v3 时配置层不该误拒。"""
+    import trainplanner.templates as templates
+
+    monkeypatch.setattr(templates, "STRATEGY_TEMPLATE_VERSIONS", ("v2", "v3"))
+    assert SchedulerConfig(strategy_experience=True, template_version="v3").template_version == "v3"
 
 
 def test_switch_off_accepts_the_default_template():
