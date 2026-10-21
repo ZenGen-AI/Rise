@@ -279,7 +279,7 @@ def bucket_key(key, baseline_model_id) -> tuple: ...
 
 | 入口 | 行为 | 失败时 |
 |---|---|---|
-| `record_and_recompute` | 读终态 run 的决策、候选、报告、账本与当前基座;记录内容变化才重写;随后由全部记录重算条目 | 坏记录计入 `ignored` 并在摘要里可见,不上抛 |
+| `record_and_recompute` | 沿指令的 `planner_decision_ref` 找到产出这一轮的决策,再读候选、报告与账本;记录内容变化才重写;随后由全部记录重算条目 | 坏记录计入 `ignored` 并在摘要里可见,不上抛 |
 | `select_entries` | 筛 `effective`、同 `benchmark_version`、同 `baseline_model_id` 的条目,按支持数与平均增益排序,截断 | 返回空摘要,不抛 |
 | `recompute_entries` | 纯函数;输入全部记录、既有条目与基准版本,按各自对照基线分组输出条目状态 | 不抛;坏记录被跳过并计数 |
 
@@ -329,8 +329,8 @@ def bucket_key(key, baseline_model_id) -> tuple: ...
 
 | 步 | 动作 | 产出 | 失败时 |
 |---|---|---|---|
-| 1 | 读终态 run 的决策、候选、诊断报告、`run_trace` 与当前基座 id | 五份输入 | 报告是桩:不落账,记一条 `ignored` |
-| 2 | 由维度、动作、模式、扰动键值与源配方算签名 | `strategy_key` | 决策缺失:记 `ignored`,不落账 |
+| 1 | 沿指令的 `planner_decision_ref` 找到产出本轮的决策,再读候选、诊断报告与 `run_trace` | 四份输入 | 报告是桩:不落账,记一条 `ignored` |
+| 2 | 由维度、动作、模式、扰动键值与源配方算签名 | `strategy_key` | 没有产出本轮的决策(人写的指令):记 `ignored`,不落账 |
 | 3 | 判归因:单键扰动的 `clone` 记 `medium`;多键扰动、`replay`、无扰动 `clone`、`new` 记 `low` | `attribution` | 无 |
 | 4 | 写或重写 `runs/<run>/strategy_experience.yaml` | 记录 | 内容相同不提交 |
 | 5 | 读全部记录,加当前基座重算条目 | 条目集合 | 坏记录计入 `ignored` |
@@ -339,6 +339,10 @@ def bucket_key(key, baseline_model_id) -> tuple: ...
 归因分档的依据:只有单键扰动的 `clone` 能把结果归到一个变量上。多键扰动无法隔离变量;`replay` 与无扰动 `clone` 的原样复跑已被 RecipeStore 的战绩条目记账,再记一次会让同一份证据算两遍;`new` 每轮改十几项配置。四类都不聚合,只留痕。
 
 训练失败轮不产生记录:它们没有终态候选,`plan_next_round` 也不会为它们触发。这是覆盖面缺口,已在定位一章的覆盖面表里写明。
+
+落账的决策来源是指令里的 `planner_decision_ref`,不是 `runs/<run>/planner_decision.yaml`。
+后者是"这一轮结束后为下一轮做的规划",在规划这一轮的当下按构造还不存在;读它会让落账在真实运行里恒为空。
+人写的指令没有这个引用,因此人工发起的轮次不进记忆——它本来也没有可归因的策略。
 
 ### 6.2 注入
 
