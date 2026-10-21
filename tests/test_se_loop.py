@@ -19,7 +19,7 @@ from ts_fixtures import (
 
 BENCH = "bench-v1"
 BASE = "zengen-v1"
-ON = SchedulerConfig(strategy_experience=True)
+ON = SchedulerConfig(strategy_experience=True, template_version="v2")
 
 
 def _previous_run(run_id: str) -> str:

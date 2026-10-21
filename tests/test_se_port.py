@@ -67,7 +67,7 @@ def test_record_is_an_envelope(tmp_path):
     store = make_store(tmp_path)
     _baseline(store)
     _round(store, "run-003")
-    record_and_recompute(store, "run-003", config=SchedulerConfig(strategy_experience=True))
+    record_and_recompute(store, "run-003", config=SchedulerConfig(strategy_experience=True, template_version="v2"))
     envelope = store.read_product(strategy_experience_note_file("run-003"))
     assert envelope.id == "strategy-run-003"
     assert envelope.type == "strategy_experience_note"
@@ -81,7 +81,7 @@ def test_record_is_idempotent(tmp_path):
     store = make_store(tmp_path)
     _baseline(store)
     _round(store, "run-003")
-    cfg = SchedulerConfig(strategy_experience=True)
+    cfg = SchedulerConfig(strategy_experience=True, template_version="v2")
     record_and_recompute(store, "run-003", config=cfg)
     head = store._git("rev-parse", "HEAD").strip()
     record_and_recompute(store, "run-003", config=cfg)
@@ -101,7 +101,7 @@ def test_single_witness_writes_an_insufficient_entry(tmp_path):
     store = make_store(tmp_path)
     _baseline(store)
     _round(store, "run-003")
-    record_and_recompute(store, "run-003", config=SchedulerConfig(strategy_experience=True))
+    record_and_recompute(store, "run-003", config=SchedulerConfig(strategy_experience=True, template_version="v2"))
     entries, broken = load_entries(store)
     assert not broken
     assert len(entries) == 1 and entries[0].status == "insufficient"
@@ -111,7 +111,7 @@ def test_single_witness_writes_an_insufficient_entry(tmp_path):
 
 def test_second_witness_promotes_the_entry(tmp_path):
     store = make_store(tmp_path)
-    cfg = SchedulerConfig(strategy_experience=True)
+    cfg = SchedulerConfig(strategy_experience=True, template_version="v2")
     _baseline(store)
     _round(store, "run-003", score=0.45)
     record_and_recompute(store, "run-003", config=cfg)
@@ -129,7 +129,7 @@ def test_stub_report_is_ignored_not_crashed(tmp_path):
     _baseline(store)
     _round(store, "run-003")
     write_report(store, "run-003", {"tom": 0.45}, stub=True)
-    record_and_recompute(store, "run-003", config=SchedulerConfig(strategy_experience=True))
+    record_and_recompute(store, "run-003", config=SchedulerConfig(strategy_experience=True, template_version="v2"))
     assert not store.exists(strategy_experience_note_file("run-003"))
     assert load_entries(store) == ([], [])
 
@@ -138,7 +138,7 @@ def test_missing_decision_is_ignored(tmp_path):
     store = make_store(tmp_path)
     _baseline(store)
     _round(store, "run-003", decision=False)
-    record_and_recompute(store, "run-003", config=SchedulerConfig(strategy_experience=True))
+    record_and_recompute(store, "run-003", config=SchedulerConfig(strategy_experience=True, template_version="v2"))
     assert not store.exists(strategy_experience_note_file("run-003"))
 
 
@@ -157,7 +157,7 @@ def test_corrupt_record_is_reported_not_swallowed(tmp_path):
 
 def test_select_filters_by_base_and_benchmark(tmp_path):
     store = make_store(tmp_path)
-    cfg = SchedulerConfig(strategy_experience=True)
+    cfg = SchedulerConfig(strategy_experience=True, template_version="v2")
     _baseline(store)
     _round(store, "run-003", score=0.45)
     record_and_recompute(store, "run-003", config=cfg)
@@ -173,7 +173,7 @@ def test_select_filters_by_base_and_benchmark(tmp_path):
 
 def test_select_caps_at_three_and_reports_truncation(tmp_path):
     store = make_store(tmp_path)
-    cfg = SchedulerConfig(strategy_experience=True)
+    cfg = SchedulerConfig(strategy_experience=True, template_version="v2")
     _baseline(store)
     keys = ("opd_coefficient", "sft_steps", "grpo_steps", "grpo_config.learning_rate")
     for i, key in enumerate(keys):
@@ -191,7 +191,7 @@ def test_select_caps_at_three_and_reports_truncation(tmp_path):
 
 def test_rendered_line_carries_the_perturbation_value(tmp_path):
     store = make_store(tmp_path)
-    cfg = SchedulerConfig(strategy_experience=True)
+    cfg = SchedulerConfig(strategy_experience=True, template_version="v2")
     _baseline(store)
     _round(store, "run-003", score=0.45)
     record_and_recompute(store, "run-003", config=cfg)
@@ -208,7 +208,7 @@ def test_a_truncated_record_file_does_not_crash_selection(tmp_path):
     store = make_store(tmp_path)
     _baseline(store)
     _round(store, "run-003")
-    record_and_recompute(store, "run-003", config=SchedulerConfig(strategy_experience=True))
+    record_and_recompute(store, "run-003", config=SchedulerConfig(strategy_experience=True, template_version="v2"))
     rel = strategy_experience_note_file("run-003")
     (store.repo_root / rel).write_text("id: strategy-run-003\npayload: {broken", encoding="utf-8")
     summary = select_entries(store, dimension="tom", benchmark_version=BENCH, base_model_id=BASE)
@@ -219,7 +219,7 @@ def test_a_record_missing_run_id_is_skipped_not_fatal(tmp_path):
     store = make_store(tmp_path)
     _baseline(store)
     _round(store, "run-003")
-    cfg = SchedulerConfig(strategy_experience=True)
+    cfg = SchedulerConfig(strategy_experience=True, template_version="v2")
     record_and_recompute(store, "run-003", config=cfg)
     rel = strategy_experience_note_file("run-003")
     env_ = store.read_product(rel)
@@ -237,7 +237,7 @@ def test_an_unparseable_entry_is_not_overwritten(tmp_path):
     """手改坏的条目文件原样留着:重算跳过它,不重建、不丢覆盖表。"""
     store = make_store(tmp_path)
     _baseline(store)
-    cfg = SchedulerConfig(strategy_experience=True)
+    cfg = SchedulerConfig(strategy_experience=True, template_version="v2")
     _round(store, "run-003", score=0.45)
     record_and_recompute(store, "run-003", config=cfg)
     entries, _ = load_entries(store)
@@ -266,7 +266,7 @@ def test_a_record_with_a_markerless_perturbation_value_is_skipped(tmp_path):
     store = make_store(tmp_path)
     _baseline(store)
     _round(store, "run-003")
-    cfg = SchedulerConfig(strategy_experience=True)
+    cfg = SchedulerConfig(strategy_experience=True, template_version="v2")
     record_and_recompute(store, "run-003", config=cfg)
     rel = strategy_experience_note_file("run-003")
     envelope = store.read_product(rel)
@@ -313,7 +313,7 @@ def test_a_directive_without_a_decision_ref_is_not_recorded(tmp_path):
     store = make_store(tmp_path)
     _baseline(store)
     write_round(store, "run-003", {"tom": 0.45, "empathy": 0.70}, backends="real")
-    record_and_recompute(store, "run-003", config=SchedulerConfig(strategy_experience=True))
+    record_and_recompute(store, "run-003", config=SchedulerConfig(strategy_experience=True, template_version="v2"))
     assert not store.exists(strategy_experience_note_file("run-003"))
 
 
@@ -321,3 +321,55 @@ def test_empty_store_renders_nothing(tmp_path):
     store = make_store(tmp_path)
     summary = select_entries(store, dimension="tom", benchmark_version=BENCH, base_model_id=BASE)
     assert summary == StrategyExperienceSummary((), (), 0, ())
+
+
+def test_a_record_with_an_unhashable_bucket_is_skipped(tmp_path):
+    """action 是列表时桶键不可哈希:必须在聚合之前跳过,否则 grouped.setdefault 抛 TypeError。"""
+    store = make_store(tmp_path)
+    _baseline(store)
+    _round(store, "run-003")
+    record_and_recompute(store, "run-003", config=SchedulerConfig(strategy_experience=True, template_version="v2"))
+    rel = strategy_experience_note_file("run-003")
+    envelope = store.read_product(rel)
+    payload = dict(envelope.payload)
+    key = dict(payload["strategy_key"])
+    key["action"] = []
+    payload["strategy_key"] = key
+    store.write_product(rel, env(envelope.id, envelope.type, envelope.status, payload, [envelope.id]),
+                        "test: unhashable action")
+    _round(store, "run-005")
+    record_and_recompute(store, "run-005", config=SchedulerConfig(strategy_experience=True, template_version="v2"))      # 不许抛
+    summary = select_entries(store, dimension="tom", benchmark_version=BENCH, base_model_id=BASE)
+    assert summary.ignored_records
+
+
+def test_rendered_line_names_the_source_recipe(tmp_path):
+    """同一扰动在不同配方上的证据不可混用,所以注入行必须写清是哪个配方。"""
+    store = make_store(tmp_path)
+    _baseline(store)
+    for run_id, score in (("run-003", 0.45), ("run-005", 0.43)):
+        _round(store, run_id, score=score)
+        record_and_recompute(store, run_id, config=SchedulerConfig(strategy_experience=True, template_version="v2"))
+    summary = select_entries(store, dimension="tom", benchmark_version=BENCH, base_model_id=BASE)
+    assert "recipe-run-002" in summary.rendered[0]
+
+
+def test_a_recording_failure_leaves_a_failure_record(tmp_path):
+    """落账失败会被调用方吞掉,所以失败本身必须留下痕迹。"""
+    store = make_store(tmp_path)
+    _baseline(store)
+    _round(store, "run-003")
+    from controlplane.paths import failure_record_file
+    import trainscheduler.experience_port as port
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("recording exploded")
+
+    original = port.collect_record
+    port.collect_record = boom
+    try:
+        with pytest.raises(RuntimeError):
+            record_and_recompute(store, "run-003", config=SchedulerConfig(strategy_experience=True, template_version="v2"))
+    finally:
+        port.collect_record = original
+    assert store.exists(failure_record_file("run-003", "strategy-experience"))

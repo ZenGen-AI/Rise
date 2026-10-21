@@ -293,3 +293,44 @@ def test_untouched_entries_become_stale():
                               benchmark_version="bench-v0")
     [now] = recompute_entries([], [old], benchmark_version="bench-v1")
     assert now.status == "stale"
+
+
+def test_malformed_entry_payloads_are_rejected():
+    """条目会被排序与渲染:非数字的 support 必须在读入时就被拒,不能留到 sort 处抛 TypeError。"""
+    [good] = recompute_entries([rec("run-003"), rec("run-005")], [],
+                               benchmark_version="bench-v1")
+    payload = good.to_payload()
+
+    for field_name, bad in (("support", "two"), ("mean_gain", "x"), ("wins", None),
+                            ("status", "weird"), ("value_examples", [])):
+        broken = dict(payload)
+        broken[field_name] = bad
+        with pytest.raises(ValueError):
+            EntryState.from_payload("exp-x", broken)
+
+    broken_key = dict(payload)
+    broken_key["strategy_key"] = dict(payload["strategy_key"], perturbation_keys=5)
+    with pytest.raises(ValueError):
+        EntryState.from_payload("exp-x", broken_key)
+
+
+def test_identity_fields_cannot_be_overridden():
+    """人写覆盖表能改数字,但不能改这条证据属于哪个实验。"""
+    [entry] = recompute_entries([rec("run-003"), rec("run-005")], [],
+                                benchmark_version="bench-v1")
+    pinned = entry.with_overrides({
+        "baseline_model_id": "zengen-v9",
+        "benchmark_version": "bench-v9",
+        "mean_gain": 9.0,
+    })
+    assert pinned.baseline_model_id == entry.baseline_model_id
+    assert pinned.benchmark_version == entry.benchmark_version
+    assert pinned.mean_gain == 9.0          # 非身份字段仍可覆盖
+
+
+def test_an_entry_whose_evidence_disappeared_goes_stale():
+    """记录被删或损坏后,旧条目不能再以 effective 留在树上被选中。"""
+    [entry] = recompute_entries([rec("run-003"), rec("run-005")], [],
+                                benchmark_version="bench-v1")
+    [now] = recompute_entries([], [entry], benchmark_version="bench-v1")
+    assert now.status == "stale"

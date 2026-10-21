@@ -75,6 +75,22 @@ class SchedulerConfig:
     template_version: str = PLANNER_V1_VERSION
     strategy_experience: bool = False
 
+    def __post_init__(self) -> None:
+        """开关打开而模板不渲染第七段时,直接拒绝。
+
+        这类"配置了但没生效"的静默陷阱最难发现:落账在写、条目在算,规划器却永远看不到。
+        宁可启动即报错,也不让功能悄悄空转。
+        """
+        if not self.strategy_experience:
+            return
+        from trainplanner.templates import PLANNER_V2_VERSION
+
+        if self.template_version != PLANNER_V2_VERSION:
+            raise SchedulerConfigError(
+                f"strategy_experience is on but template_version is {self.template_version!r}; "
+                f"only {PLANNER_V2_VERSION!r} renders the strategy section"
+            )
+
     def to_dict(self) -> dict:
         return {
             "confirm_directives": self.confirm_directives,

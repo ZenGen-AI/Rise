@@ -25,6 +25,9 @@ STATUSES = (STATUS_INSUFFICIENT, STATUS_EFFECTIVE, STATUS_DEPRECATED, STATUS_STA
 MIN_SUPPORT = 2
 MAX_CONTRADICTIONS = 5
 
+# 身份与出处:决定"这条证据属于哪个实验"。人工覆盖不能改它们,否则一条旧证据可以冒充新实验的证据。
+IMMUTABLE_FIELDS = ("entry_id", "bucket", "baseline_model_id", "benchmark_version")
+
 # 维度取自诊断载荷,要拼进文件名:只允许单段、无控制字符、不以点开头
 _DIMENSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
@@ -137,8 +140,12 @@ class EntryState:
     overrides: dict = field(default_factory=dict)
 
     def with_overrides(self, overrides: dict) -> EntryState:
-        """人写过的字段原样保留。status 只认四个已知取值;不认识的键不应用,仍留在覆盖表里让人看见。"""
-        known = {f.name for f in fields(self)} - {"overrides"}
+        """人写过的字段原样保留。
+
+        身份与出处字段不可覆盖:改了 baseline_model_id 或 benchmark_version,旧证据就会
+        冒充新实验的证据通过筛选。status 只认四个已知取值;其余未知键只留在覆盖表里供人查看。
+        """
+        known = {f.name for f in fields(self)} - {"overrides"} - set(IMMUTABLE_FIELDS)
         changes: dict = {}
         for name, value in overrides.items():
             if name not in known:
@@ -171,6 +178,12 @@ class EntryState:
 
     @classmethod
     def from_payload(cls, entry_id_: str, payload: dict) -> EntryState:
+        """严格解析:形状不对就抛,由调用方当作读不出。
+
+        条目会被排序与渲染,所以数字必须是有限数、列表必须是列表;放过它们会在
+        sort 或格式化处抛 TypeError,而那已经不在读取方的保护范围里。
+        """
+        _check_payload(payload)
         key = payload["strategy_key"]
         bucket = bucket_key(
             {
@@ -195,6 +208,49 @@ class EntryState:
             benchmark_version=payload["benchmark_version"],
             overrides=payload.get("overrides", {}),
         )
+
+
+def _check_payload(payload: object) -> None:
+    if not isinstance(payload, dict):
+        raise ValueError("entry payload must be a mapping")
+    key = payload.get("strategy_key")
+    if not isinstance(key, dict):
+        raise ValueError("entry payload has no strategy_key mapping")
+    for name in ("dimension", "action", "mode", "source_recipe_id"):
+        if not isinstance(key.get(name), str):
+            raise ValueError(f"strategy_key.{name} must be a str")
+    names = key.get("perturbation_keys")
+    if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+        raise ValueError("strategy_key.perturbation_keys must be a list of str")
+    for name in ("baseline_model_id", "benchmark_version", "evidence_scope", "status"):
+        if not isinstance(payload.get(name), str) or not payload[name]:
+            raise ValueError(f"{name} must be a non-empty str")
+    if payload["status"] not in STATUSES:
+        raise ValueError(f"unknown status {payload['status']!r}")
+    for name in ("support", "wins", "losses"):
+        value = payload.get(name)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"{name} must be a non-negative int")
+    mean = payload.get("mean_gain")
+    if isinstance(mean, bool) or not isinstance(mean, (int, float)) or not math.isfinite(float(mean)):
+        raise ValueError("mean_gain must be a finite number")
+    contradictions = payload.get("contradictions")
+    if not isinstance(contradictions, list) or not all(isinstance(c, dict) for c in contradictions):
+        raise ValueError("contradictions must be a list of mappings")
+    examples = payload.get("value_examples")
+    if not isinstance(examples, dict):
+        raise ValueError("value_examples must be a mapping")
+    for per_key in examples.values():
+        if not isinstance(per_key, dict):
+            raise ValueError("value_examples values must be mappings")
+        for shown, count in per_key.items():
+            if not isinstance(shown, str):
+                raise ValueError("value_examples keys must be str")
+            if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                raise ValueError("value_examples counts must be non-negative ints")
+    overrides = payload.get("overrides", {})
+    if not isinstance(overrides, dict):
+        raise ValueError("overrides must be a mapping")
 
 
 def _eligible(record: dict, *, benchmark_version: str) -> bool:
@@ -296,7 +352,8 @@ def recompute_entries(
     for previous in existing:
         if previous.entry_id in touched:
             continue
-        if previous.benchmark_version != benchmark_version:
-            # 转 stale 也不能盖掉人写过的状态
-            out.append(replace(previous, status=STATUS_STALE).with_overrides(previous.overrides))
+        # 没有记录再支撑它:换基准版本或证据被删/损坏。两种情况都必须失效,
+        # 否则旧条目会一直留在树上被选中——它引用的证据已经不存在了。
+        # 转 stale 也不能盖掉人写过的状态。
+        out.append(replace(previous, status=STATUS_STALE).with_overrides(previous.overrides))
     return out

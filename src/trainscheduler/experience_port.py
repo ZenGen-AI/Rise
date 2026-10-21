@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from controlplane import ledger
 from controlplane.envelope import CURRENT_SCHEMA_VERSION, Envelope, OwnerRef
 from controlplane.gitstore import GitStore
 from controlplane.paths import (
@@ -192,9 +193,19 @@ def _record_is_usable(record: object) -> bool:
     key = record.get("strategy_key")
     if not isinstance(key, dict):
         return False
+    # 桶键要拼进 dict 的键:不可哈希的值(如列表)会在 grouped.setdefault 处抛 TypeError
+    for name in ("dimension", "action", "mode", "source_recipe_id"):
+        if not isinstance(key.get(name), str):
+            return False
+    names = key.get("perturbation_keys", key.get("perturbation"))
+    if not isinstance(names, dict) and not isinstance(names, list):
+        return False
     try:
         bucket_key(key, base)
     except (KeyError, TypeError, ValueError):
+        return False
+    regressions = outcome.get("regressions")
+    if regressions is not None and not isinstance(regressions, list):
         return False
     perturbation = key.get("perturbation")
     if not isinstance(perturbation, dict):
@@ -230,9 +241,33 @@ def _all_records(store: GitStore) -> tuple[list[dict], list[str]]:
 
 
 def record_and_recompute(store: GitStore, run_id: str, *, config: SchedulerConfig) -> None:
-    """落账并在同一调用内重算条目。开关关闭时不写任何东西。"""
+    """落账并在同一调用内重算条目。开关关闭时不写任何东西。
+
+    任何失败都写成一条失败记录再上抛:调用方会吞掉这个异常(落账不能挡住规划),
+    若不留痕,这一轮的经验就永久消失,而且没有任何线索。
+    """
     if not config.strategy_experience:
         return
+    try:
+        _record_and_recompute(store, run_id)
+    except Exception as exc:
+        _note_failure(store, run_id, exc)
+        raise
+
+
+def _note_failure(store: GitStore, run_id: str, exc: BaseException) -> None:
+    """把落账失败写进 run 目录。不抛:留痕本身失败也不能挡住规划。"""
+    try:
+        ledger.record_failure(
+            store, run_id, task_id="strategy-experience", category="T3",
+            point="trainscheduler.experience_port", retries=0,
+            reason=f"{type(exc).__name__}: {exc}"[:300],
+        )
+    except Exception:
+        pass
+
+
+def _record_and_recompute(store: GitStore, run_id: str) -> None:
     record, _ = collect_record(store, run_id)
     if record is None:
         return
@@ -270,8 +305,10 @@ def _render(entry: EntryState) -> str:
         for name, counts in entry.value_examples.items()
     ]
     shown = ", ".join(values) if values else "无"
+    # 源配方必须出现:同一扰动在不同配方上的证据不可混用
+    recipe = entry.bucket[4] or "无配方"
     return (
-        f"策略 {entry.bucket[1]} {entry.bucket[2]} 扰动 {shown}"
+        f"策略 {entry.bucket[1]} {entry.bucket[2]} 配方 {recipe} 扰动 {shown}"
         f" · 证据 {entry.support} 条 · 平均增益 {entry.mean_gain:+.3f}"
         f" · 反例 {len(entry.contradictions)}"
     )
