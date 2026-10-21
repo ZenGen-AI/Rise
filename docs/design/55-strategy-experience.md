@@ -143,6 +143,7 @@ TrainScheduler 的规划处理器调用它落账与重算,再调 `assemble_conte
 | 依赖方向 | 只用 `controlplane`、RecipeStore(经 `recipes_port`)、标准库 | 不导入 `trainplanner`;上下文类型由调用方拼装 |
 | 无新第三方依赖 | 只用标准库 `hashlib`、`json`、`re` | 签名用摘要,不引外部库 |
 | 开关在配置里 | `scheduler.yaml` 加布尔键 `strategy_experience`,默认假 | `_SCHEDULER_KEYS` 由数据类字段导出,新字段自动被严格解析接受 |
+| 开关与模板必须配套 | 开关为真而 `template_version` 不是 `v2` 时构造即抛 `SchedulerConfigError` | v1 模板不含第七段占位符,允许这个组合等于让功能静默空转 |
 | 写入不改变既有语义 | 关闭时 `PlanningContext` 与现状逐字节相同 | 旧模板照常可用 |
 
 ## 3. 架构
@@ -181,7 +182,7 @@ TrainScheduler 的规划处理器调用它落账与重算,再调 `assemble_conte
 | 证据 | `grade`、`baseline_ref`、`baseline_model_id`、`benchmark_version` | `baseline_model_id` 就是报告的 `baseline_ref`,即这一轮的对照基线;`grade` 只接受 `mock`、`real`;桩报告永不落账 |
 | 条目 | `id`、`strategy_key`、`support`、`wins`、`losses`、`mean_gain`、`contradictions`、`value_examples`、`status`、`evidence_scope`、`baseline_model_id`、`benchmark_version`、`overrides` | 条目的 `strategy_key` 只存扰动键名(`perturbation_keys`),值在 `value_examples`;id 为 `exp-<维度>-<桶摘要前八位>`,桶是(维度、动作、模式、扰动键名、源配方、对照基线) |
 | `value_examples` | 扰动键到"值 → 出现次数"的映射 | 只在聚合记录里出现过的值;已排序 |
-| `overrides` | 人写过的字段名到值的映射 | 重算跳过其中列出的字段 |
+| `overrides` | 人写过的字段名到值的映射 | 重算跳过其中列出的字段;身份与出处(`entry_id`、`bucket`、`baseline_model_id`、`benchmark_version`)不可覆盖 |
 | 反例 | `run_id`、`gain`、`regression_kinds` | 按 run 编号数值序保留最近五条;废弃阈值用全部反例计数,不数截断后的五条 |
 
 | 产物类型 | 路径(`control-plane/` 下) | 信封 | 写方 | 状态 |
