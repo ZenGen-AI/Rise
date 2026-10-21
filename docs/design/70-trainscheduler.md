@@ -178,7 +178,9 @@ TrainScheduler 是决策执行器:它把 TrainPlanner 的结构化决策落成�
 | `recipes_port` | 对 RecipeStore 的全部导入 | `recipestore` | [计划中] |
 | `config` | 两份配置的字段表、严格解析、读取、安装 | `controlplane.config`、MindTrainer 两模块 | [计划中] |
 | `run_ids` | 按数值序分配下一个 `run-NNN` | `controlplane.paths` | [计划中] |
-| `assemble` | `assemble_context`:从树里装配 `PlanningContext` | `recipes_port`、`trainplanner.context`、`controlplane.evidence` | [计划中] |
+| `experience` | 策略经验的纯函数层:签名、归因、桶键、条目重算、覆盖表 | 标准库 `hashlib`、`json`、`re` | [计划中] |
+| `experience_port` | 策略经验的读写:落账、读条目、筛取渲染、失败留痕 | `controlplane`、`recipes_port`、`experience` | [计划中] |
+| `assemble` | `assemble_context`:从树里装配 `PlanningContext` | `recipes_port`、`experience_port`、`trainplanner.context`、`controlplane.evidence` | [计划中] |
 | `resolve` | `validate_decision` 领域校验,`resolve_action` 动作解析 | `recipes_port`、`controlplane.models`、`training_config` | [计划中] |
 | `directive` | `construct_directive`:写指令前校验,绝不覆盖 | MindTrainer 两模块 | [计划中] |
 | `plan_handler` | `make_plan_handler`:规划的写入顺序与重入 | 以上全部、`trainplanner`、`BridgeError` | [计划中] |
@@ -194,16 +196,17 @@ TrainScheduler 是决策执行器:它把 TrainPlanner 的结构化决策落成�
 | 可以导入 | `mindtrainer` 恰好 `training_config` 与 `data_spec` 两个模块 |
 | 不得导入 | `mindtrainer` 的其他模块(`dispatch`、`orchestrator`、`executor`、`data_producer`)、`diagnostic`、`simulator`、`actio`、`mindagent`、`factory` |
 | 反方向 | `controlplane`、`recipestore`、`trainplanner`、`mindtrainer`、`inference_bridge` 都不导入 `trainscheduler` |
+| 策略经验两模块更严 | `experience` 与 `experience_port` 不得导入 `trainplanner`、`inference_bridge`、`diagnostic`、`simulator`、`actio`、`mindagent`、`factory`;配方只经 `recipes_port`。由 `tests/test_se_boundaries.py` 强制,上下文类型由 `assemble` 拼装 |
 
 测试文件不受此限,可以导入 `mindtrainer.dispatch` 与 `mindtrainer.data_producer` 跑端到端。 [计划中]
 
 ## 4. 数据模型与状态机
 
-本包写四种产物,读两份配置;配置严格解析,未知键、类型错、范围错一律拒绝。
+本包写八类产物,读两份配置;配置严格解析,未知键、类型错、范围错一律拒绝。
 
 | 实体 | 字段与含义 | 约束 |
 |---|---|---|
-| `SchedulerConfig` [计划中] | 九个键,见下表 | 冻结;`scheduler.yaml` 缺失取全部默认值 |
+| `SchedulerConfig` [计划中] | 十个键,见下表 | 冻结;`scheduler.yaml` 缺失取全部默认值 |
 | `TrainingDefaults` [计划中] | `training_config`:完整 batch 配置,不含 `stage_manifest_refs`;`data_spec`:合成规格 | `training_defaults.yaml` 缺失抛 `SchedulerConfigError` |
 | `ResolvedAction` [计划中] | `target_dimension`、`action`、`recipe_ref`、`training_config`、`data_spec`、`base_model_id` | 冻结;只有 `new` 带 `data_spec`;`new` 的 `recipe_ref` 是空串 |
 | `NominationVerdict` [计划中] | `nominate`、`reason`、`gain`、`baseline_run_id`、`not_yet` | 冻结;`not_yet` 为真表示前置条件还没到 |
@@ -219,6 +222,7 @@ TrainScheduler 是决策执行器:它把 TrainPlanner 的结构化决策落成�
 | `min_gain` | 有限数 | `0.01` | 提名阈值 |
 | `cost_gain_window`、`recent_decision_window` | int,1 至 100 | `5`、`5` | 上下文里近几轮的成本增益、近几条决策 |
 | `max_plan_attempts`、`template_version` | int 1 至 10;非空 str | `3`、`"v1"` | 规划总尝试次数;规划模板版本 |
+| `strategy_experience` | bool | `false` | 是否落账策略经验并注入下一轮规划。为真时 `template_version` 必须在 `STRATEGY_TEMPLATE_VERSIONS` 里,否则构造即抛 `SchedulerConfigError`:模板不含第七段等于功能静默空转 |
 
 `training_defaults.yaml` 的默认值 [计划中]:被训角色位是 `zengen`,`sft_steps`、`grpo_steps`、`groups_per_step`、`group_size` 都是 2,`sft_batch_size` 与 `checkpoint_every_steps` 是 1,允许续训,`opd_coefficient` 是 0.1,学习率 1.0e-5,奖励是单分量 `goal` 的 `outcome_split`(关键词 `agreed`、`同意`)。初始基座与教师是 `file:///compute/checkpoints/` 下的占位引用,哈希为 64 个 0。这份默认配置里 `mode` 必须是 `batch`,且不得写 `stage_manifest_refs`,清单 id 每轮由指令构造按新 run id 写。默认 `data_spec` 是 4 个情境、种子 0、用途 `training`,`sft` 组大小 1,`grpo_opd` 组大小 2。`sft` 取 1,是因为默认 rollout 下同组奇数序号的样本是无内容的中性话,组大小大于 1 会让一半 SFT 数据没有信息 [计划中]。
 
@@ -228,6 +232,8 @@ TrainScheduler 是决策执行器:它把 TrainPlanner 的结构化决策落成�
 | `directive` | `runs/<新 run>/directive.yaml` | 非审核 | 规划处理器(也可人工) | 路径 [已落地],本包写入 [计划中] |
 | `failure_record` | `runs/<run>/failure-plan-<run>.yaml` | 非审核 | 规划处理器经 `record_failure` | [计划中] |
 | `nomination_note` | `runs/<run>/nomination.yaml` | 非审核 | 提名处理器 | [计划中] |
+| `strategy_experience_note` | `runs/<run>/strategy_experience.yaml` | 非审核 | 规划处理器经 `experience_port` | [计划中] |
+| `strategy_entry` | `experience/exp-<维度>-<哈希>.yaml` | 非审核 | 规划处理器经 `experience_port`,全量重算后按内容比较写 | [计划中] |
 | `recipe_candidate` | `recipe_candidates/recipe-<run>.yaml` | 审核 | 提名处理器写,命令行改状态,RecipeStore 收录 | [计划中] |
 | `config` | `config/scheduler.yaml`、`config/training_defaults.yaml` | 非审核 | 人工、`install_default_configs` | [计划中] |
 
@@ -597,6 +603,7 @@ build_recipe_candidate(store, run_id, *, config, repo_commit=None,
 | run id 分配、上下文装配、领域校验与动作解析、指令构造 | [计划中] | 任务 61 至 64 |
 | 规划处理器 | [计划中] | 任务 65 |
 | 提名处理器 | [计划中] | 任务 66 |
+| 策略经验(落账、聚合、注入第七段) | [计划中] | 设计见 `55-strategy-experience.md`;开关默认关 |
 | 端到端与边界测试 | [计划中] | 任务 67 |
 | 被调和循环调用 | [计划中] | 要等工作包 8 扩展调和循环、工作包 9 的组合根注入 |
 

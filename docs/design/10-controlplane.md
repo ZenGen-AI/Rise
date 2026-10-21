@@ -242,7 +242,7 @@ ControlPlane 是系统的协调层:它不训练、不评测,只读写产物并�
 | 配置 | `config/<名>.yaml`,信封 `type: config` | 非审核 | 配置写入函数 | 路径 [已落地],信封 [计划中] |
 | 远端计算端点 | `compute/endpoints.yaml`,信封 `type: config`,载荷是映射 `{endpoints: [...]}` | 非审核 | 人工写;配置写入函数只认 `config/` 下的路径,写不了它 | 读侧 [已落地](`factory.compute_config`),产物仍需人工写 |
 
-`SUBDIRS` 今天有九个目录:`runs`、`recipes`、`skill_memory_proposals`、`models`、`compute`、`config`、`scenarios`、`personas`、`diagnostics`。闭环在末尾追加 `recipe_candidates`、`skill_library`、`memory_library`、`agent_rounds` [计划中]。
+`SUBDIRS` 由九个基础目录 `runs`、`recipes`、`skill_memory_proposals`、`models`、`compute`、`config`、`scenarios`、`personas`、`diagnostics`,加末尾追加的 `recipe_candidates`、`skill_library`、`memory_library`、`agent_rounds` [计划中],再加 `experience`(策略经验的全局条目目录)组成。追加只能接在末尾,顺序固定:已有目录的下标被别处按位置引用。
 
 <!-- figure:begin 10-controlplane-states -->
 ![两类状态机与驱动者](diagrams/10-controlplane-states.svg)
@@ -398,6 +398,7 @@ def evidence_acceptable(grade: str, accept_mock: bool) -> bool: ...  # [计划�
 | `run_trace_file(run_id)`、`failure_record_file(run_id, task_id)` | `runs/<run>/run_trace.yaml`、`failure-<task>.yaml` | `run_trace_file` 与观测函数读的路径一致 [计划中] |
 | `scheduler_config_file()`、`training_defaults_file()` | `config/scheduler.yaml`、`config/training_defaults.yaml` | 无参数 [计划中] |
 | `planner_prompt_file(version)` | `config/prompts/planner-<版本>.yaml` | `prompts/` 不在 `SUBDIRS` 里,写入时自动建目录 [计划中] |
+| `strategy_experience_note_file(run_id)`、`strategy_entry_file(entry_id)` | `runs/<run>/strategy_experience.yaml`、`experience/<entry_id>.yaml` | 传带 `exp-` 前缀的完整条目 id [计划中] |
 
 指令文件没有路径函数,三处都写 `runs/<run>/directive.yaml`。工作包 1 之后 `paths`、`states`、`ledger`、`config`、`evidence` 冻结,后续工作包只消费,不再改。
 

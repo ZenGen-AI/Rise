@@ -117,7 +117,8 @@ def known_test_numbers() -> set[int] | None:
     for f, c in per.items():
         g = ("mt" if f.startswith("test_mt_") else "diag" if f.startswith("test_diag_")
              else "realtime" if f.startswith("test_realtime_") else "sim" if f.startswith("test_sim_") or f == "test_runner_stop_predicate.py"
-             else "cross" if f.startswith("test_model_ref_and_isolation") else "cp")
+             else "cross" if f.startswith("test_model_ref_and_isolation")
+             else "se" if f.startswith("test_se_") else "cp")
         groups[g] += c
     return (set(per.values()) | set(groups.values()) | {sum(per.values()), groups["sim"] + groups["realtime"]}
             | PLANNED_NUMBERS)

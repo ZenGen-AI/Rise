@@ -105,7 +105,7 @@ TrainScheduler 装配好 `PlanningContext`(规划上下文)交给 TrainPlanner�
 
 | 编号 | 目标 | 验收方式 |
 |---|---|---|
-| G1 | 规划上下文有精确、可校验的形状 | `PlanningContext.from_dict` 对缺键、多键、类型不符一律拒绝,`to_dict` 与 `from_dict` 严格互逆 |
+| G1 | 规划上下文有精确、可校验的形状 | `PlanningContext.from_dict` 对缺键、多键、类型不符一律拒绝,`to_dict` 与 `from_dict` 严格互逆。唯一例外是第七段 `strategy_experience`:可省,省了等于空列表,好让旧生产方继续可用 |
 | G2 | 模型输出严格解析,不做宽容猜测 | 缺键、多键、重复键、非有限数、围栏外文字都判为解析失败 |
 | G3 | 不合格输出带原因重采样,预算耗尽明确失败 | `plan()` 的重试与失败用例 [计划中] |
 | G4 | 决策后端可替换,三种后端走同一条解析路径 | 三个后端都只返回文本 |
@@ -177,7 +177,7 @@ TrainScheduler 装配好 `PlanningContext`(规划上下文)交给 TrainPlanner�
 | `trainplanner.examples` | `example_context_dict()`:对外契约的完整示例 | 无 | [计划中] |
 | `trainplanner.decision` | `PlannerDecision`、`parse_decision`、`DecisionParseError` | `context` | [计划中] |
 | `trainplanner.prompt` | 占位符语法、`check_template`、`render_prompt`、`PackedContext` | `context` | [计划中] |
-| `trainplanner.templates` | `PLANNER_V1`、`install_template`、`install_default_template`、`load_template` | `prompt`、`controlplane` | [计划中] |
+| `trainplanner.templates` | `PLANNER_V1`、`PLANNER_V2`(多一个 `{{strategy_experience}}` 段)、`PLANNER_V1_VERSION`、`PLANNER_V2_VERSION`、`STRATEGY_TEMPLATE_VERSIONS`、`install_template`、`install_default_template`、`load_template` | `prompt`、`controlplane` | [计划中] |
 | `trainplanner.backends` | `DecisionBackend` 协议与三个后端 | `context`、`prompt`、`inference_bridge` | [计划中] |
 | `trainplanner.planner` | `plan`、`PlannerResult`、`PlannerFailedError`、`attempt_task_id` | 上述各模块 | [计划中] |
 
@@ -198,7 +198,7 @@ TrainScheduler 装配好 `PlanningContext`(规划上下文)交给 TrainPlanner�
 
 | 实体 | 字段与含义 | 约束 |
 |---|---|---|
-| `PlanningContext` | `run_id`、`candidate`、`diagnostic`、`recipes`、`recent_decisions`、`cost_gain` | 冻结;构造即校验;缺键、多键、类型不符抛 `InvalidContextError` [计划中] |
+| `PlanningContext` | `run_id`、`candidate`、`diagnostic`、`recipes`、`recent_decisions`、`cost_gain`、`strategy_experience` | 冻结;构造即校验;缺键、多键、类型不符抛 `InvalidContextError`。第七段是渲染好的文本行列表,缺省为空列表:旧调用方不写这个键仍然可读 [计划中] |
 | 子结构类 | `CandidateSummary`、`DiagnosticSummary`、`RecipeSummary`、`DecisionOutcome`、`CostGainEntry`,诊断里的 `regression_flags` 与 `error_profiles` 另用 `RegressionMark`、`ErrorProfileSummary` | 都冻结,各有严格的 `from_dict`;常量 `CANDIDATE_TERMINAL_STATES`、`PLANNABLE_GRADES`、`RECIPE_TYPES` [计划中] |
 | `candidate` | `id`、`status`、`reject_reason` | `status` 只能是 `effective` 或 `rejected`;`effective` 时 `reject_reason` 必须为 `None` |
 | `diagnostic` | `l1_scores`、`regression_flags`、`error_profiles`、`benchmark_version`、`grade` | `l1_scores` 至少一项;`grade` 只能是 `mock` 或 `real` |
@@ -250,6 +250,8 @@ payload:
   text: "..."        # PLANNER_V1 的英文全文
 ```
 
+`install_default_template` 同时装 `v1` 与 `v2` 两份,返回 `v1` 的路径:`v2` 是 `PLANNER_V1` 在 `## Your answer` 之前插入“策略经验”一节得到的,多一个 `{{strategy_experience}}` 占位符。两份各自独立校验,同版本不同文本照样拒绝。
+
 ### 4.3 不变量
 
 1. 树里不会出现渲染不了的模板:写入前先过 `check_template`。
@@ -292,10 +294,10 @@ load_template(store, version) -> PromptTemplate
 | 占位符 | 渲染为 |
 |---|---|
 | `{{run_id}}` | 纯文本 |
-| `{{candidate}}`、`{{diagnostic}}`、`{{recipes}}`、`{{recent_decisions}}`、`{{cost_gain}}` | 对应段的 JSON |
+| `{{candidate}}`、`{{diagnostic}}`、`{{recipes}}`、`{{recent_decisions}}`、`{{cost_gain}}`、`{{strategy_experience}}` | 对应段的 JSON |
 | `{{context}}` | 整个上下文的 JSON |
 
-渲染规则:JSON 一律 `indent=2, sort_keys=True, ensure_ascii=False`;值为 `None` 的 `gpu_hours`、`tokens` 渲染成 `"not recorded"`;只扫一遍,替换进去的值不再解释。未知名字、游离的 `{{`、一个占位符都没有的模板,都抛 `PromptRenderError`。`PLANNER_V1` 用到除 `{{context}}` 外的六个。 [计划中]
+渲染规则:JSON 一律 `indent=2, sort_keys=True, ensure_ascii=False`;值为 `None` 的 `gpu_hours`、`tokens` 渲染成 `"not recorded"`;只扫一遍,替换进去的值不再解释。未知名字、游离的 `{{`、一个占位符都没有的模板,都抛 `PromptRenderError`。`PLANNER_V1` 用到除 `{{context}}` 与 `{{strategy_experience}}` 外的六个,`PLANNER_V2` 七个全用。 [计划中]
 
 触发条件:TrainPlanner 不自己触发。TrainScheduler 的规划处理器在调和循环发出 `plan_next_round` 动作时调用 `plan()`。 [计划中]
 
@@ -306,11 +308,11 @@ load_template(store, version) -> PromptTemplate
 | ControlPlane | `Envelope`、`OwnerRef`、`CURRENT_SCHEMA_VERSION`;`GitStore` 读写;`planner_prompt_file(version)` 返回 `control-plane/config/prompts/planner-<version>.yaml` [计划中] | 无;`controlplane` 不导入本包 |
 | 外部推理桥接 | `InferenceBridge.complete(prompt, *, run_id, task_id) -> BridgeResult`;`BridgeError(category, reason)` [计划中] | 无 |
 | TrainScheduler | 产出符合第 4 章形状的 `PlanningContext`;`validator` 只返回 `None` 或非空字符串;处理 `PlannerFailedError` 与 `BridgeError` | `plan`、`PlannerResult.record_fields`、`PlannerFailedError` 的 `reason` 与 `attempts`、`load_template`、`DecisionBackend`、`example_context_dict` [计划中] |
-| factory 组合根 | 无 | `install_default_template`、`PLANNER_V1_VERSION == "v1"`、`BridgeDecisionBackend`、`HeuristicBackend` [计划中] |
+| factory 组合根 | 无 | `install_default_template`(同时装 `v1` 与 `v2`,返回 `v1` 路径)、`PLANNER_V1_VERSION == "v1"`、`BridgeDecisionBackend`、`HeuristicBackend` [计划中] |
 
 重入续写时,TrainScheduler 要从已写的决策产物读回决策:`PlannerDecision.from_dict(d)` 规则同 `parse_decision`,失败抛 `DecisionParseError`;`decision_payload()` 还原载荷 [计划中]。
 
-TrainScheduler 那一侧的配套约定:`scheduler.yaml` 的 `max_plan_attempts` 是总次数(默认 3),传进来的 `max_parse_retries` 是它减一。规划模板版本由 `scheduler.yaml` 的 `template_version` 选(默认 `v1`),后端配置里的 `prompt_template_version` 不参与。命令行 `--planner-backend bridge|heuristic` 选后端,默认 `bridge`。
+TrainScheduler 那一侧的配套约定:`scheduler.yaml` 的 `max_plan_attempts` 是总次数(默认 3),传进来的 `max_parse_retries` 是它减一。规划模板版本由 `scheduler.yaml` 的 `template_version` 选(默认 `v1`),后端配置里的 `prompt_template_version` 不参与。打开 `strategy_experience` 时必须选一个在 `STRATEGY_TEMPLATE_VERSIONS` 里的版本(当前是 `v2`),否则 TrainScheduler 构造配置时就报错——`v1` 不含第七段占位符,允许这个组合等于让经验落账了却从没进过提示。命令行 `--planner-backend bridge|heuristic` 选后端,默认 `bridge`。
 
 ## 6. 关键流程
 
@@ -470,7 +472,7 @@ TrainScheduler 那一侧的配套约定:`scheduler.yaml` 的 `max_plan_attempts`
 
 | 能力 | 状态 | 说明 |
 |---|---|---|
-| 规划上下文与示例 | [计划中] | 工作包 4 任务 50 |
+| 规划上下文与示例 | [计划中] | 工作包 4 任务 50;含 `strategy_experience` 第七段,缺省空列表 |
 | 严格解析 | [计划中] | 任务 51 |
 | 提示渲染 | [计划中] | 任务 52 |
 | 默认模板与模板信封 | [计划中] | 任务 53;依赖 `planner_prompt_file`,由工作包 1 产出 |

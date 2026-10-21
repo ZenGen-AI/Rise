@@ -143,7 +143,7 @@ TrainScheduler 的规划处理器调用它落账与重算,再调 `assemble_conte
 | 依赖方向 | 只用 `controlplane`、RecipeStore(经 `recipes_port`)、标准库 | 不导入 `trainplanner`;上下文类型由调用方拼装 |
 | 无新第三方依赖 | 只用标准库 `hashlib`、`json`、`re` | 签名用摘要,不引外部库 |
 | 开关在配置里 | `scheduler.yaml` 加布尔键 `strategy_experience`,默认假 | `_SCHEDULER_KEYS` 由数据类字段导出,新字段自动被严格解析接受 |
-| 开关与模板必须配套 | 开关为真而 `template_version` 不在 `STRATEGY_TEMPLATE_VERSIONS` 里时构造即抛 `SchedulerConfigError` | v1 模板不含第七段占位符,允许这个组合等于让功能静默空转;将来新增渲染该段的模板只需在那个元组里登记,不用改校验 |
+| 开关与模板必须配套 | 开关为真而 `template_version` 不在 `STRATEGY_TEMPLATE_VERSIONS` 里时构造即抛 `SchedulerConfigError` | `v1` 模板不含第七段占位符,允许这个组合等于让功能静默空转;将来新增渲染该段的模板只需在那个元组里登记,不用改校验 |
 | 写入不改变既有语义 | 关闭时 `PlanningContext` 与现状逐字节相同 | 旧模板照常可用 |
 
 ## 3. 架构
