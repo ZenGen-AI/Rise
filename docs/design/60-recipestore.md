@@ -3,13 +3,13 @@
 | 项 | 内容 |
 |---|---|
 | 一句话 | 校验配方能否复现,收录经门③批准的配方,按战绩检索,并在战绩退化时自动废弃 |
-| 状态 | [计划中] |
+| 状态 | 部分落地:校验、id 互转、增益、检索与比较、战绩与废弃、收录与战绩两个处理器、调和循环的两种触发动作 [已落地];限制是闭环只在 `factory run --enable` 打开 `admit` 或 `track` 时装配,不带 `--enable` 的默认入口与 `scripts/run_controlplane.py` 不注册这两个处理器,且 `--enable` 目前不能与 `--executor roll`、`--evaluator someval` 同用 |
 | 所在层 | 控制层 |
-| 代码位置 | `src/recipestore` [计划中] |
-| 基线提交 | `8dd295b`(2026-10-10) |
+| 代码位置 | `src/recipestore` |
+| 基线提交 | `b826440`(2026-10-21) |
 | 依赖 | ControlPlane(`controlplane` 包:信封、GitStore、路径函数、状态机、失败记录、证据等级、动作) |
 | 被依赖 | TrainScheduler(检索、增益、校验)、factory 组合根(注册两个处理器)、ControlPlane 调和循环(经注入调用处理器) |
-| 对应实施计划 | 工作包 3(任务 40 至 48)[计划中] |
+| 对应实施计划 | 工作包 3(任务 40 至 48) |
 
 ## 0. 系统速览
 
@@ -20,15 +20,15 @@
 
 | 子系统 | 职责 | 所在层 | 现状 |
 |---|---|---|---|
-| ControlPlane | 协调层:git 版本化产物树、状态机、调和循环、三个审核门 | 控制层 | 核心 [已落地],闭环扩展 [计划中] |
+| ControlPlane | 协调层:git 版本化产物树、状态机、调和循环、三个审核门 | 控制层 | [已落地] |
 | SocialSimulator | 情境与人格生成、多智能体仿真、实时环境服务、诊断评测 | 计算层 | [已落地];诊断默认用 mock 后端,`--evaluator someval` 装配 vLLM 加 SoMEval 的真实运行器 [已落地],真机只验证到预测阶段 |
 | MindTrainer | 权重级训练:BatchTrain(SFT 后接 GRPO 加 OPD)与 InteractTrain | 计算层 | [已落地],默认入口的训练执行器是 mock;ROLL LoRA SFT 真实执行器 [已落地],由 `--executor roll` 装配,已在真实主机上端到端跑通一次 |
-| MindAgent | 部署态智能体的技能与记忆自进化,不改权重 | 计算层 | [计划中] |
-| RecipeStore | 验证有效的训练配方的版本化仓库 | 控制层 | [计划中] |
-| TrainScheduler | 决策执行器:装配上下文、校验决策、构造训练指令、提名配方 | 控制层 | [计划中] |
-| TrainPlanner | 决策学习者:经可插拔后端给出下一轮训练决策 | 控制层 | [计划中] |
+| MindAgent | 部署态智能体的技能与记忆自进化,不改权重 | 计算层 | [已落地],闭环里经 `--enable agent` 装配;部署驱动用的仍是罐头后端,真实模型后端未接 |
+| RecipeStore | 验证有效的训练配方的版本化仓库 | 控制层 | [已落地] |
+| TrainScheduler | 决策执行器:装配上下文、校验决策、构造训练指令、提名配方 | 控制层 | [已落地],含策略经验(默认关) |
+| TrainPlanner | 决策学习者:经可插拔后端给出下一轮训练决策 | 控制层 | [已落地],默认后端经桥接调用命令行模型 |
 
-共享基础设施有五个。**Actio** 是带技能库与显式记忆的智能体框架,每次响应附带激活轨迹。**外部推理桥接**用命令行调用外部强模型。**远端计算层** `compute` 经 SSH 在远端 GPU 主机上跑作业 [已落地]。**ROLL** 是分布式训练引擎,**vLLM** 是推理引擎。V1 经远端计算层接入 ROLL 的 LoRA SFT [已落地](由 `--executor roll` 装配,已在真实主机上从指令跑到候选一次)与 vLLM 推理服务 [计划中]。已落地部分仍由确定性 mock 顶替。真实 GRPO 加 OPD 训练与真实 judge [推迟]。
+共享基础设施有五个。**Actio** 是带技能库与显式记忆的智能体框架,每次响应附带激活轨迹。**外部推理桥接**用命令行调用外部强模型。**远端计算层** `compute` 经 SSH 在远端 GPU 主机上跑作业 [已落地]。**ROLL** 是分布式训练引擎,**vLLM** 是推理引擎。V1 经远端计算层接入 ROLL 的 LoRA SFT [已落地](由 `--executor roll` 装配,已在真实主机上从指令跑到候选一次)与 vLLM 推理服务 [已落地](命令拼装、SSH 隧道、服务生命周期;真机端到端待补)。已落地部分仍由确定性 mock 顶替。真实 GRPO 加 OPD 训练与真实 judge [推迟]。
 
 **状态标记。** **[已落地]** 表示代码在主干上且有测试。**[计划中]** 表示设计与实施计划已定,代码还没写。**[推迟]** 表示明确不在 V1 范围内。图只画目标系统,不标进展,进展只看正文的状态标记。
 
@@ -39,7 +39,7 @@
 | 产物树 | 所有协作数据是 git 树里的 YAML 产物,统一信封:`id`、`type`、`version`、`created_at`、`created_by`(含 `owner` 与 `visibility`)、`status`、`schema_version`、`links`、`payload`。checkpoint 等大体量内容只存引用 `{uri, sha256, size_bytes}`;V1 的数据集逐条 episode 进 git,只适合小规模 mock。git 树是唯一真相,读取时先经迁移器链再消费。 |
 | 状态机 | 需审核类:`draft → pending_review → approved → effective`,之后可到 `deprecated` 或 `superseded`,`pending_review` 也可到 `rejected`。非审核类:`pending → executed → consumed`,`pending` 也可到 `failed`。被拒绝与失败的产物保留;被拒绝的候选进入下一轮规划的输入,失败只留痕、等人处理。 |
 | 调和循环 | 纯函数 `reconcile(树视图) → 动作列表`,守护进程按间隔轮询并执行动作。循环无状态、动作幂等,进程崩溃后从 git 树续接。子系统之间不直接调用,只读写产物。 |
-| 审核门 | 三道人工门:① checkpoint 晋级,② 技能与记忆增量纳入,③ 配方入库。证据不在场就不能批准:门①要诊断报告,门②要验证结果,门③要可复现性校验报告。门②与门③ [计划中]。 |
+| 审核门 | 三道人工门:① checkpoint 晋级,② 技能与记忆增量纳入,③ 配方入库。证据不在场就不能批准:门①要诊断报告,门②要验证结果,门③要可复现性校验报告。门②与门③ [已落地]。 |
 | 受限直连 | 两处高频实时调用绕过 ControlPlane:① MindTrainer 与 SocialSimulator 之间的 InteractTrain rollout,② MindAgent 与 SocialSimulator 之间的部署经验采集。两处都走 gRPC 双向流,发生在计算层内部。是否开会话仍由 ControlPlane 决策。 |
 | 失败分类 | T1 瞬态:有限次指数退避重试,耗尽升为 T3。T2 确定性:不重放,按所属子系统的校验链处理,LLM 的随机输出可有限次重采样。T3 需人工:写失败记录,不自动重跑。失败是数据,不是异常。 |
 
@@ -56,7 +56,7 @@
 | Recipe(配方) | 验证有效的完整训练方案,分 batch、interact、agent_rsi 三类 |
 | DiagnosticReport | 诊断评测产出的报告:维度、分数、置信区间、错误类型、退化标记 |
 | Activation trace(激活轨迹) | Actio 每次响应附带的记录:命中的技能候选、选中的技能、命中的记忆 |
-| Evidence grade(证据等级) | 诊断报告的可信等级 `stub`、`mock`、`real`,决定它能否驱动规划与提名 [计划中] |
+| Evidence grade(证据等级) | 诊断报告的可信等级 `stub`、`mock`、`real`,决定它能否驱动规划与提名;缺标记一律判 `stub`,失败关闭 |
 <!-- shared:end context-block -->
 
 ## 1. 定位
@@ -100,7 +100,7 @@ RecipeStore 把一次被证明有效的训练沉淀成可复现、可检索、�
 </details>
 <!-- figure:end 60-recipestore-context -->
 
-读图要点如下。本包接口全部 [计划中],施工时可能微调。TrainScheduler 写配方候选,并调本包的检索、增益与校验。人在门③批准或拒绝候选。调和循环产生 `admit_recipe` 与 `record_track` 两种动作,调用 factory 注册的两个处理器。处理器读 `runs/` 与 `models/`,只往 `recipes/`、配方候选与战绩标记三处写。
+读图要点如下。TrainScheduler 写配方候选,并调本包的检索、增益与校验。人在门③批准或拒绝候选。调和循环产生 `admit_recipe` 与 `record_track` 两种动作,调用 factory 注册的两个处理器。处理器读 `runs/` 与 `models/`,只往 `recipes/`、配方候选与战绩标记三处写。
 
 | 邻居 | 它给 RecipeStore | RecipeStore 给它 |
 |---|---|---|
@@ -117,11 +117,11 @@ V1 的目标是让配方从提名到废弃的全程自动记账,只在入库时�
 | 编号 | 目标 | 验收方式 |
 |---|---|---|
 | G1 | 三类配方都有可复现性校验,错误与警告写进候选 | 校验器对三类完整载荷无错误,缺任一锚点各有一条错误 |
-| G2 | 增益只有一处实现,提名与战绩共用 | 提名与战绩回写都调 `compute_gain` [计划中,施工时可能微调] |
+| G2 | 增益只有一处实现,提名与战绩共用 | 提名与战绩回写都调 `compute_gain` |
 | G3 | 批准的候选被收录为 `effective` 配方 | 收录处理器写出配方、谱系、空战绩,候选置 `effective` |
 | G4 | 每次复用追加一条战绩,最近一条退化就废弃 | 端到端用例:收录、复用两轮、第三轮退化、配方 `deprecated` |
 | G5 | 两个处理器崩在任意一步后重跑都收敛 | 逐步故障注入测试,重跑后树与一次跑通相同 |
-| G6 | 检索按战绩排序,供规划器挑选 | `find_recipes` 按 `mean_gain` 降序 [计划中,施工时可能微调] |
+| G6 | 检索按战绩排序,供规划器挑选 | `find_recipes` 按 `mean_gain` 降序 |
 
 | 项 | 状态 | V1 的处理 |
 |---|---|---|
@@ -179,17 +179,17 @@ RecipeStore 是七个模块组成的单层包,按"处理器、领域、纯函数
 </details>
 <!-- figure:end 60-recipestore-architecture -->
 
-两个处理器在最上层,它们调领域模块读写战绩与谱系。领域模块共用 `ids` 互转配方 id 与 run id。`validate` 是纯函数,不读树,由 TrainScheduler 在提名时调用。整个包对外只导入 `controlplane`。下表的接口全部 [计划中],施工时可能微调。
+两个处理器在最上层,它们调领域模块读写战绩与谱系。领域模块共用 `ids` 互转配方 id 与 run id。`validate` 是纯函数,不读树,由 TrainScheduler 在提名时调用。整个包对外只导入 `controlplane`。
 
 | 模块 | 职责 | 依赖 | 状态 |
 |---|---|---|---|
-| `recipestore.ids` | `recipe_id_for`、`run_id_of`:配方 id 与来源 run id 互转 | 无 | [计划中] |
-| `recipestore.validate` | `validate_reproducibility`、`ReproReport`、`is_relative_ref` | 无 | [计划中] |
-| `recipestore.gain` | `compute_gain`、`GainResult`、`baseline_run_of`、读报告的小函数 | `controlplane` | [计划中] |
-| `recipestore.library` | `find_recipes`、`get_recipe`、`compare`、`read_track_entries`、`track_summary` | `ids`、`controlplane` | [计划中] |
-| `recipestore.track` | `append_track_entry`、`verdict`、`deprecate`、`deprecated_by` | `library`、`ids`、`controlplane` | [计划中] |
-| `recipestore.admit` | 收录处理器 `handle_admit_recipe`、`has_repro_evidence` | `track`、`ids`、`controlplane` | [计划中] |
-| `recipestore.record` | 战绩处理器 `handle_record_track`、`used_as_for` | `gain`、`library`、`track`、`controlplane` | [计划中] |
+| `recipestore.ids` | `recipe_id_for`、`run_id_of`:配方 id 与来源 run id 互转 | 无 | [已落地] |
+| `recipestore.validate` | `validate_reproducibility`、`ReproReport`、`is_relative_ref` | 无 | [已落地] |
+| `recipestore.gain` | `compute_gain`、`GainResult`、`baseline_run_of`、读报告的小函数 | `controlplane` | [已落地] |
+| `recipestore.library` | `find_recipes`、`get_recipe`、`compare`、`read_track_entries`、`track_summary` | `ids`、`controlplane` | [已落地] |
+| `recipestore.track` | `append_track_entry`、`verdict`、`deprecate`、`deprecated_by` | `library`、`ids`、`controlplane` | [已落地] |
+| `recipestore.admit` | 收录处理器 `handle_admit_recipe`、`has_repro_evidence` | `track`、`ids`、`controlplane` | [已落地] |
+| `recipestore.record` | 战绩处理器 `handle_record_track`、`used_as_for` | `gain`、`library`、`track`、`controlplane` | [已落地] |
 
 依赖方向规则如下。
 
@@ -224,7 +224,7 @@ RecipeStore 管四种产物,全部是信封,放在产物树里。配方候选与
 | interact | `training_config`、`scenario_ids`、`bindings`、`code_version` |
 | agent_rsi | `bound_model_id`、`scenario_ids`、`persona_ids`、`analyzer_config`、`verifier_config`、`generator_version`、`uses_bridge`、`prompt_template_version` |
 
-`repro` 的错误与警告规则 [计划中]:
+`repro` 的错误与警告规则:
 
 | 类型 | 错误 | 警告 |
 |---|---|---|
@@ -238,12 +238,12 @@ RecipeStore 管四种产物,全部是信封,放在产物树里。配方候选与
 
 | 产物类型 | 路径 | 状态机种类 | 写方 | 状态 |
 |---|---|---|---|---|
-| `recipe_candidate` | `recipe_candidates/recipe-<run>.yaml` | 审核类 | 提名器写;命令行改状态;收录处理器置 `effective` | [计划中] |
-| `recipe` | `recipes/recipe-<run>/recipe.yaml` | 审核类 | 收录处理器写;战绩处理器废弃 | [计划中] |
-| `recipe_lineage` | `recipes/recipe-<run>/lineage.yaml` | 非审核类,`executed` | 收录处理器、战绩处理器 | [计划中] |
-| `recipe_track_record` | `recipes/recipe-<run>/track_record.yaml` | 非审核类,`executed` | 收录处理器写空表;战绩处理器追加 | [计划中] |
-| `recipe_track_note` | `runs/<run>/recipe_track.yaml` | 非审核类,`executed` | 战绩处理器 | [计划中] |
-| `failure_record` | `runs/<run>/failure-admit_recipe.yaml` | 非审核类,`executed` | 收录处理器,经统一的失败写入函数 | [计划中] |
+| `recipe_candidate` | `recipe_candidates/recipe-<run>.yaml` | 审核类 | 提名器写;命令行改状态;收录处理器置 `effective` | [已落地] |
+| `recipe` | `recipes/recipe-<run>/recipe.yaml` | 审核类 | 收录处理器写;战绩处理器废弃 | [已落地] |
+| `recipe_lineage` | `recipes/recipe-<run>/lineage.yaml` | 非审核类,`executed` | 收录处理器、战绩处理器 | [已落地] |
+| `recipe_track_record` | `recipes/recipe-<run>/track_record.yaml` | 非审核类,`executed` | 收录处理器写空表;战绩处理器追加 | [已落地] |
+| `recipe_track_note` | `runs/<run>/recipe_track.yaml` | 非审核类,`executed` | 战绩处理器 | [已落地] |
+| `failure_record` | `runs/<run>/failure-admit_recipe.yaml` | 非审核类,`executed` | 收录处理器,经统一的失败写入函数 | [已落地] |
 
 <!-- figure:begin 60-recipestore-states -->
 ![配方的生命周期](diagrams/60-recipestore-states.svg)
@@ -307,9 +307,9 @@ code_version: {repo_commit: "0385004"}
 
 ## 5. 接口契约
 
-本章全部接口都是 [计划中],签名来自工作包 3 的施工单,施工时可能微调。
+本章的签名与取值细节都按 `src/recipestore` 的当前代码核对过。
 
-校验与增益两个入口(施工时可能微调):
+校验与增益两个入口:
 
 ```python
 def validate_reproducibility(recipe_payload: dict) -> ReproReport: ...
@@ -320,9 +320,9 @@ class GainResult:             # gain 为 None 时 reason 写明原因
     gain: float | None; baseline_run_id: str | None; reason: str
 ```
 
-增益的唯一实现是 `compute_gain(store, run_id, dimension)`,返回 `GainResult(gain, baseline_run_id, reason)`,成功时 `reason` 为 `ok`。链路是:候选报告取该维度一级分,经报告的 `baseline_ref`(`zengen-vN`)找到基线模型,再经模型的 `links` 找到基线 run,取基线报告的同维度一级分相减。任何一环缺失都返回空增益,`reason` 写明缺什么:候选无报告、候选报告是桩、候选缺该维度一级分、没有 `baseline_ref`、`baseline_ref` 不是模型 id、基线模型不在、模型 `links` 认不出 run、基线就是自己、基线 run 无报告、基线报告是桩、real 候选对非 real 基线、基准版本不可比、基线缺该维度、分数不是数字、分数不是有限数或重复。基线 run 已找到时 `baseline_run_id` 照填,便于审核人追查 [计划中]。
+增益的唯一实现是 `compute_gain(store, run_id, dimension)`,返回 `GainResult(gain, baseline_run_id, reason)`,成功时 `reason` 为 `ok`。链路是:候选报告取该维度一级分,经报告的 `baseline_ref`(`zengen-vN`)找到基线模型,再经模型的 `links` 找到基线 run,取基线报告的同维度一级分相减。任何一环缺失都返回空增益,`reason` 写明缺什么:候选无报告、候选报告是桩、候选缺该维度一级分、没有 `baseline_ref`、`baseline_ref` 不是模型 id、基线模型不在、模型 `links` 认不出 run、基线就是自己、基线 run 无报告、基线报告是桩、real 候选对非 real 基线、基准版本不可比、基线缺该维度、分数不是数字、分数不是有限数或重复。基线 run 已找到时 `baseline_run_id` 照填,便于审核人追查。
 
-检索、战绩与生命周期(施工时可能微调):
+检索、战绩与生命周期:
 
 ```python
 def find_recipes(store, *, dimension=None, recipe_type=None,
@@ -335,9 +335,9 @@ def deprecate(store, recipe_id, *, reason, run_id) -> bool: ...
 # RecipeView: id, recipe_type, dimension, status, payload, mean_gain, n_reuse
 ```
 
-检索与战绩的取值细节 [计划中]:`order` 取 `track` 或 `id`,其他值抛 `ValueError`;`track` 序下没有增益数据的配方排在所有有数据的配方之后,含负增益。`compare` 只比配置,排除 `result`、`repro`、`source_run_id`,差异按点分路径展开,列表整体比较,一侧缺失记 `<missing>`。`append_track_entry` 严格校验条目恰好五个键,同一 `run_id` 已存在时先写者为准,不覆盖。`deprecate` 先写谱系事件再改配方状态,同一配方只记一次 `deprecated`。
+检索与战绩的取值细节:`order` 取 `track` 或 `id`,其他值抛 `ValueError`;`track` 序下没有增益数据的配方排在所有有数据的配方之后,含负增益。`compare` 只比配置,排除 `result`、`repro`、`source_run_id`,差异按点分路径展开,列表整体比较,一侧缺失记 `<missing>`。`append_track_entry` 严格校验条目恰好五个键,同一 `run_id` 已存在时先写者为准,不覆盖。`deprecate` 先写谱系事件再改配方状态,同一配方只记一次 `deprecated`。
 
-两个处理器,签名即 `Callable[[GitStore, Action], None]`(施工时可能微调):
+两个处理器,签名即 `Callable[[GitStore, Action], None]`:
 
 ```python
 def handle_admit_recipe(store: GitStore, action: Action) -> None: ...  # target_id 是配方候选 id
@@ -345,7 +345,7 @@ def handle_record_track(store: GitStore, action: Action) -> None: ...  # target_
 def has_repro_evidence(payload: dict) -> bool: ...  # 门③"证据在场"规则的 Python 版
 ```
 
-触发条件由 ControlPlane 调和循环的扩展判定(施工时可能微调):
+触发条件由 ControlPlane 调和循环的扩展判定:
 
 | 动作 | `target_id` | 触发条件 | 幂等键 |
 |---|---|---|---|
@@ -369,13 +369,13 @@ def has_repro_evidence(payload: dict) -> bool: ...  # 门③"证据在场"规则
 |---|---|---|
 | ControlPlane | 晋级写 `links=[cand-<run>, <run>]`;`GitStore.write_product` 对相同内容不产生提交;路径函数与 `SUBDIRS` 已含配方目录 | 两个处理器不抛确定性异常 |
 | 诊断评测 | 报告含 `baseline_ref`、`benchmark_version`、`dimension_scores`(一级维度 `level` 为 `l1`)、`regression_flags` | 无 |
-| TrainScheduler | 候选载荷符合第 4 章;指令带 `planner_decision_ref`;决策 id 形如 `planner-<源 run>` | 检索的排序、增益的唯一实现、校验器的错误文本;并要求这些名字存在:`find_recipes`、`get_recipe`、`RecipeNotFoundError`、`RecipeView`、`compute_gain`、`GainResult`、`read_report_payload`、`regression_flags`、`recipe_id_for`、`run_id_of`、`validate_reproducibility`、`ReproReport`、`has_repro_evidence` [计划中] |
+| TrainScheduler | 候选载荷符合第 4 章;指令带 `planner_decision_ref`;决策 id 形如 `planner-<源 run>` | 检索的排序、增益的唯一实现、校验器的错误文本;并要求这些名字存在:`find_recipes`、`get_recipe`、`RecipeNotFoundError`、`RecipeView`、`compute_gain`、`GainResult`、`read_report_payload`、`regression_flags`、`recipe_id_for`、`run_id_of`、`validate_reproducibility`、`ReproReport`、`has_repro_evidence` |
 | TypeScript 命令行 | `approve` 配方候选时执行与 `has_repro_evidence` 相同的规则 | 无 |
 | factory 组合根 | 把处理器注册到 `handlers['admit_recipe']` 与 `handlers['record_track']` | 两个处理器函数 |
 
 ## 6. 关键流程
 
-主流程分两段:来源 run 入库,后续 run 复用并回写战绩。图中七步与下表一一对应,表中接口全部 [计划中],施工时可能微调。
+主流程分两段:来源 run 入库,后续 run 复用并回写战绩。图中七步与下表一一对应。
 
 <!-- figure:begin 60-recipestore-flow -->
 ![提名到入库到战绩回写](diagrams/60-recipestore-flow.svg)
@@ -454,7 +454,7 @@ def has_repro_evidence(payload: dict) -> bool: ...  # 门③"证据在场"规则
 | 候选已批准但没有 `repro` | 不收录,写一次 T2 失败记录 | 人修好候选,或拒绝它 |
 | 增益无法计算 | 条目照记,`gain` 为空 | 不需要;`mean_gain` 只统计非空条目 |
 
-走查例子。数值来自工作包 3 的端到端用例 `test_admit_then_reuse_then_deprecate` [计划中]。
+走查例子。数值来自端到端用例 `test_admit_then_reuse_then_deprecate`(`tests/test_rs_flow.py`)。
 
 | 时刻 | 动作 | 报告的 tom 一级分 | 增益 | 结果 |
 |---|---|---|---|---|
@@ -499,7 +499,7 @@ def has_repro_evidence(payload: dict) -> bool: ...  # 门③"证据在场"规则
 | 失败点 | 类 | 处理 | 留痕产物 |
 |---|---|---|---|
 | 读写产物时 `OSError` 等瞬态异常 | T1 | 原样上抛,守护循环退出,重启后同一动作再来 | 无 |
-| 收录:候选 `approved` 但没有合法 `repro` | T2 | 不收录,只记一次 | `runs/<run>/failure-admit_recipe.yaml`,`point` 为 `recipestore.admit` [计划中] |
+| 收录:候选 `approved` 但没有合法 `repro` | T2 | 不收录,只记一次 | `runs/<run>/failure-admit_recipe.yaml`,`point` 为 `recipestore.admit` |
 | 收录:候选 id 形状对但文件不在 | T2 | 只记一次;run 目录不在时什么都不写 | 同上 |
 | 收录:`target_id` 不是 `recipe-<run>` 或含路径分隔符 | T2 | 空操作 | 无 |
 | 战绩:`recipe_ref` 为空、配方不在、报告是 stub | T2 | 写 `skipped` 标记,调和循环不再触发 | `runs/<run>/recipe_track.yaml` |
@@ -532,35 +532,35 @@ V1 里本包不产生 T3。处理器内的瞬态异常会让守护循环退出,�
 | 守卫 | 依赖方向、`__future__` 首行 | 解析源文件 |
 | 字段名钉 | 诊断报告字段名 | 用 `diagnostic` 自己的写法造一份报告 |
 
-计划的测试文件与用例数(全部 [计划中],施工时可能微调):
+测试文件与用例数(实测 `pytest --collect-only -q`,合计 197):
 
 | 文件 | 用例数 |
 |---|---|
-| `tests/test_rs_ids.py` [计划中] | 9 |
-| `tests/test_rs_validate.py` [计划中] | 62 |
-| `tests/test_rs_gain.py` [计划中] | 30 |
-| `tests/test_rs_library.py` [计划中] | 20 |
-| `tests/test_rs_track.py` [计划中] | 24 |
-| `tests/test_rs_admit.py` [计划中] | 23 |
-| `tests/test_rs_record.py` [计划中] | 26 |
-| `tests/test_rs_flow.py` [计划中] | 3 |
+| `tests/test_rs_ids.py` | 9 |
+| `tests/test_rs_validate.py` | 62 |
+| `tests/test_rs_gain.py` | 30 |
+| `tests/test_rs_library.py` | 20 |
+| `tests/test_rs_track.py` | 24 |
+| `tests/test_rs_admit.py` | 23 |
+| `tests/test_rs_record.py` | 26 |
+| `tests/test_rs_flow.py` | 3 |
 | 合计 | 197 |
 
-测试用的构造函数放 `tests/rs_fixtures.py` 与 `tests/rs_recipes.py` [计划中],不建 `conftest.py`,以免影响全部测试的收集。不依赖的外部服务:真实诊断后端、训练引擎、推理引擎、外部推理桥接、网络。
+测试用的构造函数放 `tests/rs_fixtures.py` 与 `tests/rs_recipes.py`,不建 `conftest.py`,以免影响全部测试的收集。不依赖的外部服务:真实诊断后端、训练引擎、推理引擎、外部推理桥接、网络。
 
 ## 10. 现状、局限与未核实项
 
-RecipeStore 整体 [计划中]:代码一行没写,`src/recipestore` 不存在,设计与施工单已定。
+RecipeStore 已落地:校验、增益、检索、战绩、生命周期与两个处理器都在 `src/recipestore`,测试 197 个。限制在装配:factory 只在 `--enable` 含 `admit` 或 `track` 时注册对应处理器,不带 `--enable` 的默认入口(与 `scripts/run_controlplane.py`)不装这两个处理器;`--enable` 目前不能与 `--executor roll`、`--evaluator someval` 同时使用,所以配方闭环只在 mock 训练与 mock 评测下跑过。
 
 | 能力 | 状态 | 说明 |
 |---|---|---|
-| 配方目录 `recipes/` | [已落地] | 已在 `SUBDIRS` 里,目前为空 |
-| 配方候选目录、配方路径函数、失败记录、证据等级 | [计划中] | 由工作包 1 产出,本包只消费 |
-| 可复现性校验 | [计划中] | 纯函数 |
-| 增益 | [计划中] | 全系统唯一实现 |
-| 检索、比较、战绩、废弃 | [计划中] | 按目录扫描 |
-| 收录与战绩两个处理器 | [计划中] | 可脱离调和循环直接调用 |
-| 调和循环产生两种动作 | [计划中] | 由调和循环扩展完成,不在本包 |
+| 配方目录 `recipes/` | [已落地] | 已在 `SUBDIRS` 里;目录内容由收录处理器按需写入,当前产物树里还没有配方 |
+| 配方候选目录、配方路径函数、失败记录、证据等级 | [已落地] | 由工作包 1 产出,本包只消费 |
+| 可复现性校验 | [已落地] | 纯函数 |
+| 增益 | [已落地] | 全系统唯一实现 |
+| 检索、比较、战绩、废弃 | [已落地] | 按目录扫描 |
+| 收录与战绩两个处理器 | [已落地] | 可脱离调和循环直接调用 |
+| 调和循环产生两种动作 | [已落地] | 由调和循环扩展完成,不在本包;默认入口不启用 |
 | `superseded` 自动迁移 | [推迟] | R8 |
 
 已知局限:
@@ -584,10 +584,10 @@ RecipeStore 整体 [计划中]:代码一行没写,`src/recipestore` 不存在,�
 
 | 项 | 影响 | 核实办法 |
 |---|---|---|
-| 真实诊断评估器写的 `baseline_ref` 形如 `zengen-vN` | 形状不同时增益恒为空,不会算错 | 诊断评估器落地后,读一份它写的报告 |
-| 命令行门③规则与 `has_repro_evidence` 一致 | 不一致时人能批准缺 `repro` 的候选,处理器兜底写失败记录 | 命令行落地后,对同一组载荷跑两边的判定 |
+| 真实诊断评估器写的 `baseline_ref` 形如 `zengen-vN` | 形状不同时增益恒为空,不会算错 | 跨包一致性测试取 `resolve_baseline` 的返回值喂给 `baseline_run_of`,`tests/test_factory_cross_plan.py` 已钉住;换后端后仍要读一份真报告复核 |
+| 命令行门③规则与 `has_repro_evidence` 一致 | 不一致时人能批准缺 `repro` 的候选,处理器兜底写失败记录 | 两侧同一张用例表:`tests/test_factory_cross_plan.py` 的 `REPRO_CASES` 与 `cli/test/gates.test.ts` 的 recipe 用例;任一侧改了另一侧照改 |
 | "模型 → 产出 run"两种判法结果一致 | 不一致时增益与调和循环选的基线不同 | 组合根的跨包一致性测试钉住 |
-| 用例数 197 | 施工时可能变化 | 落地后用 `uv run pytest --collect-only -q` 收集 `tests/test_rs_*.py` |
+| 用例数 197 | 施工时可能变化 | 已实测 `--collect-only -q` 收集 `tests/test_rs_*.py`,合计 197 |
 | `RECIPE_TYPES` 与规划器上下文的同名常量相等 | 不等时规划器会跳过某类配方 | 组合根的跨包一致性测试钉住 |
 
 明确不做:

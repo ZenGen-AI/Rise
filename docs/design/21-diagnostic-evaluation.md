@@ -3,12 +3,12 @@
 | 项 | 内容 |
 |---|---|
 | 一句话 | 对候选 checkpoint 跑静态轨与动态轨评测,逐层聚合成带置信区间的维度分,对照基线标出退化,写成诊断报告 |
-| 状态 | [已落地]:评测流水线、编排器、评估器与资产读写、SoMBench 题库导入、真实 SoMEval 运行器、训练行污染准入检查。真机只验证到预测阶段,判分阶段与真实裁判未在真机上跑通,见「现状」。[计划中]接口施工时可能微调 |
+| 状态 | [已落地]:评测流水线、编排器、评估器与资产读写、SoMBench 题库导入、真实 SoMEval 运行器、训练行污染准入检查。真机只验证到预测阶段,判分阶段与真实裁判未在真机上跑通,见「现状」。 |
 | 所在层 | 计算层,属于 SocialSimulator 的评测部分 |
 | 代码位置 | `src/diagnostic`,含评估器 `evaluator.py` 与资产 `assets.py`;污染索引与准入检查 `src/diagnostic/contamination.py`;真实运行器、导入命令与评测配置在 `src/factory`(`sombench.py`、`sombench_runner.py`、`eval_config.py`) |
-| 基线提交 | `8dd295b`(2026-10-10) |
+| 基线提交 | `b826440`(2026-10-21) |
 | 依赖 | ControlPlane 的产物树与信封(`controlplane.gitstore`、`controlplane.envelope`、`controlplane.paths`);SocialSimulator 的仿真运行器(`simulator.runner`) |
-| 被依赖 | ControlPlane 审核门①(读报告);factory 组合根(装配评估器与真实运行器)[已落地];RecipeStore 增益与战绩、TrainScheduler 规划上下文 [计划中] |
+| 被依赖 | ControlPlane 审核门①(读报告);factory 组合根(装配评估器与真实运行器)[已落地];RecipeStore 增益与战绩、TrainScheduler 规划上下文 [已落地] |
 | 对应实施计划 | 评估器与资产:工作包 8、9 [已落地];远端推理服务组件:计算层计划 [已落地];SoMBench 评测接入与污染准入检查:九任务计划 [已落地],其中第 9 项真机验证只完成了一部分 |
 
 ## 0. 系统速览
@@ -20,15 +20,15 @@
 
 | 子系统 | 职责 | 所在层 | 现状 |
 |---|---|---|---|
-| ControlPlane | 协调层:git 版本化产物树、状态机、调和循环、三个审核门 | 控制层 | 核心 [已落地],闭环扩展 [计划中] |
+| ControlPlane | 协调层:git 版本化产物树、状态机、调和循环、三个审核门 | 控制层 | [已落地] |
 | SocialSimulator | 情境与人格生成、多智能体仿真、实时环境服务、诊断评测 | 计算层 | [已落地];诊断默认用 mock 后端,`--evaluator someval` 装配 vLLM 加 SoMEval 的真实运行器 [已落地],真机只验证到预测阶段 |
 | MindTrainer | 权重级训练:BatchTrain(SFT 后接 GRPO 加 OPD)与 InteractTrain | 计算层 | [已落地],默认入口的训练执行器是 mock;ROLL LoRA SFT 真实执行器 [已落地],由 `--executor roll` 装配,已在真实主机上端到端跑通一次 |
-| MindAgent | 部署态智能体的技能与记忆自进化,不改权重 | 计算层 | [计划中] |
-| RecipeStore | 验证有效的训练配方的版本化仓库 | 控制层 | [计划中] |
-| TrainScheduler | 决策执行器:装配上下文、校验决策、构造训练指令、提名配方 | 控制层 | [计划中] |
-| TrainPlanner | 决策学习者:经可插拔后端给出下一轮训练决策 | 控制层 | [计划中] |
+| MindAgent | 部署态智能体的技能与记忆自进化,不改权重 | 计算层 | [已落地],闭环里经 `--enable agent` 装配;部署驱动用的仍是罐头后端,真实模型后端未接 |
+| RecipeStore | 验证有效的训练配方的版本化仓库 | 控制层 | [已落地] |
+| TrainScheduler | 决策执行器:装配上下文、校验决策、构造训练指令、提名配方 | 控制层 | [已落地],含策略经验(默认关) |
+| TrainPlanner | 决策学习者:经可插拔后端给出下一轮训练决策 | 控制层 | [已落地],默认后端经桥接调用命令行模型 |
 
-共享基础设施有五个。**Actio** 是带技能库与显式记忆的智能体框架,每次响应附带激活轨迹。**外部推理桥接**用命令行调用外部强模型。**远端计算层** `compute` 经 SSH 在远端 GPU 主机上跑作业 [已落地]。**ROLL** 是分布式训练引擎,**vLLM** 是推理引擎。V1 经远端计算层接入 ROLL 的 LoRA SFT [已落地](由 `--executor roll` 装配,已在真实主机上从指令跑到候选一次)与 vLLM 推理服务 [计划中]。已落地部分仍由确定性 mock 顶替。真实 GRPO 加 OPD 训练与真实 judge [推迟]。
+共享基础设施有五个。**Actio** 是带技能库与显式记忆的智能体框架,每次响应附带激活轨迹。**外部推理桥接**用命令行调用外部强模型。**远端计算层** `compute` 经 SSH 在远端 GPU 主机上跑作业 [已落地]。**ROLL** 是分布式训练引擎,**vLLM** 是推理引擎。V1 经远端计算层接入 ROLL 的 LoRA SFT [已落地](由 `--executor roll` 装配,已在真实主机上从指令跑到候选一次)与 vLLM 推理服务 [已落地](命令拼装、SSH 隧道、服务生命周期;真机端到端待补)。已落地部分仍由确定性 mock 顶替。真实 GRPO 加 OPD 训练与真实 judge [推迟]。
 
 **状态标记。** **[已落地]** 表示代码在主干上且有测试。**[计划中]** 表示设计与实施计划已定,代码还没写。**[推迟]** 表示明确不在 V1 范围内。图只画目标系统,不标进展,进展只看正文的状态标记。
 
@@ -39,7 +39,7 @@
 | 产物树 | 所有协作数据是 git 树里的 YAML 产物,统一信封:`id`、`type`、`version`、`created_at`、`created_by`(含 `owner` 与 `visibility`)、`status`、`schema_version`、`links`、`payload`。checkpoint 等大体量内容只存引用 `{uri, sha256, size_bytes}`;V1 的数据集逐条 episode 进 git,只适合小规模 mock。git 树是唯一真相,读取时先经迁移器链再消费。 |
 | 状态机 | 需审核类:`draft → pending_review → approved → effective`,之后可到 `deprecated` 或 `superseded`,`pending_review` 也可到 `rejected`。非审核类:`pending → executed → consumed`,`pending` 也可到 `failed`。被拒绝与失败的产物保留;被拒绝的候选进入下一轮规划的输入,失败只留痕、等人处理。 |
 | 调和循环 | 纯函数 `reconcile(树视图) → 动作列表`,守护进程按间隔轮询并执行动作。循环无状态、动作幂等,进程崩溃后从 git 树续接。子系统之间不直接调用,只读写产物。 |
-| 审核门 | 三道人工门:① checkpoint 晋级,② 技能与记忆增量纳入,③ 配方入库。证据不在场就不能批准:门①要诊断报告,门②要验证结果,门③要可复现性校验报告。门②与门③ [计划中]。 |
+| 审核门 | 三道人工门:① checkpoint 晋级,② 技能与记忆增量纳入,③ 配方入库。证据不在场就不能批准:门①要诊断报告,门②要验证结果,门③要可复现性校验报告。门②与门③ [已落地]。 |
 | 受限直连 | 两处高频实时调用绕过 ControlPlane:① MindTrainer 与 SocialSimulator 之间的 InteractTrain rollout,② MindAgent 与 SocialSimulator 之间的部署经验采集。两处都走 gRPC 双向流,发生在计算层内部。是否开会话仍由 ControlPlane 决策。 |
 | 失败分类 | T1 瞬态:有限次指数退避重试,耗尽升为 T3。T2 确定性:不重放,按所属子系统的校验链处理,LLM 的随机输出可有限次重采样。T3 需人工:写失败记录,不自动重跑。失败是数据,不是异常。 |
 
@@ -56,7 +56,7 @@
 | Recipe(配方) | 验证有效的完整训练方案,分 batch、interact、agent_rsi 三类 |
 | DiagnosticReport | 诊断评测产出的报告:维度、分数、置信区间、错误类型、退化标记 |
 | Activation trace(激活轨迹) | Actio 每次响应附带的记录:命中的技能候选、选中的技能、命中的记忆 |
-| Evidence grade(证据等级) | 诊断报告的可信等级 `stub`、`mock`、`real`,决定它能否驱动规划与提名 [计划中] |
+| Evidence grade(证据等级) | 诊断报告的可信等级 `stub`、`mock`、`real`,决定它能否驱动规划与提名;缺标记一律判 `stub`,失败关闭 |
 <!-- shared:end context-block -->
 
 ## 1. 定位
@@ -208,7 +208,7 @@
 |---|---|
 | `diagnostic` 可以导入 `controlplane` 与 `simulator` | 已满足 |
 | `diagnostic` 不导入 `mindtrainer`、`trainscheduler`、`recipestore`、`factory`、`compute` | 已满足;一条语法树扫描测试强制不导入 `mindtrainer`,其余靠约定。真实运行器要用 `compute`,所以它住在 `factory`,只实现 `diagnostic` 定义的协议 |
-| 下游只读报告产物,不导入 `diagnostic` | RecipeStore 与 TrainScheduler 的施工计划照此执行 [计划中] |
+| 下游只读报告产物,不导入 `diagnostic` | 已满足:RecipeStore 在 `src/recipestore/gain.py`、TrainScheduler 在 `src/trainscheduler/assemble.py` 按 `to_dict()` 的键名直接读 payload,两包都不导入 `diagnostic` |
 | 评估器的返回类型写成可调用对象,不导入守护模块 | 已满足 |
 | 污染准入检查由 `factory` 作为可调用对象注入训练执行器,`mindtrainer` 不导入 `diagnostic` | 准入检查是 `Callable[[bytes], tuple[int, int]]`:收整份上传字节,返回(有命中的行数, 命中窗口数) |
 
@@ -342,8 +342,8 @@ def write_report(store, run_id, report, *, backends: str) -> None: ...
 | 远端计算层 `compute` | 真实运行器经它起 vLLM 服务、开隧道、持有 GPU 租约(DX-13 到 DX-15) | 无;`compute` 不认识评测 |
 | MindTrainer | 无 | 训练行上传前调用污染准入检查(DX-19);准入检查是 factory 注入的可调用对象,`mindtrainer` 不导入 `diagnostic` |
 | SoMEval 检出目录 | 数据集 parquet、评测入口 `tasks/SoMBench/run.py`、结果文件格式;只读,不改它 | 无 |
-| RecipeStore [计划中] | 无 | 读 L1 分算增益;读 `regression_flags.flags` 判战绩退化 |
-| TrainScheduler [计划中] | 无 | 读 L1 分、退化标记、错误画像装配规划上下文;丢掉空标签 `""` |
+| RecipeStore [已落地] | 无 | 读 L1 分算增益;读 `regression_flags.flags` 判战绩退化 |
+| TrainScheduler [已落地] | 无 | 读 L1 分、退化标记、错误画像装配规划上下文;丢掉空标签 `""` |
 | factory | 写入默认资产与 SoMBench 资产;装配评估器、真实运行器与污染准入检查 | 评估器构造函数 |
 
 ## 6. 关键流程
@@ -526,7 +526,7 @@ def write_report(store, run_id, report, *, backends: str) -> None: ...
 | 真实 SoMEval 的瞬态失败:服务启动超时、隧道建立失败、GPU 被占用、SoMEval 子进程非零退出、裁判端点出错(`judge_error`)、没有答案的样本占比超过阈值 | 延后 | 抛 `DeferredError` 的子类,守护进程不写树、按退避重试;不写报告,租约在失败时释放。连续失败到上限升级为需要人看 | 守护进程结构化日志 |
 | 评测凭证出现在 SoMEval 工作目录的任何文件里 | T3 | 删除该次运行的工作目录,抛不继承 `DeferredError` 的异常,守护进程带着原因退出,等人处理 | 守护进程退出原因,只写文件相对路径,不写密钥 |
 
-写 `stub` 报告而不是让动作一直失败:报告是评测的结论载体,`diagnostic_grade` 对 `stub: true` 已经失败关闭,闭环里记录、提名、规划下一轮都要求证据可接受,所以不推进。晋级本身只看对应报告是否在场、不看等级,这条语义不变,拦它的是人工审核门:`review` 对 `stub` 报告标 `[STUB]` [计划中] 并打印 `failure_reason`,批准的人能区分「占位」和「评测没跑成」。判错的代价:把确定性错误当瞬态,守护进程会无限重试同一个必然失败的评测。
+写 `stub` 报告而不是让动作一直失败:报告是评测的结论载体,`diagnostic_grade` 对 `stub: true` 已经失败关闭,闭环里记录、提名、规划下一轮都要求证据可接受,所以不推进。晋级本身只看对应报告是否在场、不看等级,这条语义不变,拦它的是人工审核门:`review` 对 `stub` 报告标 `[STUB]` [已落地] 并打印 `failure_reason`,批准的人能区分「占位」和「评测没跑成」。判错的代价:把确定性错误当瞬态,守护进程会无限重试同一个必然失败的评测。
 
 **哪些组件产生了分数,报告的等级就看哪些组件。** 真实 SoMEval 的静态轨不调用 `JudgeBackend`(动态 spec 为空),分数全部来自真实存点加真实 SoMEval,所以这类报告的 `backends` 写 `real`,即使装配里的 judge 后端仍是 mock。只要动态 spec 非空而 judge 是 mock,`backends` 仍写 `mock`,`diagnostic_grade` 与下游门控一行不改。报告载荷另加一个只作记录、不参与判级的字段 `component_backends`,形如 `{executor: real, converter: real, someval: real, judge: unused}`,让人看出每个组件是真实、mock 还是没被用到。`executor` 与 `converter` 两项由候选存点引用的 `fetch_hint.type` 推出(`roll_ssh` 即训练与转换都是真实的,`mock` 即都是 mock),`someval` 与 `judge` 两项由评估器装配时声明。该字段与 `backends` 在同一次 `write_report` 里落盘。
 
@@ -565,7 +565,7 @@ def write_report(store, run_id, report, *, backends: str) -> None: ...
 
 ## 10. 现状、局限与未核实项
 
-编排器、全部流水线模块、评估器与资产读写已落地,默认入口(闭环模式)里的评估器注入 mock 后端。真实评测要等 SoMBench 的导入、真实运行器、污染准入检查与 `--evaluator someval` 装配。
+编排器、全部流水线模块、评估器与资产读写、SoMBench 导入、真实运行器、污染准入检查与 `--evaluator someval` 装配都已落地。`scripts/run_controlplane.py` 走 `mindtrainer.wire`,不注入评估器,所以默认入口的 `request_diagnostic` 仍由守护进程用 `simulator.stubs` 的占位桩写报告;闭环模式(`factory run` 带 `--enable`)注入 mock 评估器,`--evaluator someval` 注入真实评估器。真机只验证到预测阶段。
 
 | 能力 | 状态 | 说明 |
 |---|---|---|
@@ -597,7 +597,7 @@ def write_report(store, run_id, report, *, backends: str) -> None: ...
 | 判分用的裁判模型由 SoMEval 的任务配置写死:本地检出的工作树里是 gpt-5.5、地址取 `OPENAI_BASE_URL`;它的提交 `6453a83` 里是 qwen3.7-max、地址取 `SOMBENCH_JUDGE_API_URL`,改动未提交 | 换裁判要改 SoMEval 的配置,不在我们的配置里;评测的是工作树而不是提交,报告里 SoMEval 版本记为 `6453a83+dirty`,看不出具体是哪份改动 | 报告不记裁判型号;换裁判前先确认 SoMEval 配置并换 `benchmark_version`;SoMEval 的这两处改动提交之后,版本记录才能准确定位 |
 | judge 模式的静态题按精确匹配打分 | 这类题的分数没有意义 | V1 题库只放规则式静态题 |
 | 占位报告的信封 id 是 `diag-<run>`,真实报告是 `<run>` | 按信封 id 找报告的工具要兼容两种写法 | 按路径找报告,不按 id |
-| 不检测目标维度的显著提升 | 增益由 RecipeStore 用 L1 分直接相减 [计划中],不看区间 | 审核人对照报告里的区间读增益 |
+| 不检测目标维度的显著提升 | 增益由 RecipeStore 用 L1 分直接相减 [已落地],不看区间 | 审核人对照报告里的区间读增益 |
 
 **vLLM 服务。** 在一台空闲的 8 卡 H800 主机上,用镜像自带的 vLLM 开发版 `0.1.dev20073+g8e685d198`,以原生 `vllm serve` 加载基座,并用 `--lora-modules` 挂上转换器导出的适配器(张量并行 8、开专家并行、`--enable-lora`、最大秩 64、最多 1 个适配器、`--enforce-eager`,上下文长度限 4096)。约 151 秒后健康检查返回 200,模型列表同时给出基座与适配器。同一条提示、温度 0,适配器与基座的逐 token 对数概率在 15 个 token 上全部不同,最大绝对差 0.487,文本也不同,说明适配器确实被加载并作用于推理,没有被静默忽略。所以 ROLL 的两个进程内补丁(替换 LoRA 管理器的适配器加载函数、把 Triton 的 split_k 固定为 1)对「能否加载」不是必需的,最初设想的启动包装脚本不需要;补丁里管可重复性的那一个没有应用,见未核实项。
 

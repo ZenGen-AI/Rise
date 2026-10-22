@@ -3,13 +3,13 @@
 | 项 | 内容 |
 |---|---|
 | 一句话 | 生成情境与人格,驱动多角色多轮交互产出 Episode,批量产出带哈希清单的数据集,并以 gRPC 实时环境服务支撑交互式训练与部署经验采集 |
-| 状态 | 部分落地:数据模型、运行器、批量数据集、实时环境服务 [已落地];激活轨迹打通 [计划中] |
+| 状态 | 部分落地:数据模型、运行器、批量数据集、实时环境服务、激活轨迹打通 [已落地];外部强模型生成后端、按目标维度生成情境与人格、episode 分片存储 [推迟] |
 | 所在层 | 计算层 |
 | 代码位置 | `src/simulator`(诊断评测在 `src/diagnostic`,本文不展开) |
-| 基线提交 | `8dd295b`(2026-10-10) |
+| 基线提交 | `b826440`(2026-10-21) |
 | 依赖 | ControlPlane 的 `controlplane.envelope`、`controlplane.gitstore`、`controlplane.paths`;第三方 `grpcio`、`protobuf` |
-| 被依赖 | MindTrainer(`mindtrainer`)、诊断评测(`diagnostic`)、ControlPlane 骨架桩(`controlplane.daemon`);计划中:Actio、MindAgent、factory |
-| 对应实施计划 | 工作包 6(任务 70 至 72)[计划中];其余部分已落地,无待施工任务 |
+| 被依赖 | MindTrainer(`mindtrainer`)、诊断评测(`diagnostic`)、ControlPlane 骨架桩(`controlplane.daemon`);已落地:Actio、MindAgent、factory |
+| 对应实施计划 | 工作包 6(任务 70 至 72)[已落地];其余部分已落地,无待施工任务 |
 
 ## 0. 系统速览
 
@@ -20,15 +20,15 @@
 
 | 子系统 | 职责 | 所在层 | 现状 |
 |---|---|---|---|
-| ControlPlane | 协调层:git 版本化产物树、状态机、调和循环、三个审核门 | 控制层 | 核心 [已落地],闭环扩展 [计划中] |
+| ControlPlane | 协调层:git 版本化产物树、状态机、调和循环、三个审核门 | 控制层 | [已落地] |
 | SocialSimulator | 情境与人格生成、多智能体仿真、实时环境服务、诊断评测 | 计算层 | [已落地];诊断默认用 mock 后端,`--evaluator someval` 装配 vLLM 加 SoMEval 的真实运行器 [已落地],真机只验证到预测阶段 |
 | MindTrainer | 权重级训练:BatchTrain(SFT 后接 GRPO 加 OPD)与 InteractTrain | 计算层 | [已落地],默认入口的训练执行器是 mock;ROLL LoRA SFT 真实执行器 [已落地],由 `--executor roll` 装配,已在真实主机上端到端跑通一次 |
-| MindAgent | 部署态智能体的技能与记忆自进化,不改权重 | 计算层 | [计划中] |
-| RecipeStore | 验证有效的训练配方的版本化仓库 | 控制层 | [计划中] |
-| TrainScheduler | 决策执行器:装配上下文、校验决策、构造训练指令、提名配方 | 控制层 | [计划中] |
-| TrainPlanner | 决策学习者:经可插拔后端给出下一轮训练决策 | 控制层 | [计划中] |
+| MindAgent | 部署态智能体的技能与记忆自进化,不改权重 | 计算层 | [已落地],闭环里经 `--enable agent` 装配;部署驱动用的仍是罐头后端,真实模型后端未接 |
+| RecipeStore | 验证有效的训练配方的版本化仓库 | 控制层 | [已落地] |
+| TrainScheduler | 决策执行器:装配上下文、校验决策、构造训练指令、提名配方 | 控制层 | [已落地],含策略经验(默认关) |
+| TrainPlanner | 决策学习者:经可插拔后端给出下一轮训练决策 | 控制层 | [已落地],默认后端经桥接调用命令行模型 |
 
-共享基础设施有五个。**Actio** 是带技能库与显式记忆的智能体框架,每次响应附带激活轨迹。**外部推理桥接**用命令行调用外部强模型。**远端计算层** `compute` 经 SSH 在远端 GPU 主机上跑作业 [已落地]。**ROLL** 是分布式训练引擎,**vLLM** 是推理引擎。V1 经远端计算层接入 ROLL 的 LoRA SFT [已落地](由 `--executor roll` 装配,已在真实主机上从指令跑到候选一次)与 vLLM 推理服务 [计划中]。已落地部分仍由确定性 mock 顶替。真实 GRPO 加 OPD 训练与真实 judge [推迟]。
+共享基础设施有五个。**Actio** 是带技能库与显式记忆的智能体框架,每次响应附带激活轨迹。**外部推理桥接**用命令行调用外部强模型。**远端计算层** `compute` 经 SSH 在远端 GPU 主机上跑作业 [已落地]。**ROLL** 是分布式训练引擎,**vLLM** 是推理引擎。V1 经远端计算层接入 ROLL 的 LoRA SFT [已落地](由 `--executor roll` 装配,已在真实主机上从指令跑到候选一次)与 vLLM 推理服务 [已落地](命令拼装、SSH 隧道、服务生命周期;真机端到端待补)。已落地部分仍由确定性 mock 顶替。真实 GRPO 加 OPD 训练与真实 judge [推迟]。
 
 **状态标记。** **[已落地]** 表示代码在主干上且有测试。**[计划中]** 表示设计与实施计划已定,代码还没写。**[推迟]** 表示明确不在 V1 范围内。图只画目标系统,不标进展,进展只看正文的状态标记。
 
@@ -39,7 +39,7 @@
 | 产物树 | 所有协作数据是 git 树里的 YAML 产物,统一信封:`id`、`type`、`version`、`created_at`、`created_by`(含 `owner` 与 `visibility`)、`status`、`schema_version`、`links`、`payload`。checkpoint 等大体量内容只存引用 `{uri, sha256, size_bytes}`;V1 的数据集逐条 episode 进 git,只适合小规模 mock。git 树是唯一真相,读取时先经迁移器链再消费。 |
 | 状态机 | 需审核类:`draft → pending_review → approved → effective`,之后可到 `deprecated` 或 `superseded`,`pending_review` 也可到 `rejected`。非审核类:`pending → executed → consumed`,`pending` 也可到 `failed`。被拒绝与失败的产物保留;被拒绝的候选进入下一轮规划的输入,失败只留痕、等人处理。 |
 | 调和循环 | 纯函数 `reconcile(树视图) → 动作列表`,守护进程按间隔轮询并执行动作。循环无状态、动作幂等,进程崩溃后从 git 树续接。子系统之间不直接调用,只读写产物。 |
-| 审核门 | 三道人工门:① checkpoint 晋级,② 技能与记忆增量纳入,③ 配方入库。证据不在场就不能批准:门①要诊断报告,门②要验证结果,门③要可复现性校验报告。门②与门③ [计划中]。 |
+| 审核门 | 三道人工门:① checkpoint 晋级,② 技能与记忆增量纳入,③ 配方入库。证据不在场就不能批准:门①要诊断报告,门②要验证结果,门③要可复现性校验报告。门②与门③ [已落地]。 |
 | 受限直连 | 两处高频实时调用绕过 ControlPlane:① MindTrainer 与 SocialSimulator 之间的 InteractTrain rollout,② MindAgent 与 SocialSimulator 之间的部署经验采集。两处都走 gRPC 双向流,发生在计算层内部。是否开会话仍由 ControlPlane 决策。 |
 | 失败分类 | T1 瞬态:有限次指数退避重试,耗尽升为 T3。T2 确定性:不重放,按所属子系统的校验链处理,LLM 的随机输出可有限次重采样。T3 需人工:写失败记录,不自动重跑。失败是数据,不是异常。 |
 
@@ -56,7 +56,7 @@
 | Recipe(配方) | 验证有效的完整训练方案,分 batch、interact、agent_rsi 三类 |
 | DiagnosticReport | 诊断评测产出的报告:维度、分数、置信区间、错误类型、退化标记 |
 | Activation trace(激活轨迹) | Actio 每次响应附带的记录:命中的技能候选、选中的技能、命中的记忆 |
-| Evidence grade(证据等级) | 诊断报告的可信等级 `stub`、`mock`、`real`,决定它能否驱动规划与提名 [计划中] |
+| Evidence grade(证据等级) | 诊断报告的可信等级 `stub`、`mock`、`real`,决定它能否驱动规划与提名;缺标记一律判 `stub`,失败关闭 |
 <!-- shared:end context-block -->
 
 ## 1. 定位
@@ -95,7 +95,7 @@ SocialSimulator 的仿真部分是工厂的"社会情境发生器":它把情境�
 </details>
 <!-- figure:end 20-socialsimulator-context -->
 
-读图说明。MindTrainer 在 batch 模式下读数据集清单并逐条校验,在 interact 模式下经接口①作为客户端跑实时会话。诊断评测的动态轨与 ControlPlane 骨架桩以库调用复用它。它把情境、人格、Episode 与清单写进产物树。MindAgent 的接口② [计划中],Actio 的激活轨迹 [计划中]。
+读图说明。MindTrainer 在 batch 模式下读数据集清单并逐条校验,在 interact 模式下经接口①作为客户端跑实时会话。诊断评测的动态轨与 ControlPlane 骨架桩以库调用复用它。它把情境、人格、Episode 与清单写进产物树。MindAgent 的接口② [已落地],Actio 的激活轨迹 [已落地]。
 
 ## 2. 目标、非目标与约束
 
@@ -115,7 +115,7 @@ SocialSimulator 的仿真部分是工厂的"社会情境发生器":它把情境�
 |---|---|---|
 | 按目标维度定制情境与人格 | [推迟] | 模板池加种子取模,与目标维度无关 |
 | 外部强模型生成后端 | [推迟] | 只有 `GenerationBackend` 协议与模板实现 |
-| 激活轨迹随 `SubmitTurn` 上行 | [计划中] | 当前每轮 `activation_trace` 恒为 None |
+| 激活轨迹随 `SubmitTurn` 上行 | [已落地] | 客户端 `submit_turn` 带 `activation_trace`;不带轨迹的后端仍是 None |
 | 一个会话多个客户端驱动的角色位 | [推迟] | 每会话恰好一个 `client_driven_slot` |
 | 断线续接 | [推迟] | 失败会话整条重跑,不续接 |
 | episode 与清单分片存储 | [推迟] | V1 每条 episode 一个文件一次提交;接真实训练之前改成分片文件加引用 |
@@ -313,7 +313,7 @@ manifest_hash: 5acb59e29990…   # 对排序后的 episode_refs 规范化 JSON �
 
 ## 5. 接口契约
 
-结论:对内是三个库函数入口,对外是一个 gRPC 双向流;已落地签名以代码为准,激活轨迹相关的签名 [计划中]。
+结论:对内是三个库函数入口,对外是一个 gRPC 双向流;签名以代码为准,激活轨迹相关的字段与参数 [已落地]。
 
 库入口[已落地]:
 
@@ -340,7 +340,8 @@ def create_server(backends_factory, *, port=0, turn_timeout_s=30.0,
 class EnvironmentServiceClient:
     def create_session(self, *, scenario_id, role_assignment, personas,
                        purpose, client_driven_slot) -> str
-    def submit_turn(self, utterance, inner_thought=None) -> list[TurnRecord]
+    def submit_turn(self, utterance, inner_thought=None, *,
+                    activation_trace: dict | None = None) -> list[TurnRecord]
     def drain_until_end(self) -> Episode
     def end_session(self, reason="client_terminated") -> Episode
     def abort(self) -> None
@@ -352,7 +353,7 @@ class EnvironmentServiceClient:
 |---|---|---|
 | `CreateSession` | 客户端到服务端 | `scenario_id`、角色分配、人格映射、`purpose`、`client_driven_slot` |
 | `SessionReady` | 服务端到客户端 | `session_id`,会话已进入 ACTIVE |
-| `SubmitTurn` | 客户端到服务端 | `utterance`、可选 `inner_thought` |
+| `SubmitTurn` | 客户端到服务端 | `utterance`、可选 `inner_thought`、可选 `activation_trace` |
 | `TurnUpdate` | 服务端到客户端 | 一条 `TurnRecordProto`,含客户端自己轮的回显 |
 | `EndSession` | 双向 | `reason`、`episode_id`、可选 `failure_detail` |
 
@@ -373,20 +374,20 @@ class EnvironmentServiceClient:
 | ControlPlane | `Envelope`、`GitStore`、路径函数 | 骨架桩 `execute_dispatch`、`diagnostic_evaluator_stub` | [已落地] |
 | MindTrainer | 无 | batch:`read_manifest`、`verify_manifest`、`episode_group_id`;interact:`EnvironmentServiceClient`、`ModelBackend` 协议 | [已落地] |
 | 诊断评测 | 无 | 动态轨直接调 `run_episode` 并传 `stop_predicate` | [已落地] |
-| MindTrainer 数据合成 | 无 | `produce_grouped_dataset`、`TemplateGenerationBackend`;生产器 `TemplateDataProducer` 属工作包 2 [计划中] | [计划中] |
-| Actio | 无 | 运行器接受后端返回三元组,`SubmitTurn` 携带轨迹,工作包 6 [计划中] | [计划中] |
-| MindAgent | 无 | 接口②,复用客户端"客户端后说"能力,工作包 7 [计划中] | [计划中] |
-| factory | 无 | 组合根调 `create_server` 并注入 `scenario_resolver`,工作包 9 [计划中] | [计划中] |
+| MindTrainer 数据合成 | 无 | `produce_grouped_dataset`、`TemplateGenerationBackend`;生产器 `TemplateDataProducer` 属工作包 2 [已落地] | [已落地] |
+| Actio | 无 | 运行器接受后端返回三元组,`SubmitTurn` 携带轨迹,工作包 6 [已落地] | [已落地] |
+| MindAgent | 无 | 接口②,复用客户端"客户端后说"能力,工作包 7 [已落地] | [已落地] |
+| factory | 无 | 组合根调 `create_server` 并注入 `scenario_resolver`,工作包 9 [已落地] | [已落地] |
 
-工作包 6 对本文接口的改动如下,签名来自施工计划,施工时可能微调。
+工作包 6 对本文接口的改动如下。
 
 | 改动 | 内容 | 状态 |
 |---|---|---|
-| 协议 | `SubmitTurn` 增加 `optional google.protobuf.Struct activation_trace = 3` | [计划中] |
-| 运行器 | 新增 `_unpack_reply`,后端可返回二元组或三元组,签名不变;长度不是 2 或 3 抛 `TypeError`,第三项必须是字典或空,写进记录的是深拷贝 | [计划中] |
-| 实时后端与驱动器 | `submit` 与 `submit_turn` 增加 keyword-only 的 `activation_trace` | [计划中] |
-| 客户端 | `submit_turn(utterance, inner_thought=None, *, activation_trace=None)` | [计划中] |
-| 抹除规则 | 不变:对手的轨迹不进 `history`,不下行 | [计划中] |
+| 协议 | `SubmitTurn` 增加 `optional google.protobuf.Struct activation_trace = 3` | [已落地] |
+| 运行器 | 新增 `_unpack_reply`,后端可返回二元组或三元组,签名不变;长度不是 2 或 3 抛 `TypeError`,第三项必须是字典或空,写进记录的是深拷贝 | [已落地] |
+| 实时后端与驱动器 | `submit` 与 `submit_turn` 增加 keyword-only 的 `activation_trace` | [已落地] |
+| 客户端 | `submit_turn(utterance, inner_thought=None, *, activation_trace=None)` | [已落地] |
+| 抹除规则 | 不变:对手的轨迹不进 `history`,不下行 | [已落地] |
 
 ## 6. 关键流程
 
@@ -506,8 +507,8 @@ class EnvironmentServiceClient:
 | SS-11 | 服务端后端调用套 `TimeoutBackend`,每次一个 daemon 线程 | 线程池;不设期限 | 挂死的对手不拖住会话;daemon 线程不阻止进程退出 | 超时后底层调用继续占资源直到自然结束 |
 | SS-12 | 外部配置路强制 `source="external"` | 信任输入里的标记 | 来源可追溯,不被外部数据冒充 | 无法从外部导入标为 `auto` 的定义 |
 | SS-13 | V1 保持每条 episode 一个产物文件、一次提交,清单逐条锚定 sha256;分片文件加引用推迟到接真实训练之前 [推迟] | 现在就分片 | 小规模 mock 下逐条足够;分片要同时改清单格式、读取与校验 | 万条级数据集写入要数小时,仓库膨胀 |
-| R12 | 打通激活轨迹:`SubmitTurn` 加可选字段,运行器接受三元组 [计划中] | 轨迹走单独通道 | 原设计未记录别的理由,施工计划表现为改动最小、既有二元组后端不改 | 改协议,要重新生成并入库 pb2 文件 |
-| R14 | 指令带 `data_spec`,派发器缺清单时调注入的生产器,生产器复用 `produce_grouped_dataset` [计划中] | 数据集只能预先生产 | 闭环能自己补数据 | V1 模板生成与目标维度无关,只证明流程跑通 |
+| R12 | 打通激活轨迹:`SubmitTurn` 加可选字段,运行器接受三元组 [已落地] | 轨迹走单独通道 | 原设计未记录别的理由,施工计划表现为改动最小、既有二元组后端不改 | 改协议,要重新生成并入库 pb2 文件 |
+| R14 | 指令带 `data_spec`,派发器缺清单时调注入的生产器,生产器复用 `produce_grouped_dataset` [已落地] | 数据集只能预先生产 | 闭环能自己补数据 | V1 模板生成与目标维度无关,只证明流程跑通 |
 
 ## 8. 失败处理与可观测
 
@@ -540,7 +541,7 @@ class EnvironmentServiceClient:
 
 ## 9. 测试策略
 
-结论:158 个用例全部在本机跑,不需要 GPU、真实模型或外网;实时测试起真实的回环 gRPC 服务端。
+结论:184 个用例全部在本机跑,不需要 GPU、真实模型或外网;实时测试起真实的回环 gRPC 服务端。
 
 | 层次 | 对象 | 替身 |
 |---|---|---|
@@ -575,15 +576,15 @@ class EnvironmentServiceClient:
 | `tests/test_realtime_client_abort.py` | 7 | [已落地] |
 | `tests/test_realtime_client_transport.py` | 6 | [已落地] |
 | `tests/test_realtime_persistence.py` | 1 | [已落地] |
-| `tests/test_realtime_proto_submit_trace.py` | 5 | [计划中] |
-| `tests/test_runner_activation_trace.py` | 10 | [计划中] |
-| `tests/test_realtime_activation_trace.py` | 11 | [计划中] |
+| `tests/test_realtime_proto_submit_trace.py` | 5 | [已落地] |
+| `tests/test_runner_activation_trace.py` | 10 | [已落地] |
+| `tests/test_realtime_activation_trace.py` | 11 | [已落地] |
 
-合计:批量侧 66 个,实时侧 92 个。不依赖的外部服务:GPU、ROLL、vLLM、任何外部模型 API、网络。
+合计:批量侧 76 个,实时侧 108 个。不依赖的外部服务:GPU、ROLL、vLLM、任何外部模型 API、网络。
 
 ## 10. 现状、局限与未核实项
 
-结论:批量与实时两条路径都已落地并有测试;激活轨迹、外部生成后端、按目标维度生成是空白。
+结论:批量与实时两条路径、激活轨迹都已落地并有测试;外部生成后端与按目标维度生成是空白。
 
 | 能力 | 状态 | 说明 |
 |---|---|---|
@@ -591,9 +592,9 @@ class EnvironmentServiceClient:
 | 纯函数运行器与信息隔离 | [已落地] | 含 `stop_predicate`、`on_turn` |
 | 分组数据集与 sha256 清单 | [已落地] | MindTrainer batch 已消费 |
 | 实时环境服务与客户端 | [已落地] | MindTrainer interact 已消费 |
-| 激活轨迹上行与入记录 | [计划中] | 工作包 6 |
-| 接口②部署经验采集 | [计划中] | 工作包 7,本包不改代码 |
-| 组合根启动服务端 | [计划中] | 工作包 9 |
+| 激活轨迹上行与入记录 | [已落地] | 工作包 6 |
+| 接口②部署经验采集 | [已落地] | 工作包 7 由 MindAgent 侧的部署驱动器消费 |
+| 组合根启动服务端 | [已落地] | 工作包 9,`factory.agent.AgentRuntime` |
 | 外部强模型生成后端 | [推迟] | 只有协议 |
 
 | 局限 | 影响 | 缓解 |
@@ -611,7 +612,7 @@ class EnvironmentServiceClient:
 |---|---|---|
 | 16 个并发会话在真实模型延迟下是否够用 | InteractTrain 吞吐 | 接入真实后端后压测 |
 | keepalive 30 秒能否及时发现跨网段死连接 | 断连判定延迟 | 跨机部署时拔网线实测 |
-| 工作包 6 改协议后 pb2 生成物与当前 protobuf 版本兼容 | 实时服务能否启动 | 施工时跑 `tests/test_realtime_proto_smoke.py` |
+| pb2 生成物与当前 protobuf 版本兼容 | 实时服务能否启动 | 已在本地跑通 `tests/test_realtime_proto_smoke.py`;升级 protobuf 后重跑 |
 | 客户端重建与服务端落盘的 Episode 是否逐字节一致 | 对账 | 比较两边 `episode_digest` |
 
 明确不做的事:SocialSimulator 不决定"是否启动会话",那是 ControlPlane 的决策;不写训练奖励;不做诊断打分;不在实时服务内部持久化。

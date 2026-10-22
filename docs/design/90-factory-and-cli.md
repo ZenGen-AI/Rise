@@ -3,13 +3,13 @@
 | 项 | 内容 |
 |---|---|
 | 一句话 | 组合根 factory 读配置、按开关装配派发器、评估器与处理器后启动调和循环;两种语言的命令行分管门控写与只读观测 |
-| 状态 | 部分落地。[已落地]:守护进程入口 `mindtrainer.wire` 与 `scripts/run_controlplane.py`,TypeScript 命令行四个命令 `review`、`approve`、`reject`、`status`,观测函数 `controlplane.observe.trace` 与 `controlplane.observe.cost`。[计划中]:新包 `src/factory`(组合根、开关、只读子命令、端到端),命令行泛化与 `confirm` |
+| 状态 | 主体落地,默认入口仍走 mock。组合根包 `src/factory`(开关、装配、六个处理器、桥接、评估器、只读子命令)、入口脚本 `scripts/run_factory.py` 与 `scripts/run_factory_dev.py`、TypeScript 命令行五个命令 `review`、`approve`、`reject`、`confirm`、`status`,以及守护进程入口 `mindtrainer.wire` 与 `scripts/run_controlplane.py` [已落地]。限制:两个默认入口只注入 mock 执行器与 mock 诊断;真实 ROLL LoRA SFT 与真实 SoMEval 由 `--executor roll`、`--evaluator someval` 显式装配,真机只各跑通一次,且两者暂不能与 `--enable` 同用;闭环端到端只在 mock 证据、`HeuristicBackend` 与罐头后端上跑过。部署会话超时的可配置与两侧共用读写 [计划中]。真实 GRPO 加 OPD 训练与真实 judge [推迟] |
 | 所在层 | 控制层(入口与组合根) |
-| 代码位置 | `src/mindtrainer/wire.py`、`scripts/run_controlplane.py`、`cli/src`、`src/controlplane/observe.py`;`src/factory`、`scripts/run_factory.py`、`scripts/run_factory_dev.py` [计划中] |
-| 基线提交 | `8dd295b`(2026-10-10) |
-| 依赖 | ControlPlane(调和循环、产物树、配置信封、观测函数)、MindTrainer 派发器;闭环模式下还依赖诊断评测、RecipeStore、TrainPlanner、TrainScheduler、MindAgent、外部推理桥接、SocialSimulator 的实时服务 [计划中] |
+| 代码位置 | `src/mindtrainer/wire.py`、`scripts/run_controlplane.py`、`cli/src`、`src/controlplane/observe.py`、`src/factory`、`scripts/run_factory.py`、`scripts/run_factory_dev.py` |
+| 基线提交 | `b826440`(2026-10-21) |
+| 依赖 | ControlPlane(调和循环、产物树、配置信封、观测函数)、MindTrainer 派发器;闭环模式下还依赖诊断评测、RecipeStore、TrainPlanner、TrainScheduler、MindAgent、外部推理桥接、SocialSimulator 的实时服务 |
 | 被依赖 | 无。factory 是依赖图的叶子,只有入口脚本与测试调用它 |
-| 对应实施计划 | 命令行泛化与 `confirm`:工作包 8(任务 96 至 97)[计划中];组合根与端到端:工作包 9(任务 100 至 109)[计划中] |
+| 对应实施计划 | 命令行泛化与 `confirm`:工作包 8(任务 96 至 97);组合根与端到端:工作包 9(任务 100 至 109) |
 
 ## 0. 系统速览
 
@@ -20,15 +20,15 @@
 
 | 子系统 | 职责 | 所在层 | 现状 |
 |---|---|---|---|
-| ControlPlane | 协调层:git 版本化产物树、状态机、调和循环、三个审核门 | 控制层 | 核心 [已落地],闭环扩展 [计划中] |
+| ControlPlane | 协调层:git 版本化产物树、状态机、调和循环、三个审核门 | 控制层 | [已落地] |
 | SocialSimulator | 情境与人格生成、多智能体仿真、实时环境服务、诊断评测 | 计算层 | [已落地];诊断默认用 mock 后端,`--evaluator someval` 装配 vLLM 加 SoMEval 的真实运行器 [已落地],真机只验证到预测阶段 |
 | MindTrainer | 权重级训练:BatchTrain(SFT 后接 GRPO 加 OPD)与 InteractTrain | 计算层 | [已落地],默认入口的训练执行器是 mock;ROLL LoRA SFT 真实执行器 [已落地],由 `--executor roll` 装配,已在真实主机上端到端跑通一次 |
-| MindAgent | 部署态智能体的技能与记忆自进化,不改权重 | 计算层 | [计划中] |
-| RecipeStore | 验证有效的训练配方的版本化仓库 | 控制层 | [计划中] |
-| TrainScheduler | 决策执行器:装配上下文、校验决策、构造训练指令、提名配方 | 控制层 | [计划中] |
-| TrainPlanner | 决策学习者:经可插拔后端给出下一轮训练决策 | 控制层 | [计划中] |
+| MindAgent | 部署态智能体的技能与记忆自进化,不改权重 | 计算层 | [已落地],闭环里经 `--enable agent` 装配;部署驱动用的仍是罐头后端,真实模型后端未接 |
+| RecipeStore | 验证有效的训练配方的版本化仓库 | 控制层 | [已落地] |
+| TrainScheduler | 决策执行器:装配上下文、校验决策、构造训练指令、提名配方 | 控制层 | [已落地],含策略经验(默认关) |
+| TrainPlanner | 决策学习者:经可插拔后端给出下一轮训练决策 | 控制层 | [已落地],默认后端经桥接调用命令行模型 |
 
-共享基础设施有五个。**Actio** 是带技能库与显式记忆的智能体框架,每次响应附带激活轨迹。**外部推理桥接**用命令行调用外部强模型。**远端计算层** `compute` 经 SSH 在远端 GPU 主机上跑作业 [已落地]。**ROLL** 是分布式训练引擎,**vLLM** 是推理引擎。V1 经远端计算层接入 ROLL 的 LoRA SFT [已落地](由 `--executor roll` 装配,已在真实主机上从指令跑到候选一次)与 vLLM 推理服务 [计划中]。已落地部分仍由确定性 mock 顶替。真实 GRPO 加 OPD 训练与真实 judge [推迟]。
+共享基础设施有五个。**Actio** 是带技能库与显式记忆的智能体框架,每次响应附带激活轨迹。**外部推理桥接**用命令行调用外部强模型。**远端计算层** `compute` 经 SSH 在远端 GPU 主机上跑作业 [已落地]。**ROLL** 是分布式训练引擎,**vLLM** 是推理引擎。V1 经远端计算层接入 ROLL 的 LoRA SFT [已落地](由 `--executor roll` 装配,已在真实主机上从指令跑到候选一次)与 vLLM 推理服务 [已落地](命令拼装、SSH 隧道、服务生命周期;真机端到端待补)。已落地部分仍由确定性 mock 顶替。真实 GRPO 加 OPD 训练与真实 judge [推迟]。
 
 **状态标记。** **[已落地]** 表示代码在主干上且有测试。**[计划中]** 表示设计与实施计划已定,代码还没写。**[推迟]** 表示明确不在 V1 范围内。图只画目标系统,不标进展,进展只看正文的状态标记。
 
@@ -39,7 +39,7 @@
 | 产物树 | 所有协作数据是 git 树里的 YAML 产物,统一信封:`id`、`type`、`version`、`created_at`、`created_by`(含 `owner` 与 `visibility`)、`status`、`schema_version`、`links`、`payload`。checkpoint 等大体量内容只存引用 `{uri, sha256, size_bytes}`;V1 的数据集逐条 episode 进 git,只适合小规模 mock。git 树是唯一真相,读取时先经迁移器链再消费。 |
 | 状态机 | 需审核类:`draft → pending_review → approved → effective`,之后可到 `deprecated` 或 `superseded`,`pending_review` 也可到 `rejected`。非审核类:`pending → executed → consumed`,`pending` 也可到 `failed`。被拒绝与失败的产物保留;被拒绝的候选进入下一轮规划的输入,失败只留痕、等人处理。 |
 | 调和循环 | 纯函数 `reconcile(树视图) → 动作列表`,守护进程按间隔轮询并执行动作。循环无状态、动作幂等,进程崩溃后从 git 树续接。子系统之间不直接调用,只读写产物。 |
-| 审核门 | 三道人工门:① checkpoint 晋级,② 技能与记忆增量纳入,③ 配方入库。证据不在场就不能批准:门①要诊断报告,门②要验证结果,门③要可复现性校验报告。门②与门③ [计划中]。 |
+| 审核门 | 三道人工门:① checkpoint 晋级,② 技能与记忆增量纳入,③ 配方入库。证据不在场就不能批准:门①要诊断报告,门②要验证结果,门③要可复现性校验报告。门②与门③ [已落地]。 |
 | 受限直连 | 两处高频实时调用绕过 ControlPlane:① MindTrainer 与 SocialSimulator 之间的 InteractTrain rollout,② MindAgent 与 SocialSimulator 之间的部署经验采集。两处都走 gRPC 双向流,发生在计算层内部。是否开会话仍由 ControlPlane 决策。 |
 | 失败分类 | T1 瞬态:有限次指数退避重试,耗尽升为 T3。T2 确定性:不重放,按所属子系统的校验链处理,LLM 的随机输出可有限次重采样。T3 需人工:写失败记录,不自动重跑。失败是数据,不是异常。 |
 
@@ -56,7 +56,7 @@
 | Recipe(配方) | 验证有效的完整训练方案,分 batch、interact、agent_rsi 三类 |
 | DiagnosticReport | 诊断评测产出的报告:维度、分数、置信区间、错误类型、退化标记 |
 | Activation trace(激活轨迹) | Actio 每次响应附带的记录:命中的技能候选、选中的技能、命中的记忆 |
-| Evidence grade(证据等级) | 诊断报告的可信等级 `stub`、`mock`、`real`,决定它能否驱动规划与提名 [计划中] |
+| Evidence grade(证据等级) | 诊断报告的可信等级 `stub`、`mock`、`real`,决定它能否驱动规划与提名;缺标记一律判 `stub`,失败关闭 |
 <!-- shared:end context-block -->
 
 ## 1. 定位
@@ -101,7 +101,7 @@ factory 是组合根:系统里唯一知道所有包的地方。它把各子系�
 </details>
 <!-- figure:end 90-factory-context -->
 
-审核人经 TypeScript 命令行做门控写,命令只改状态字段并提交。开发者经 Python 入口启动 factory,由它构造派发器、诊断评估器、六个处理器与外部推理桥接,再注入调和循环 [计划中]。已落地的守护进程入口走同一个调和循环,只注入 MindTrainer 派发器。两侧不互相调用,只经产物树通信。
+审核人经 TypeScript 命令行做门控写,命令只改状态字段并提交。开发者经 Python 入口启动 factory,由它构造派发器、诊断评估器、六个处理器与外部推理桥接,再注入调和循环 [已落地]。守护进程入口走同一个调和循环,只注入 MindTrainer 派发器。两侧不互相调用,只经产物树通信。
 
 ## 2. 目标、非目标与约束
 
@@ -109,12 +109,12 @@ factory 是组合根:系统里唯一知道所有包的地方。它把各子系�
 
 | 编号 | 目标 | 验收方式 |
 |---|---|---|
-| G1 | 不传 `--enable` 时与现有守护进程入口行为相同 | 两棵相同的仓库分别跑两个入口,整棵 `control-plane/` 与全部提交说明逐字节相同 [计划中] |
-| G2 | 五个开关恰好覆盖六个闭环处理器键 | 开关映射表的单测;每个键接到真实处理器 [计划中] |
-| G3 | 闭环模式的装配全部在第一个 tick 之前完成 | 缺配置、资产、角色、凭证时退出码 2、一行错误、树里不写东西 [计划中] |
-| G4 | 门控写命令证据不在场就拒绝 | 候选缺诊断时 `approve` 抛错且不提交 [已落地];配方候选与提案的证据规则 [计划中] |
-| G5 | 只读命令不改 `HEAD` 与工作区 | 前后比较 `HEAD` 与工作区快照 [计划中] |
-| G6 | 闭环能从一条人工指令转到第二轮训练 | 端到端测试 `test_the_whole_loop_turns_twice` [计划中] |
+| G1 | 不传 `--enable` 时与现有守护进程入口行为相同 | 两棵相同的仓库分别跑两个入口,整棵 `control-plane/` 与全部提交说明逐字节相同 [已落地] |
+| G2 | 五个开关恰好覆盖六个闭环处理器键 | 开关映射表的单测;每个键接到真实处理器 [已落地] |
+| G3 | 闭环模式的装配全部在第一个 tick 之前完成 | 缺配置、资产、角色、凭证时退出码 2、一行错误、树里不写东西 [已落地] |
+| G4 | 门控写命令证据不在场就拒绝 | 候选缺诊断、配方候选缺 `repro`、提案缺 `verification` 时 `approve` 抛错且不提交 [已落地] |
+| G5 | 只读命令不改 `HEAD` 与工作区 | 前后比较 `HEAD` 与工作区快照 [已落地] |
+| G6 | 闭环能从一条人工指令转到第二轮训练 | 端到端测试 `test_the_whole_loop_turns_twice` [已落地] |
 
 | 非目标 | 状态 | V1 的处理 |
 |---|---|---|
@@ -129,8 +129,8 @@ factory 是组合根:系统里唯一知道所有包的地方。它把各子系�
 
 | 约束 | 内容 | 影响 |
 |---|---|---|
-| 依赖方向 | factory 可以导入任何包,任何包都不导入 factory | factory 不导出名字,`__init__.py` 只有说明 [计划中] |
-| 原入口冻结 | `mindtrainer.wire` 与 `scripts/run_controlplane.py` 不删、不改 | 两个入口并存;改动范围用 `git diff` 证明 [计划中] |
+| 依赖方向 | factory 可以导入任何包,任何包都不导入 factory | factory 不导出名字,`__init__.py` 只有说明;守卫测试 `test_no_other_package_imports_factory` 扫全部源码 [已落地] |
+| 原入口冻结 | `mindtrainer.wire` 与 `scripts/run_controlplane.py` 不删、不改 | 两个入口并存;改动范围用 `git diff` 证明,两个文件相对基线提交无改动 [已落地] |
 | 无新第三方依赖 | 只用标准库 `argparse`、`hashlib`、`urllib.parse`、`inspect`;读本机主机映射用已有的 `yaml` | `pyproject.toml` 的 `dependencies` 不动 |
 | 凭证不外露 | 凭证不进 git 树,值不进标准输出、标准错误、异常信息、日志 | 凭证相关的异常一律断开异常链 |
 | 只走信封 | 读写产物走 `GitStore` 与 `Envelope`,配置走配置信封 | 直接文件读取只有两处:`logs` 读日志文件;真实后端读本机主机映射文件(路径来自环境变量 `RISMFORGE_COMPUTE_HOSTS`,仓库之外) |
@@ -170,7 +170,7 @@ factory 是组合根:系统里唯一知道所有包的地方。它把各子系�
 </details>
 <!-- figure:end 90-factory-commands -->
 
-左边是 TypeScript 命令行,四个命令已落地,`confirm` 与按类型审核 [计划中]。右边是 Python 入口 factory 的子命令,全部 [计划中];其中 `trace`、`cost` 的函数已在 `controlplane.observe` 落地。只读子命令只读树,不提交。
+左边是 TypeScript 命令行,五个命令已落地,其中 `review`、`approve` 按产物类型处理三类门控产物。右边是 Python 入口 factory 的子命令,全部 [已落地];只读子命令只读树,不提交。
 
 | 模块 | 职责 | 依赖 | 状态 |
 |---|---|---|---|
@@ -189,10 +189,10 @@ factory 是组合根:系统里唯一知道所有包的地方。它把各子系�
 | `factory.handlers` | `DEFAULT_BUILDERS`、`scheduler_config_loader` | `recipestore`、`trainscheduler`、`trainplanner`、`mindagent` | [已落地] |
 | `factory.agent` | `agent.yaml` 读取、`AgentRuntime`、`DeadlineStub`、`CannedGuidedBackend` | `mindagent`、`simulator.realtime` | [已落地] |
 | `factory.defaults` | 默认诊断资产、评估器配置、部署素材、`install_defaults` | `diagnostic`、`simulator`、`trainplanner`、`trainscheduler` | [已落地] |
-| `factory.sombench` | `import-sombench` 子命令:读 SoMEval 检出目录里的 parquet,写分类表、题库与污染索引;pyarrow 放在可选依赖组 `sombench` | `diagnostic.assets`、`diagnostic.contamination` | [已落地] |
+| `factory.sombench` | `import-sombench` 子命令:读 SoMEval 检出目录里的 parquet,写分类表、题库与污染索引;pyarrow 在函数内惰性导入 | `diagnostic.assets`、`diagnostic.contamination` | [已落地] |
 | `factory.compute_config` | 读树内 `compute/endpoints.yaml` 出 `ComputeEndpoint` 列表,读本机主机映射出 `ComputeClient`;缺文件、键缺失或多余、取值不合、映射里查不到 `endpoint_id` 一律 `FactoryConfigError`,退出码 2,只写键名与路径,不回显取值 | `compute`、`factory.configio` | [已落地] |
 
-两个入口脚本 `scripts/run_factory.py` 与 `scripts/run_factory_dev.py` 都是 `factory.cli` 的薄壳 [计划中]。前者默认不接受 mock 证据,后者对 `run`、`reconcile` 自动加 `--allow-mock-evidence`。
+两个入口脚本 `scripts/run_factory.py` 与 `scripts/run_factory_dev.py` 都是 `factory.cli` 的薄壳 [已落地]。前者默认不接受 mock 证据,后者对 `run`、`reconcile` 自动加 `--allow-mock-evidence`。
 
 <!-- figure:begin 90-factory-layers -->
 ![依赖方向与分层守卫](diagrams/90-factory-layers.svg)
@@ -232,13 +232,13 @@ factory 是组合根:系统里唯一知道所有包的地方。它把各子系�
 
 | 包 | 可以导入 | 不得导入 | 状态 |
 |---|---|---|---|
-| `factory` | 任何包 | 无 | [计划中] |
-| 其余任何包 | 各自的规则 | `factory` | 守卫测试 [计划中] |
-| `controlplane` | `simulator.stubs`(骨架桩,唯一回指) | `diagnostic`、`mindtrainer` 与七个新包 | 今天成立;常驻守卫 [计划中] |
-| `mindtrainer` | `controlplane`、`simulator` | `diagnostic` | 今天成立;常驻守卫 [计划中] |
-| `diagnostic` | `controlplane`、`simulator` | `mindtrainer` | 今天成立;常驻守卫 [计划中] |
+| `factory` | 任何包 | 无 | [已落地] |
+| 其余任何包 | 各自的规则 | `factory` | 守卫测试 [已落地] |
+| `controlplane` | `simulator.stubs`(骨架桩,唯一回指) | `diagnostic`、`mindtrainer` 与七个新包 | 今天成立;常驻守卫 [已落地] |
+| `mindtrainer` | `controlplane`、`simulator` | `diagnostic` | 今天成立;常驻守卫 [已落地] |
+| `diagnostic` | `controlplane`、`simulator` | `mindtrainer` | 今天成立;常驻守卫 [已落地] |
 
-"今天成立"是在基线提交上用 grep 查的:三个已落地包里没有越界的绝对导入。常驻守卫 `test_layer_rules_hold` 用语法树扫真实源码,只看绝对导入的顶层包名 [计划中]。
+"今天成立"是在基线提交上用 grep 查的:三个已落地包里没有越界的绝对导入。常驻守卫 `test_layer_rules_hold` 用语法树扫真实源码,只看绝对导入的顶层包名 [已落地]。
 
 ## 4. 数据模型与状态机
 
@@ -246,32 +246,32 @@ factory 是组合根:系统里唯一知道所有包的地方。它把各子系�
 
 | 实体 | 字段与含义 | 约束 |
 |---|---|---|
-| `FactoryOptions` | `switches`、`allow_mock_evidence`、`confirm_directives`、`planner_backend`、`repo_commit` | 冻结数据类;`confirm_directives` 三态,`None` 表示用配置 [计划中] |
-| `BuildContext` | 仓库、证据开关、确认覆盖、规划后端、环境变量、日志目录、`repo_commit`、收尾函数列表 | 交给处理器构造器;`bridge(role)` 每次新建一个桥接 [计划中] |
-| `Assembly` | 派发器、处理器字典、评估器、证据开关、收尾函数 | 处理器为空即默认路径;`close()` 逆序收尾 [计划中] |
-| `ENABLE_MAP` | 开关到处理器键的固定表 | 五个开关、六个键,见下表 [计划中] |
+| `FactoryOptions` | `switches`、`allow_mock_evidence`、`confirm_directives`、`planner_backend`、`repo_commit` | 冻结数据类;`confirm_directives` 三态,`None` 表示用配置 [已落地] |
+| `BuildContext` | 仓库、证据开关、确认覆盖、规划后端、环境变量、日志目录、`repo_commit`、收尾函数列表 | 交给处理器构造器;`bridge(role)` 每次新建一个桥接 [已落地] |
+| `Assembly` | 派发器、处理器字典、评估器、证据开关、收尾函数 | 处理器为空即默认路径;`close()` 逆序收尾 [已落地] |
+| `ENABLE_MAP` | 开关到处理器键的固定表 | 五个开关、六个键,见下表 [已落地] |
 
 | 开关 | 处理器键 | 处理器来自 |
 |---|---|---|
-| `plan` | `plan_next_round` | TrainScheduler 的规划处理器 [计划中] |
-| `nominate` | `nominate_recipe` | TrainScheduler 的提名处理器 [计划中] |
-| `track` | `record_track` | RecipeStore 的战绩处理器 [计划中] |
-| `agent` | `start_agent_round` | MindAgent 的轮次处理器 [计划中] |
-| `admit` | `admit_recipe`、`admit_proposal` | RecipeStore 与 MindAgent 的收录处理器 [计划中] |
+| `plan` | `plan_next_round` | TrainScheduler 的规划处理器 [已落地] |
+| `nominate` | `nominate_recipe` | TrainScheduler 的提名处理器 [已落地] |
+| `track` | `record_track` | RecipeStore 的战绩处理器 [已落地] |
+| `agent` | `start_agent_round` | MindAgent 的轮次处理器 [已落地] |
+| `admit` | `admit_recipe`、`admit_proposal` | RecipeStore 与 MindAgent 的收录处理器 [已落地] |
 
 | 产物类型 | 路径(`control-plane/` 下) | 状态机种类 | 写方 | 状态 |
 |---|---|---|---|---|
 | 评估器配置 | `config/evaluator.yaml` | 配置信封 | `install-defaults`,之后由人改 | [已落地] |
-| MindAgent 部署素材 | `config/agent.yaml` | 配置信封 | `install-defaults`,之后由人改 | [计划中] |
-| 规划提示模板 | `config/prompts/planner-<版本>.yaml`,默认模板 `PLANNER_V1` | 提示模板信封 | `install-defaults`,之后由人改 | [计划中] |
-| 调度配置与训练默认值 | `config/scheduler.yaml`、`config/training_defaults.yaml` | 配置信封 | `install-defaults`,之后由人改 | [计划中] |
-| 默认部署情境与人格 | `scenarios/` 下 `factory-deploy-s1` 至 `s3`,`personas/` 下两个人格 | 情境与人格产物 | `install-defaults` | [计划中] |
-| 桥接配置 | `config/backends.yaml` | 配置信封 | 人 | 路径函数 [已落地],角色形状 [计划中] |
-| 默认分类表与题库 | `diagnostics/` 下 `factory-tax-v1`、`factory-pool-v1`;SoMBench 导入的 `sombench-<哈希前缀>` | 登记即 `effective` | `install-defaults`;`import-sombench` | 默认 [已落地],SoMBench [计划中] |
+| MindAgent 部署素材 | `config/agent.yaml` | 配置信封 | `install-defaults`,之后由人改 | [已落地] |
+| 规划提示模板 | `config/prompts/planner-<版本>.yaml`,默认模板 `PLANNER_V1` | 提示模板信封 | `install-defaults`,之后由人改 | [已落地] |
+| 调度配置与训练默认值 | `config/scheduler.yaml`、`config/training_defaults.yaml` | 配置信封 | `install-defaults`,之后由人改 | [已落地] |
+| 默认部署情境与人格 | `scenarios/` 下 `factory-deploy-s1` 至 `s3`,`personas/` 下两个人格 | 情境与人格产物 | `install-defaults` | [已落地] |
+| 桥接配置 | `config/backends.yaml` | 配置信封 | 人 | [已落地] |
+| 默认分类表与题库 | `diagnostics/` 下 `factory-tax-v1`、`factory-pool-v1`;SoMBench 导入的 `sombench-<哈希前缀>` | 登记即 `effective` | `install-defaults`;`import-sombench` | [已落地] |
 | 本机评测配置 | 树外,路径由环境变量 `RISMFORGE_EVAL_CONFIG` 给出,权限 0600 | 无;不进树 | 人 | [已落地] |
 | 候选 checkpoint | `runs/<run>/candidate_checkpoint.yaml` | 需审核 | 命令行改 `approved` 或 `rejected` | [已落地] |
-| 配方候选、技能提案 | `recipe_candidates/`、`skill_memory_proposals/` | 需审核 | 命令行改状态 | [计划中] |
-| 训练指令 | `runs/<run>/directive.yaml` | 非审核 | `confirm` 改 `pending` | [计划中] |
+| 配方候选、技能提案 | `recipe_candidates/`、`skill_memory_proposals/` | 需审核 | 命令行改状态 | [已落地] |
+| 训练指令 | `runs/<run>/directive.yaml` | 非审核 | `confirm` 改 `pending` | [已落地] |
 
 `evaluator.yaml` 的载荷恰好五个键,`backends` 不可配置:mock 评估器恒为 `mock`,`--evaluator someval` 恒为 `real`:
 
@@ -283,7 +283,7 @@ tier: full          # full 或 quick
 sampling_k: 4       # 整数,至少 1
 ```
 
-`agent.yaml` 的载荷必填三个键:`scenario_ids`、`bindings`(角色绑定字典的列表)、`opponent_lines`(对手台词列表)。可选键是 `AgentConfig` 的其余八个字段,缺省取它的默认值。未知键与类型错误都是装配错误,退出码 2 [计划中]。`install-defaults` 写入的默认值:三个部署情境 `factory-deploy-s1` 至 `s3`;`user` 位绑定 `frozen_reference`(`model_ref` 为 `zengen-v1`),`agent` 位绑定 `self_play`;对手台词三句;`max_turns` 为 4,`min_support` 为 3,`min_ratio` 为 0.5 [计划中]。
+`agent.yaml` 的载荷必填三个键:`scenario_ids`、`bindings`(角色绑定字典的列表)、`opponent_lines`(对手台词列表)。可选键是 `AgentConfig` 的其余八个字段,缺省取它的默认值。未知键与类型错误都是装配错误,退出码 2 [已落地]。`install-defaults` 写入的默认值:三个部署情境 `factory-deploy-s1` 至 `s3`;`user` 位绑定 `frozen_reference`(`model_ref` 为 `zengen-v1`),`agent` 位绑定 `self_play`;对手台词三句;`max_turns` 为 4,`min_support` 为 3,`min_ratio` 为 0.5 [已落地]。
 
 命令行驱动的迁移:
 
@@ -291,18 +291,18 @@ sampling_k: 4       # 整数,至少 1
 |---|---|---|---|
 | `approve <id>` | 候选 checkpoint | `pending_review → approved` | [已落地] |
 | `reject <id> [原因]` | 候选 checkpoint | `pending_review → rejected`,写 `reject_reason` | [已落地] |
-| `approve`、`reject` | 配方候选、技能提案 | 同上 | [计划中] |
-| `confirm <directive-id>` | 训练指令 | `awaiting_confirmation → pending` | [计划中] |
+| `approve`、`reject` | 配方候选、技能提案 | 同上 | [已落地] |
+| `confirm <directive-id>` | 训练指令 | `awaiting_confirmation → pending` | [已落地] |
 
 不变量:
 
-1. 不传 `--enable` 时,factory 不读任何配置文件,不注入派发器以外的任何东西 [计划中]。
-2. 开了任一闭环开关,就同时注入数据生产器与 mock 后端的真实评估器 [计划中]。
-3. 证据开关只有一个来源:命令行 `--allow-mock-evidence`。同一个值交给调和循环与提名处理器 [计划中]。
-4. 确认覆盖不写回 `scheduler.yaml`,只改 loader 的返回值 [计划中]。
+1. 不传 `--enable` 时,factory 不读任何配置文件,不注入派发器以外的任何东西 [已落地]。
+2. 开了任一闭环开关,就同时注入数据生产器与 mock 后端的真实评估器 [已落地]。
+3. 证据开关只有一个来源:命令行 `--allow-mock-evidence`。同一个值交给调和循环与提名处理器 [已落地]。
+4. 确认覆盖不写回 `scheduler.yaml`,只改 loader 的返回值 [已落地]。
 5. 门控写命令在迁移不合法或证据不在场时,不写文件、不提交。
-6. 已存在的配置文件 `install-defaults` 不覆盖,人改过的配置优先 [计划中]。
-7. `--executor roll` 与任一 `--enable` 开关同时给是用法错误,退出码 2,树里不写东西 [已落地]。第 8 到 10 条是本轮新增的组合规则 [计划中]。真训练会同步占住调和循环数小时(CP-15),闭环处理器的排队语义是按 mock 训练的前提写的;先让一条链路跑通真机,再决定叠加。以后放开比以后收紧容易。
+6. 已存在的配置文件 `install-defaults` 不覆盖,人改过的配置优先 [已落地]。
+7. `--executor roll` 与任一 `--enable` 开关同时给是用法错误,退出码 2,树里不写东西 [已落地]。第 8 到 10 条是本轮新增的组合规则 [已落地]。真训练会同步占住调和循环数小时(CP-15),闭环处理器的排队语义是按 mock 训练的前提写的;先让一条链路跑通真机,再决定叠加。以后放开比以后收紧容易。
 8. `--evaluator someval` 必须同时给 `--executor roll`,且暂不能与 `--enable` 同用;任一不满足是用法错误,退出码 2(FC-16)。
 9. `--executor roll` 且不传 `--evaluator someval` 时,仍然要求污染索引在场且数据集哈希对得上,否则拒绝装配。真训练必须过关,不论是否评测(DX-19)。
 10. `--evaluator someval` 要求本机评测配置在场、权限 0600、不在仓库目录里,且 SoMEval 检出目录与数据集哈希都对得上;缺一项退出码 2,不回显任何凭证取值(DX-20)。
@@ -320,7 +320,7 @@ def main(argv: list[str] | None = None) -> int
 # 命令行:scripts/run_controlplane.py <repo_root> [--interval-s S] [--max-ticks N]
 ```
 
-计划中的组合根,签名来自施工计划,施工时可能微调 [计划中]:
+组合根的对外签名,已落地:
 
 ```python
 # factory.wire
@@ -334,7 +334,7 @@ def main(argv=None, *, env=None, builders=None) -> int
 def dev_main(argv=None, **kw) -> int
 ```
 
-Python 子命令 [计划中]。每个子命令的第一个位置参数都是控制面仓库根目录:
+Python 子命令 [已落地]。每个子命令的第一个位置参数都是控制面仓库根目录:
 
 | 子命令 | 作用 | 退出码 |
 |---|---|---|
@@ -346,7 +346,7 @@ Python 子命令 [计划中]。每个子命令的第一个位置参数都是控�
 | `cost <repo> <run>` | 原样打印观测函数 `cost` 的输出 | 0,没有 `run_trace` 也是 0 |
 | `logs <repo> <run> [--task <id>]` | 按 run 目录产物的 `log_refs` 打印日志 | 0;run 不存在、有引用不可达或哈希不符 1 |
 
-`run` 与 `reconcile` 共用的开关 [计划中]:
+`run` 与 `reconcile` 共用的开关 [已落地]:
 
 | 开关 | 取值 | 含义 |
 |---|---|---|
@@ -359,9 +359,9 @@ Python 子命令 [计划中]。每个子命令的第一个位置参数都是控�
 | `--endpoint` | 端点 id | 只在 `--executor roll` 时有意义,点名 `compute/endpoints.yaml` 里的哪个端点;只有一个端点时可省 [已落地] |
 | `--evaluator` | `mock`(默认)、`someval` | `someval` 装配真实评估器:起 vLLM 服务、跑 SoMEval 子进程、把结果转成诊断报告。必须同时给 `--executor roll`,暂不能与 `--enable` 同用 [已落地] |
 
-TypeScript 命令行:`rismforge <review|approve|reject|status> [id] [reason]` [已落地],工作包 8 加入 `confirm` [计划中]。
+TypeScript 命令行:`rismforge <review|approve|reject|confirm|status> [id] [reason]` [已落地],五个命令都在 `cli/src`。
 
-| 命令 | 今天的行为 [已落地] | 泛化后 [计划中] |
+| 命令 | 泛化前的行为 [已落地] | 泛化后即今天的行为 [已落地] |
 |---|---|---|
 | `review <id>` | 打印候选头行与诊断摘要;缺报告标 `MISSING`,桩报告标 `[STUB]` | 三类产物按类型打印证据;mock 报告标 `[MOCK BACKENDS]` |
 | `approve <id>` | 先判迁移,再要求同 run 目录有诊断报告 | 配方候选要有 `repro`,提案要有 `verification` |
@@ -374,14 +374,14 @@ TypeScript 命令行:`rismforge <review|approve|reject|status> [id] [reason]` [�
 | 邻居 | 本文依赖它什么 | 它依赖本文什么 |
 |---|---|---|
 | ControlPlane | `run_daemon`、`reconcile_once` 接受 `dispatcher`;闭环模式还接受 `handlers`、`evaluator`、`accept_mock_evidence`;非闭环的 `--evaluator someval` 也传 `evaluator` | 有人注入处理器,闭环动作才会产生(R2) |
-| MindTrainer | `make_mindtrainer_dispatcher()`;闭环模式传 `data_producer` [计划中] | 无 |
+| MindTrainer | `make_mindtrainer_dispatcher()`;闭环模式传 `data_producer` [已落地] | 无 |
 | 诊断评测 | `make_diagnostic_evaluator` 与资产读写;`ScoredSoMEvalRunner` 协议、`write_failure_report` | 无 |
-| TrainScheduler | `make_plan_handler`、`make_nominate_handler`、`install_default_configs` [计划中] | 传入 `accept_mock_evidence`、`repo_commit` 与带覆盖的 loader |
-| TrainPlanner | `install_default_template`、`BridgeDecisionBackend`、`HeuristicBackend` [计划中] | 选后端、安装默认模板由本文负责 |
+| TrainScheduler | `make_plan_handler`、`make_nominate_handler`、`install_default_configs` [已落地] | 传入 `accept_mock_evidence`、`repo_commit` 与带覆盖的 loader |
+| TrainPlanner | `install_default_template`、`BridgeDecisionBackend`、`HeuristicBackend` [已落地] | 选后端、安装默认模板由本文负责 |
 | SocialSimulator | `create_server`、`EnvironmentServiceClient`、`read_persona`、`read_scenario`、`write_persona`、`write_scenario` | 无 |
-| RecipeStore | `handle_admit_recipe`、`handle_record_track` [计划中] | 无 |
-| MindAgent | `make_start_round_handler`、`handle_admit_proposal` [计划中] | 实时客户端工厂、罐头后端、人格 loader |
-| 外部推理桥接 | `CliBridge` [计划中] | `backends.yaml` 的 `planner`、`agent` 两个角色 |
+| RecipeStore | `handle_admit_recipe`、`handle_record_track` [已落地] | 无 |
+| MindAgent | `make_start_round_handler`、`handle_admit_proposal` [已落地] | 实时客户端工厂、罐头后端、人格 loader |
+| 外部推理桥接 | `CliBridge` [已落地] | `backends.yaml` 的 `planner`、`agent` 两个角色 |
 
 ## 6. 关键流程
 
@@ -427,28 +427,28 @@ TypeScript 命令行:`rismforge <review|approve|reject|status> [id] [reason]` [�
 
 | 步 | 动作 | 失败时 |
 |---|---|---|
-| 0 | 取仓库排他文件锁(`run` 与 `reconcile` 取,只读子命令不取) | 锁已被占用,退出码 2 [计划中] |
+| 0 | 取仓库排他文件锁(`run` 与 `reconcile` 取,只读子命令不取) | 锁已被占用,退出码 2 [已落地] |
 | 1 | 解析 `--enable`,经 `ENABLE_MAP` 得到处理器键 | 未知开关或空项,退出码 2 |
 | 2 | 处理器键为空:只构造 `make_mindtrainer_dispatcher()`,调 `run_daemon` 时只传派发器 | 无 |
 | 3 | 读 `evaluator.yaml`,要求恰好五个键 | `FactoryConfigError`,退出码 2 |
 | 4 | 校验分类表与题库在树里,构造 mock 评估器;`--evaluator someval` 时改为校验本机评测配置与 SoMEval 检出目录,构造真实运行器与真实评估器 | 同上;凭证只写键名,不回显取值 |
 | 4a | `--executor roll` 时:读 `compute/endpoints.yaml` 与本机主机映射,选定端点,造 `ComputeClient`,再造执行器工厂与转换器 [已落地] | `FactoryConfigError`,退出码 2;缺文件、键缺失或多余、映射里查不到端点、别名形态不合、`--endpoint` 点名了不存在的端点、有多个端点却没点名,全在第一个 tick 之前报 |
 | 4b | `--executor roll` 时:读污染索引,校验数据集哈希,把准入检查注入执行器;`--evaluator someval` 时另把真实运行器注入评估器 | `FactoryConfigError`,退出码 2;索引缺失、哈希对不上、stub 前端断言失败 |
-| 5 | 按 `DEFAULT_BUILDERS` 逐个构造处理器,需要时经 `build_bridge(store, role, *, env=None, log_dir=None)` 建桥接、读凭证、读 `agent.yaml`。`planner` 角色只在 `--planner-backend bridge` 时必需,`agent` 角色可选,缺了就不建桥接,提案生成回到规则模板 [计划中] | 同上;已登记的收尾函数逆序调用 |
+| 5 | 按 `DEFAULT_BUILDERS` 逐个构造处理器,需要时经 `build_bridge(store, role, *, env=None, log_dir=None)` 建桥接、读凭证、读 `agent.yaml`。`planner` 角色只在 `--planner-backend bridge` 时必需,`agent` 角色可选,缺了就不建桥接,提案生成回到规则模板 [已落地] | 同上;已登记的收尾函数逆序调用 |
 | 6 | 注入派发器(带数据生产器)、处理器、评估器、证据开关,启动调和循环 | 运行中的异常原样上抛,进程退出 |
 
-以上步骤全部 [计划中]。第 2 步与今天的守护进程入口走同一条代码路径,所以两者逐字节相同。任一步出错,标准错误打印一行 `factory: error: ...`,树里不写任何东西。
+以上步骤全部 [已落地]。第 2 步与守护进程入口走同一条代码路径,所以两者逐字节相同。任一步出错,标准错误打印一行 `factory: error: ...`,树里不写任何东西。
 
 ### 6.2 失败与恢复
 
 | 场景 | 发生什么 | 恢复 |
 |---|---|---|
-| 闭环模式缺评估器配置、诊断资产、桥接角色、凭证或 `agent.yaml` | 启动即退出码 2,指出缺哪份文件 | 跑一次 `install-defaults` 或补文件,再启动 [计划中] |
-| 缺规划提示模板或调度配置 | 启动不拦,第一次规划时守护进程退出;重启后同一处再退出 | 先跑 `install-defaults`,再重启 [计划中] |
-| 缺凭证或凭证写进了树 | 退出码 2,信息只含变量名或键路径 | 设好环境变量,从树里删掉凭证 [计划中] |
-| 规划桥接失败 | 决策 `failed`,写 T3 失败记录,闭环停住(R18) | 人写新指令或手工重置 [计划中] |
+| 闭环模式缺评估器配置、诊断资产、桥接角色、凭证或 `agent.yaml` | 启动即退出码 2,指出缺哪份文件 | 跑一次 `install-defaults` 或补文件,再启动 [已落地] |
+| 缺规划提示模板或调度配置 | 装配期就拦下:`--enable plan` 或 `nominate` 时先预检 `scheduler.yaml`、`training_defaults.yaml` 与提示模板,缺任一项即以退出码 2 结束,不会起守护进程 [已落地] | 先跑 `install-defaults`,再启动 |
+| 缺凭证或凭证写进了树 | 退出码 2,信息只含变量名或键路径 | 设好环境变量,从树里删掉凭证 [已落地] |
+| 规划桥接失败 | 决策 `failed`,写 T3 失败记录,闭环停住(R18) | 人写新指令或手工重置 [已落地] |
 | 处理器或派发器抛瞬态异常 | 进程退出 | 外部监督者重启,调和循环从树续接 |
-| 运行中删了诊断资产 | 评估器在调用处抛 `DiagnosticAssetError` | 补齐后重启 [计划中] |
+| 运行中删了诊断资产 | 评估器在调用处抛 `DiagnosticAssetError` | 补齐后重启 [已落地] |
 | `approve` 时诊断报告缺失 | 抛错,不改文件、不提交 [已落地] | 等报告出来,先 `review` 再批准 |
 
 ### 6.3 走查:端到端测试转两圈
@@ -492,7 +492,7 @@ TypeScript 命令行:`rismforge <review|approve|reject|status> [id] [reason]` [�
 </details>
 <!-- figure:end 90-factory-e2e -->
 
-主链对应 `test_the_whole_loop_turns_twice` [计划中]。每一步都经 `factory reconcile --once`,人工动作用写状态模拟,与已落地的 `tests/test_mt_wire.py` 同一手法。数值都取自施工计划里的测试断言。
+主链对应 `test_the_whole_loop_turns_twice` [已落地]。每一步都经 `factory reconcile --once`,人工动作用写状态模拟,与已落地的 `tests/test_mt_wire.py` 同一手法。数值取自该测试的断言。
 
 | 步 | 图中节点 | 动作或结果 |
 |---|---|---|
@@ -509,7 +509,7 @@ TypeScript 命令行:`rismforge <review|approve|reject|status> [id] [reason]` [�
 
 默认 mock 评估器对变体族的基题答参考答案、对变体题恒答错,各 `sampling_k` 次。所以每个候选的一级分数严格在 0 与 1 之间,错误画像是 `{"surface_match": 1.0}`。基线全错,第一轮才有正增益;第二轮与第一轮同分,增益为 0。
 
-MindAgent 链对应 `test_the_mindagent_line_runs_inside_the_reconcile_loop` [计划中],图中第 11、12 步:`zengen-v2` 的轮次空库零提案,放入基线技能后 `zengen-v3` 的轮次产出 `pending_review` 提案,批准收录后库版本是 `{"skill": "2", "memory": "0"}`,两个值都是字符串。
+MindAgent 链对应 `test_the_mindagent_line_runs_inside_the_reconcile_loop` [已落地],图中第 11、12 步:`zengen-v2` 的轮次空库零提案,放入基线技能后 `zengen-v3` 的轮次产出 `pending_review` 提案,批准收录后库版本是 `{"skill": "2", "memory": "0"}`,两个值都是字符串。
 
 ### 6.4 九个工作包的顺序与依赖
 
@@ -529,7 +529,7 @@ factory 是最后一个工作包,前八个全部落地后才能施工。
 
 ### 6.5 首次部署
 
-一个新的控制面仓库从零到闭环转起来,按下表的顺序做 [计划中]。
+一个新的控制面仓库从零到闭环转起来,按下表的顺序做 [已落地]。
 
 | 步 | 动作 | 谁做 | 说明 |
 |---|---|---|---|
@@ -561,9 +561,9 @@ factory 是最后一个工作包,前八个全部落地后才能施工。
 | FC-9 | `--allow-mock-evidence` 是证据开关的唯一来源 | 各处读各自配置 | 两处各读各的会出现"有提名动作而处理器跳过",跳过还会写幂等标记 | 只改 `scheduler.yaml` 打开 mock 证据没有效果 |
 | FC-10 | 确认覆盖在 loader 里替换返回值,不写回文件 | 写回 `scheduler.yaml` | 人看到的配置就是默认行为 | 事后看配置看不出指令为什么没停在确认态 |
 | FC-11 | `repo_commit` 取组合根所在代码仓库的 HEAD,启动时取一次 | 取控制面仓库的 HEAD | 控制面仓库不是代码仓库 | 长跑跨提交时记的是启动时的提交 |
-| FC-12 | 端到端用确定性的 `HeuristicBackend` 规划,桥接只单测正向与失败路径 | 罐头桥接 | 每一步都是真实代码,命令行一个开关选得到 | 桥接往返的格式问题要到接真实后端才暴露 [计划中] |
+| FC-12 | 端到端用确定性的 `HeuristicBackend` 规划,桥接只单测正向与失败路径 | 罐头桥接 | 每一步都是真实代码,命令行一个开关选得到 | 桥接往返的格式问题要到接真实后端才暴露 |
 | FC-13 | MindAgent 用罐头后端与进程内 loopback 实时服务端,首次需要时才起 | 起外部服务端 | V1 没有加载 checkpoint 的推理后端 | 部署 episode 只证明路由与轨迹,不代表模型能力 |
-| FC-14 | `run` 与 `reconcile` 在第一个 tick 之前取仓库排他文件锁,只读子命令不取 [计划中] | 只靠只带本文件提交;把锁放进每次写入 | 挡住两个守护进程重复派发与记账互相覆盖,开销只在启动时一次 | 锁被占用时退出码 2,第二个守护进程起不来 |
+| FC-14 | `run` 与 `reconcile` 在第一个 tick 之前取仓库排他文件锁,只读子命令不取 [已落地] | 只靠只带本文件提交;把锁放进每次写入 | 挡住两个守护进程重复派发与记账互相覆盖,开销只在启动时一次 | 锁被占用时退出码 2,第二个守护进程起不来 |
 | FC-15 | 真实 ROLL 执行器由显式的 `--executor roll` 启用,默认 `mock`;`--endpoint` 点名端点 [已落地]。执行器工厂接收 `run_id`:派发器按指令 id 调 `executor_factory(run_id)`,`MockExecutor` 一侧用 `lambda _: MockExecutor()` 适配 | 看树里有没有 `compute/endpoints.yaml` 就自动启用;环境变量启用 | 一次训练会同步占住调和循环数小时并真的动远端 GPU(CP-15),这个后果值得在命令行上明写;自动启用会让「提交一份配置」悄悄改变入口行为;环境变量在 `--help` 里看不见,也与已有五个开关风格不一致 | 要多输入一个参数;派发器的 `executor_factory` 签名从无参改成带 `run_id`,既有五处测试调用要跟着改 |
 | FC-16 | 真实评估器由显式的 `--evaluator someval` 启用,默认 `mock`;它要求 `--executor roll`,暂不能与 `--enable` 同用;真训练一侧不论是否评测都要求污染索引在场并通过哈希校验 [已落地] | 让 `--executor roll` 自动带上真实评估器;把评估并入 `--enable` | 评测要真实存点才有意义,所以依赖真实执行器;但真训练与真评测是两个独立后果,各自一个开关才看得清;污染索引跟着真训练走,是因为「评测题不进训练」是硬约束,与这次开不开评测无关 | 想只换评估器不开真训练做不到;索引缺失时连不开评测的真训练也起不来,要先跑一次导入 |
 
@@ -573,11 +573,11 @@ factory 是最后一个工作包,前八个全部落地后才能施工。
 
 | 失败点 | 类 | 处理 | 留痕产物 |
 |---|---|---|---|
-| 开关拼错、`reconcile` 缺 `--once` | 用法错误 | 退出码 2,一行错误 | 无,树里不写 [计划中] |
-| 缺配置、资产、桥接角色或凭证 | 装配错误,发生在启动前,不属于 T1 至 T3 | 退出码 2,`FactoryConfigError` | 无,树里不写 [计划中] |
-| 规划桥接失败 | T3 | 决策 `failed`,不写新指令(R18) | 决策与失败记录,带桥接日志的 `log_refs` [计划中] |
-| 轮次产物读不出 | T3 | 轮次处理器重写为 `failed`,循环继续(R19) | 轮次产物与失败记录 [计划中] |
-| 轮次中途瞬态异常或被杀 | T1 | 轮次留在 `pending`,下一 tick 复用已落盘的 episode 续上(R19) | 已落盘的 episode [计划中] |
+| 开关拼错、`reconcile` 缺 `--once` | 用法错误 | 退出码 2,一行错误 | 无,树里不写 [已落地] |
+| 缺配置、资产、桥接角色或凭证 | 装配错误,发生在启动前,不属于 T1 至 T3 | 退出码 2,`FactoryConfigError` | 无,树里不写 [已落地] |
+| 规划桥接失败 | T3 | 决策 `failed`,不写新指令(R18) | 决策与失败记录,带桥接日志的 `log_refs` [已落地] |
+| 轮次产物读不出 | T3 | 轮次处理器重写为 `failed`,循环继续(R19) | 轮次产物与失败记录 [已落地] |
+| 轮次中途瞬态异常或被杀 | T1 | 轮次留在 `pending`,下一 tick 复用已落盘的 episode 续上(R19) | 已落盘的 episode [已落地] |
 | 派发器或处理器抛瞬态异常 | T1 | 进程退出,外部监督者重启 | 树里已提交的部分 |
 | 门控写证据不在场或迁移非法 | 用法错误 | 命令抛错,不写文件、不提交 | 无 [已落地] |
 
@@ -585,53 +585,53 @@ factory 是最后一个工作包,前八个全部落地后才能施工。
 
 | 想知道 | 用什么 | 状态 |
 |---|---|---|
-| 一轮的全部产物、状态与溯源链 | `controlplane.observe.trace`;`factory trace <repo> <run>` | 函数 [已落地],子命令 [计划中] |
-| 一轮的成本明细与汇总 | `controlplane.observe.cost`;`factory cost <repo> <run>` | 函数 [已落地],子命令 [计划中] |
-| 失败记录登记的日志 | `factory logs <repo> <run> [--task <id>]` | [计划中] |
+| 一轮的全部产物、状态与溯源链 | `controlplane.observe.trace`;`factory trace <repo> <run>` | [已落地] |
+| 一轮的成本明细与汇总 | `controlplane.observe.cost`;`factory cost <repo> <run>` | [已落地] |
+| 失败记录登记的日志 | `factory logs <repo> <run> [--task <id>]` | [已落地] |
 | 待审候选 | `rismforge status` | [已落地] |
 | 候选的诊断证据 | `rismforge review <id>` | [已落地] |
-| 本 tick 做了什么 | `factory reconcile <repo> --once` 的输出 | [计划中] |
+| 本 tick 做了什么 | `factory reconcile <repo> --once` 的输出 | [已落地] |
 
-`logs` 对不可达的引用标 `[unreachable]` 并写明不显示内容,哈希不符标 `[sha256 mismatch]` 但照样打印 [计划中]。成功调用的桥接日志不进树,只在控制面仓库的 `.rismforge/logs/<run>/` 目录里。
+`logs` 对不可达的引用标 `[unreachable]` 并写明不显示内容,哈希不符标 `[sha256 mismatch]` 但照样打印 [已落地]。成功调用的桥接日志不进树,只在控制面仓库的 `.rismforge/logs/<run>/` 目录里。
 
 ## 9. 测试策略
 
-已落地部分用真实的 git 仓库与 mock 执行器;计划中部分在此之上加真实的闭环处理器,外部工具一律用替身。
+已落地部分用真实的 git 仓库与 mock 执行器;闭环部分在此之上加真实的闭环处理器,外部工具一律用替身。
 
 | 层次 | 对象 | 替身 | 测试文件 | 用例数 |
 |---|---|---|---|---|
 | 入口 | 守护进程入口单 tick、参数解析、到晋级、重复 tick 幂等 | `MockExecutor`、`ScriptedBackend` | `tests/test_mt_wire.py` | 4 [已落地] |
 | 观测 | `trace`、`cost`、`sum_costs` | 临时仓库 | `tests/test_observe.py` | 5 [已落地] |
-| 命令行 | `review`、`approve`、`reject`、`status` | 临时 git 仓库 | `cli/test/commands.test.ts` | 17 [已落地] |
+| 命令行 | `review`、`approve`、`reject`、`status` | 临时 git 仓库 | `cli/test/commands.test.ts` | 19 [已落地] |
 | 命令行 | 命令名常量 | 无 | `cli/test/smoke.test.ts` | 1 [已落地] |
-| 开关与边界 | 映射表;无包导入 factory | 无 | `tests/test_factory_switches.py`、`tests/test_factory_boundaries.py` | 17、2 [计划中] |
-| 只读 | `trace`、`cost`、`logs` | 临时仓库 | `tests/test_factory_readonly.py` | 10 [计划中] |
-| 桥接装配 | 角色、凭证不外露 | `sys.executable -c` 假可执行体 | `tests/test_factory_bridges.py` | 14 [计划中] |
-| 评估器装配 | 配置校验、默认资产 | `MockSoMEvalRunner`、`MockJudgeBackend` | `tests/test_factory_evaluation.py` | 12 |
-| 组合根与命令行 | 逐字节相同、注入、装配错误、退出码、仓库锁被占用时的退出与只读照常 | 记录调用的假处理器 | `tests/test_factory_wire.py`、`tests/test_factory_cli.py` | 18、9 [计划中] |
-| 端到端框架 | 空闭环一个 tick、mock 证据默认不转 | 假处理器 | `tests/test_factory_e2e_frame.py` | 4 [计划中] |
-| 处理器构造 | 六个构造器、证据开关单一来源、Interact 流超时 | 罐头后端 | `tests/test_factory_handlers.py` | 18 [计划中] |
-| 端到端 | 完整闭环、R5、规划等配方入库门、R18、R19、MindAgent 链 | `HeuristicBackend`、罐头后端 | `tests/test_factory_e2e_loop.py` | 10 [计划中] |
-| 跨工作包 | 共享用例表、分层规则、run 编号数值序 | 无 | `tests/test_factory_cross_plan.py`、`tests/test_factory_run_order.py` | 31、3 [计划中] |
+| 开关与边界 | 映射表;无包导入 factory | 无 | `tests/test_factory_switches.py`、`tests/test_factory_boundaries.py` | 17、2 [已落地] |
+| 只读 | `trace`、`cost`、`logs` | 临时仓库 | `tests/test_factory_readonly.py` | 10 [已落地] |
+| 桥接装配 | 角色、凭证不外露 | `sys.executable -c` 假可执行体 | `tests/test_factory_bridges.py` | 14 [已落地] |
+| 评估器装配 | 配置校验、默认资产 | `MockSoMEvalRunner`、`MockJudgeBackend` | `tests/test_factory_evaluation.py` | 12 [已落地] |
+| 组合根与命令行 | 逐字节相同、注入、装配错误、退出码、仓库锁被占用时的退出与只读照常 | 记录调用的假处理器 | `tests/test_factory_wire.py`、`tests/test_factory_cli.py` | 37、9 [已落地] |
+| 端到端框架 | 空闭环一个 tick、mock 证据默认不转 | 假处理器 | `tests/test_factory_e2e_frame.py` | 4 [已落地] |
+| 处理器构造 | 六个构造器、证据开关单一来源、Interact 流超时 | 罐头后端 | `tests/test_factory_handlers.py` | 18 [已落地] |
+| 端到端 | 完整闭环、R5、规划等配方入库门、R18、R19、MindAgent 链 | `HeuristicBackend`、罐头后端 | `tests/test_factory_e2e_loop.py` | 10 [已落地] |
+| 跨工作包 | 共享用例表、分层规则、run 编号数值序 | 无 | `tests/test_factory_cross_plan.py`、`tests/test_factory_run_order.py` | 31、3 [已落地] |
 
-计划中的用例共 148 个,按 pytest 收集的参数化展开计。工作包 9 另有一个前置核对脚本 `scripts/check_factory_assumptions.py`,21 行全部 `OK` 才能施工 [计划中]。
+上表的 pytest 用例数由 `pytest --collect-only -q` 逐个文件实测,按参数化展开计;TypeScript 的两个数按测试文件的 `it(` 计,未跑 vitest 收集。工作包 9 另有一个前置核对脚本 `scripts/check_factory_assumptions.py`:它逐行核对各包的符号名与签名,本次运行有 20 行 `OK`、1 行 `MISMATCH`,缺的是 `SchedulerConfig` 上新增的 `strategy_experience` 字段。
 
 不依赖的外部服务:GPU、外部网络、真实模型、真实 `claude` 与 `codex` 命令行。实时服务端只绑 `127.0.0.1`,在进程内起停。
 
 ## 10. 现状、局限与未核实项
 
-已落地的只有原有入口、四个命令与两个观测函数,组合根整个包尚未存在。
+组合根、两个入口脚本、命令行泛化与端到端都已落地;闭环只在 mock 证据、`HeuristicBackend` 与罐头后端上跑过,真实 ROLL 执行器与真实 SoMEval 是显式开关且暂不能与闭环同开。
 
 | 能力 | 状态 | 说明 |
 |---|---|---|
 | 守护进程入口 `mindtrainer.wire` 与 `scripts/run_controlplane.py` | [已落地] | 只注入 MindTrainer 派发器;interact 指令因缺实时客户端判 `failed` |
-| TypeScript 命令行 `review`、`approve`、`reject`、`status` | [已落地] | 只认候选 checkpoint |
-| 观测函数 `trace`、`cost` | [已落地] | 没有命令行入口,只能在 Python 里调用 |
-| 命令行泛化与 `confirm` | [计划中] | 工作包 8 任务 96 至 97 |
-| 包骨架、开关、只读、桥接、评估器装配 | [计划中] | 工作包 9 任务 100 至 103 |
-| 组合根、命令行、入口脚本 | [计划中] | 任务 104 |
-| 端到端框架、前置核对、处理器构造 | [计划中] | 任务 105 至 107 |
-| 完整闭环与跨工作包核对 | [计划中] | 任务 108 至 109 |
+| TypeScript 命令行 `review`、`approve`、`reject`、`confirm`、`status` | [已落地] | 门控写覆盖三类需审核产物与待确认指令 |
+| 组合根包 `src/factory`、入口脚本 `scripts/run_factory.py` 与 `scripts/run_factory_dev.py` | [已落地] | 不传 `--enable` 时与守护进程入口逐字节相同 |
+| 开关、只读子命令、桥接、评估器装配、六个处理器构造 | [已落地] | 工作包 9 任务 100 至 103、105 至 107 |
+| 完整闭环与跨工作包核对 | [已落地] | 任务 108 至 109;端到端只用 mock 证据、`HeuristicBackend` 与罐头后端 |
+| 真实 ROLL LoRA SFT(经远端计算层) | [已落地] | 由 `--executor roll` 装配,暂不能与 `--enable` 同用;真机只跑通单段两步 |
+| 真实 SoMEval 与 `import-sombench` | [已落地] | 由 `--evaluator someval` 装配,必须同时给 `--executor roll`;真机只验证到预测阶段 |
+| 真实 GRPO 加 OPD 训练与真实 judge | [推迟] | 仍用 mock |
 
 | 局限 | 影响 | 缓解 |
 |---|---|---|
@@ -642,13 +642,13 @@ factory 是最后一个工作包,前八个全部落地后才能施工。
 | 瞬态异常让进程退出 | 需要外部监督者,但没有任何工作包交付监督脚本、重启退避或崩溃计数;规划与轮次处理器在非桥接瞬态异常下没有重入次数上限,只有 MindTrainer 的续训次数有上限 | 调和循环无状态,重启从树续接 |
 | `logs` 看不到成功调用的桥接日志 | 只能看到失败记录登记的引用 | 直接看 `.rismforge/logs/<run>/` |
 | 默认诊断资产是一个一级维度、两道题的最小夹具 | 只证明流程,规划器只看到一个维度 | 换真实题库 |
-| 一条部署会话超过 15 秒即 `DEADLINE_EXCEEDED` | 轮次 `failed` | 调 `interact_deadline_s`,目前不在 `agent.yaml` 里 [计划中] |
-| TypeScript 的 `writeProduct` 无条件提交,读取不经迁移与 Schema 校验 | 两侧校验强度不同;空提交会抛错 | 命令行只改状态字段;提交改为只带本文件,根治要两侧共用读写 [计划中] |
+| 一条部署会话超过 15 秒即 `DEADLINE_EXCEEDED` | 轮次 `failed` | `AgentRuntime` 的 `interact_deadline_s` 目前只作构造参数,不在 `agent.yaml` 里 [计划中] |
+| TypeScript 的 `writeProduct` 无条件提交,读取不经迁移与 Schema 校验 | 两侧校验强度不同;空提交会抛错。提交已只带本文件 | 命令行只改状态字段;根治要两侧共用读写 [计划中] |
 
 | 未核实项 | 影响 | 核实办法 |
 |---|---|---|
-| 本文计划中部分的签名与用例数(共 148)未实跑,只来自施工计划文本及其在集成拷贝上的重放;其中仓库锁与规划等门的 6 个用例是设计修订后补写的,连重放也没做过 | 施工时签名可能微调,用例数可能变化 [计划中] | 工作包 9 落地后,按代码与 `uv run pytest --collect-only -q` 复核 |
-| 前八个工作包的符号名最终是否与本文同名 | 组合根引用的名字可能对不上 [计划中] | 施工前跑 `scripts/check_factory_assumptions.py`,21 行全部 `OK` [计划中] |
+| `cli/` 侧用例数与真实运行结果 | 用例数按源码计,未实跑 | 在 `cli/` 目录跑一次 `npx vitest run` |
+| 前八个工作包的符号名与本文是否同名 | 组合根引用的名字可能对不上 | `scripts/check_factory_assumptions.py` 本次 20 行 `OK`、1 行 `MISMATCH`:`SchedulerConfig` 已多出 `strategy_experience` 字段,脚本的期望列表还没跟上 |
 | 外部命令行的参数模板与用量输出 | 成本数字可能缺失,模板可能要调 | 用真实 `claude`、`codex` 各调一次,看输出里有没有用量 |
 | 规划经真实桥接的正向路径 | 带围栏、带说明文字、被截断的输出只在接真实后端时暴露 | 接真实后端,用 `--planner-backend bridge` 跑一圈 |
 | 规划与提案的质量 | 罐头与启发式后端只证明流程与解析 | 接真实后端后人工评审一批决策 |
@@ -659,7 +659,7 @@ factory 是最后一个工作包,前八个全部落地后才能施工。
 | 已提交产物损坏时进程退出,重启后同一处再抛 | 循环卡死,需人工修树 | 构造一个带合并冲突标记的指令,观察守护进程行为 |
 | 第一次闭环没有基线模型 | 没有可比增益就不会提名 | 真实部署前检查 `models/` 下是否已有晋级模型 |
 | `factory run` 长跑 | 只用 `--max-ticks` 跑过几轮;端口、通道占用与 15 秒超时都没实测 | 跑数小时长循环,监控进程的端口与文件句柄 |
-| TypeScript 泛化只在临时拷贝里跑过 | 真实仓库的 `cli/` 没有动过 [计划中] | 工作包 8 落地后在仓库里跑 `npx vitest run` |
+| TypeScript 泛化只按测试文件的用例清单核对过 | 本次没有在 `cli/` 仓库里实跑 vitest,用例数按源码里的 `it(` 计 | 在仓库里跑一次 `npx vitest run` |
 
 明确不做:真实 GRPO 加 OPD 训练与真实 judge 的接入;桥接的 API 形态;运行中热加载配置;进程内自动重试与自我重启;两种语言合并成一个命令行;图形界面。
 

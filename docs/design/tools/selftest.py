@@ -8,6 +8,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import check_docs  # noqa: E402
+import symbol_index  # noqa: E402
+
+# "只在计划里"的样例符号每次现取:写死一个名字,它一旦落地进代码,用例就会无声地过期。
+PLAN_ONLY = next(n for n in sorted(symbol_index._plans() - symbol_index._code())
+                 if symbol_index.CAMEL.match(n) and symbol_index._candidate(n) == n
+                 and n not in symbol_index.ALLOW)
 
 HEAD = ("# 测试文档\n\n| 项 | 内容 |\n|---|---|\n| 一句话 | 测试 |\n| 状态 | [已落地] |\n| 所在层 | 控制层 |\n"
         "| 代码位置 | `src/controlplane` |\n| 基线提交 | `8dd295b` |\n| 依赖 | 无 |\n| 被依赖 | 无 |\n"
@@ -48,8 +54,8 @@ CASES = [
     ("图占位", GOOD + "\n<!-- figure:begin 00-states -->\n<!-- figure:end 00-states -->\n", lambda e, w: not e),
     ("缺图文件", GOOD + "\n<!-- figure:begin 99-nope -->\n<!-- figure:end 99-nope -->\n", lambda e, w: has(e, "缺图")),
     ("符号在代码里", GOOD + "\n`reconcile_once()` 与 `TreeState`\n", lambda e, w: not e and not has(w, "符号告警")),
-    ("符号只在计划里且未标", GOOD + "\n`RunView` 是视图\n", lambda e, w: has(w, "缺 [计划中]")),
-    ("符号只在计划里且已标", GOOD + "\n`RunView` [计划中]\n", lambda e, w: not has(w, "符号告警")),
+    ("符号只在计划里且未标", GOOD + f"\n`{PLAN_ONLY}` 是视图\n", lambda e, w: has(w, "缺 [计划中]")),
+    ("符号只在计划里且已标", GOOD + f"\n`{PLAN_ONLY}` [计划中]\n", lambda e, w: not has(w, "符号告警")),
     ("符号哪里都没有", GOOD + "\n`FooBarBaz()`\n", lambda e, w: has(w, "都找不到")),
     ("外部点号调用不查", GOOD + "\n`json.dumps()`\n", lambda e, w: not has(w, "符号告警")),
     ("协议消息名", GOOD + "\n`SubmitTurn` 与 `CreateSession`\n", lambda e, w: not has(w, "符号告警")),

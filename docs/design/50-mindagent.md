@@ -3,13 +3,13 @@
 | 项 | 内容 |
 |---|---|
 | 一句话 | 新模型晋级后,部署 Actio 实例采集经验,分析行为缺口,生成并验证技能提案,经审核门②收录进正式库 |
-| 状态 | [计划中] |
+| 状态 | 部分落地:配置、库读取、失败守卫、部署、分析、提案、验证、打包、轮次与收录两个处理器、调和循环触发与组合根装配 [已落地],已由 `factory run --enable agent,admit` 经 `reconcile_once` 端到端跑通;闭环里的模型后端是罐头实现(`factory.agent.CannedGuidedBackend`,不加载 checkpoint),轮次产物不记后端来源 |
 | 所在层 | 计算层 |
-| 代码位置 | `src/mindagent` [计划中] |
-| 基线提交 | `8dd295b`(2026-10-10) |
+| 代码位置 | `src/mindagent` [已落地] |
+| 基线提交 | `b826440`(2026-10-21) |
 | 依赖 | ControlPlane(`controlplane`)、Actio(`actio`)、外部推理桥接(`inference_bridge`)、SocialSimulator(`simulator` 的数据模型、产物读写、实时环境服务客户端) |
 | 被依赖 | factory 组合根(注册两个处理器);调和循环经注入调用处理器;命令行读提案载荷 |
-| 对应实施计划 | 工作包 7(任务 80 至 89)[计划中] |
+| 对应实施计划 | 工作包 7(任务 80 至 89)与工作包 8、9 的触发与装配 [已落地] |
 
 ## 0. 系统速览
 
@@ -20,15 +20,15 @@
 
 | 子系统 | 职责 | 所在层 | 现状 |
 |---|---|---|---|
-| ControlPlane | 协调层:git 版本化产物树、状态机、调和循环、三个审核门 | 控制层 | 核心 [已落地],闭环扩展 [计划中] |
+| ControlPlane | 协调层:git 版本化产物树、状态机、调和循环、三个审核门 | 控制层 | [已落地] |
 | SocialSimulator | 情境与人格生成、多智能体仿真、实时环境服务、诊断评测 | 计算层 | [已落地];诊断默认用 mock 后端,`--evaluator someval` 装配 vLLM 加 SoMEval 的真实运行器 [已落地],真机只验证到预测阶段 |
 | MindTrainer | 权重级训练:BatchTrain(SFT 后接 GRPO 加 OPD)与 InteractTrain | 计算层 | [已落地],默认入口的训练执行器是 mock;ROLL LoRA SFT 真实执行器 [已落地],由 `--executor roll` 装配,已在真实主机上端到端跑通一次 |
-| MindAgent | 部署态智能体的技能与记忆自进化,不改权重 | 计算层 | [计划中] |
-| RecipeStore | 验证有效的训练配方的版本化仓库 | 控制层 | [计划中] |
-| TrainScheduler | 决策执行器:装配上下文、校验决策、构造训练指令、提名配方 | 控制层 | [计划中] |
-| TrainPlanner | 决策学习者:经可插拔后端给出下一轮训练决策 | 控制层 | [计划中] |
+| MindAgent | 部署态智能体的技能与记忆自进化,不改权重 | 计算层 | [已落地],闭环里经 `--enable agent` 装配;部署驱动用的仍是罐头后端,真实模型后端未接 |
+| RecipeStore | 验证有效的训练配方的版本化仓库 | 控制层 | [已落地] |
+| TrainScheduler | 决策执行器:装配上下文、校验决策、构造训练指令、提名配方 | 控制层 | [已落地],含策略经验(默认关) |
+| TrainPlanner | 决策学习者:经可插拔后端给出下一轮训练决策 | 控制层 | [已落地],默认后端经桥接调用命令行模型 |
 
-共享基础设施有五个。**Actio** 是带技能库与显式记忆的智能体框架,每次响应附带激活轨迹。**外部推理桥接**用命令行调用外部强模型。**远端计算层** `compute` 经 SSH 在远端 GPU 主机上跑作业 [已落地]。**ROLL** 是分布式训练引擎,**vLLM** 是推理引擎。V1 经远端计算层接入 ROLL 的 LoRA SFT [已落地](由 `--executor roll` 装配,已在真实主机上从指令跑到候选一次)与 vLLM 推理服务 [计划中]。已落地部分仍由确定性 mock 顶替。真实 GRPO 加 OPD 训练与真实 judge [推迟]。
+共享基础设施有五个。**Actio** 是带技能库与显式记忆的智能体框架,每次响应附带激活轨迹。**外部推理桥接**用命令行调用外部强模型。**远端计算层** `compute` 经 SSH 在远端 GPU 主机上跑作业 [已落地]。**ROLL** 是分布式训练引擎,**vLLM** 是推理引擎。V1 经远端计算层接入 ROLL 的 LoRA SFT [已落地](由 `--executor roll` 装配,已在真实主机上从指令跑到候选一次)与 vLLM 推理服务 [已落地](命令拼装、SSH 隧道、服务生命周期;真机端到端待补)。已落地部分仍由确定性 mock 顶替。真实 GRPO 加 OPD 训练与真实 judge [推迟]。
 
 **状态标记。** **[已落地]** 表示代码在主干上且有测试。**[计划中]** 表示设计与实施计划已定,代码还没写。**[推迟]** 表示明确不在 V1 范围内。图只画目标系统,不标进展,进展只看正文的状态标记。
 
@@ -39,7 +39,7 @@
 | 产物树 | 所有协作数据是 git 树里的 YAML 产物,统一信封:`id`、`type`、`version`、`created_at`、`created_by`(含 `owner` 与 `visibility`)、`status`、`schema_version`、`links`、`payload`。checkpoint 等大体量内容只存引用 `{uri, sha256, size_bytes}`;V1 的数据集逐条 episode 进 git,只适合小规模 mock。git 树是唯一真相,读取时先经迁移器链再消费。 |
 | 状态机 | 需审核类:`draft → pending_review → approved → effective`,之后可到 `deprecated` 或 `superseded`,`pending_review` 也可到 `rejected`。非审核类:`pending → executed → consumed`,`pending` 也可到 `failed`。被拒绝与失败的产物保留;被拒绝的候选进入下一轮规划的输入,失败只留痕、等人处理。 |
 | 调和循环 | 纯函数 `reconcile(树视图) → 动作列表`,守护进程按间隔轮询并执行动作。循环无状态、动作幂等,进程崩溃后从 git 树续接。子系统之间不直接调用,只读写产物。 |
-| 审核门 | 三道人工门:① checkpoint 晋级,② 技能与记忆增量纳入,③ 配方入库。证据不在场就不能批准:门①要诊断报告,门②要验证结果,门③要可复现性校验报告。门②与门③ [计划中]。 |
+| 审核门 | 三道人工门:① checkpoint 晋级,② 技能与记忆增量纳入,③ 配方入库。证据不在场就不能批准:门①要诊断报告,门②要验证结果,门③要可复现性校验报告。门②与门③ [已落地]。 |
 | 受限直连 | 两处高频实时调用绕过 ControlPlane:① MindTrainer 与 SocialSimulator 之间的 InteractTrain rollout,② MindAgent 与 SocialSimulator 之间的部署经验采集。两处都走 gRPC 双向流,发生在计算层内部。是否开会话仍由 ControlPlane 决策。 |
 | 失败分类 | T1 瞬态:有限次指数退避重试,耗尽升为 T3。T2 确定性:不重放,按所属子系统的校验链处理,LLM 的随机输出可有限次重采样。T3 需人工:写失败记录,不自动重跑。失败是数据,不是异常。 |
 
@@ -56,7 +56,7 @@
 | Recipe(配方) | 验证有效的完整训练方案,分 batch、interact、agent_rsi 三类 |
 | DiagnosticReport | 诊断评测产出的报告:维度、分数、置信区间、错误类型、退化标记 |
 | Activation trace(激活轨迹) | Actio 每次响应附带的记录:命中的技能候选、选中的技能、命中的记忆 |
-| Evidence grade(证据等级) | 诊断报告的可信等级 `stub`、`mock`、`real`,决定它能否驱动规划与提名 [计划中] |
+| Evidence grade(证据等级) | 诊断报告的可信等级 `stub`、`mock`、`real`,决定它能否驱动规划与提名;缺标记一律判 `stub`,失败关闭 |
 <!-- shared:end context-block -->
 
 ## 1. 定位
@@ -177,23 +177,23 @@ MindAgent 是 AgentRSI 路径的执行者:不改权重,只让技能库与记忆�
 </details>
 <!-- figure:end 50-mindagent-architecture -->
 
-轮次处理器按编号 1 到 5 依次调用部署、分析、提案、验证、打包。它读 `AgentConfig` 与正式库,失败一律经失败守卫留痕。收录处理器不经过流水线,只用正式库读取与失败守卫。全部模块都在 `src/mindagent` 下 [计划中]。
+轮次处理器按编号 1 到 5 依次调用部署、分析、提案、验证、打包。它读 `AgentConfig` 与正式库,失败一律经失败守卫留痕。收录处理器不经过流水线,只用正式库读取与失败守卫。全部模块都在 `src/mindagent` 下 [已落地]。
 
-**模块表**(全部 [计划中],接口施工时可能微调)
+**模块表**
 
 | 模块 | 职责 | 依赖 | 状态 |
 |---|---|---|---|
-| `config` | 冻结配置 `AgentConfig`,找出 Actio 占的角色位 | `simulator.datamodel` | [计划中] |
-| `library` | 读正式库与库版本,推出收录后的条目 id | `actio`、`controlplane.paths` | [计划中] |
-| `failures` | 判"读不出"、校验 run id、只记一次失败记录 | `controlplane.ledger` | [计划中] |
-| `deployment` | 流水线 1:经接口②跑部署 episode 并落盘 | 实时环境服务客户端、`store_adapter` | [计划中] |
-| `analysis` | 流水线 2:跨 episode 统计行为缺口 | `actio.signals`、`actio.triggers` | [计划中] |
-| `proposals` | 流水线 3:规则模板或桥接生成技能草案 | `actio.skills`、`inference_bridge` | [计划中] |
-| `verify` | 流水线 4:离线重放度量行为改变 | `analysis`、Actio 实例 | [计划中] |
-| `packaging` | 流水线 5:按阈值筛选,写提案产物 | `controlplane.paths` | [计划中] |
-| `rounds` | 轮次处理器工厂,取代旧轮次 | 以上全部 | [计划中] |
-| `admit` | 收录处理器 | `library`、`failures` | [计划中] |
-| `errors` | 本包异常:数据错误、解析耗尽、轮次失败 | 无 | [计划中] |
+| `config` | 冻结配置 `AgentConfig`,找出 Actio 占的角色位 | `simulator.datamodel` | [已落地] |
+| `library` | 读正式库与库版本,推出收录后的条目 id | `actio`、`controlplane.paths` | [已落地] |
+| `failures` | 判"读不出"、校验 run id、只记一次失败记录 | `controlplane.ledger` | [已落地] |
+| `deployment` | 流水线 1:经接口②跑部署 episode 并落盘 | 实时环境服务客户端、`store_adapter` | [已落地] |
+| `analysis` | 流水线 2:跨 episode 统计行为缺口 | `actio.signals`、`actio.triggers` | [已落地] |
+| `proposals` | 流水线 3:规则模板或桥接生成技能草案 | `actio.skills`、`inference_bridge` | [已落地] |
+| `verify` | 流水线 4:离线重放度量行为改变 | `analysis`、Actio 实例 | [已落地] |
+| `packaging` | 流水线 5:按阈值筛选,写提案产物 | `controlplane.paths` | [已落地] |
+| `rounds` | 轮次处理器工厂,取代旧轮次 | 以上全部 | [已落地] |
+| `admit` | 收录处理器 | `library`、`failures` | [已落地] |
+| `errors` | 本包异常:数据错误、解析耗尽、轮次失败 | 无 | [已落地] |
 
 **依赖方向规则**
 
@@ -201,23 +201,23 @@ MindAgent 是 AgentRSI 路径的执行者:不改权重,只让技能库与记忆�
 |---|---|
 | 可以导入 | `controlplane`、`actio`、`inference_bridge`、`simulator.datamodel`、`simulator.store_adapter`、`simulator.realtime.client` |
 | 不得导入 | `mindtrainer`、`diagnostic`、`recipestore`、`trainplanner`、`trainscheduler`、`factory` |
-| 反向 | `controlplane` 不出现 `mindagent`;静态测试强制 [计划中] |
+| 反向 | `controlplane` 不出现 `mindagent`;静态测试强制 [已落地] |
 
 ## 4. 数据模型与状态机
 
 结论:MindAgent 写五类产物;轮次走非审核类状态机,提案走审核类状态机。
 
-**实体表**(施工时可能微调)
+**实体表**
 
 | 实体 | 字段与含义 | 约束 |
 |---|---|---|
-| `AgentConfig` [计划中] | 情境清单、角色绑定、每情境 episode 数、重跑上限、分析阈值、验证阈值、解析重试上限 | 冻结;情境非空不重复;绑定恰好一个 `self_play`;比例在 0 到 1 |
-| `LibraryState` [计划中] | `skills`、`memories`、`version{skill, memory}` | 只收 `effective` 条目,按 id 排序;版本为十进制数字串 |
-| `BehaviorFinding` [计划中] | `id`、`signal`、`pattern`、`support`、`ratio`、`episode_refs` | `id` 由信号与排序后的 episode id 求 sha256 前 12 位 |
-| `ProposalDraft` [计划中] | `finding_id`、`increments`、`generator` | V1 只有一个 `kind: skill` 增量 |
-| `Verification` [计划中] | `method`、`episodes`、`fired_on_motivating`、`fired_elsewhere`、`notes`、可选 `quality_notes` | `method` 固定为 `replay_behavior` |
+| `AgentConfig` [已落地] | 情境清单、角色绑定、每情境 episode 数、重跑上限、分析阈值、验证阈值、解析重试上限 | 冻结;情境非空不重复;绑定恰好一个 `self_play`;比例在 0 到 1 |
+| `LibraryState` [已落地] | `skills`、`memories`、`version{skill, memory}` | 只收 `effective` 条目,按 id 排序;版本为十进制数字串 |
+| `BehaviorFinding` [已落地] | `id`、`signal`、`pattern`、`support`、`ratio`、`episode_refs` | `id` 由信号与排序后的 episode id 求 sha256 前 12 位 |
+| `ProposalDraft` [已落地] | `finding_id`、`increments`、`generator` | V1 只有一个 `kind: skill` 增量 |
+| `Verification` [已落地] | `method`、`episodes`、`fired_on_motivating`、`fired_elsewhere`、`notes`、可选 `quality_notes` | `method` 固定为 `replay_behavior` |
 
-| `AgentConfig` 字段 [计划中] | `max_turns` | `episodes_per_scenario` | `max_retries_per_episode` | `min_support` / `min_ratio` | 验证阈值 | `max_parse_retries` |
+| `AgentConfig` 字段 [已落地] | `max_turns` | `episodes_per_scenario` | `max_retries_per_episode` | `min_support` / `min_ratio` | 验证阈值 | `max_parse_retries` |
 |---|---|---|---|---|---|---|
 | 默认值 | 6 | 1 | 1 | 3 / 0.5 | 0.8 / 0.2 | 2 |
 
@@ -225,24 +225,24 @@ MindAgent 是 AgentRSI 路径的执行者:不改权重,只让技能库与记忆�
 
 | 产物类型 | 路径 | 状态机种类 | 写方 | 状态 |
 |---|---|---|---|---|
-| `agent_round` | `control-plane/agent_rounds/agent-round-<model>.yaml` | 非审核类 | 轮次处理器 | [计划中] |
-| 部署 episode | `control-plane/runs/<run>/episodes/deploy-<model>-<scenario>-<k>.yaml` | 无 | 部署驱动器 | [计划中] |
-| `skill_memory_proposal` | `control-plane/skill_memory_proposals/proposal-<round>-<n>/proposal.yaml` | 审核类 | 打包器;人改状态 | [计划中] |
-| `skill` / `memory` | `control-plane/skill_library/<id>.yaml`、`control-plane/memory_library/<id>.yaml` | 直接 `effective`;`deprecated` 在 V1 没有自动写方,人工改成它后 `load_library` 不再读到 | 收录处理器 | [计划中] |
-| `library_state` | `control-plane/library_state.yaml` | 恒为 `executed` | 收录处理器 | [计划中] |
-| 失败记录 | `control-plane/runs/<run>/failure-<task>.yaml` | 无 | 失败守卫 | [计划中] |
+| `agent_round` | `control-plane/agent_rounds/agent-round-<model>.yaml` | 非审核类 | 轮次处理器 | [已落地] |
+| 部署 episode | `control-plane/runs/<run>/episodes/deploy-<model>-<scenario>-<k>.yaml` | 无 | 部署驱动器 | [已落地] |
+| `skill_memory_proposal` | `control-plane/skill_memory_proposals/proposal-<round>-<n>/proposal.yaml` | 审核类 | 打包器;人改状态 | [已落地] |
+| `skill` / `memory` | `control-plane/skill_library/<id>.yaml`、`control-plane/memory_library/<id>.yaml` | 直接 `effective`;`deprecated` 在 V1 没有自动写方,人工改成它后 `load_library` 不再读到 | 收录处理器 | [已落地] |
+| `library_state` | `control-plane/library_state.yaml` | 恒为 `executed` | 收录处理器 | [已落地] |
+| 失败记录 | `control-plane/runs/<run>/failure-<task>.yaml` | 无 | 失败守卫 | [已落地] |
 
 **轮次状态**:`pending → executed | failed`。终态再触发是空操作。`failed` 用 `payload.failure.category` 区分三种:`T3` 是真失败,`superseded` 是被新模型取代。
 
 **提案状态**:`pending_review → approved | rejected`,`approved → effective`。审核类状态机里 `approved` 没有通往失败的出口,所以收录失败时提案原样留在 `approved`。
 
-正式库状态产物 `library_state` [计划中]:id 为 `library-state`,类型 `library_state`,状态恒为 `executed`。载荷是 `skill_version`、`memory_version`、`admitted` 三个键,两个版本都是十进制数字串,`admitted` 是收录记录的列表,每条含 `proposal_id`、`skill_version`、`memory_version` 与 `entries`(该次收录写入的条目 id 列表)。信封 `version` 每次收录加一,`links` 是最近一次收录的提案 id。文件不存在时等价于两个版本都是 `"0"`。版本不是十进制数字串(如 `lib-3`、空串、`3.0`、布尔、负数)时读取方抛 `MindAgentDataError`:收录处理器当作确定性失败,轮次处理器判 T3。空库不需要这份产物,预置初始技能时由人手写技能产物与这份产物。
+正式库状态产物 `library_state` [已落地]:id 为 `library-state`,类型 `library_state`,状态恒为 `executed`。载荷是 `skill_version`、`memory_version`、`admitted` 三个键,两个版本都是十进制数字串,`admitted` 是收录记录的列表,每条含 `proposal_id`、`skill_version`、`memory_version` 与 `entries`(该次收录写入的条目 id 列表)。信封 `version` 每次收录加一,`links` 是最近一次收录的提案 id。文件不存在时等价于两个版本都是 `"0"`。版本不是十进制数字串(如 `lib-3`、空串、`3.0`、布尔、负数)时读取方抛 `MindAgentDataError`:收录处理器当作确定性失败,轮次处理器判 T3。空库不需要这份产物,预置初始技能时由人手写技能产物与这份产物。
 
-候选技能与桥接输出的形状 [计划中]:规则模板生成的候选技能 id 为 `skill-candidate-<信号名>`,版本 1,层级 `micro`,优先级 100,触发条件是单个信号,指令取模板文本。桥接路径下外部模型只写 `instructions` 与 `description`,必须恰好输出这两个键,多一个键也不合格;不合格带着原因重问,总次数 `1 + max_parse_retries`,耗尽抛 `ProposalParseError`。传了桥接而 `run_id` 为空时,调用桥接之前就抛 `MindAgentDataError`。规则生成器标识 `rule_template.v1`,桥接生成器标识 `bridge.v1`,提示模板版本 `mindagent-skill-v1`。每次尝试的 task id 带尝试序号,所以每次尝试各记一条成本。
+候选技能与桥接输出的形状 [已落地]:规则模板生成的候选技能 id 为 `skill-candidate-<信号名>`,版本 1,层级 `micro`,优先级 100,触发条件是单个信号,指令取模板文本。桥接路径下外部模型只写 `instructions` 与 `description`,必须恰好输出这两个键,多一个键也不合格;不合格带着原因重问,总次数 `1 + max_parse_retries`,耗尽抛 `ProposalParseError`。传了桥接而 `run_id` 为空时,调用桥接之前就抛 `MindAgentDataError`。规则生成器标识 `rule_template.v1`,桥接生成器标识 `bridge.v1`,提示模板版本 `mindagent-skill-v1`。每次尝试的 task id 带尝试序号,所以每次尝试各记一条成本。
 
-`dropped` 有两种条目 [计划中]:被阈值筛掉的草案,含 `finding_id`、原因、两个验证比例;重入后留下的过期提案,含 `proposal_id` 与原因,原因写明它是更早一次重入留下的。
+`dropped` 有两种条目 [已落地]:被阈值筛掉的草案,含 `finding_id`、原因、两个验证比例;重入后留下的过期提案,含 `proposal_id` 与原因,原因写明它是更早一次重入留下的。
 
-轮次产物载荷 [计划中]:
+轮次产物载荷 [已落地]:
 
 ```yaml
 id: agent-round-zengen-v2
@@ -278,9 +278,9 @@ payload:
 
 ## 5. 接口契约
 
-结论:对外只有两个处理器入口,形状都是 `Callable[[GitStore, Action], None]`;以下签名全部 [计划中],施工时可能微调。
+结论:对外只有两个处理器入口,形状都是 `Callable[[GitStore, Action], None]`;以下签名 [已落地]。
 
-**入口**(施工时可能微调)
+**入口**
 
 ```python
 # mindagent.rounds —— 组合根先调工厂,再把返回值注册为 start_agent_round 的处理器
@@ -293,11 +293,11 @@ def make_start_round_handler(*, config: AgentConfig, client_factory, backend_fac
 def handle_admit_proposal(store: GitStore, action: Action) -> None: ...
 ```
 
-轮次处理器的 `action.target_id` 是模型 id `zengen-vN`,收录处理器的是提案 id;两者都不读 `detail` [计划中]。
+轮次处理器的 `action.target_id` 是模型 id `zengen-vN`,收录处理器的是提案 id;两者都不读 `detail` [已落地]。
 
-三个注入的工厂 [计划中]:`client_factory()` 零参数,每条会话新建一个客户端;`backend_factory(model_id, checkpoint_ref)` 每次新建模型后端,部署一份、验证时基线与候选各一份;`base_instance_factory(extra_skills)` 每次返回新的 Actio 实例,传空元组得到基线。部署实例的 `profile` 是 `{model_id, round_id}`。
+三个注入的工厂 [已落地]:`client_factory()` 零参数,每条会话新建一个客户端;`backend_factory` 取 `model_id` 与 `checkpoint_ref`,每次新建模型后端,部署一份、验证时基线与候选各一份;`base_instance_factory` 取 `extra_skills`,每次返回新的 Actio 实例,传空元组得到基线。部署实例的 `profile` 是 `{model_id, round_id}`。
 
-**流水线函数**(施工时可能微调)
+**流水线函数**
 
 ```python
 def run_deployment_episodes(store, instance, client_factory, *, run_id, scenario_ids, personas,
@@ -316,7 +316,7 @@ def load_library(store) -> LibraryState: ...
 
 与闭环集成设计签名的偏差:部署驱动器多 `model_id` 等四个参数;分析器多 `skills`、`registry`、`signals`;提案生成器与验证器多记账用的 `run_id`、`task_id`;轮次处理器改成闭包工厂。理由都是统一签名只有 `(store, action)`,其余依赖只能从外面注入。
 
-**触发条件**由调和循环判定 [计划中]:`start_agent_round` 在最新 effective 模型没有轮次产物、轮次 `pending` 或读不出时产生;`admit_proposal` 在存在 `approved` 提案时产生。
+**触发条件**由调和循环判定 [已落地]:`start_agent_round` 在最新 effective 模型没有轮次产物、轮次 `pending` 或读不出时产生;`admit_proposal` 在存在 `approved` 提案时产生。
 
 **提案载荷:命令行读取的键**
 
@@ -336,11 +336,11 @@ def load_library(store) -> LibraryState: ...
 
 | 邻居 | 本文依赖它什么 | 它依赖本文什么 |
 |---|---|---|
-| ControlPlane | 路径函数、`ledger.record_failure`、状态迁移检查、`GitStore` 写入内容不变不提交 [计划中] | 两个处理器的名字、位置与形状;终态由处理器自己写回 |
-| Actio | `instantiate`、`respond` 返回三元组、`library_version`、`validate_trace`、`referenced_signals`、内置信号、技能与记忆的 id 前缀 `skill-`、`mem-` [计划中] | 正式库条目的格式;库版本为字符串 |
-| SocialSimulator | 实时环境服务客户端的"客户端后说"、`submit_turn` 带激活轨迹、回显自己轮次时保留轨迹、`write_episode` [计划中] | 部署会话的 `purpose` 固定为 `deployment_simulation`;Actio 占 `self_play` 位 |
-| 外部推理桥接 | `complete(prompt, *, run_id, task_id)`、`BridgeError` 带 `category` 与 `attempts`、每次成功调用记一条成本 [计划中] | 传入非空 `run_id`;每次尝试用不同 `task_id` |
-| factory 组合根 | 注入配置、客户端工厂、模型后端工厂、人格加载器、可选桥接 [计划中] | 按名字 `mindagent.rounds.make_start_round_handler` 取工厂 [计划中] |
+| ControlPlane | 路径函数、`ledger.record_failure`、状态迁移检查、`GitStore` 写入内容不变不提交 [已落地] | 两个处理器的名字、位置与形状;终态由处理器自己写回 |
+| Actio | `instantiate`、`respond` 返回三元组、`library_version`、`validate_trace`、`referenced_signals`、内置信号、技能与记忆的 id 前缀 `skill-`、`mem-` [已落地] | 正式库条目的格式;库版本为字符串 |
+| SocialSimulator | 实时环境服务客户端的"客户端后说"、`submit_turn` 带激活轨迹、回显自己轮次时保留轨迹、`write_episode` [已落地] | 部署会话的 `purpose` 固定为 `deployment_simulation`;Actio 占 `self_play` 位 |
+| 外部推理桥接 | `complete(prompt, *, run_id, task_id)`、`BridgeError` 带 `category` 与 `attempts`、每次成功调用记一条成本 [已落地] | 传入非空 `run_id`;每次尝试用不同 `task_id` |
+| factory 组合根 | 注入配置、客户端工厂、模型后端工厂、人格加载器、可选桥接 [已落地] | 按名字 `mindagent.rounds.make_start_round_handler` 取工厂 [已落地] |
 | 命令行 | 无 | 上表的提案载荷键 |
 
 ## 6. 关键流程
@@ -391,7 +391,7 @@ def load_library(store) -> LibraryState: ...
 
 调和循环为最新 effective 模型产生动作,处理器先看轮次是否已在终态。随后取代旧模型的 `pending` 轮次,绑定模型与正式库并写 `pending`。部署、分析、提案、验证、打包依次执行,最后置 `executed`。红色是两条失败出口,虚线是 R19 的重入。
 
-**轮次处理步骤表**(与图中编号一一对应,表中步骤全部 [计划中])
+**轮次处理步骤表**(与图中编号一一对应)
 
 | 步 | 名称 | 做什么 | 出口 |
 |---|---|---|---|
@@ -404,7 +404,7 @@ def load_library(store) -> LibraryState: ...
 | 7 | 筛选并打包 | 按阈值筛选,通过的写 `pending_review` 提案 | 被筛掉的记进 `dropped` |
 | 8 | 轮次 executed | 写 `episode_ids`、`findings`、`proposals`、`dropped`,置 `executed` | 终态 |
 
-**部署会话的失败分类**(第 5 步,[计划中])
+**部署会话的失败分类**(第 5 步,[已落地])
 
 | 终止原因或状态 | 处理 |
 |---|---|
@@ -413,7 +413,7 @@ def load_library(store) -> LibraryState: ...
 | `invalid_session`、`role_backend_failure`、`client_disconnected`、其他状态码、协议错乱 | 不重跑,轮次 `failed`(T3) |
 | Actio 实例自身抛异常 | 先 `abort()` 会话,原异常原样上抛,不重跑、不包装 |
 
-**分析器的判定**(第 6 步,[计划中])
+**分析器的判定**(第 6 步,[已落地])
 
 | 项 | 规则 |
 |---|---|
@@ -421,7 +421,7 @@ def load_library(store) -> LibraryState: ...
 | 受影响 | 某 agent 轮次信号为真、`selected` 非空、选中技能的触发条件不引用该信号;奇数层 `not` 包住的不算引用 |
 | 出发现 | `ratio = 受影响数 / 有 agent 轮次的 episode 数`;`support ≥ min_support` 且 `ratio ≥ min_ratio` |
 
-**验证器的口径**(第 6 步,[计划中])
+**验证器的口径**(第 6 步,[已落地])
 
 | 量 | 定义 |
 |---|---|
@@ -495,7 +495,7 @@ def load_library(store) -> LibraryState: ...
 
 **走查例子**
 
-数值取自工作包 7 的端到端测试 [计划中],施工时以测试为准。配置:情境 `s1`、`s2`、`s3`,`max_turns=4`,每情境 1 个 episode,对手依次说"我真的很生气!!""好吧,你说说看""那就这样吧"。
+数值取自工作包 7 的端到端测试,与 `tests/test_ma_e2e.py` 一致。配置:情境 `s1`、`s2`、`s3`,`max_turns=4`,每情境 1 个 episode,对手依次说"我真的很生气!!""好吧,你说说看""那就这样吧"。
 
 | 轮 | 前置 | 结果 |
 |---|---|---|
@@ -515,7 +515,7 @@ def load_library(store) -> LibraryState: ...
 |---|---|---|---|---|
 | R11 | 正式技能库放 `skill_library/`,记忆库放 `memory_library/`,版本记在 `library_state.yaml` | 技能与记忆混放在提案目录 | 库是版本化产物,要经审核门进入产物树 | 无 |
 | R13 | 验证只度量"行为是否按预期改变",质量评审可选接 judge | 用对话质量打分筛选 | 质量评分没有可靠来源;行为改变可确定地重放 | 审核人看到的是行为证据,不是质量证据 |
-| R18 | 任何 `BridgeError` [计划中] 都让轮次 `failed` 并记 T3;非桥接瞬态原样上抛 | 桥接 T1 也留 `pending` | 桥接自己已退避重试,留 `pending` 会让守护循环无限空转外部推理 | 外部工具短暂不可用也让这一轮 `failed`,要人删轮次产物重开 |
+| R18 | 任何 `BridgeError` [已落地] 都让轮次 `failed` 并记 T3;非桥接瞬态原样上抛 | 桥接 T1 也留 `pending` | 桥接自己已退避重试,留 `pending` 会让守护循环无限空转外部推理 | 外部工具短暂不可用也让这一轮 `failed`,要人删轮次产物重开 |
 | R19 | `start_agent_round` 在"无轮次或轮次 `pending`"时都触发,处理器负责写终态,重入必须幂等 | 只在无轮次时触发 | 否则瞬态失败或进程被杀留下的 `pending` 永不再派发 | 处理器会被连续唤醒,全靠幂等键挡重复长任务 |
 | MA-1 | 部署 episode 由驱动器用客户端重建的 Episode 改 id 落盘 | 服务端关闭钩子落盘 | 钩子拿不到模型 id、情境内序号与 run;确定性 id 就是幂等键 | 落盘 episode 没有对手内心独白;要它得改成服务端按会话 id 关联 |
 | MA-2 | 已落盘 episode 只在每个 agent 轮次轨迹的库版本与当前实例一致时复用 | 有就复用 | 两次重入之间若有收录,旧 episode 会把已修好的缺口再报一遍 | 库在轮次中途变化时多跑一遍部署 |
@@ -541,7 +541,7 @@ def load_library(store) -> LibraryState: ...
 | 人格加载器等非桥接异常 | T1 | 原样上抛,轮次 `pending` | 无 |
 | 不可重跑的会话失败、会话被拒 | T3 | 轮次 `failed` | `failure-agent-<model>.yaml` |
 | 情境或人格不在树里、库条目不合法、轨迹引用库外技能 | T3 | 轮次 `failed`,不建会话或中止 | `failure-agent-<model>.yaml` |
-| `BridgeError` [计划中](T1 已用尽或 T2) | T3 | 轮次 `failed`,`retries = attempts - 1` | `failure-agent-<model>.yaml` |
+| `BridgeError` [已落地](T1 已用尽或 T2) | T3 | 轮次 `failed`,`retries = attempts - 1` | `failure-agent-<model>.yaml` |
 | 桥接输出解析耗尽 | T3 | 轮次 `failed`,`retries` 为已重试次数 | `failure-agent-<model>.yaml` |
 | 轮次产物读不出 | T3 | 整份重写为 `failed` | `failure-agent-<model>.yaml`(run 可得时) |
 | 模型产物缺失、非 `effective`、`links` 不足 | T3 | 轮次 `failed` | 只在轮次产物 `payload.failure` 上 |
@@ -549,9 +549,9 @@ def load_library(store) -> LibraryState: ...
 | 提案增量不合法、库版本非数字 | T2 | 提案留在 `approved`,库不变 | `failure-admit-<提案>.yaml` |
 | run id 坏掉或 run 目录不存在 | — | 不写失败记录 | 只在轮次产物或提案上 |
 
-轮次的失败记录挂在绑定模型所在 run 下,task id 为 `agent-<model>`。收录的失败记录挂在提案载荷里的 `run_id` 下,task id 为 `admit-<提案 id>` [计划中]。
+轮次的失败记录挂在绑定模型所在 run 下,task id 为 `agent-<model>`。收录的失败记录挂在提案载荷里的 `run_id` 下,task id 为 `admit-<提案 id>` [已落地]。
 
-本包的异常 [计划中]:`errors` 模块里有 `MindAgentDataError`(数据不合法的基类,库版本不是十进制数字串也抛它)、`ProposalParseError`、`AgentRoundFailedError`;`deployment` 模块里有 `DeploymentFailedError`。
+本包的异常 [已落地]:`errors` 模块里有 `MindAgentDataError`(数据不合法的基类,库版本不是十进制数字串也抛它)、`ProposalParseError`、`AgentRoundFailedError`;`deployment` 模块里有 `DeploymentFailedError`。
 
 **只读观测手段**
 
@@ -565,28 +565,28 @@ def load_library(store) -> LibraryState: ...
 
 ## 9. 测试策略
 
-结论:全部测试脱离真实环境可跑,gRPC 用真实 loopback 服务端,桥接用脚本化替身;计划新增 152 个用例。
+结论:全部测试脱离真实环境可跑,gRPC 用真实 loopback 服务端,桥接用脚本化替身;共 152 个用例。
 
 | 层次 | 对象 | 替身 |
 |---|---|---|
 | 单元 | 配置校验、库读取、分析、提案、验证、打包 | 罐头模型后端、构造的 Episode |
-| 组件 | 部署驱动器与两个处理器 | 真实 loopback 服务端、替身客户端、`ScriptedBridge` [计划中]、故障注入 |
+| 组件 | 部署驱动器与两个处理器 | 真实 loopback 服务端、替身客户端、`ScriptedBridge` [已落地]、故障注入 |
 | 端到端 | 三轮 AgentRSI 环路加一次收录 | 真实 loopback 服务端,对手为脚本化后端 |
 | 静态 | 依赖方向、`__future__` 首行 | 无 |
 
-**计划用例数**(全部 [计划中])
+**用例数**
 
-| 测试文件 | 计划用例数 | 覆盖 |
+| 测试文件 | 用例数 | 覆盖 |
 |---|---|---|
-| `tests/test_ma_config_library.py` [计划中] | 27 | 配置校验、库版本 8 个反例、静态检查 |
-| `tests/test_ma_deployment.py` [计划中] | 19 | 落盘 id、轨迹校验、复用、T1 重跑、实例异常 |
-| `tests/test_ma_analysis.py` [计划中] | 19 | 判定、阈值等号、`not` 包裹、库外技能 |
-| `tests/test_ma_proposals.py` [计划中] | 20 | 规则模板、严格解析、重试、成本条数 |
-| `tests/test_ma_verify.py` [计划中] | 8 | 精准命中、触发过宽、优先级压不过 |
-| `tests/test_ma_packaging.py` [计划中] | 8 | 筛选、编号、重入不改写 |
-| `tests/test_ma_admit.py` [计划中] | 22 | 三个崩溃点、T2、5 种坏 run id、记忆增量 |
-| `tests/test_ma_rounds.py` [计划中] | 28 | 空库沉默、R18、R19 重入、取代、读不出、过期提案 |
-| `tests/test_ma_e2e.py` [计划中] | 1 | 第 6 章走查例子 |
+| `tests/test_ma_config_library.py` [已落地] | 27 | 配置校验、库版本 8 个反例、静态检查 |
+| `tests/test_ma_deployment.py` [已落地] | 19 | 落盘 id、轨迹校验、复用、T1 重跑、实例异常 |
+| `tests/test_ma_analysis.py` [已落地] | 19 | 判定、阈值等号、`not` 包裹、库外技能 |
+| `tests/test_ma_proposals.py` [已落地] | 20 | 规则模板、严格解析、重试、成本条数 |
+| `tests/test_ma_verify.py` [已落地] | 8 | 精准命中、触发过宽、优先级压不过 |
+| `tests/test_ma_packaging.py` [已落地] | 8 | 筛选、编号、重入不改写 |
+| `tests/test_ma_admit.py` [已落地] | 22 | 三个崩溃点、T2、5 种坏 run id、记忆增量 |
+| `tests/test_ma_rounds.py` [已落地] | 28 | 空库沉默、R18、R19 重入、取代、读不出、过期提案 |
+| `tests/test_ma_e2e.py` [已落地] | 1 | 第 6 章走查例子 |
 
 服务端夹具沿用 `tests/test_mt_trajectory_interact.py` 的搭法。gRPC 测试给每条流加 15 秒 deadline,收尾等服务端停止,防止挂住套件。
 
@@ -594,19 +594,19 @@ def load_library(store) -> LibraryState: ...
 
 ## 10. 现状、局限与未核实项
 
-结论:`src/mindagent` [计划中] 一行代码都还没有;设计与施工任务已定,前置是工作包 1 与工作包 6。
+结论:`src/mindagent` 十一个模块 [已落地],两个处理器由组合根按 `--enable agent,admit` 装配,并经 `reconcile_once` 端到端跑通;闭环里的模型后端是罐头实现,不加载 checkpoint,轮次产物也不记后端来源。
 
-**已落地与计划中**
+**能力现状**
 
 | 能力 | 状态 | 说明 |
 |---|---|---|
 | 实时环境服务的 `deployment_simulation` 用途 | [已落地] | 数据模型与协议已有该取值 |
-| 激活轨迹字段 | [已落地] | `TurnRecord.activation_trace` 已存在,当前运行器写 `None` |
-| `submit_turn` 携带激活轨迹 | [计划中] | 工作包 6 |
-| 产物路径函数与失败台账 | [计划中] | 工作包 1 |
-| 部署、分析、提案、验证、打包 | [计划中] | 工作包 7 |
-| 轮次处理器与收录处理器 | [计划中] | 工作包 7 |
-| 调和循环触发与注入、组合根装配与端到端 | [计划中] | 工作包 8、工作包 9 |
+| 激活轨迹字段 | [已落地] | `TurnRecord.activation_trace` 已存在,运行器接受后端返回的三元组并写进该轮 |
+| `submit_turn` 携带激活轨迹 | [已落地] | 工作包 6 |
+| 产物路径函数与失败台账 | [已落地] | 工作包 1 |
+| 部署、分析、提案、验证、打包 | [已落地] | 工作包 7 |
+| 轮次处理器与收录处理器 | [已落地] | 工作包 7 |
+| 调和循环触发与注入、组合根装配与端到端 | [已落地] | 工作包 8、工作包 9 |
 
 **三条必须知道的设计取舍**
 
@@ -633,14 +633,14 @@ def load_library(store) -> LibraryState: ...
 
 | 项 | 影响 | 核实办法 |
 |---|---|---|
-| 计划用例数与累计通过数 | 只在临时拷贝里跑过,真实仓库基线随已合并的工作包变化 | 开工时在主干跑全量测试取基线,逐任务核对增量 |
+| 累计通过数 | 九个测试文件共 152 个用例,数目已按 `--collect-only` 实测;在主干上的全量通过数没有单独记录 | 在主干跑全量测试取基线,逐任务核对增量 |
 | gRPC 用例稳定性 | 只在 macOS 上连跑三次 | 在 Linux 与 CI 上重复运行三个 gRPC 测试文件 |
 | 外部模型能否稳定只输出一个 JSON 对象 | 解析耗尽频繁时轮次大量 `failed` | 接真实外部工具后统计解析失败率 |
 | 真实模型后端按 `checkpoint_ref` 加载并支持带指导语响应 | 部署与验证无法接真实模型 | 计算层接入时用真实 checkpoint 跑一轮 |
 | 提案生成走本地的外部推理桥接,而 MindAgent 属于计算层 | 整体放到计算层需要把外部命令行的登录态与凭证带过去,与「凭证只留在控制层」冲突 | 部署时定下提案生成留在控制层,或为跨层调用设计接口 |
 | 信号词典与阈值 | 0.8 / 0.2、`min_support=3`、`min_ratio=0.5`、优先级 100 都是拟定值 | 积累部署 episode 后回看误报与漏报 |
-| 处理器经调和循环注入 | 只做了文本核对 | 工作包 9 的端到端经 `reconcile_once` 跑通 |
-| 生产客户端没有流 deadline | 服务端失联时轮次挂住 | 组合根用 `DeadlineStub` 给每条流加 15 秒 deadline,不改生产客户端 [计划中];失联场景未压测 |
+| 处理器经调和循环注入 | 只在 mock 训练与罐头模型后端下跑通 | 工作包 9 的端到端经 `reconcile_once` 跑通;真实执行器与闭环处理器暂不能同时启用(`--executor roll` 与 `--enable` 互斥) |
+| 生产客户端没有流 deadline | 服务端失联时轮次挂住 | 组合根用 `DeadlineStub` 给每条流加 15 秒 deadline,不改生产客户端 [已落地];失联场景未压测 |
 
 **明确不做**:不改模型权重;不在运行中打断轮次;不从生产日志采集经验;不自动生成记忆增量;不自动提名 AgentRSI 配方;不让机器改写人审过的提案。
 

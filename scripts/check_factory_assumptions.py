@@ -44,7 +44,8 @@ ASSUMPTIONS: list[tuple[str, str, str, tuple[str, ...] | None, tuple[str, ...] |
 ]
 # A5-4 的字段集:scheduler.yaml 恰好九个键(计划 5 Ruling 8)
 SCHEDULER_KEYS = ("confirm_directives", "allow_interact", "accept_mock_evidence", "perturbable", "min_gain",
-                  "cost_gain_window", "recent_decision_window", "max_plan_attempts", "template_version")
+                  "cost_gain_window", "recent_decision_window", "max_plan_attempts", "template_version",
+                  "strategy_experience")
 
 
 def check(module: str, name: str, pos, kw) -> str:

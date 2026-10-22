@@ -3,13 +3,13 @@
 | 项 | 内容 |
 |---|---|
 | 一句话 | 权重级训练子系统:读训练指令与数据集清单,跑 SFT 与 GRPO 加 OPD,产出候选 checkpoint,崩溃后从存点续训 |
-| 状态 | 部分落地:配置、两种轨迹源、奖励管线、分组、mock 执行器、续训、编排、派发器 [已落地];ROLL LoRA SFT 真实执行器与适配器导出转换器 [已落地],已由 `factory run --executor roll` 装配,已在真实主机上从训练指令端到端跑到待审候选一次(单段两步训练加导出),多段与续训尚未在真机上跑过;数据合成接线 [计划中];真实 GRPO 加 OPD 训练 [推迟] |
+| 状态 | 部分落地:配置、两种轨迹源、奖励管线、分组、mock 执行器、续训、编排、派发器、数据合成接线 [已落地];ROLL LoRA SFT 真实执行器与适配器导出转换器 [已落地],已由 `factory run --executor roll` 装配,已在真实主机上从训练指令端到端跑到待审候选一次(单段两步训练加导出),多段与续训尚未在真机上跑过;数据合成的失败留痕仍只有指令的 `failure` 字段,没有独立的失败记录产物(统一写入函数不在本包);真实 GRPO 加 OPD 训练 [推迟] |
 | 所在层 | 计算层 |
-| 代码位置 | `src/mindtrainer`;`src/mindtrainer/data_spec.py`、`src/mindtrainer/data_producer.py` [计划中] |
-| 基线提交 | `8dd295b`(2026-10-10) |
+| 代码位置 | `src/mindtrainer`;`src/mindtrainer/data_spec.py`、`src/mindtrainer/data_producer.py`;真实执行器与转换器在 `src/mindtrainer/roll_executor.py` 与 `src/mindtrainer/roll_converter.py`,经 `src/compute` 调远端主机 |
+| 基线提交 | `b826440`(2026-10-21) |
 | 依赖 | ControlPlane(`controlplane` 的信封、GitStore、路径、状态机、派发缝);SocialSimulator(`simulator` 的数据模型、数据集清单、实时环境服务客户端);真实执行器另依赖远端计算层(`compute`) |
-| 被依赖 | ControlPlane 调和循环经注入的派发器调用它;`scripts/run_controlplane.py`;factory 与 TrainScheduler [计划中] |
-| 对应实施计划 | 工作包 2(任务 30 至 34)[计划中] |
+| 被依赖 | ControlPlane 调和循环经注入的派发器调用它;`scripts/run_controlplane.py`;factory 与 TrainScheduler |
+| 对应实施计划 | 工作包 2(任务 30 至 34);真实执行器与转换器另由计算层计划交付 |
 
 ## 0. 系统速览
 
@@ -20,15 +20,15 @@
 
 | 子系统 | 职责 | 所在层 | 现状 |
 |---|---|---|---|
-| ControlPlane | 协调层:git 版本化产物树、状态机、调和循环、三个审核门 | 控制层 | 核心 [已落地],闭环扩展 [计划中] |
+| ControlPlane | 协调层:git 版本化产物树、状态机、调和循环、三个审核门 | 控制层 | [已落地] |
 | SocialSimulator | 情境与人格生成、多智能体仿真、实时环境服务、诊断评测 | 计算层 | [已落地];诊断默认用 mock 后端,`--evaluator someval` 装配 vLLM 加 SoMEval 的真实运行器 [已落地],真机只验证到预测阶段 |
 | MindTrainer | 权重级训练:BatchTrain(SFT 后接 GRPO 加 OPD)与 InteractTrain | 计算层 | [已落地],默认入口的训练执行器是 mock;ROLL LoRA SFT 真实执行器 [已落地],由 `--executor roll` 装配,已在真实主机上端到端跑通一次 |
-| MindAgent | 部署态智能体的技能与记忆自进化,不改权重 | 计算层 | [计划中] |
-| RecipeStore | 验证有效的训练配方的版本化仓库 | 控制层 | [计划中] |
-| TrainScheduler | 决策执行器:装配上下文、校验决策、构造训练指令、提名配方 | 控制层 | [计划中] |
-| TrainPlanner | 决策学习者:经可插拔后端给出下一轮训练决策 | 控制层 | [计划中] |
+| MindAgent | 部署态智能体的技能与记忆自进化,不改权重 | 计算层 | [已落地],闭环里经 `--enable agent` 装配;部署驱动用的仍是罐头后端,真实模型后端未接 |
+| RecipeStore | 验证有效的训练配方的版本化仓库 | 控制层 | [已落地] |
+| TrainScheduler | 决策执行器:装配上下文、校验决策、构造训练指令、提名配方 | 控制层 | [已落地],含策略经验(默认关) |
+| TrainPlanner | 决策学习者:经可插拔后端给出下一轮训练决策 | 控制层 | [已落地],默认后端经桥接调用命令行模型 |
 
-共享基础设施有五个。**Actio** 是带技能库与显式记忆的智能体框架,每次响应附带激活轨迹。**外部推理桥接**用命令行调用外部强模型。**远端计算层** `compute` 经 SSH 在远端 GPU 主机上跑作业 [已落地]。**ROLL** 是分布式训练引擎,**vLLM** 是推理引擎。V1 经远端计算层接入 ROLL 的 LoRA SFT [已落地](由 `--executor roll` 装配,已在真实主机上从指令跑到候选一次)与 vLLM 推理服务 [计划中]。已落地部分仍由确定性 mock 顶替。真实 GRPO 加 OPD 训练与真实 judge [推迟]。
+共享基础设施有五个。**Actio** 是带技能库与显式记忆的智能体框架,每次响应附带激活轨迹。**外部推理桥接**用命令行调用外部强模型。**远端计算层** `compute` 经 SSH 在远端 GPU 主机上跑作业 [已落地]。**ROLL** 是分布式训练引擎,**vLLM** 是推理引擎。V1 经远端计算层接入 ROLL 的 LoRA SFT [已落地](由 `--executor roll` 装配,已在真实主机上从指令跑到候选一次)与 vLLM 推理服务 [已落地](命令拼装、SSH 隧道、服务生命周期;真机端到端待补)。已落地部分仍由确定性 mock 顶替。真实 GRPO 加 OPD 训练与真实 judge [推迟]。
 
 **状态标记。** **[已落地]** 表示代码在主干上且有测试。**[计划中]** 表示设计与实施计划已定,代码还没写。**[推迟]** 表示明确不在 V1 范围内。图只画目标系统,不标进展,进展只看正文的状态标记。
 
@@ -39,7 +39,7 @@
 | 产物树 | 所有协作数据是 git 树里的 YAML 产物,统一信封:`id`、`type`、`version`、`created_at`、`created_by`(含 `owner` 与 `visibility`)、`status`、`schema_version`、`links`、`payload`。checkpoint 等大体量内容只存引用 `{uri, sha256, size_bytes}`;V1 的数据集逐条 episode 进 git,只适合小规模 mock。git 树是唯一真相,读取时先经迁移器链再消费。 |
 | 状态机 | 需审核类:`draft → pending_review → approved → effective`,之后可到 `deprecated` 或 `superseded`,`pending_review` 也可到 `rejected`。非审核类:`pending → executed → consumed`,`pending` 也可到 `failed`。被拒绝与失败的产物保留;被拒绝的候选进入下一轮规划的输入,失败只留痕、等人处理。 |
 | 调和循环 | 纯函数 `reconcile(树视图) → 动作列表`,守护进程按间隔轮询并执行动作。循环无状态、动作幂等,进程崩溃后从 git 树续接。子系统之间不直接调用,只读写产物。 |
-| 审核门 | 三道人工门:① checkpoint 晋级,② 技能与记忆增量纳入,③ 配方入库。证据不在场就不能批准:门①要诊断报告,门②要验证结果,门③要可复现性校验报告。门②与门③ [计划中]。 |
+| 审核门 | 三道人工门:① checkpoint 晋级,② 技能与记忆增量纳入,③ 配方入库。证据不在场就不能批准:门①要诊断报告,门②要验证结果,门③要可复现性校验报告。门②与门③ [已落地]。 |
 | 受限直连 | 两处高频实时调用绕过 ControlPlane:① MindTrainer 与 SocialSimulator 之间的 InteractTrain rollout,② MindAgent 与 SocialSimulator 之间的部署经验采集。两处都走 gRPC 双向流,发生在计算层内部。是否开会话仍由 ControlPlane 决策。 |
 | 失败分类 | T1 瞬态:有限次指数退避重试,耗尽升为 T3。T2 确定性:不重放,按所属子系统的校验链处理,LLM 的随机输出可有限次重采样。T3 需人工:写失败记录,不自动重跑。失败是数据,不是异常。 |
 
@@ -56,14 +56,14 @@
 | Recipe(配方) | 验证有效的完整训练方案,分 batch、interact、agent_rsi 三类 |
 | DiagnosticReport | 诊断评测产出的报告:维度、分数、置信区间、错误类型、退化标记 |
 | Activation trace(激活轨迹) | Actio 每次响应附带的记录:命中的技能候选、选中的技能、命中的记忆 |
-| Evidence grade(证据等级) | 诊断报告的可信等级 `stub`、`mock`、`real`,决定它能否驱动规划与提名 [计划中] |
+| Evidence grade(证据等级) | 诊断报告的可信等级 `stub`、`mock`、`real`,决定它能否驱动规划与提名;缺标记一律判 `stub`,失败关闭 |
 <!-- shared:end context-block -->
 
 ## 1. 定位
 
 MindTrainer 把一条 `pending` 的训练指令变成一个 `pending_review` 的候选 checkpoint,并留下可续训的训练记录。它解决两件事:训练配置与数据被哈希锚定,训练可复现;训练中途崩溃不丢进度,也不无限重跑。
 
-它不决定练什么,也不评价练得好不好。练什么由指令作者决定(人工,或 TrainScheduler [计划中]),好不好由诊断评测与审核门①判断。
+它不决定练什么,也不评价练得好不好。练什么由指令作者决定(人工,或 TrainScheduler),好不好由诊断评测与审核门①判断。
 
 <!-- figure:begin 30-mindtrainer-context -->
 ![MindTrainer 的上下文](diagrams/30-mindtrainer-context.svg)
@@ -98,7 +98,7 @@ MindTrainer 把一条 `pending` 的训练指令变成一个 `pending_review` 的
 </details>
 <!-- figure:end 30-mindtrainer-context -->
 
-调和循环发现 `pending` 指令,调用注入的 MindTrainer 派发器。MindTrainer 从产物树读数据集清单与 episode,InteractTrain 经受限直连接口①向实时环境服务要 rollout。训练由 `TrainingExecutor` 协议完成,今天是 mock;ROLL 的 LoRA SFT 真实执行器经远端计算层在远端 GPU 主机上跑 [计划中]。结果以训练记录与候选 checkpoint 写回产物树,之后的审核与晋级不归 MindTrainer。
+调和循环发现 `pending` 指令,调用注入的 MindTrainer 派发器。MindTrainer 从产物树读数据集清单与 episode,InteractTrain 经受限直连接口①向实时环境服务要 rollout。训练由 `TrainingExecutor` 协议完成,今天是 mock;ROLL 的 LoRA SFT 真实执行器经远端计算层在远端 GPU 主机上跑 [已落地]。结果以训练记录与候选 checkpoint 写回产物树,之后的审核与晋级不归 MindTrainer。
 
 ## 2. 目标、非目标与约束
 
@@ -111,15 +111,15 @@ MindTrainer 把一条 `pending` 的训练指令变成一个 `pending_review` 的
 | G3 | 崩溃后从存点续训,batch 下与一次跑完逐字节等价 | `test_mt_orchestrator.py` 在 6 个 step 各注入一次崩溃,终态哈希相同 |
 | G4 | 失败分类明确,确定性失败不重放 | 每类失败点有测试钉住 `failed` 或 `pending` |
 | G5 | 续训有上限,不会无限循环 | `resume_attempts` 触顶后升级为 T3。资源暂时不可用走延后通道,预检在 `run_training` 之前,`ComputeBusyError` 不耗 `resume_attempts`;通道自己有连续延后上限(CP-14),G5 对真正的失败仍成立 |
-| G6 | 候选能走完审核门①并成为下一轮的基座 | `test_mt_integration.py` 两个用例。只对 mock 成立:真实后端 [计划中] 的候选是适配器导出,不是训练起点,第二轮由真实执行器拒绝(见已知局限) |
-| G7 | 带 `data_spec` 的指令缺清单时能自补数据并训练成候选 [计划中] | 派发器合成分支的测试:合成后训练、缺生产器判 `failed`、合成中途崩溃重入收敛 |
+| G6 | 候选能走完审核门①并成为下一轮的基座 | `test_mt_integration.py` 两个用例。只对 mock 成立:真实后端的候选是适配器导出,不是训练起点,第二轮由真实执行器拒绝(见已知局限) |
+| G7 | 带 `data_spec` 的指令缺清单时能自补数据并训练成候选 [已落地] | 派发器合成分支的测试:合成后训练、缺生产器判 `failed`、合成中途崩溃重入收敛 |
 
 | 非目标或推迟项 | 状态 | V1 的处理 |
 |---|---|---|
 | ROLL LoRA SFT 真实执行器与 vLLM LoRA 适配器导出 | [已落地] | 默认入口仍装配 `MockExecutor` 与 `MockConverter`,`--executor roll` 才装配真实的一对(FC-15);真实执行器只声明 `supported_phases = {"sft"}` |
 | 真实 GRPO 加 OPD 训练、把适配器合并回完整 HF 权重 | [推迟] | `grpo_steps > 0` 与真实执行器混用在配置校验期失败 |
 | 异步派发 | [推迟] | 派发器同步返回;接真实 LoRA SFT 的这一轮作为有限定的例外接受同步阻塞(CP-15),异步派发留给下一轮 |
-| 缺清单时先合成数据 | [计划中] | 缺清单的指令判 `failed`,原因写明缺哪份清单 |
+| 缺清单时先合成数据 | [已落地] | 指令带 `data_spec` 且本 run 名下的清单缺失时,派发器调注入的生产器先合成;缺清单又不带 `data_spec` 的指令仍判 `failed` |
 | judge 归因 | 代码已有,入口不提供 judge | judge 归因的指令在派发器里判 `failed` |
 | interact 的实时服务端 | 入口不启动 | `scripts/run_controlplane.py` 下 interact 指令判 `failed`;注入 `client_factory` 与 `policy` 的调用方可以跑 |
 | 成本记账、完整失败记录产物 | [计划中] | 由工作包 1 的统一写入函数负责,MindTrainer 现在不写 |
@@ -195,8 +195,8 @@ MindTrainer 分两层:入口与编排一层决定"从哪跑、跑不跑",模式�
 | `src/mindtrainer/orchestrator.py` | `resume_or_run`、`run_training` | 上述全部 | [已落地] |
 | `src/mindtrainer/dispatch.py` | `make_mindtrainer_dispatcher`:指令到训练,异常到失败类别 | `controlplane.daemon`、编排器 | [已落地] |
 | `src/mindtrainer/wire.py` | 把调和循环接到派发器的入口 | `controlplane.daemon` | [已落地] |
-| `src/mindtrainer/data_spec.py` | `data_spec` 严格解析、要合成哪些阶段、`DataProducer` 协议 | `training_config` | [计划中] |
-| `src/mindtrainer/data_producer.py` | 默认数据生产器 `TemplateDataProducer` | `simulator` | [计划中] |
+| `src/mindtrainer/data_spec.py` | `data_spec` 严格解析、要合成哪些阶段、`DataProducer` 协议 | `training_config` | [已落地] |
+| `src/mindtrainer/data_producer.py` | 默认数据生产器 `TemplateDataProducer` | `simulator` | [已落地] |
 | `src/mindtrainer/roll_executor.py` | `RollExecutor`:把 ROLL 的整段 LoRA SFT 作业映射到执行器协议,远端数据渲染、作业控制与指标回收 | `compute`、`executor`、`datamodel` | [已落地] |
 | `src/mindtrainer/roll_converter.py` | `RollLoraConverter`:经 `python3 -c` 调 ROLL 的 `convert_checkpoint_to_hf` 产出 vLLM 适配器,路径只经环境变量传,幂等 | `compute`、`checkpoint` | [已落地] |
 
@@ -205,7 +205,7 @@ MindTrainer 分两层:入口与编排一层决定"从哪跑、跑不跑",模式�
 - `mindtrainer` 可以导入 `controlplane` 与 `simulator`。复用 `Episode`、`RoleBinding` 等数据结构是允许的,受限的是子系统间的运行时调用。真实执行器与转换器另可导入 `compute`;`compute` 反过来不认识训练,只导入标准库与 `controlplane.deferred`。
 - `mindtrainer` 不导入 `diagnostic`。系统没有 MindTrainer 与诊断评测之间的直连;OPD 是否失效由诊断侧判定。
 - 编排器只调下层纯函数和协议,不含判定逻辑。续训判定在 `resume.py`,失败到类别的映射在 `dispatch.py`。
-- TrainScheduler 只可导入 `mindtrainer.data_spec` 与 `mindtrainer.training_config` 两个模块 [计划中]。factory 可以导入 `mindtrainer.dispatch` 与 `mindtrainer.data_producer` [计划中]。
+- TrainScheduler 只可导入 `mindtrainer.data_spec` 与 `mindtrainer.training_config` 两个模块。factory 可以导入 `mindtrainer.dispatch` 与 `mindtrainer.data_producer`。
 
 ## 4. 数据模型与状态机
 
@@ -232,8 +232,8 @@ MindTrainer 分两层:入口与编排一层决定"从哪跑、跑不跑",模式�
 
 | 产物类型 | 路径 | 状态机种类 | 写方 | 状态 |
 |---|---|---|---|---|
-| 训练指令 | `runs/<run>/directive.yaml` | 非审核类 | 人工;TrainScheduler [计划中] | [已落地] |
-| 数据集清单 | `runs/<run>/dataset_manifest_<阶段>.yaml` | 非审核类,写 `executed` | SocialSimulator;数据生产器 [计划中] | [已落地] |
+| 训练指令 | `runs/<run>/directive.yaml` | 非审核类 | 人工;TrainScheduler | [已落地] |
+| 数据集清单 | `runs/<run>/dataset_manifest_<阶段>.yaml` | 非审核类,写 `executed` | SocialSimulator;数据生产器 | [已落地] |
 | 训练记录 | `runs/<run>/training_run.yaml` | 非审核类 | MindTrainer | [已落地] |
 | 候选 checkpoint | `runs/<run>/candidate_checkpoint.yaml` | 需审核类 | MindTrainer 只写 `pending_review` | [已落地] |
 | checkpoint 本体 | `BigRef` 指向的外部存储 | 无 | 训练执行器 | mock 下是哈希链,无文件 |
@@ -387,10 +387,10 @@ GRPO 与 OPD 只有一个方法,因为两者在同一个训练 step 里联合更
 | SocialSimulator 数据集 | `verify_manifest` 逐条校验;`episode_group_id` 是分组键 | 无 |
 | SocialSimulator 实时服务 | 一条流一次会话;终止原因;`on_session_closed` 落盘 episode | 客户端放弃会话时调用 `abort()`,不发 EndSession |
 | 审核门①与晋级 | 候选进入 `pending_review` 后由人审核 | `latest_promoted_checkpoint` 从晋级版本解析下一轮的 `base_checkpoint_ref` |
-| TrainScheduler [计划中] | 按 `dsm-<run>-<阶段>` 写 `stage_manifest_refs` 与 `data_spec` | `validate_training_config`、`load_config_from_directive` 与 `data_spec` 解析 |
-| factory [计划中] | 无 | 用 `make_mindtrainer_dispatcher` 组装,并注入数据生产器 |
+| TrainScheduler | 按 `dsm-<run>-<阶段>` 写 `stage_manifest_refs` 与 `data_spec` | `validate_training_config`、`load_config_from_directive` 与 `data_spec` 解析 |
+| factory | 无 | 用 `make_mindtrainer_dispatcher` 组装,并注入数据生产器 |
 
-数据合成接线 [计划中]:`make_mindtrainer_dispatcher` 末尾加 keyword-only 的 `data_producer=None` [计划中]。签名来自工作包 2,施工时可能微调。
+数据合成接线:`make_mindtrainer_dispatcher` 末尾有 keyword-only 的 `data_producer=None`,不传时行为与接线前逐字节相同;factory 的组合根传 `TemplateDataProducer()`。
 
 ```python
 class DataProducer(Protocol):
@@ -398,9 +398,9 @@ class DataProducer(Protocol):
                 cfg: TrainingConfig, data_spec: DataSpec) -> None: ...
 ```
 
-派发器在读清单前检查三件事:清单文件缺失、指令带 `data_spec`、数据所在 run 就是本 run。三者都成立才调用生产器,其余情况与现在完全相同 [计划中]。`data_spec` 恰好四个键:`scenario_count`、`seed`、`purpose`、`stages`,缺键或多键都拒绝 [计划中]。
+派发器在读清单前检查三件事:清单文件缺失、指令带 `data_spec`、数据所在 run 就是本 run。三者都成立才调用生产器,其余情况与现在完全相同。`data_spec` 恰好四个键:`scenario_count`、`seed`、`purpose`、`stages`,缺键或多键都拒绝。
 
-`data_spec` 的字段规则 [计划中]:
+`data_spec` 的字段规则:
 
 | 键 | 类型与范围 | 说明 |
 |---|---|---|
@@ -409,18 +409,18 @@ class DataProducer(Protocol):
 | `purpose` | `training` 或 `deployment_simulation` | 取自情境的用途字段 |
 | `stages` | 阶段名到 `{group_size}` 的映射,阶段名只能是 `sft`、`grpo_opd` | `group_size` 整数,1 至 16;`grpo_opd` 的 `group_size` 不小于 2,否则组内奖励必然零方差 |
 
-类型先于范围:整数字段排除布尔与浮点(含 `4.0`、`nan`)。任何不合规都只抛 `InvalidDataSpecError` [计划中],不让别的异常类型漏出守护循环。错误信息里的展示值经截断函数,超过 4300 位的整数也不会让信息拼接抛 `ValueError`。
+类型先于范围:整数字段排除布尔与浮点(含 `4.0`、`nan`)。任何不合规都只抛 `InvalidDataSpecError`,不让别的异常类型漏出守护循环。错误信息里的展示值经截断函数,超过 4300 位的整数也不会让信息拼接抛 `ValueError`。
 
-交叉校验:要合成的阶段在 `data_spec.stages` 里都有条目;合成 `grpo_opd` 时 `group_size` 不小于 `min_group_size`,`scenario_count` 不小于 `groups_per_step` [计划中]。
+交叉校验:要合成的阶段在 `data_spec.stages` 里都有条目;合成 `grpo_opd` 时 `group_size` 不小于 `min_group_size`,`scenario_count` 不小于 `groups_per_step`。
 
-`mindtrainer.data_spec` 的对外名字 [计划中]:`DataSpec`、`StageSpec`、`parse_data_spec`、`data_spec_from_directive`(没有 `data_spec` 键或值为空时返回 `None`)、`InvalidDataSpecError`、`DataSynthesisError`、`required_stages`、`manifest_data_run`、`stages_to_synthesize`、`check_data_spec_against_config`。
+`mindtrainer.data_spec` 的对外名字:`DataSpec`、`StageSpec`、`parse_data_spec`、`data_spec_from_directive`(没有 `data_spec` 键或值为空时返回 `None`)、`InvalidDataSpecError`、`DataSynthesisError`、`required_stages`、`manifest_data_run`、`stages_to_synthesize`、`check_data_spec_against_config`。
 
-生产器的错误契约 [计划中]:确定性做不成必须抛 `DataSynthesisError`,派发器把它判为 T2;其余异常原样上抛,指令保持 `pending`。替代生产器必须自己把确定性错误包成 `DataSynthesisError`,否则守护进程会每轮重派同一条指令并退出。
+生产器的错误契约:确定性做不成必须抛 `DataSynthesisError`,派发器把它判为 T2;其余异常原样上抛,指令保持 `pending`。替代生产器必须自己把确定性错误包成 `DataSynthesisError`,否则守护进程会每轮重派同一条指令并退出。
 
-默认数据生产器 [计划中]:`TemplateDataProducer`,由组合根注入。
+默认数据生产器:`TemplateDataProducer`,由组合根注入。
 - 构造参数含 `rollout_factory`、生成后端、`max_turns`(默认 4,取值 1 至 200,与实时服务端的上限一致)与对手的 `model_ref`(默认 `template-opponent-v1`)。`max_turns` 不放进 `data_spec`,想改轮数只能在组合根构造时传参。
 - 默认的 `keyword_alternating_rollouts`:训练位在偶数序号的 rollout 里每句都说各分量的第一个关键词,奇数序号只说不含任何关键词的中性话,对手位恒说中性话。因此每个组的奖励是高低混合,不会退化。
-- 只支持 `outcome_split` 归因,其他归因抛 `DataSynthesisError` [计划中]。第 i 个情境用种子 `seed + i`。
+- 只支持 `outcome_split` 归因,其他归因抛 `DataSynthesisError`。第 i 个情境用种子 `seed + i`。
 - **V1 训练数据里的奖励差异是人造的,只证明流程跑通,不代表任何社会能力。**
 - 情境的角色位按训练配置改写:带 `bindings`(interact)就照它,训练位排第一;不带(batch)就配一个 `frozen_reference` 的对手位 `opponent`。
 - 生产器只写 episode 与清单,不写 `scenarios/` 与 `personas/`。
@@ -469,7 +469,7 @@ class DataProducer(Protocol):
 | 步 | 谁 | 做什么 | 写什么 |
 |---|---|---|---|
 | 1 | 派发器 | 读并校验配置,构造归因后端;interact 检查 `client_factory` 与 `policy`;batch 检查清单在场且 id 对得上 | 失败时不写记录,指令判 `failed` |
-| 1a | 派发器 | 缺清单且指令带 `data_spec` 时先合成,插在客户端检查之后、读清单之前:先严格解析 `data_spec`(带了就解析,即便清单都在场),再检查不合成的其余阶段的清单在场,再交叉校验,最后调生产器。interact 指令只合成 `sft`。已在场的清单不重做 [计划中] | 失败时不写记录,指令判 `failed` |
+| 1a | 派发器 | 缺清单且指令带 `data_spec` 时先合成,插在客户端检查之后、读清单之前:先严格解析 `data_spec`(带了就解析,即便清单都在场),再检查不合成的其余阶段的清单在场,再交叉校验,最后调生产器。interact 指令只合成 `sft`。已在场的清单不重做 | 失败时不写记录,指令判 `failed` |
 | 2 | 编排器 | 读训练记录,交给 `decide_resume`;`noop` 直接返回,`escalate` 抛 `NeedsHumanError` | 无 |
 | 3 | 编排器 | 新运行从 step 0 起;resume 从 `checkpoint_step` 起;restart 从 step 0 起。之后先写 `pending` 记录,再 `executor.load` | 训练记录 |
 | 4 | 编排器 | batch 且有 GRPO 步:整份 GRPO 数据集一次算完奖励,校验组大小与组数 | 失败写 `failed` |
@@ -530,7 +530,7 @@ class DataProducer(Protocol):
 | 每次续训都在同一步崩溃 | `resume_attempts` 到 `max_resume_attempts` 后升级为 T3 |
 | 续训时配置变了 | `config_hash` 不同,抛 `NeedsHumanError`,记录不改 |
 | interact 的 rollout | 失败的会话整条重跑,不续接;续训时 `InteractTrajectorySource` 的 `start_step` 让情境轮转接着走 |
-| 合成中途崩溃 | 已在树里的清单不再合成;episode 写完而清单未写的阶段整段重跑覆盖,逐字节相同的文件不产生新提交 [计划中] |
+| 合成中途崩溃 | 已在树里的清单不再合成;episode 写完而清单未写的阶段整段重跑覆盖,逐字节相同的文件不产生新提交 |
 
 走查例子:batch 指令在第 3 步崩溃,从第 2 步的存点续训,第 6 步完成。数值来自 `tests/test_mt_orchestrator.py` 的同一套夹具,经 `uv run python` 实跑。
 
@@ -565,7 +565,7 @@ class DataProducer(Protocol):
 | 编号 | 决策 | 备选 | 理由 | 判错的代价 |
 |---|---|---|---|---|
 | MT-1 | 派发器住在 `mindtrainer` 侧,经 ControlPlane 的派发缝注入 | 在 `controlplane` 里直接调用训练 | 依赖方向单向,调和循环不认识 MindTrainer | 每个入口都要自己组装派发器 |
-| MT-2 | 训练配置内联在指令里,用规范化 JSON 的 sha256 锚定 | 配置单独成产物;引用配方 | RecipeStore 尚未落地,不提前设计它的一部分 | 配方落地后要改成引用,配置结构不变 |
+| MT-2 | 训练配置内联在指令里,用规范化 JSON 的 sha256 锚定 | 配置单独成产物;引用配方 | 配方引用推迟到 RecipeStore 落地之后,不提前设计它的一部分 | 配方落地后要改成引用,配置结构不变 |
 | MT-3 | batch 模式用离线分组 GRPO:数据集同一上下文至少 2 条,按 `group_id` 算优势 | 训练时在数据集上下文重采样;退化为奖励加权 SFT | 重采样会把 interact 搬进 batch;奖励加权 SFT 不是 GRPO,`grpo_config` 失去意义 | 不是 on-policy;ROLL 对离线分组数据的语义未核实 |
 | MT-4 | 组内优势取均值基线,不除标准差 | 标准化优势 | 是否标准化交给真实执行器经 `grpo_config` 决定 | 换执行器时要确认它自己做了标准化 |
 | MT-5 | `combined_reward` 取训练轮逐轮奖励的均值 | 取总和 | 总和随对话变长而变大,会奖励拖长对话 | `gamma<1` 时较长的 episode 均值偏低 |
@@ -578,7 +578,7 @@ class DataProducer(Protocol):
 | MT-12 | judge 与被训模型相同或互为前缀时构造即拒绝 | 只在诊断侧防自评 | 训练会被直接优化去讨好自己的 judge | 前缀匹配不是真正的血缘判断,漏判与误判都有 |
 | MT-13 | `allow_resume` 与 `max_resume_attempts` 计入 `config_hash` | 只哈希影响训练产物的字段 | 原设计未记录理由,代码表现为整份配置一起哈希 | 两项一旦改动,同一个 run 判"配置变了",无法续训,只能重跑;要支持放宽后续训,须把它们移出 `config_hash` |
 | MT-14 | SFT 只以训练位的 `utterance` 为目标,不训练 `inner_thought` | 同时训练内心推理 | 原设计未记录理由,是实现者的选择 | 被训模型学不到内心推理 |
-| R14 | 指令携带 `data_spec`,派发器缺清单时调用注入的数据生产器 [计划中] | 由调度器先单独合成 | 合成与训练同一条指令,不多一种动作 | V1 模板生成器与目标维度无关,闭环只是流程跑通 |
+| R14 | 指令携带 `data_spec`,派发器缺清单时调用注入的数据生产器 | 由调度器先单独合成 | 合成与训练同一条指令,不多一种动作 | V1 模板生成器与目标维度无关,闭环只是流程跑通 |
 | MT-15 | 训练数据在上传前过污染准入检查,命中即整条指令失败;检查函数由组合根注入,`mindtrainer` 不导入 `diagnostic` | 在数据生产器里查;在清单登记时查;只靠约定 | 数据可以从模板、桥接或人工三条路径来,只有上传前的最后一道覆盖全部;命中就整条失败而不是剔行,是因为 ROLL 要求每步的行数固定,剔行会让训练步与数据错位 | 逐字重叠之外的内容抓不到;索引缺失时真训练直接起不来 |
 
 ## 8. 失败处理与可观测
@@ -589,11 +589,11 @@ class DataProducer(Protocol):
 |---|---|---|---|
 | 配置缺字段、类型错、校验不过 | T2 | 指令判 `failed`,不写训练记录 | 指令 `payload["failure"]` |
 | 清单缺失、id 形状不对、读不出、id 不符 | T2 | 指令判 `failed` | 指令 `payload["failure"]` |
-| `data_spec` 解析不过(`InvalidDataSpecError`) | T2 | 指令判 `failed`,不写训练记录 | 指令 `payload["failure"]` [计划中] |
-| 需要合成清单却没注入生产器 | T2 | 同上 | 同上 [计划中] |
-| `data_spec` 与训练配置交叉校验不过 | T2 | 同上 | 同上 [计划中] |
-| 生产器抛 `DataSynthesisError` | T2 | 同上,原因前缀 `data synthesis failed` | 同上 [计划中] |
-| 生产器的其余异常(`OSError` 等) | T1 | 原样上抛,指令保持 `pending`,下一轮重入时已在场的清单不再合成 | 无 [计划中] |
+| `data_spec` 解析不过(`InvalidDataSpecError`) | T2 | 指令判 `failed`,不写训练记录 | 指令 `payload["failure"]` |
+| 需要合成清单却没注入生产器 | T2 | 同上 | 同上 |
+| `data_spec` 与训练配置交叉校验不过 | T2 | 同上 | 同上 |
+| 生产器抛 `DataSynthesisError` | T2 | 同上,原因前缀 `data synthesis failed` | 同上 |
+| 生产器的其余异常(`OSError` 等) | T1 | 原样上抛,指令保持 `pending`,下一轮重入时已在场的清单不再合成 | 无 |
 | 数据集哈希不符(`DatasetIntegrityError`) | T2 | 记录写 `failed`,指令判 `failed` | 训练记录 `failure`、指令 `failure` |
 | 组不足(`DegenerateGroupError`)、组数不够(`NotEnoughGroupsError`) | T2 | 同上 | 同上 |
 | 归因不合法(`AttributionError`)、judge 归因而入口无 judge | T2 | 同上;无 judge 时不写记录 | 同上 |
@@ -639,8 +639,8 @@ T1 的上抛异常会让 `run_daemon` 退出,需要外部监督者重启。重�
 |---|---|---|
 | `tests/test_mt_config.py` | 171 | [已落地] |
 | `tests/test_mt_reward_pipeline.py` | 59 | [已落地] |
-| `tests/test_mt_dispatch.py` | 39 | [已落地] |
-| `tests/test_mt_orchestrator.py` | 36 | [已落地] |
+| `tests/test_mt_dispatch.py` | 42 | [已落地] |
+| `tests/test_mt_orchestrator.py` | 46 | [已落地] |
 | `tests/test_mt_executor.py`、`tests/test_mt_grouping.py`、`tests/test_mt_trajectory_interact.py` | 各 26 | [已落地] |
 | `tests/test_mt_training_run.py` | 22 | [已落地] |
 | `tests/test_mt_resume.py` | 19 | [已落地] |
@@ -648,12 +648,11 @@ T1 的上抛异常会让 `run_daemon` 退出,需要外部监督者重启。重�
 | `tests/test_mt_checkpoint.py` | 14 | [已落地] |
 | `tests/test_mt_datamodel.py` | 10 | [已落地] |
 | `tests/test_mt_wire.py`、`tests/test_mt_paths.py`、`tests/test_mt_integration.py`、`tests/test_mt_packaging.py` | 4、3、2、2 | [已落地] |
-| 合计 | 476 | [已落地] |
+| 合计 | 489 | [已落地] |
 | `tests/test_daemon_dispatcher.py`(ControlPlane 侧的派发缝) | 14 | [已落地] |
-| `tests/test_mt_data_spec.py`、`tests/test_mt_data_spec_stages.py` | 预计 70、17 | [计划中] |
-| `tests/test_mt_data_producer.py`、`tests/test_mt_dispatch_synthesis.py` | 预计 25、33 | [计划中] |
-| `tests/test_mt_roll_executor.py`、`tests/test_mt_roll_converter.py` | 21、17 | [已落地] |
-| `tests/test_mt_orchestrator.py` 的阶段路径、真实执行器与转换器集成用例 | 新增 6、3、1 | [已落地] |
+| `tests/test_mt_data_spec.py`、`tests/test_mt_data_spec_stages.py` | 70、17 | [已落地] |
+| `tests/test_mt_data_producer.py`、`tests/test_mt_dispatch_synthesis.py` | 25、33 | [已落地] |
+| `tests/test_mt_roll_executor.py`、`tests/test_mt_roll_converter.py`、`tests/test_mt_roll_gate.py` | 30、20、5 | [已落地] |
 | `tests/test_daemon_deferred.py`(ControlPlane 侧的延后通道) | 10 | [已落地] |
 
 用例数由 `uv run pytest --collect-only -q` 逐文件得出。
@@ -671,7 +670,7 @@ T1 的上抛异常会让 `run_daemon` 退出,需要外部监督者重启。重�
 | 离线分组 GRPO 的分组契约 | [已落地] | 算法语义未在 ROLL 上核实 |
 | 续训判定与崩溃续训 | [已落地] | 逐字节等价只在 mock 下有证据 |
 | 调和循环接线 | [已落地] | `scripts/run_controlplane.py` 用 mock 执行器与转换器 |
-| 数据合成接线 | [计划中] | 工作包 2 |
+| 数据合成接线 | [已落地] | 工作包 2 |
 | ROLL LoRA SFT 真实执行器、适配器导出转换器、阶段协议 | [已落地] | 远端计算层 `compute` 是它们的前置,已先于执行器与转换器落地;已在真实主机上各跑通一次,多段与续训、端到端调和循环仍待验证 |
 | 真实 GRPO 加 OPD 训练、适配器合并回完整权重 | [推迟] | |
 
@@ -683,7 +682,7 @@ T1 的上抛异常会让 `run_daemon` 退出,需要外部监督者重启。重�
 | 续训次数耗尽后无法通过放宽配置救回 | 人只能写一条新指令 | 改为只哈希影响训练产物的字段 |
 | `gamma<1` 时较长的 episode 均值偏低 | batch 数据集长度不一时奖励有长度偏置 | 默认 `gamma=1.0`;interact 下 episode 都跑满 `max_turns`,不受影响 |
 | 训练同步阻塞调和循环 | 训练期间审核与晋级动作排队,一轮可达数小时 | 异步派发:指令加 `submitted` 状态,派发器拆成提交与轮询,训练记录里的 `remote_job_ref` 作幂等键 [推迟];接真实 LoRA SFT 的这一轮作为有限定的例外接受阻塞(CP-15) |
-| 真实后端只支持单轮 [计划中] | 真实转换器产出适配器导出,晋级把它原样复制进模型产物,下一轮基座解析得到它,真实执行器 `load` 拒绝它:第二轮必然确定性失败。G6 在真实后端下不成立 | 候选多带一个训练格式引用,晋级与基座解析随之改 [推迟];本轮由 `RollExecutor.load` 响亮失败,理由写明原因 |
+| 真实后端只支持单轮 [已落地] | 真实转换器产出适配器导出,晋级把它原样复制进模型产物,下一轮基座解析得到它,真实执行器 `load` 拒绝它:第二轮必然确定性失败。G6 在真实后端下不成立。拒绝由 `RollExecutor.load` 实现,`tests/test_mt_roll_executor.py` 钉住 | 候选多带一个训练格式引用,晋级与基座解析随之改 [推迟];本轮由 `RollExecutor.load` 响亮失败,理由写明原因 |
 | 服务端 `turn_timeout_s` 小于策略最坏延迟时,慢策略被当作 T1 重试 | 推理成本按重试次数放大 | 组合根配置时保证超时大于策略延迟 |
 | 合成的情境与人格不落盘 | 想按 id 查生成的情境,只能看 episode 里的 `scenario_id` 与 `role_assignment` | 无 [计划中] |
 | 默认生产器的奖励差异是人造的 | 合成数据只证明流程跑通 | 换桥接生成器 [计划中] |
@@ -700,7 +699,6 @@ T1 的上抛异常会让 `run_daemon` 退出,需要外部监督者重启。重�
 | 远端 Python 版本 | 助手按 3.8 语法写,实际版本更低则无法运行 | 在验证主机上跑一次助手的 `probe` |
 | 真实执行器下续训是否逐字节等价 | 取决于优化器与随机数状态是否存点、浮点归约顺序 | 真实执行器上做崩溃注入 |
 | 长跑 rollout 的 keepalive | 死连接可能不被及时发现 | 构造断连场景压测 |
-| 计划中四个测试文件的用例数取自施工计划,未实测 [计划中] | 第 9 章的预计数可能与落地后不同 | 工作包 2 落地后逐文件 `uv run pytest --collect-only -q` |
 | 对手模型只以 `model_ref` 字符串记录 | 对手版本没有制品锚定 | 要锚定就得给 `model_ref` 加带 sha256 的引用形式;RecipeStore 的校验目前只要求它是具体 id,不校验哈希 [计划中] |
 | interact 的 episode 不会以 `goal_reached` 结束 | 依赖目标达成的奖励规则恒为 0 | 实时服务支持早停时重新评估 |
 
@@ -718,4 +716,4 @@ T1 的上抛异常会让 `run_daemon` 退出,需要外部监督者重启。重�
 | 退化组 | 成员不足 `min_group_size` 的组(报错),或奖励全同的组(计数) |
 | 续训 | 从存点(resume)或基座(restart)接着跑同一个 run |
 | `group_id` | GRPO 分组键,由情境 id 与各角色位的人格、后端、`model_ref` 推出 |
-| `data_spec` | 指令里描述要合成什么数据的载荷 [计划中] |
+| `data_spec` | 指令里描述要合成什么数据的载荷 |
