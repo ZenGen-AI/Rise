@@ -68,7 +68,8 @@ class BuildContext:
     accept_mock_evidence: bool
     confirm_directives: bool | None
     planner_backend: str
-    env: Mapping[str, str]
+    # 不进 repr:整个 env 映射里有凭证(repr(ctx) 会把它们原样带出来)。
+    env: Mapping[str, str] = field(repr=False)
     log_dir: Path | None
     repo_commit: str | None = None
     closers: list = field(default_factory=list)
@@ -79,6 +80,23 @@ class BuildContext:
     def register_closer(self, close: Callable[[], None]) -> None:
         """构造器起了要收尾的资源(如 loopback 实时服务端)时登记;run 结束时逆序调用。"""
         self.closers.append(close)
+
+
+def _close_all(closers) -> None:
+    """逆序调用每个收尾函数,把异常攒起来。
+
+    裸循环会在第一个抛异常时跳过剩下的收尾函数,还会把装配中途的原始错误盖掉——
+    那正是最需要看到的信息。全部跑完之后,若有失败,抛一个带明细的异常;调用方在
+    异常路径上会忽略它(原异常已经在传播),正常退出路径上它会被报出来。
+    """
+    failures = []
+    for close in reversed(list(closers)):
+        try:
+            close()
+        except Exception as exc:          # 收尾失败不该让后续收尾也不跑
+            failures.append(f"{type(exc).__name__}: {exc}")
+    if failures:
+        raise RuntimeError("closer(s) failed: " + "; ".join(failures))
 
 
 HandlerBuilder = Callable[[BuildContext], Handler]
@@ -96,8 +114,8 @@ class Assembly:
     converter: object | None = None
 
     def close(self) -> None:
-        for close in reversed(self.closers):
-            close()
+        """逆序收尾。一个收尾函数抛异常不能跳过其余几个,也不能盖住装配中途的原异常。"""
+        _close_all(self.closers)
 
     @property
     def closed_loop(self) -> bool:
@@ -242,8 +260,10 @@ def assemble(
     try:
         handlers = {key: table[key](ctx) for key in sorted(keys)}
     except BaseException:
-        for close in reversed(ctx.closers):
-            close()
+        try:
+            _close_all(ctx.closers)
+        except Exception:
+            pass          # 正在传播的才是根因:收尾失败不能把它盖掉
         raise
     return Assembly(
         dispatcher=make_mindtrainer_dispatcher(data_producer=TemplateDataProducer()),

@@ -18,7 +18,16 @@ class GitStore:
         self.repo_root = Path(repo_root)
 
     def _git(self, *args: str) -> str:
-        return self._run(*args, check=True).stdout
+        try:
+            return self._run(*args, check=True).stdout
+        except subprocess.CalledProcessError as exc:
+            # 默认的 CalledProcessError 只把 git 的 stderr 放在属性里,pytest 摘要看不到原话,
+            # 而 git 的报错正是这类失败唯一的线索(见计划 9 期间七次瞬态 exit 128)。
+            detail = (exc.stderr or "").strip()
+            raise subprocess.CalledProcessError(
+                exc.returncode, exc.cmd, output=exc.stdout,
+                stderr=f"{detail}\ngit {' '.join(args)} exited {exc.returncode}",
+            ) from exc
 
     def _run(self, *args: str, check: bool) -> subprocess.CompletedProcess:
         # LC_ALL=C:下面要靠 git 的报错文本分支(未跟踪 vs 无改动),本地化的消息会让它瞎掉。

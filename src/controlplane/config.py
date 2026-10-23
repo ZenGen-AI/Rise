@@ -113,7 +113,8 @@ def load_backend_config(raw: dict) -> BackendConfig:
         )
     token_env = raw["token_env"]  # 键必须在场；值可以是变量名或显式 null
     if token_env is not None and (not isinstance(token_env, str) or not token_env):
-        raise ValueError(f"token_env must be an env var name or null, got {token_env!r}")
+        # 不回显取值:人会把这个字段误填成密钥本身,回显等于把密钥写进异常信息与日志。
+        raise ValueError("token_env must be an env var name (a string) or null")
     return BackendConfig(
         backend=raw["backend"],
         invocation_form=raw["invocation_form"],

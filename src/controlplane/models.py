@@ -9,6 +9,22 @@ from controlplane.gitstore import GitStore
 from controlplane.paths import CONTROL_PLANE_ROOT
 
 _MODEL_FILE = re.compile(r"zengen-v(\d+)\.yaml$")
+MODEL_ID = re.compile(r"^zengen-v(\d+)$")
+
+
+def version_of_file(rel: str) -> int | None:
+    """从模型产物路径里取版本号;不是模型文件返回 None。
+
+    模型文件名与 id 的正则原先在四个包里各有一份拷贝,改一处漏三处,所以收到这里。
+    """
+    match = _MODEL_FILE.search(rel)
+    return int(match.group(1)) if match else None
+
+
+def version_of_id(model_id: str) -> int | None:
+    """从 `zengen-vN` 形式的 id 里取版本号;形状不对返回 None。"""
+    match = MODEL_ID.match(model_id)
+    return int(match.group(1)) if match else None
 
 
 class MissingCheckpointRefError(Exception):

@@ -13,7 +13,7 @@ from controlplane.evidence import diagnostic_grade
 from controlplane.gitstore import GitStore
 from controlplane.lock import acquire_repo_lock
 from controlplane.migration import UnknownSchemaVersionError
-from controlplane.models import max_model_version
+from controlplane.models import max_model_version, version_of_file
 from controlplane.paths import (
     CONTROL_PLANE_ROOT,
     agent_round_file,
@@ -53,7 +53,6 @@ Handler = Callable[[GitStore, Action], None]
 # 诊断评估器:(store, run_id, candidate_id),把诊断报告写到 diagnostic_report_file(run_id)。
 Evaluator = Callable[[GitStore, str, str], None]
 
-_MODEL_FILE = re.compile(r"zengen-v(\d+)\.yaml$")
 
 _log = logging.getLogger("controlplane.daemon")
 
@@ -228,8 +227,8 @@ def _report_grade(store: GitStore, rel: str) -> str:
 def _read_model_views(store: GitStore) -> list[ModelView]:
     views: list[ModelView] = []
     for rel in store.list_products(f"{CONTROL_PLANE_ROOT}/models"):
-        match = _MODEL_FILE.search(rel)
-        if match is None:
+        version = version_of_file(rel)
+        if version is None:
             continue
         env = store.read_product(rel)
         # promote_candidate 写的 links 是 [候选 id, run id]:第二项就是产生该模型的 run。
@@ -238,7 +237,7 @@ def _read_model_views(store: GitStore) -> list[ModelView]:
         # 改晋级写法时两处要一起改,计划 9 的一致性核对会加测试钉住。
         run_id = env.links[1] if len(env.links) >= 2 else ""
         views.append(ModelView(
-            model_id=env.id, version=int(match.group(1)), run_id=run_id, status=env.status,
+            model_id=env.id, version=version, run_id=run_id, status=env.status,
             agent_round_status=_agent_round_status(store, env.id),
         ))
     return views
@@ -297,9 +296,9 @@ def _recorded_model_version(store: GitStore, candidate_id: str) -> int | None:
     """models/ 下已经登记过这个候选的模型的版本号;没有返回 None(控制面 CP-7)。
     晋级在"模型已写、候选还没置 effective"时崩溃,重放就靠它认出上一次写下的那个模型。"""
     for rel in store.list_products(f"{CONTROL_PLANE_ROOT}/models"):
-        match = _MODEL_FILE.search(rel)
-        if match and store.read_product(rel).payload.get("promoted_from") == candidate_id:
-            return int(match.group(1))
+        version = version_of_file(rel)
+        if version is not None and store.read_product(rel).payload.get("promoted_from") == candidate_id:
+            return version
     return None
 
 

@@ -6,11 +6,11 @@
 """
 from __future__ import annotations
 
-import re
 from collections.abc import Callable
 
 from controlplane.evidence import diagnostic_grade
 from controlplane.gitstore import GitStore
+from controlplane.models import version_of_file
 from controlplane.paths import CONTROL_PLANE_ROOT
 from diagnostic.assets import read_item_pool, read_taxonomy
 from diagnostic.datamodel import DimensionScore
@@ -22,16 +22,15 @@ from diagnostic.store_adapter import BACKENDS_VALUES
 
 NO_BASELINE = "none"
 
-_MODEL_FILE = re.compile(r"zengen-v(\d+)\.yaml$")
 
 
 def _latest_effective_model(store: GitStore):
     """版本号(按数字)最大、状态 effective 的 zengen 模型信封;没有则 None。"""
     found = []
     for rel in store.list_products(f"{CONTROL_PLANE_ROOT}/models"):
-        match = _MODEL_FILE.search(rel)
-        if match:
-            found.append((int(match.group(1)), rel))
+        version = version_of_file(rel)
+        if version is not None:
+            found.append((version, rel))
     for _, rel in sorted(found, reverse=True):
         env = store.read_product(rel)
         if env.status == "effective":

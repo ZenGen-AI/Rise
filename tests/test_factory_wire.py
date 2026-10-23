@@ -9,7 +9,7 @@ from controlplane.paths import candidate_checkpoint_file, diagnostic_report_file
 from controlplane.reconcile import CLOSED_LOOP_ACTIONS
 from factory.cli import build_parser, dev_main, main
 from factory.evaluation import EVALUATOR_CONFIG
-from factory.wire import FactoryOptions, assemble
+from factory.wire import Assembly, BuildContext, FactoryOptions, assemble
 from factory_fixtures import (
     DATA_SPEC, Recorder, closed_loop_repo, git_head, git_log_messages, held_lock, produce_datasets,
     recording_builders, tree_files, write_directive,
@@ -33,6 +33,48 @@ def twin(tmp_path):
 def _same(a, b):
     assert tree_files(a) == tree_files(b)
     assert git_log_messages(a) == git_log_messages(b)
+
+
+def _assembly(**kw):
+    return Assembly(dispatcher=None, handlers={}, evaluator=None,
+                    accept_mock_evidence=False, **kw)
+
+
+def test_a_failing_closer_does_not_skip_the_others():
+    """收尾逆序跑完:中间一个抛异常,排在它前面的仍要被调用。"""
+    called = []
+
+    def ok(name):
+        return lambda: called.append(name)
+
+    def boom():
+        raise RuntimeError("close exploded")
+
+    asm = _assembly(closers=(ok("first"), boom, ok("third")))
+    with pytest.raises(RuntimeError, match="closer"):
+        asm.close()
+    assert called == ["third", "first"]       # 逆序,且失败的那个没有拦住其余
+
+
+def test_the_closer_failure_message_names_the_underlying_error():
+    asm = _assembly(closers=(lambda: (_ for _ in ()).throw(ValueError("bad")),))
+    with pytest.raises(RuntimeError) as info:
+        asm.close()
+    assert "ValueError" in str(info.value) and "bad" in str(info.value)
+
+
+def test_build_context_repr_does_not_leak_credentials():
+    """装配上下文会被日志与异常带出去:env 里的凭证不能出现在 repr 里。"""
+    ctx = BuildContext(
+        store=object(), accept_mock_evidence=True, confirm_directives=None,
+        planner_backend="heuristic",
+        env={"PATH": "/usr/bin", "ANTHROPIC_API_KEY": "sk-secret-value"},
+        log_dir=None,
+    )
+    shown = repr(ctx)
+    assert "sk-secret-value" not in shown
+    assert "ANTHROPIC_API_KEY" not in shown          # 连变量名也不用出现
+    assert ctx.env["ANTHROPIC_API_KEY"] == "sk-secret-value"   # 值本身仍可用
 
 
 def test_without_enable_run_is_byte_identical_to_mindtrainer_wire(twin):

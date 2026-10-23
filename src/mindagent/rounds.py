@@ -22,6 +22,7 @@ from actio.instance import instantiate
 from actio.skills import Skill
 from controlplane.envelope import BigRef, Envelope, OwnerRef
 from controlplane.gitstore import GitStore
+from controlplane.models import version_of_file, version_of_id
 from controlplane.paths import CONTROL_PLANE_ROOT, agent_round_file, model_file, persona_file, scenario_file
 from controlplane.reconcile import Action
 from controlplane.states import assert_transition
@@ -39,7 +40,6 @@ from simulator.datamodel import Persona
 from simulator.store_adapter import read_scenario
 
 ROUND_TYPE = "agent_round"
-_MODEL_ID = re.compile(r"^zengen-v(\d+)$")
 _ROUND_FILE = re.compile(r"agent-round-(zengen-v(\d+))\.yaml$")
 
 BackendFactory = Callable[[str, "BigRef | None"], object]
@@ -60,10 +60,10 @@ def task_id_for(model_id: str) -> str:
 
 
 def _model_version(model_id: str) -> int:
-    match = _MODEL_ID.match(model_id)
-    if match is None:
+    version = version_of_id(model_id)
+    if version is None:
         raise AgentRoundFailedError(f"not a zengen model id: {model_id!r}", point="mindagent.rounds.model")
-    return int(match.group(1))
+    return version
 
 
 def _read_model(store: GitStore, model_id: str) -> tuple[int, str, BigRef | None]:
@@ -84,9 +84,9 @@ def _read_model(store: GitStore, model_id: str) -> tuple[int, str, BigRef | None
 def _latest_effective_version(store: GitStore) -> int:
     best = 0
     for rel in store.list_products(f"{CONTROL_PLANE_ROOT}/models"):
-        match = re.search(r"zengen-v(\d+)\.yaml$", rel)
-        if match and store.read_product(rel).status == "effective":
-            best = max(best, int(match.group(1)))
+        version = version_of_file(rel)
+        if version is not None and store.read_product(rel).status == "effective":
+            best = max(best, version)
     return best
 
 
