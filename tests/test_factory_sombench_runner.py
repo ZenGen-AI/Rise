@@ -212,6 +212,19 @@ def test_an_export_on_another_endpoint_is_refused(tmp_path):
         _runner(tmp_path, rows=[], store=store).evaluate_scored(_items("i1"), "cand-run-1", 1)
 
 
+def test_a_candidate_with_an_unusable_ref_is_refused_as_unusable(tmp_path):
+    """手改进树的坏引用(I8):评估器只接 CandidateUnusableError(写失败的诊断报告),
+    InvalidBigRefError 会从它那里漏出去。"""
+    store = _store(tmp_path)
+    _candidate(store)
+    rel = candidate_checkpoint_file("run-1")
+    env = store.read_product(rel)
+    env.payload["checkpoint_ref"]["sha256"] = "../../etc"
+    store.write_product(rel, env, "human: spoil the export ref")
+    with pytest.raises(CandidateUnusableError, match="sha256"):
+        _runner(tmp_path, rows=[], store=store).evaluate_scored(_items("i1"), "cand-run-1", 1)
+
+
 def test_a_missing_candidate_is_refused(tmp_path):
     runner = _runner(tmp_path, rows=[])
     runner.bind("run-9")

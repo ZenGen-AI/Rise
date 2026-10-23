@@ -27,7 +27,7 @@ from compute.tunnel import SshTunnel, http_probe
 from compute.sizing import weights_gib_from_index
 from compute.vllm_service import VllmServeConfig, build_serve_job
 from controlplane.deferred import DeferredError
-from controlplane.envelope import BigRef
+from controlplane.envelope import BigRef, InvalidBigRefError
 from controlplane.gitstore import GitStore
 from controlplane.paths import candidate_checkpoint_file
 from diagnostic.contamination import normalize_text
@@ -147,7 +147,13 @@ class SomevalRunner:
         raw = payload.get("checkpoint_ref")
         if not isinstance(raw, dict):
             raise CandidateUnusableError("the candidate checkpoint carries no checkpoint_ref")
-        ref = BigRef.from_dict(raw)
+        try:
+            ref = BigRef.from_dict(raw)
+        except (InvalidBigRefError, KeyError) as exc:
+            # 手改进树的坏引用(I8):评估器只接 CandidateUnusableError,别的异常会从它那里漏出去
+            raise CandidateUnusableError(
+                f"the candidate checkpoint_ref is unusable ({type(exc).__name__}: {exc})"
+            ) from exc
         hint = ref.fetch_hint or {}
         if hint.get("format") != EXPORT_FORMAT or hint.get("type") != "roll_ssh":
             raise CandidateUnusableError(

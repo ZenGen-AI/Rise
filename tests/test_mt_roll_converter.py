@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 from compute_fixtures import FakeClient, fake_endpoint
 from compute.errors import ComputeBusyError, HelperError
-from controlplane.envelope import BigRef
+from controlplane.envelope import BigRef, InvalidBigRefError
 from mindtrainer.executor import CheckpointCorruptError
 from mindtrainer.roll_converter import EXPORT_FORMAT, EXPORT_MARKER, EXPORT_PROGRAM, RollLoraConverter
 
@@ -185,24 +185,21 @@ def test_mock_refs_are_refused():
         )
 
 
-def test_a_reference_without_a_sha256_is_refused():
-    with pytest.raises(CheckpointCorruptError, match=r"no usable sha256"):
-        _converter(FakeClient()).convert(
-            BigRef(uri=f"ssh://gpu-1{CKPT}", sha256="", size_bytes=0)
-        )
+def test_a_reference_without_a_sha256_cannot_even_be_formed():
+    """坏 sha256 在构造 BigRef 时就被拒(I8),到不了转换器。"""
+    with pytest.raises(InvalidBigRefError, match="sha256"):
+        BigRef(uri=f"ssh://gpu-1{CKPT}", sha256="", size_bytes=0)
 
 
 # ---------------- 路径围栏 ----------------
 
 def test_a_sha256_that_is_not_hex_cannot_escape_the_work_root():
-    """sha256[:8] 直接进远端路径。BigRef 不校验这个字段,所以转换器自己要校验:
-    64 个字符的 '../../..' 会让产物目录逃出 work_root。"""
-    client = _exporting_client()
+    """sha256[:8] 直接进远端路径:64 个字符的 '../../..' 会让产物目录逃出 work_root。
+    BigRef 在构造时就拒绝它(I8),所以这样的引用根本到不了转换器;转换器自己的检查留作纵深防御。"""
     traversal = "../../.." + "/x" * 28  # 64 字符,非十六进制
     assert len(traversal) == 64
-    with pytest.raises(CheckpointCorruptError, match=r"no usable sha256"):
-        _converter(client).convert(BigRef(uri=f"ssh://gpu-1{CKPT}", sha256=traversal, size_bytes=0))
-    assert client.run_calls == []  # 一个作业都没起
+    with pytest.raises(InvalidBigRefError, match="sha256"):
+        BigRef(uri=f"ssh://gpu-1{CKPT}", sha256=traversal, size_bytes=0)
 
 
 @pytest.mark.parametrize("uri", [

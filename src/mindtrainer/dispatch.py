@@ -243,7 +243,14 @@ def make_mindtrainer_dispatcher(
             # 编排器对 invalid_session 这类确定性的 rollout 拒绝,会先把 training_run 写成 failed 再重抛。
             # 记录已是终态,下一轮重派只会换来 NeedsHumanError,而这一轮的异常会一路逃出守护循环,
             # 所以当轮就把指令判 failed。记录仍是 pending 的瞬态异常照旧上抛。
-            record = read_training_run(store, run_id)
+            try:
+                record = read_training_run(store, run_id)
+            except NeedsHumanError as unreadable:
+                # 记录在而读不出(I8):这里抛出的异常兄弟分支接不住,会一路逃出调和循环。
+                # 下一轮重派也只会在入口读到同一份坏记录,所以当轮判 failed,两个原因都留下。
+                raise DirectiveFailedError(
+                    f"directive {run_id}: {type(exc).__name__}: {exc}; and {unreadable}", category="T3",
+                ) from exc
             if record is not None and record.status == "failed":
                 raise DirectiveFailedError(f"directive {run_id}: {type(exc).__name__}: {exc}") from exc
             raise

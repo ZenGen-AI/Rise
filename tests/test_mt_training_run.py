@@ -11,6 +11,7 @@ from controlplane.observe import trace
 from controlplane.paths import run_dir, training_run_file
 from controlplane.states import InvalidTransitionError
 from mindtrainer.datamodel import StepResult, TrainingRun
+from mindtrainer.resume import NeedsHumanError
 from mindtrainer.store_adapter import read_training_run, write_training_run
 
 
@@ -182,3 +183,16 @@ def test_a_finished_record_cannot_be_rewritten_with_different_content(store, ter
     with pytest.raises(ValueError, match="finished record"):
         write_training_run(store, _run(**changed))
     assert read_training_run(store, "run-1") == _run(**terminal)
+
+
+@pytest.mark.parametrize("key", ["last_checkpoint_ref", "metric_stream_refs"])
+def test_a_record_with_an_unusable_ref_needs_a_human(store, key):
+    """记录在而读不出(手改进树的坏引用,I8):NeedsHumanError 在派发器的确定性元组里,指令 failed;
+    InvalidBigRefError 不在,会让指令保持 pending、每轮重派。"""
+    write_training_run(store, _run(last_checkpoint_ref=_ref("a"), metric_stream_refs=[_ref("b")]))
+    env = store.read_product(training_run_file("run-1"))
+    bad = {**_ref("a").to_dict(), "sha256": "../../etc"}
+    env.payload[key] = [bad] if key == "metric_stream_refs" else bad
+    store.write_product(training_run_file("run-1"), env, "human: spoil a ref")
+    with pytest.raises(NeedsHumanError, match="run-1"):
+        read_training_run(store, "run-1")

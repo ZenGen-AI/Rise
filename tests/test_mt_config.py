@@ -113,8 +113,6 @@ INVALID = [
     ("opd_inf", lambda: _interact(opd_coefficient=float("inf")), "opd_coefficient must be"),
     ("negative_retries", lambda: _interact(max_retries_per_episode=-1), "max_retries_per_episode must be >= 0"),
     ("negative_resume_attempts", lambda: _interact(max_resume_attempts=-1), "max_resume_attempts must be >= 0"),
-    ("base_sha_not_hex", lambda: _interact(base_checkpoint_ref=BigRef("u", "xyz", 1)), "base_checkpoint_ref.sha256"),
-    ("teacher_sha_uppercase", lambda: _interact(teacher_model_ref=BigRef("u", "A" * 64, 1)), "teacher_model_ref.sha256"),
     ("unknown_stage", lambda: _interact(stage_manifest_refs={"sftt": "x"}), "unknown stage"),
     ("sft_without_manifest", lambda: _interact(sft_steps=2, stage_manifest_refs={}), "stage_manifest_refs['sft']"),
     ("batch_grpo_without_manifest", lambda: _batch(stage_manifest_refs={"sft": "m"}), "stage_manifest_refs['grpo_opd']"),
@@ -278,6 +276,30 @@ def test_directive_with_a_missing_field_names_the_field():
         load_config_from_directive(_directive({"training_config": d}))
 
 
+# 两个引用的每种坏形状(原先在下面几张表里各构造一个坏 BigRef):坏 BigRef 已经构造不出来(I8),
+# 所以它们只可能来自指令里的字典。从指令读配置时转成 InvalidTrainingConfigError,点名引用与字段。
+BAD_REF_FIELDS = [
+    ("base_checkpoint_ref", "sha256", "xyz"),
+    ("teacher_model_ref", "sha256", "A" * 64),
+    ("base_checkpoint_ref", "sha256", 123),
+    ("teacher_model_ref", "sha256", 123),
+    ("base_checkpoint_ref", "uri", 5),
+    ("teacher_model_ref", "size_bytes", "1"),
+    ("base_checkpoint_ref", "size_bytes", True),
+    ("base_checkpoint_ref", "fetch_hint", "x"),
+]
+
+
+@pytest.mark.parametrize("ref_name, field, value", BAD_REF_FIELDS,
+                         ids=[f"{r}.{f}={v!r}"[:40] for r, f, v in BAD_REF_FIELDS])
+def test_a_bad_reference_in_a_directive_is_an_invalid_config_naming_the_reference(ref_name, field, value):
+    d = _interact().to_dict()
+    d[ref_name][field] = value
+    with pytest.raises(InvalidTrainingConfigError) as info:
+        load_config_from_directive(_directive({"training_config": d}))
+    assert ref_name in str(info.value) and field in str(info.value), str(info.value)
+
+
 # ---------------- F1:字段类型校验 ----------------
 # 下半段编排器靠异常类型区分"确定性失败写 failed"和"其余保持 pending 等续训",
 # 类型错误绝不能以裸 TypeError 或静默通过的形式逃出 validate_training_config。
@@ -304,8 +326,6 @@ TYPE_INVALID = [
     ("gamma_is_a_bool", lambda: _interact(reward=_reward(gamma=True)), "reward.gamma"),
     ("grpo_config_is_not_a_dict", lambda: _interact(grpo_config=["lr"]), "grpo_config"),
     ("grpo_config_has_an_unserializable_value", lambda: _interact(grpo_config={"x": {1, 2, 3}}), "grpo_config"),
-    ("base_checkpoint_sha256_is_not_a_string", lambda: _interact(base_checkpoint_ref=BigRef("u", 123, 1)), "base_checkpoint_ref.sha256"),
-    ("teacher_sha256_is_not_a_string", lambda: _interact(teacher_model_ref=BigRef("u", 123, 1)), "teacher_model_ref.sha256"),
     ("scenario_ids_is_not_a_list", lambda: _interact(scenario_ids="s1"), "scenario_ids"),
     ("scenario_ids_has_a_non_string_entry", lambda: _interact(scenario_ids=["s1", 2]), "scenario_ids"),
     ("scenario_ids_has_an_empty_string_entry", lambda: _interact(scenario_ids=["s1", ""]), "scenario_ids"),
@@ -368,7 +388,8 @@ _CIRCULAR: dict = {}
 _CIRCULAR["self"] = _CIRCULAR
 
 
-def _bad_ref(**kw) -> BigRef:
+def _ref_with(**kw) -> BigRef:
+    """合规的引用,改其中几个字段。fetch_hint 的内容不受 BigRef 约束,坏内容只会在序列化时暴露。"""
     base = dict(uri="file:///ckpt/x", sha256="a" * 64, size_bytes=1, fetch_hint=None)
     base.update(kw)
     return BigRef(**base)
@@ -399,13 +420,6 @@ TYPE_GAPS = [
      lambda: _interact(bindings=[_trained(), RoleBinding("b", "pb", "frozen_reference", model_ref=5)]), "bindings"),
     ("base_checkpoint_ref_is_a_string", lambda: _interact(base_checkpoint_ref="base"), "base_checkpoint_ref"),
     ("teacher_model_ref_is_none", lambda: _interact(teacher_model_ref=None), "teacher_model_ref"),
-    ("ref_uri_is_an_int", lambda: _interact(base_checkpoint_ref=_bad_ref(uri=5)), "base_checkpoint_ref.uri"),
-    ("ref_size_bytes_is_a_string",
-     lambda: _interact(teacher_model_ref=_bad_ref(size_bytes="1")), "teacher_model_ref.size_bytes"),
-    ("ref_size_bytes_is_a_bool",
-     lambda: _interact(base_checkpoint_ref=_bad_ref(size_bytes=True)), "base_checkpoint_ref.size_bytes"),
-    ("ref_fetch_hint_is_a_string",
-     lambda: _interact(base_checkpoint_ref=_bad_ref(fetch_hint="x")), "base_checkpoint_ref.fetch_hint"),
     ("stage_manifest_refs_value_is_an_int",
      lambda: _batch(stage_manifest_refs={"sft": "a", "grpo_opd": 5}), "stage_manifest_refs"),
     ("stage_manifest_refs_key_is_an_int",
@@ -522,7 +536,7 @@ def test_validate_rejects_something_that_is_not_a_training_config_at_all():
 
 def test_a_fetch_hint_with_an_unserializable_value_is_caught_by_the_final_serialization_check():
     # fetch_hint 本身是 dict,逐项检查都放行;只有最后一道"整份配置能不能序列化"能抓住它
-    cfg = _interact(base_checkpoint_ref=_bad_ref(fetch_hint={"url": {1, 2, 3}}))
+    cfg = _interact(base_checkpoint_ref=_ref_with(fetch_hint={"url": {1, 2, 3}}))
     reason = validate_training_config(cfg)
     assert reason is not None and "JSON serializable" in reason and "must be" in reason, reason
     with pytest.raises(InvalidTrainingConfigError, match="JSON serializable"):
@@ -585,7 +599,7 @@ HASH_ONLY_FAILS = [
     # 孤立代理字符:json.dumps 能写出来,编码成 UTF-8 才失败
     ("grpo_config_has_a_lone_surrogate", lambda: _interact(grpo_config={"x": "\ud800"}), "grpo_config"),
     ("fetch_hint_keys_cannot_be_sorted",
-     lambda: _interact(base_checkpoint_ref=_bad_ref(fetch_hint={1: "a", "b": 2})), "JSON serializable"),
+     lambda: _interact(base_checkpoint_ref=_ref_with(fetch_hint={1: "a", "b": 2})), "JSON serializable"),
     ("trained_slot_has_a_lone_surrogate", lambda: _batch(trained_slot="\ud800"), "JSON serializable"),
 ]
 

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from controlplane.envelope import CURRENT_SCHEMA_VERSION, Envelope, OwnerRef
+from controlplane.envelope import CURRENT_SCHEMA_VERSION, Envelope, InvalidBigRefError, OwnerRef
 from controlplane.gitstore import GitStore
 from controlplane.paths import training_run_file
 from controlplane.states import NONREVIEW, assert_transition
 from mindtrainer.datamodel import TrainingRun
+from mindtrainer.resume import NeedsHumanError
 
 # 沿用仓库既有的固定时间戳写法:产物内容必须是输入的纯函数,
 # 崩溃后重放才会逐字节相同(GitStore.write_product 对此是空操作)。
@@ -53,4 +54,9 @@ def read_training_run(store: GitStore, run_id: str) -> TrainingRun | None:
     if not store.exists(path):
         return None
     env = store.read_product(path)
-    return TrainingRun.from_dict(env.payload, status=env.status)
+    try:
+        return TrainingRun.from_dict(env.payload, status=env.status)
+    except InvalidBigRefError as exc:
+        # 记录在而读不出(手改进树的坏引用,I8):自动续训无从谈起,要人处理。NeedsHumanError 在
+        # 派发器的确定性元组里(指令 failed);InvalidBigRefError 不在,会让指令每轮重派。
+        raise NeedsHumanError(f"training_run {run_id} holds an unusable reference: {exc}") from exc

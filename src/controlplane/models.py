@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from controlplane.envelope import BigRef
+from controlplane.envelope import BigRef, InvalidBigRefError
 from controlplane.gitstore import GitStore
 from controlplane.paths import CONTROL_PLANE_ROOT
 
@@ -28,7 +28,7 @@ def version_of_id(model_id: str) -> int | None:
 
 
 class MissingCheckpointRefError(Exception):
-    """最新的已晋级模型产物里没有 checkpoint_ref，无法作为下一轮的训练基座。"""
+    """最新的已晋级模型产物里没有可用的 checkpoint_ref(缺失或不合规),无法作为下一轮的训练基座。"""
 
 
 @dataclass(frozen=True)
@@ -63,7 +63,16 @@ def latest_promoted_checkpoint(store: GitStore) -> PromotedBase | None:
                 f"{env.id} is the latest effective model but its payload has no "
                 f"checkpoint_ref; refusing to fall back to an earlier version"
             )
-        return PromotedBase(model_id=env.id, version=version, checkpoint_ref=BigRef.from_dict(raw))
+        try:
+            ref = BigRef.from_dict(raw)
+        except (InvalidBigRefError, KeyError, AttributeError) as exc:
+            # 手改进树的坏引用(I8):与缺失同样处理,同样不回退到更早的版本。调用方已把
+            # MissingCheckpointRefError 当成确定性失败,InvalidBigRefError 却会从它们那里漏出去。
+            raise MissingCheckpointRefError(
+                f"{env.id} is the latest effective model but its checkpoint_ref is unusable "
+                f"({type(exc).__name__}: {exc}); refusing to fall back to an earlier version"
+            ) from exc
+        return PromotedBase(model_id=env.id, version=version, checkpoint_ref=ref)
     return None
 
 

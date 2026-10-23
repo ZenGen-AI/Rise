@@ -1,3 +1,5 @@
+import hashlib
+
 import pytest
 
 from controlplane.envelope import BigRef, Envelope, OwnerRef
@@ -7,7 +9,8 @@ from controlplane.paths import model_file
 
 
 def _ref(tag: str) -> dict:
-    return BigRef(uri=f"file:///ckpt/{tag}", sha256=tag * 8, size_bytes=1).to_dict()
+    # sha256 必须是合规的十六进制摘要(I8):从 tag 派生,不同 tag 仍得到不同引用
+    return BigRef(uri=f"file:///ckpt/{tag}", sha256=hashlib.sha256(tag.encode()).hexdigest(), size_bytes=1).to_dict()
 
 
 def _write_model(store, n, *, status="effective", ref="__default__"):
@@ -72,3 +75,18 @@ def test_missing_ref_on_a_non_effective_model_does_not_block_resolution(store):
     _write_model(store, 1)
     _write_model(store, 2, status="deprecated", ref=None)
     assert latest_promoted_checkpoint(store).model_id == "zengen-v1"
+
+
+@pytest.mark.parametrize("bad", [
+    {"uri": "file:///ckpt/v2", "sha256": "../../etc", "size_bytes": 1},
+    {"uri": "file:///ckpt/v2", "sha256": "a" * 64, "size_bytes": -1},
+    {"uri": "", "sha256": "a" * 64, "size_bytes": 1},
+], ids=["sha256", "size_bytes", "uri"])
+def test_an_unusable_checkpoint_ref_is_reported_like_a_missing_one(store, bad):
+    """手改进树的坏引用(I8):转成 MissingCheckpointRefError,调用方已把它当成确定性失败
+    (规划动作解析转 ResolveError、决策 failed),不让 InvalidBigRefError 漏出去打崩处理器。
+    同样不回退到更早的版本。"""
+    _write_model(store, 1)
+    _write_model(store, 2, ref=bad)
+    with pytest.raises(MissingCheckpointRefError, match="zengen-v2"):
+        latest_promoted_checkpoint(store)

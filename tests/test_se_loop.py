@@ -5,6 +5,7 @@ import pytest
 from controlplane.reconcile import Action
 from trainscheduler.assemble import assemble_context
 from trainscheduler.config import SchedulerConfig
+from trainscheduler.errors import ContextAssemblyError
 from trainscheduler.experience_port import record_and_recompute
 from trainscheduler.plan_handler import make_plan_handler
 from trainplanner.backends import HeuristicBackend
@@ -74,6 +75,32 @@ def test_on_injects_matching_entries(tmp_path):
     assert ctx.strategy_experience
     assert "opd_coefficient" in ctx.strategy_experience[0]
     assert "0.2" in ctx.strategy_experience[0]
+
+
+def _spoil_base_ref(store, ref):
+    """把基线模型的 checkpoint_ref 换成 ref(None 表示删掉),像人手改树那样提交。"""
+    from controlplane.paths import model_file
+    env = store.read_product(model_file(1))
+    if ref is None:
+        env.payload.pop("checkpoint_ref", None)
+    else:
+        env.payload["checkpoint_ref"] = ref
+    store.write_product(model_file(1), env, "human: spoil zengen-v1 checkpoint_ref")
+
+
+@pytest.mark.parametrize("ref", [
+    None,
+    {"uri": "file:///ckpt/v1", "sha256": "../../etc", "size_bytes": 1},
+], ids=["missing", "not-hex"])
+def test_an_unusable_base_ref_fails_assembly_instead_of_escaping_the_handler(tmp_path, ref):
+    """开关打开时装配要读基座:缺 checkpoint_ref 或它不合规(I8)都转成 ContextAssemblyError。
+    它是 SchedulerError,规划处理器把决策置 failed;MissingCheckpointRefError 不是,会打崩处理器。"""
+    store = make_store(tmp_path)
+    _baseline(store)
+    _round(store, "run-003")
+    _spoil_base_ref(store, ref)
+    with pytest.raises(ContextAssemblyError, match="zengen-v1"):
+        assemble_context(store, "run-003", config=ON)
 
 
 def test_handler_records_before_it_assembles(tmp_path):

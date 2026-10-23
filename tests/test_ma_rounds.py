@@ -341,6 +341,19 @@ def test_an_unknown_model_fails_the_round_without_a_failure_record(store):
     assert env.status == "failed" and "not found" in env.payload["failure"]["reason"]
 
 
+def test_a_model_with_an_unusable_checkpoint_ref_fails_the_round_instead_of_escaping(store):
+    """手改进树的坏引用(I8):轮次 failed、类别 T3、原因点名字段;InvalidBigRefError 不能从处理器
+    漏出去(调用方只接 AgentRoundFailedError,漏出去会打崩守护进程)。"""
+    env = store.read_product(model_file(1))
+    env.payload["checkpoint_ref"] = {**CKPT.to_dict(), "sha256": "../../etc"}
+    store.write_product(model_file(1), env, "human: spoil checkpoint_ref")
+    _start(store, _handler())
+    rnd = store.read_product(agent_round_file("zengen-v1"))
+    assert rnd.status == "failed"
+    assert rnd.payload["failure"]["category"] == "T3"
+    assert "sha256" in rnd.payload["failure"]["reason"]
+
+
 def test_a_newer_model_supersedes_a_pending_round_and_an_old_action_is_refused(store, monkeypatch):
     real = store.write_product
 

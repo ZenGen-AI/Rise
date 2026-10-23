@@ -4,17 +4,15 @@ import copy
 import hashlib
 import json
 import math
-import re
 from dataclasses import dataclass, field
 
-from controlplane.envelope import BigRef, Envelope
+from controlplane.envelope import SHA256_HEX, BigRef, Envelope, InvalidBigRefError
 from simulator.datamodel import RoleBinding
 
 MODES = ("batch", "interact")
 STAGES = ("sft", "grpo_opd")
 ATTRIBUTIONS = ("outcome_split", "judge")
 COMBINATIONS = ("sum", "product")
-_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
 class InvalidTrainingConfigError(ValueError):
@@ -30,7 +28,12 @@ def _expect(value, kind: type, label: str):
 
 
 def _ref_from_dict(name: str, value) -> BigRef:
-    return BigRef.from_dict(_expect(value, dict, name))
+    try:
+        return BigRef.from_dict(_expect(value, dict, name))
+    except InvalidBigRefError as exc:
+        # 点名是哪个引用:BigRef 自己只知道字段,不知道它在配置里叫什么。仍是 TypeError 子类,
+        # load_config_from_directive 照旧把它包成 InvalidTrainingConfigError。
+        raise InvalidBigRefError(f"{name}: {exc}") from exc
 
 
 @dataclass(frozen=True)
@@ -192,16 +195,9 @@ def _canonical_json(value) -> bytes:
 
 
 def _check_ref(name: str, ref) -> str | None:
+    # 字段本身由 BigRef 在构造时校验(I8),这里只需确认它确实是 BigRef。
     if not isinstance(ref, BigRef):
         return f"{name} must be a BigRef, got {type(ref).__name__}"
-    if not isinstance(ref.uri, str):
-        return f"{name}.uri must be a str, got {type(ref.uri).__name__}"
-    if not isinstance(ref.sha256, str):
-        return f"{name}.sha256 must be a str, got {type(ref.sha256).__name__}"
-    if isinstance(ref.size_bytes, bool) or not isinstance(ref.size_bytes, int):
-        return f"{name}.size_bytes must be an int, got {type(ref.size_bytes).__name__}"
-    if ref.fetch_hint is not None and not isinstance(ref.fetch_hint, dict):
-        return f"{name}.fetch_hint must be a dict or None, got {type(ref.fetch_hint).__name__}"
     return None
 
 
@@ -400,12 +396,6 @@ def validate_training_config(cfg: TrainingConfig) -> str | None:
         return f"max_retries_per_episode must be >= 0, got {cfg.max_retries_per_episode}"
     if cfg.max_resume_attempts < 0:
         return f"max_resume_attempts must be >= 0, got {cfg.max_resume_attempts}"
-    for name, ref in (
-        ("base_checkpoint_ref", cfg.base_checkpoint_ref),
-        ("teacher_model_ref", cfg.teacher_model_ref),
-    ):
-        if not _SHA256.match(ref.sha256):
-            return f"{name}.sha256 must be 64 lowercase hex chars, got {ref.sha256!r}"
     unknown = sorted(set(cfg.stage_manifest_refs) - set(STAGES))
     if unknown:
         return f"stage_manifest_refs has unknown stage(s) {unknown}; allowed {list(STAGES)}"

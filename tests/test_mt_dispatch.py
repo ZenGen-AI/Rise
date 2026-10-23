@@ -388,6 +388,27 @@ def test_any_other_orchestrator_exception_leaves_the_directive_pending(store, mo
     assert store.read_product(f"{run_dir(RUN)}/directive.yaml").status == "pending"
 
 
+def test_an_unreadable_record_in_the_fallback_branch_fails_the_directive(store, monkeypatch):
+    """兜底分支要重读训练记录判它是不是终态。记录在而读不出(手改进树的坏引用,I8)时
+    read_training_run 抛 NeedsHumanError;它在 except 分支里抛出,兄弟分支接不住,会一路逃出
+    调和循环。所以那一处自己转成 DirectiveFailedError,类别 T3,原异常留在原因里。"""
+    def raiser(*args, **kwargs):
+        raise RuntimeError("rollout went sideways")
+
+    def unreadable(store_, run_id):
+        raise NeedsHumanError(f"training_run {run_id} holds an unusable reference")
+
+    monkeypatch.setattr("mindtrainer.dispatch.resume_or_run", raiser)
+    monkeypatch.setattr("mindtrainer.dispatch.read_training_run", unreadable)
+    _directive(store, payload={"target_dimension": "tom", "recipe_ref": "", "training_config": _cfg_dict()})
+    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher())   # 不抛
+    env = store.read_product(f"{run_dir(RUN)}/directive.yaml")
+    assert env.status == "failed"
+    assert env.payload["failure"]["category"] == "T3"
+    assert "rollout went sideways" in env.payload["failure"]["reason"]
+    assert "unusable reference" in env.payload["failure"]["reason"]
+
+
 def test_a_tampered_episode_fails_the_directive(store):
     episode_id = read_manifest(store, RUN, "grpo_opd").episode_refs[0]["id"]
     episode = read_episode(store, RUN, episode_id)

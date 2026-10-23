@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from actio.errors import ActioDataError
 from actio.instance import instantiate
 from actio.skills import Skill
-from controlplane.envelope import BigRef, Envelope, OwnerRef
+from controlplane.envelope import BigRef, Envelope, InvalidBigRefError, OwnerRef
 from controlplane.gitstore import GitStore
 from controlplane.models import version_of_file, version_of_id
 from controlplane.paths import CONTROL_PLANE_ROOT, agent_round_file, model_file, persona_file, scenario_file
@@ -78,7 +78,16 @@ def _read_model(store: GitStore, model_id: str) -> tuple[int, str, BigRef | None
     if len(env.links) < 2 or not env.links[1]:
         raise AgentRoundFailedError(f"model {model_id} has no run in its links", point="mindagent.rounds.model")
     raw = env.payload.get("checkpoint_ref")
-    return version, env.links[1], BigRef.from_dict(raw) if raw is not None else None
+    if raw is None:
+        return version, env.links[1], None
+    try:
+        return version, env.links[1], BigRef.from_dict(raw)
+    except (InvalidBigRefError, KeyError, AttributeError) as exc:
+        # 手改进树的坏引用(I8):调用方只接 AgentRoundFailedError,别的异常会从处理器漏出去打崩守护进程
+        raise AgentRoundFailedError(
+            f"model {model_id} has an unusable checkpoint_ref ({type(exc).__name__}: {exc})",
+            point="mindagent.rounds.model",
+        ) from exc
 
 
 def _latest_effective_version(store: GitStore) -> int:

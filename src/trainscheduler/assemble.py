@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from controlplane.evidence import diagnostic_grade
 from controlplane.gitstore import GitStore
-from controlplane.models import latest_promoted_checkpoint
+from controlplane.models import MissingCheckpointRefError, latest_promoted_checkpoint
 from controlplane.paths import candidate_checkpoint_file, planner_decision_file, run_dir, run_trace_file
 from trainplanner.context import (
     CANDIDATE_TERMINAL_STATES,
@@ -225,7 +225,12 @@ def _strategy_experience(store: GitStore, run_id: str, config: SchedulerConfig) 
     """设计 6.2:最低一级分维度、同基座同基准、最多三条。关闭时为空。"""
     if not config.strategy_experience:
         return []
-    base = latest_promoted_checkpoint(store)
+    try:
+        base = latest_promoted_checkpoint(store)
+    except MissingCheckpointRefError as exc:
+        # 基座缺 checkpoint_ref 或它不合规(I8)。MissingCheckpointRefError 不是 SchedulerError,
+        # 漏出去会打崩规划处理器;转成装配错误,处理器把这次决策置 failed。
+        raise ContextAssemblyError(f"strategy experience needs the promoted base: {exc}") from exc
     if base is None:
         return []
     payload = read_report_payload(store, run_id)

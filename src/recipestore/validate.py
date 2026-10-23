@@ -8,6 +8,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from controlplane.envelope import SHA256_HEX
+
 RECIPE_TYPES = ("batch", "interact", "agent_rsi")
 # 与 trainplanner.context.RECIPE_TYPES(计划 4)是同两份字面量,必须同步;计划 9 任务 109
 # 有一条跨计划一致性测试钉住两边相等(本包不导入 trainplanner,所以只能放在计划 9)。
@@ -26,7 +28,6 @@ RELATIVE_TOKENS = frozenset({
 })
 _RELATIVE_SUFFIXES = (":latest", "-latest", "@latest", "_latest")
 
-_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT = re.compile(r"^[0-9a-f]{7,40}$")
 
 INTERACT_WARNING = "interact recipes are nondeterministic: a rerun can only be highly similar, not identical"
@@ -101,7 +102,7 @@ def _check_bigref(cfg: dict, key: str, errors: list[str]) -> None:
     if not isinstance(ref, dict):
         errors.append(f"training_config.{key}: must be a BigRef mapping")
         return
-    if not isinstance(ref.get("sha256"), str) or not _SHA256.match(ref["sha256"]):
+    if not isinstance(ref.get("sha256"), str) or not SHA256_HEX.match(ref["sha256"]):
         errors.append(f"training_config.{key}.sha256: must be a 64-char lowercase hex digest")
     if not isinstance(ref.get("uri"), str) or not ref["uri"].strip():
         errors.append(f"training_config.{key}.uri: must be a non-empty string")
@@ -150,7 +151,7 @@ def _check_batch(p: dict, errors: list[str], warnings: list[str]) -> None:
         if not _concrete_str(entry.get("id")):
             errors.append(f"stage_manifests.{stage}.id: missing")
         h = entry.get("manifest_hash")
-        if not isinstance(h, str) or not _SHA256.match(h):
+        if not isinstance(h, str) or not SHA256_HEX.match(h):
             errors.append(f"stage_manifests.{stage}.manifest_hash: must be a 64-char lowercase hex digest")
     refs = cfg.get("stage_manifest_refs", {}) if isinstance(cfg, dict) else {}
     if isinstance(refs, dict):

@@ -3,17 +3,15 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import re
 from typing import Protocol
 
-from controlplane.envelope import BigRef
+from controlplane.envelope import SHA256_HEX, BigRef
 from mindtrainer.datamodel import RewardedTrajectory, StepResult
 from mindtrainer.grouping import count_degenerate_groups, group_by_id
 from simulator.dataset import episode_digest
 from simulator.datamodel import Episode
 
 _URI_PREFIX = "mock://ckpt/"
-_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
 class ExecutorNotLoadedError(RuntimeError):
@@ -110,7 +108,7 @@ def _parse_mock_ref(ref: BigRef) -> tuple[str, int]:
     """mock://ckpt/{state}@{steps}。state 必须等于 ref.sha256,否则视为损坏。"""
     body = ref.uri[len(_URI_PREFIX):]
     state, sep, steps = body.partition("@")
-    if not sep or not steps.isdigit() or not _SHA256.match(state) or state != ref.sha256:
+    if not sep or not steps.isdigit() or not SHA256_HEX.match(state) or state != ref.sha256:
         raise CheckpointCorruptError(f"cannot restore from {ref.uri!r} (sha256 {ref.sha256!r})")
     return state, int(steps)
 

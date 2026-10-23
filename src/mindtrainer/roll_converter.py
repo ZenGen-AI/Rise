@@ -10,19 +10,17 @@
 from __future__ import annotations
 
 import hashlib
-import re
 import uuid
 from dataclasses import dataclass
 
 from compute.client import ComputeClient, JobSpec
 from compute.endpoint import ComputeEndpoint
 from compute.errors import ComputeBusyError, HelperError
-from controlplane.envelope import BigRef
+from controlplane.envelope import SHA256_HEX, BigRef
 from mindtrainer.executor import CheckpointCorruptError
 
 EXPORT_MARKER = ".exported"  # 内容是产物目录的 full 哈希
 EXPORT_FORMAT = "qwen4_exp_vllm_2d"  # ROLL 的 LoRAHFConverter 布局(设计 §1 已核实)
-_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 # ROLL4ZenGen 的导出是 convert_checkpoint_to_hf 的 Python 调用,没有命令行入口(README 与 B2 实测)。
 # 此前假定的 scripts/export_lora_for_vllm.py 不存在。路径只经环境变量传进来,程序文本是固定常量:
@@ -67,9 +65,9 @@ class RollLoraConverter:
             raise CheckpointCorruptError(
                 f"RollLoraConverter cannot convert {ref.uri!r}: it expects an ssh:// reference"
             )
-        if len(ref.sha256) != 64 or not _SHA256.match(ref.sha256):
-            # 必须是 64 位小写十六进制:sha256[:8] 会直接进远端路径,非十六进制的 64 字符串
-            # (例如 "../../..")会让产物目录逃出 work_root。
+        if not SHA256_HEX.match(ref.sha256):
+            # BigRef 构造时已保证这一条(I8);sha256[:8] 直接进远端路径,所以这里再判一次作纵深防御:
+            # 非十六进制的 64 字符串(例如 "../../..")会让产物目录逃出 work_root。
             raise CheckpointCorruptError(
                 f"the checkpoint reference carries no usable sha256: {ref.sha256!r}"
             )
