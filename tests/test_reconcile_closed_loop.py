@@ -348,6 +348,32 @@ def test_nominate_is_not_blocked_by_a_round_in_flight_and_covers_every_run():
     assert [a.target_id for a in _kinds(reconcile(state), "nominate_recipe")] == ["run-001", "run-002"]
 
 
+# ---- 同种动作内的输出次序 ----
+
+_MIXED = ["run-10", "run-2", "scratch", "run-011", "run-1"]
+
+
+def test_nominate_recipe_lists_runs_in_numeric_order():
+    """同种动作内按 run 编号的数值序:字典序会把 run-10 排在 run-2 前面。"""
+    state = TreeState(runs=[_run(r) for r in _MIXED], enabled=frozenset({"nominate_recipe"}))
+    got = [a.target_id for a in _kinds(reconcile(state), "nominate_recipe")]
+    assert got == ["run-1", "run-2", "run-10", "run-011", "scratch"]
+
+
+def test_record_track_lists_runs_in_numeric_order():
+    state = TreeState(runs=[_run(r, recipe_ref="recipe-run-000") for r in _MIXED],
+                      enabled=frozenset({"record_track"}))
+    got = [a.target_id for a in _kinds(reconcile(state), "record_track")]
+    assert got == ["run-1", "run-2", "run-10", "run-011", "scratch"]
+
+
+def test_a_tie_on_the_run_number_keeps_the_order_independent_of_input():
+    """同编号(手工命名才会出现)按 run id 字典序排,与 _latest_numbered_run 同一口径。"""
+    for order in (["run-7", "run-007"], ["run-007", "run-7"]):
+        state = TreeState(runs=[_run(r) for r in order], enabled=frozenset({"nominate_recipe"}))
+        assert [a.target_id for a in _kinds(reconcile(state), "nominate_recipe")] == ["run-007", "run-7"]
+
+
 # ---- record_track ----
 
 @pytest.mark.parametrize("candidate_status", ["effective", "rejected"])

@@ -378,7 +378,7 @@ def evidence_acceptable(grade: str, accept_mock: bool) -> bool: ...
 | `plan_next_round` | run id | `run_id` | 候选 `effective` 或 `rejected`;证据可接受;决策状态为空或 `pending`;没有在途轮;启用提名且候选为 `effective` 时,来源 run 已有提名标记,且配方候选 `recipe-<run>` 不在 `pending_review` 或 `approved`;该 run 是 `run-<数字>` 里编号最大的 | 规划决策变为 `executed` 或 `failed` |
 | `start_agent_round` | 模型 id | `version`、`run_id` | 版本号(按数字)最大的 `effective` 模型,且轮次产物不存在、读不出或状态为 `pending` | 轮次产物变为 `executed` 或 `failed` |
 
-- **输出顺序固定。** 既有动作在前,之后是 `admit_recipe`、`admit_proposal`、`record_track`、`nominate_recipe`、`plan_next_round`、`start_agent_round`,同种动作按 id 字典序。先收录再规划,规划就能看到刚收录的配方;先记战绩再规划,退化的配方不会被同一 tick 选中。`plan_next_round` 每个 tick 至多一条。
+- **输出顺序固定。** 既有动作在前,之后是 `admit_recipe`、`admit_proposal`、`record_track`、`nominate_recipe`、`plan_next_round`、`start_agent_round`。同种动作内,门按 id 字典序;run 按编号的数值序,`run-<数字>` 在前,不合约定的名字按字典序排在后面,同编号再按 run id 字典序。数值序是为了让 `reconcile --once` 的输出与 run 的先后一致(字典序会把 `run-10` 排在 `run-2` 前面);同一 tick 里这些动作彼此独立,次序不影响结果。先收录再规划,规划就能看到刚收录的配方;先记战绩再规划,退化的配方不会被同一 tick 选中。`plan_next_round` 每个 tick 至多一条。
 - **在途轮。** 任一指令是 `pending` 或 `awaiting_confirmation`,或任一候选是 `pending_review` 或 `approved`。只有 `plan_next_round` 受它限制,提名与战绩是对已结束 run 的记账,不受限。启用提名且候选为 `effective` 时,`plan_next_round` 还要等配方入库门:来源 run 已有提名标记(`nominated` 或 `skipped`),且 `GateView` 里 id 为 `recipe-<run>` 的配方候选不在 `pending_review` 或 `approved`(CP-11)[已落地]。候选为 `rejected` 的 run 不等,因为被拒绝的候选不提名。
 - **最大 run。** 按 `run-<数字>` 整数比较。不匹配的名字不参与。一个 `run-<数字>` 都没有时不触发规划,这是刻意的失败关闭,闭环停在等人写指令。编号相同(如 `run-7` 与 `run-007`)按 run id 字典序取较大者。若用字符串序,不补零的 `run-9` 会压过 `run-011`,闭环会静默停住。
 - **只对最大版本跑轮次。** 最大 `effective` 模型的轮次到终态后,更旧的模型即使没有轮次也不补跑。`start_agent_round` 的 `run_id` 取模型 `links` 的第二项,不足两项为空串。

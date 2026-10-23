@@ -108,6 +108,13 @@ def has_round_in_flight(state: TreeState) -> bool:
 _RUN_ID = re.compile(r"^run-([0-9]+)$")   # [0-9] 而不是 \d:与计划 5 的 run_number 同一口径,避免 Unicode 数字被一边认、一边不认
 
 
+def _run_order_key(run_id: str) -> tuple:
+    """同种动作内的输出次序:run-<数字> 按数值在前,其余名字按字典序排在后面。
+    同编号(run-7 与 run-007)再按 run id 字典序,结果与输入顺序无关。"""
+    m = _RUN_ID.match(run_id)
+    return (0, int(m.group(1)), run_id) if m else (1, 0, run_id)
+
+
 def _latest_numbered_run(runs: list[RunView]) -> RunView | None:
     """run-<数字> 里数值最大的那个 run;一个都没有时为 None(刻意失败关闭:不规划)。
     同编号(只可能是手工命名,例如 run-7 与 run-007)时按 run id 字典序取最大,结果与输入顺序无关。"""
@@ -137,15 +144,16 @@ def _recipe_gate_open(state: TreeState, run: RunView) -> bool:
 
 def _closed_loop_actions(state: TreeState) -> list[Action]:
     """六个新动作。输出顺序固定:admit_recipe → admit_proposal → record_track →
-    nominate_recipe → plan_next_round → start_agent_round;同一种动作内按 id 字典序
-    (plan_next_round 至多一条,只针对编号最大的 run-<数字>,见 _latest_numbered_run)。
+    nominate_recipe → plan_next_round → start_agent_round;同一种动作内:门按 id 字典序,
+    run 按编号的数值序(_run_order_key)。plan_next_round 至多一条,只针对编号最大的
+    run-<数字>,见 _latest_numbered_run。
     detail 只是提示,处理器必须自己重读树(动作列表来自 tick 开头的快照)。"""
     on = state.enabled
     out: list[Action] = []
     gates = sorted(state.gates, key=lambda g: g.id)
-    # 只决定 record_track / nominate_recipe 的输出顺序(Ruling 3:按 id 字典序);
-    # 不用来选"最大 run",那个按数值序,见 _latest_numbered_run。
-    runs = sorted(state.runs, key=lambda r: r.run_id)
+    # 只决定 record_track / nominate_recipe 的输出顺序。按编号的数值序(字典序会把 run-10
+    # 排在 run-2 前面);不用来选"最大 run",那个见 _latest_numbered_run。
+    runs = sorted(state.runs, key=lambda r: _run_order_key(r.run_id))
     if "admit_recipe" in on:
         for g in gates:
             if g.kind == "recipe_candidate" and g.status == "approved":
