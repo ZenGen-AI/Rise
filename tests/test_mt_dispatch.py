@@ -270,6 +270,21 @@ def test_a_manifest_that_exists_but_cannot_be_read_fails_the_directive(store, co
     assert reconcile_once(store, dispatcher=make_mindtrainer_dispatcher()) == []
 
 
+def test_a_manifest_with_a_broken_envelope_fails_the_directive(store):
+    """信封校验失败同样是确定性的读不出(gitstore.UNREADABLE_PRODUCT_ERRORS):原先这一处的元组漏了它,
+    异常逃出派发器,指令保持 pending、每轮重派。"""
+    path = store.repo_root / dataset_manifest_file(RUN, "sft")
+    path.write_text(                                       # 字段都在,但载荷不是对象:过不了信封 Schema
+        "id: dsm-run-1-sft\ntype: dataset_manifest\nversion: 1\ncreated_at: '2026-10-09T00:00:00Z'\n"
+        "created_by: {owner: default, visibility: shared}\nstatus: executed\nschema_version: 1\n"
+        "links: []\npayload: [1, 2]\n", encoding="utf-8")
+    _directive(store, payload={"target_dimension": "tom", "recipe_ref": "", "training_config": _cfg_dict()})
+    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher())
+    env = store.read_product(f"{run_dir(RUN)}/directive.yaml")
+    assert env.status == "failed"
+    assert "EnvelopeValidationError" in env.payload["failure"]["reason"]
+
+
 def test_a_transient_error_while_reading_a_manifest_leaves_the_directive_pending(store, monkeypatch):
     """读清单那段只接确定性的读取失败。OSError 是瞬态的,必须原样上抛、指令保持 pending,
     下一轮才有机会重派;若被当成确定性失败接住,一次磁盘抖动就会把指令永久判 failed。"""

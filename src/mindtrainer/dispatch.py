@@ -2,13 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-import yaml
-
 from controlplane.daemon import DirectiveFailedError, Dispatcher
 from controlplane.deferred import DeferredError
 from controlplane.envelope import Envelope
-from controlplane.gitstore import GitStore
-from controlplane.migration import UnknownSchemaVersionError
+from controlplane.gitstore import UNREADABLE_PRODUCT_ERRORS, GitStore
 from controlplane.paths import dataset_manifest_file
 from mindtrainer.checkpoint import CheckpointConverter, MockConverter
 from mindtrainer.data_spec import (
@@ -124,7 +121,7 @@ def _batch_manifests(store: GitStore, run_id: str, cfg: TrainingConfig) -> dict[
             )
         try:
             manifest = read_manifest(store, data_run, name)
-        except (KeyError, TypeError, AttributeError, yaml.YAMLError, UnknownSchemaVersionError) as exc:
+        except UNREADABLE_PRODUCT_ERRORS as exc:
             # 文件在场但读不出来(缺键、YAML 语法错、schema_version 没有迁移器):这同样是
             # 确定性的配置/数据问题,重试不会变好,不能让它逃出 dispatch() 变成每轮重派的
             # "瞬态失败"(那样会在同一处卡死 run_daemon,排在它后面的指令永远轮不到)。

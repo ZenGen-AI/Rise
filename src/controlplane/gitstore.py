@@ -7,8 +7,16 @@ from pathlib import Path
 import yaml
 
 from controlplane.envelope import Envelope
-from controlplane.migration import load_product
+from controlplane.migration import UnknownSchemaVersionError, load_product
+from controlplane.validate import EnvelopeValidationError
 from controlplane.paths import CONTROL_PLANE_ROOT, SUBDIRS
+
+# read_product 在「文件在、内容用不了」时抛的异常:YAML 解析失败(含合并冲突标记)、缺键、类型不对
+# (BigRef 不合规抛的 InvalidBigRefError 是 TypeError 子类)、信封校验失败、schema_version 无法迁移。
+# 重读也不会变好,是确定性的。OSError 不在其中:磁盘与权限问题是瞬态,调用方应原样上抛。
+# 各处判「读不出」都引用这一份,不另写元组(此前有四份,其中一份漏了信封校验失败)。
+UNREADABLE_PRODUCT_ERRORS = (KeyError, TypeError, AttributeError, yaml.YAMLError,
+                             EnvelopeValidationError, UnknownSchemaVersionError)
 
 
 class GitStore:

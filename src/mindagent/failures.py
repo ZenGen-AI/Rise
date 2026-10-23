@@ -1,20 +1,14 @@
 """失败记录的守卫与轮次产物的容错读取。两个处理器都经这里写失败记录,不直接调 record_failure。"""
 from __future__ import annotations
 
-import yaml
-
 from controlplane.envelope import Envelope
-from controlplane.gitstore import GitStore
+from controlplane.gitstore import UNREADABLE_PRODUCT_ERRORS, GitStore
 from controlplane.ledger import record_failure
-from controlplane.migration import UnknownSchemaVersionError
 from controlplane.paths import failure_record_file, run_dir
-from controlplane.validate import EnvelopeValidationError
 
-# 产物"文件在、内容读不出"时的异常,与计划 8 的 _agent_round_status 同一组:YAML 解析失败
-# (含合并冲突标记)、缺键、类型不对、信封校验失败、schema_version 无法迁移。
+# 产物"文件在、内容读不出"时的异常,定义见 gitstore.UNREADABLE_PRODUCT_ERRORS(各处同一份);
 # OSError 不在其中,原样上抛(瞬态)。
-UNREADABLE = (KeyError, TypeError, AttributeError, yaml.YAMLError,
-              EnvelopeValidationError, UnknownSchemaVersionError)
+UNREADABLE = UNREADABLE_PRODUCT_ERRORS
 
 
 def read_or_none(store: GitStore, rel: str) -> Envelope | None:

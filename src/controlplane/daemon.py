@@ -1,19 +1,15 @@
 from __future__ import annotations
 
 import logging
-import re
 import time
-from pathlib import Path
 from collections.abc import Callable, Mapping
-
-import yaml
+from pathlib import Path
 
 from controlplane.deferred import DeferredError
 from controlplane.envelope import Envelope, OwnerRef
 from controlplane.evidence import diagnostic_grade
-from controlplane.gitstore import GitStore
+from controlplane.gitstore import UNREADABLE_PRODUCT_ERRORS, GitStore
 from controlplane.lock import acquire_repo_lock
-from controlplane.migration import UnknownSchemaVersionError
 from controlplane.models import max_model_version, version_of_file
 from controlplane.paths import (
     CONTROL_PLANE_ROOT,
@@ -40,7 +36,6 @@ from controlplane.reconcile import (
     reconcile,
 )
 from controlplane.states import assert_transition
-from controlplane.validate import EnvelopeValidationError
 from simulator.stubs import diagnostic_evaluator_stub, execute_dispatch
 
 _NOW = "2026-09-26T00:00:00Z"
@@ -139,11 +134,9 @@ def _iter_run_ids(store: GitStore) -> list[str]:
     return sorted(p.name for p in runs_dir.iterdir() if p.is_dir())
 
 
-# 产物"文件在、内容读不出"时的异常:YAML 解析失败(含合并冲突标记)、缺键、类型不对(BigRef 不合规
-# 抛的 InvalidBigRefError 是 TypeError 子类)、信封校验失败、schema_version 无法迁移。
-# OSError 不在其中,原样上抛(瞬态,守护进程退出)。
-_UNREADABLE = (KeyError, TypeError, AttributeError, yaml.YAMLError,
-               EnvelopeValidationError, UnknownSchemaVersionError)
+# 产物"文件在、内容读不出"时的异常,定义见 gitstore.UNREADABLE_PRODUCT_ERRORS;OSError 不在其中,
+# 原样上抛(瞬态,守护进程退出)。
+_UNREADABLE = UNREADABLE_PRODUCT_ERRORS
 
 
 def _read_or_mark(store: GitStore, rel: str, bad: set[str]) -> Envelope | None:
@@ -163,8 +156,12 @@ def read_tree_state(
 ) -> TreeState:
     """扫 git 树，投影成 reconcile() 需要的纯视图。
 
-    enabled 为空时只读既有的三项,返回值与引入闭环视图之前逐字节相同(accept_mock_evidence
-    此时不起作用:没有闭环动作,它无处可用)。非空时才去填 runs / models / gates。"""
+    enabled 为空时只填既有的几项(指令、候选、模型数与最大版本号)和 unreadable;为了填 unreadable,
+    也逐个读模型文件(晋级的暂停规则要用,控制面 CP-17)。树里没有坏文件时,结果与引入闭环视图之前
+    相同。accept_mock_evidence 此时不起作用:没有闭环动作,它无处可用。非空时才去填 runs / models / gates。
+
+    读不出的产物(gitstore.UNREADABLE_PRODUCT_ERRORS)不抛:状态记 UNREADABLE_STATUS,路径进 unreadable;
+    OSError 原样上抛。"""
     bad: set[str] = set()   # 读不出的产物路径(CP-17);指令与候选在下面和 run 视图里各读一次,所以用集合
     directives: list[DirectiveView] = []
     candidates: list[CandidateView] = []

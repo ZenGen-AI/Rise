@@ -9,6 +9,7 @@ from actio.trace import normalize_library_version
 from controlplane.gitstore import GitStore
 from controlplane.paths import CONTROL_PLANE_ROOT, library_state_file
 from mindagent.errors import MindAgentDataError
+from mindagent.failures import UNREADABLE
 
 LIBRARY_STATE_ID = "library-state"
 _PROPOSAL_PREFIX = "proposal-"
@@ -46,17 +47,28 @@ def read_library_versions(store: GitStore) -> dict:
     return state
 
 
+def _read_entry(store: GitStore, rel: str):
+    """库文件读不出(YAML 坏、信封校验失败、schema 版本无法迁移)转成 MindAgentDataError,点名文件。
+    库文件不在调和循环的视图里,控制面 CP-17 的暂停规则管不到它;轮次处理器只接 MindAgentDataError
+    与 ActioDataError,别的异常会从处理器漏出去打崩守护进程。OSError 不在 UNREADABLE 里,原样上抛。"""
+    try:
+        return store.read_product(rel)
+    except UNREADABLE as exc:
+        raise MindAgentDataError(f"library file {rel} is unreadable ({type(exc).__name__})") from exc
+
+
 def load_library(store: GitStore) -> LibraryState:
     """读当前正式库:skill_library/、memory_library/ 下状态为 effective 的条目,按 id 排序;
-    版本取自 library_state。条目结构不合法抛 actio 的 ActioDataError(确定性错误)。"""
+    版本取自 library_state。条目结构不合法抛 actio 的 ActioDataError,文件读不出抛
+    MindAgentDataError(都是确定性错误)。"""
     skills = []
     for rel in store.list_products(f"{CONTROL_PLANE_ROOT}/skill_library"):
-        env = store.read_product(rel)
+        env = _read_entry(store, rel)
         if env.status == "effective":
             skills.append(Skill.from_dict(env.payload))
     memories = []
     for rel in store.list_products(f"{CONTROL_PLANE_ROOT}/memory_library"):
-        env = store.read_product(rel)
+        env = _read_entry(store, rel)
         if env.status == "effective":
             memories.append(MemoryEntry.from_dict(env.payload))
     state = read_library_versions(store)

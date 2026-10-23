@@ -121,3 +121,59 @@ def test_reading_never_commits(store, tmp_path):
     render_logs(store, RUN, task_id="x")
     render_logs(store, "run-404")
     assert _head_and_status(store) == before
+
+
+# ---- logs 是排查问题时最需要的命令:树里有坏东西时它自己不能崩 ----
+
+def _put_payload(store, name, payload):
+    env = Envelope(id=name, type="failure_record", version=1, created_at="2026-10-09T00:00:00Z",
+                   created_by=OwnerRef(), status="executed", schema_version=1, payload=payload)
+    store.write_product(f"{run_dir(RUN)}/{name}.yaml", env, f"seed {name}")
+
+
+def test_an_unreadable_product_in_the_run_is_named_and_the_rest_still_print(store, tmp_path):
+    good = _log_file(tmp_path, "train-1.log", "ok line\n")
+    record_failure(store, RUN, task_id="train", category="T1", point="x", retries=0, reason="r", log_ref=good)
+    bad = store.repo_root / run_dir(RUN) / "broken.yaml"
+    bad.write_text("<<<<<<< HEAD\nid: broken\n", encoding="utf-8")
+    text, code = render_logs(store, RUN)
+    assert code == 1
+    assert "ok line" in text
+    assert f"{run_dir(RUN)}/broken.yaml [unreadable]" in text
+
+
+@pytest.mark.parametrize("ref", [{"sha256": "a" * 64}, {"uri": 5}, "not-a-mapping"],
+                         ids=["no-uri", "uri-not-a-string", "ref-not-a-mapping"])
+def test_a_malformed_reference_is_named_not_a_crash(store, ref):
+    _put_payload(store, "failure-train", {"task_id": "train", "log_refs": [ref]})
+    text, code = render_logs(store, RUN)
+    assert code == 1
+    assert "[malformed]" in text
+
+
+def test_a_log_file_that_cannot_be_read_is_unreachable(store, tmp_path, monkeypatch):
+    ref = _log_file(tmp_path, "train-1.log", "secret-free line\n")
+    record_failure(store, RUN, task_id="train", category="T1", point="x", retries=0, reason="r", log_ref=ref)
+    real = readonly.Path.read_bytes
+
+    def denied(self):
+        if self.name == "train-1.log":
+            raise PermissionError(13, "Permission denied", str(self))
+        return real(self)
+
+    monkeypatch.setattr(readonly.Path, "read_bytes", denied)
+    text, code = render_logs(store, RUN)
+    assert code == 1
+    assert f"log_ref [unreachable] {ref.uri}" in text
+    assert "PermissionError" in text
+
+
+def test_a_percent_encoded_file_uri_is_decoded(store, tmp_path):
+    """file:// 地址里的空格等字符按 RFC 8089 是百分号编码的。"""
+    path = tmp_path / "logs dir" / "train-1.log"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"spaced\n")
+    ref = BigRef(uri=f"file://{str(path).replace(' ', '%20')}", sha256=hashlib.sha256(b"spaced\n").hexdigest(), size_bytes=7)
+    record_failure(store, RUN, task_id="train", category="T1", point="x", retries=0, reason="r", log_ref=ref)
+    text, code = render_logs(store, RUN)
+    assert (code, "spaced" in text) == (0, True)

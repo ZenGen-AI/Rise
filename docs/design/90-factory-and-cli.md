@@ -344,7 +344,7 @@ Python 子命令 [已落地]。每个子命令的第一个位置参数都是控�
 | `import-sombench <repo> --someval-root <路径> --index <树外路径>` | 从 SoMEval 检出目录导入 SoMBench:写分类表与题库(版本带数据集哈希前缀),写污染索引;内容相同不提交 [已落地] | 0;parquet 缺失或 pyarrow 未装,退出码 2 |
 | `trace <repo> <run>` | 原样打印观测函数 `trace` 的输出 | 0;run 不存在 1 |
 | `cost <repo> <run>` | 原样打印观测函数 `cost` 的输出 | 0,没有 `run_trace` 也是 0 |
-| `logs <repo> <run> [--task <id>]` | 按 run 目录产物的 `log_refs` 打印日志 | 0;run 不存在、有引用不可达或哈希不符 1 |
+| `logs <repo> <run> [--task <id>]` | 按 run 目录产物的 `log_refs` 打印日志 | 0;run 不存在、有引用不可达或哈希不符、有产物读不出或引用畸形 1 |
 
 `run` 与 `reconcile` 共用的开关 [已落地]:
 
@@ -592,7 +592,7 @@ factory 是最后一个工作包,前八个全部落地后才能施工。
 | 候选的诊断证据 | `rismforge review <id>` | [已落地] |
 | 本 tick 做了什么 | `factory reconcile <repo> --once` 的输出 | [已落地] |
 
-`logs` 对不可达的引用标 `[unreachable]` 并写明不显示内容,哈希不符标 `[sha256 mismatch]` 但照样打印 [已落地]。成功调用的桥接日志不进树,只在控制面仓库的 `.rismforge/logs/<run>/` 目录里。
+`logs` 对不可达的引用标 `[unreachable]` 并写明不显示内容(本机读文件时的权限等 `OSError` 同样算不可达),哈希不符标 `[sha256 mismatch]` 但照样打印 [已落地]。它是排查问题时最需要的命令,所以树里有坏东西时自己不崩:读不出的产物标 `[unreadable]` 并写明异常类名,`log_refs` 不是列表或引用缺字符串 `uri` 时标 `[malformed]`,其余引用照常打印;`file://` 地址按百分号编码解码 [已落地]。成功调用的桥接日志不进树,只在控制面仓库的 `.rismforge/logs/<run>/` 目录里。
 
 ## 9. 测试策略
 
@@ -605,7 +605,7 @@ factory 是最后一个工作包,前八个全部落地后才能施工。
 | 命令行 | `review`、`approve`、`reject`、`status` | 临时 git 仓库 | `cli/test/commands.test.ts` | 19 [已落地] |
 | 命令行 | 命令名常量 | 无 | `cli/test/smoke.test.ts` | 1 [已落地] |
 | 开关与边界 | 映射表;无包导入 factory | 无 | `tests/test_factory_switches.py`、`tests/test_factory_boundaries.py` | 17、2 [已落地] |
-| 只读 | `trace`、`cost`、`logs` | 临时仓库 | `tests/test_factory_readonly.py` | 10 [已落地] |
+| 只读 | `trace`、`cost`、`logs` | 临时仓库 | `tests/test_factory_readonly.py` | 16 [已落地] |
 | 桥接装配 | 角色、凭证不外露 | `sys.executable -c` 假可执行体 | `tests/test_factory_bridges.py` | 14 [已落地] |
 | 评估器装配 | 配置校验、默认资产 | `MockSoMEvalRunner`、`MockJudgeBackend` | `tests/test_factory_evaluation.py` | 12 [已落地] |
 | 组合根与命令行 | 逐字节相同、注入、装配错误、退出码、仓库锁被占用时的退出与只读照常 | 记录调用的假处理器 | `tests/test_factory_wire.py`、`tests/test_factory_cli.py` | 37、9 [已落地] |

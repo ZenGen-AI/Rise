@@ -354,6 +354,18 @@ def test_a_model_with_an_unusable_checkpoint_ref_fails_the_round_instead_of_esca
     assert "sha256" in rnd.payload["failure"]["reason"]
 
 
+def test_a_corrupt_library_file_fails_the_round_instead_of_escaping(store):
+    """库文件读不出:轮次 failed,原因点名文件;处理器不抛,守护进程不退出。"""
+    rel = skill_file("skill-broken")
+    path = store.repo_root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("<<<<<<< HEAD\nid: skill-broken\n", encoding="utf-8")
+    _start(store, _handler())
+    rnd = store.read_product(agent_round_file("zengen-v1"))
+    assert rnd.status == "failed"
+    assert "skill-broken" in rnd.payload["failure"]["reason"]
+
+
 def test_a_newer_model_supersedes_a_pending_round_and_an_old_action_is_refused(store, monkeypatch):
     real = store.write_product
 
