@@ -2,7 +2,9 @@
 非空时才读 runs / models / gates。"""
 import pytest
 
-from controlplane.daemon import read_tree_state, reconcile_once
+import logging
+
+from controlplane.daemon import read_tree_state, reconcile_once, run_daemon
 from controlplane.envelope import Envelope, OwnerRef
 from controlplane.gitstore import GitStore
 from controlplane.paths import (
@@ -17,7 +19,9 @@ from controlplane.paths import (
     recipe_track_note_file,
     run_dir,
 )
-from controlplane.reconcile import CLOSED_LOOP_ACTIONS, GateView, ModelView, RunView, TreeState
+from controlplane.reconcile import (
+    CLOSED_LOOP_ACTIONS, UNREADABLE_STATUS, GateView, ModelView, RunView, TreeState,
+)
 
 ALL = frozenset(CLOSED_LOOP_ACTIONS)
 
@@ -222,3 +226,141 @@ def test_missing_new_directories_read_as_empty(tmp_path):
         shutil.rmtree(store.repo_root / "control-plane" / sub, ignore_errors=True)
     state = read_tree_state(store, enabled=ALL)
     assert (state.runs, state.models, state.gates) == ([], [], [])
+
+
+# ---- CP-17:读不出的已提交产物记为 unreadable,不让守护进程退出 ----
+
+CONFLICT = "<<<<<<< HEAD\nstatus: pending\n=======\nstatus: executed\n>>>>>>> other\n"
+
+
+def _spoil(store, rel, text=CONFLICT):
+    """像合并冲突或手改那样,把一个已提交的产物写成读不出的样子(不经 write_product)。"""
+    path = store.repo_root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return rel
+
+
+def test_an_unreadable_directive_is_projected_not_raised(store):
+    rel = _spoil(store, f"{run_dir('run-001')}/directive.yaml")
+    state = read_tree_state(store, enabled=ALL)
+    (d,) = state.directives
+    assert (d.id, d.status) == ("run-001", UNREADABLE_STATUS)
+    assert state.runs[0].directive_status == UNREADABLE_STATUS
+    assert state.unreadable == (rel,)
+
+
+def test_an_unreadable_candidate_is_projected_not_raised(store):
+    rel = _spoil(store, candidate_checkpoint_file("run-001"), "id: cand-run-001\npayload: [1]\n")
+    state = read_tree_state(store, enabled=ALL)
+    (c,) = state.candidates
+    assert (c.id, c.status, c.run_id) == ("cand-run-001", UNREADABLE_STATUS, "run-001")
+    assert state.runs[0].candidate_status == UNREADABLE_STATUS
+    assert state.unreadable == (rel,)
+
+
+def test_an_unreadable_planner_decision_is_not_read_as_missing(store):
+    """决策「为空」正是 plan_next_round 的触发条件:读不出不能当成没有。"""
+    _candidate(store, "run-001", "effective")
+    rel = _spoil(store, planner_decision_file("run-001"))
+    state = read_tree_state(store, enabled=ALL)
+    assert state.runs[0].planner_decision_status == UNREADABLE_STATUS
+    assert state.unreadable == (rel,)
+
+
+def test_an_unreadable_model_is_projected_from_its_file_name(store):
+    _put(store, model_file(1), _env("zengen-v1", "zengen_model", "effective", links=["cand-run-001", "run-001"]))
+    rel = _spoil(store, model_file(2))
+    state = read_tree_state(store, enabled=ALL)
+    assert sorted(state.models, key=lambda m: m.version)[1] == ModelView("zengen-v2", 2, "", UNREADABLE_STATUS, None)
+    assert state.unreadable == (rel,)
+
+
+def test_an_unreadable_model_is_reported_even_without_closed_loop_actions(store):
+    """晋级的暂停规则要用:enabled 为空时也要读模型文件。"""
+    rel = _spoil(store, model_file(1))
+    state = read_tree_state(store)
+    assert (state.models, state.unreadable) == ([], (rel,))
+
+
+def test_unreadable_gates_take_their_id_from_the_path(store):
+    recipe = _spoil(store, recipe_candidate_file("run-001"))
+    proposal = _spoil(store, proposal_file("prop-7"))
+    state = read_tree_state(store, enabled=ALL)
+    assert sorted(state.gates, key=lambda g: g.id) == [
+        GateView("prop-7", "skill_memory_proposal", UNREADABLE_STATUS),
+        GateView("recipe-run-001", "recipe_candidate", UNREADABLE_STATUS),
+    ]
+    assert state.unreadable == tuple(sorted((recipe, proposal)))
+
+
+def test_a_healthy_tree_has_nothing_unreadable(store):
+    _seed_everything(store)
+    assert read_tree_state(store, enabled=ALL).unreadable == ()
+    assert read_tree_state(store).unreadable == ()
+
+
+def test_an_os_error_still_propagates(store, monkeypatch):
+    """OSError 是瞬态(磁盘、权限):不吞,守护进程照旧退出。"""
+    _directive(store, "run-001")
+
+    def broken(rel):
+        raise PermissionError(rel)
+
+    monkeypatch.setattr(store, "read_product", broken)
+    with pytest.raises(PermissionError):
+        read_tree_state(store)
+
+
+
+def _warnings(caplog):
+    return [r.getMessage() for r in caplog.records
+            if r.name == "controlplane.daemon" and r.levelno == logging.WARNING]
+
+
+def test_the_daemon_survives_a_corrupt_file_and_reports_it_once(store, caplog):
+    """坏文件在树里:守护进程跑多个 tick 不退出;同一路径只记一次警告;别的指令照常派发。"""
+    rel = _spoil(store, f"{run_dir('run-001')}/directive.yaml")
+    _directive(store, "run-002")
+    caplog.set_level(logging.WARNING, logger="controlplane.daemon")
+    run_daemon(store, interval_s=0, max_ticks=3)
+    assert store.read_product(f"{run_dir('run-002')}/directive.yaml").status == "executed"
+    reported = [m for m in _warnings(caplog) if rel in m]
+    assert len(reported) == 1, reported
+    assert "Error" in reported[0], reported          # 带上异常类名,人能看出是哪种坏法
+
+
+def test_a_one_shot_tick_reports_every_unreadable_path(store, caplog):
+    first = _spoil(store, f"{run_dir('run-001')}/directive.yaml")
+    second = _spoil(store, model_file(1))
+    caplog.set_level(logging.WARNING, logger="controlplane.daemon")
+    reconcile_once(store)
+    messages = _warnings(caplog)
+    assert any(first in m for m in messages) and any(second in m for m in messages)
+
+
+def test_a_path_is_reported_again_after_it_was_fixed_and_broke_again(store, caplog):
+    rel = f"{run_dir('run-001')}/directive.yaml"
+    _spoil(store, rel)
+    reported: set[str] = set()
+    caplog.set_level(logging.WARNING, logger="controlplane.daemon")
+    reconcile_once(store, reported=reported)
+    reconcile_once(store, reported=reported)                   # 仍坏:不重复记
+    _directive(store, "run-001", status="executed")           # 修好
+    reconcile_once(store, reported=reported)
+    assert reported == set()
+    _spoil(store, rel)                                        # 又坏
+    reconcile_once(store, reported=reported)
+    assert len([m for m in _warnings(caplog) if rel in m]) == 2
+
+
+def test_the_closed_loop_resumes_once_the_file_is_fixed(store):
+    """暂停只持续到人修好文件:读得出之后同一棵树照常产生闭环动作。"""
+    _candidate(store, "run-001", "effective")
+    _report(store, "run-001", REAL)
+    rel = _spoil(store, recipe_candidate_file("run-000"))
+    assert read_tree_state(store, enabled=ALL).unreadable == (rel,)
+    from controlplane.reconcile import reconcile
+    assert not [a for a in reconcile(read_tree_state(store, enabled=ALL)) if a.kind in CLOSED_LOOP_ACTIONS]
+    (store.repo_root / rel).unlink()
+    assert [a.kind for a in reconcile(read_tree_state(store, enabled=ALL)) if a.kind in CLOSED_LOOP_ACTIONS]

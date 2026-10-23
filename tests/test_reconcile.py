@@ -124,3 +124,32 @@ def test_candidates_in_other_statuses_emit_nothing_even_without_a_diagnostic(sta
         model_count=0,
     )
     assert reconcile(state) == []
+
+
+# ---- CP-17:有模型读不出时诊断与晋级也暂停 ----
+
+def _candidates():
+    return [
+        CandidateView("cand-run-001", "pending_review", "run-001", has_diagnostic=False),
+        CandidateView("cand-run-002", "approved", "run-002", has_diagnostic=True),
+    ]
+
+
+def test_an_unreadable_model_pauses_diagnosis_and_promotion_but_not_dispatch():
+    """真实评估器找基线、晋级的重放判定都要读模型;派发与等待审核不读。"""
+    state = TreeState(
+        directives=[DirectiveView("run-003", "pending", "tom", "")],
+        candidates=_candidates() + [CandidateView("cand-run-004", "pending_review", "run-004", has_diagnostic=True)],
+        max_model_version=2,
+        unreadable=("control-plane/models/zengen-v2.yaml",),
+    )
+    assert [(a.kind, a.target_id) for a in reconcile(state)] == [
+        ("dispatch_directive", "run-003"),
+        ("await_review", "cand-run-004"),
+    ]
+
+
+def test_an_unreadable_non_model_product_does_not_pause_diagnosis_or_promotion():
+    state = TreeState(candidates=_candidates(), max_model_version=1,
+                      unreadable=("control-plane/runs/run-009/directive.yaml",))
+    assert [a.kind for a in reconcile(state)] == ["request_diagnostic", "promote_candidate"]

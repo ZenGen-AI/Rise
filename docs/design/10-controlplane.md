@@ -230,7 +230,7 @@ ControlPlane 是系统的协调层:它不训练、不评测,只读写产物并�
 | `ModelView` [已落地] | `model_id`、`version`、`run_id`、`status`、`agent_round_status` | `agent_round_status` 为 `None` 表示没有轮次产物或产物读不出;`has_agent_round` 是由它派生的只读属性,不是构造参数 |
 | `GateView` [已落地] | `id`、`kind`、`status` | `id` 取产物信封的 id,不取文件名;`kind` 是 `recipe_candidate` 或 `skill_memory_proposal` |
 | `TreeState` 新增字段 [已落地] | `runs`、`models`、`gates`(默认空列表),`enabled`(默认空集合),`accept_mock_evidence`(默认假) | 全部带默认值;`enabled` 为空时不填这几项,默认路径与现在逐字节相同 |
-| `TreeState.unreadable` [计划中] | 读不出的产物的树内路径,排好序的元组,默认空 | 不论 `enabled` 是否为空都填(`enabled` 为空时也读模型文件,晋级的暂停规则要用);树里没有坏文件时为空,其余字段与原先相同。读不出的产物在各视图里的状态记为常量 `UNREADABLE_STATUS`(取值 `unreadable`),id 从路径取,见 CP-17 |
+| `TreeState.unreadable` [已落地] | 读不出的产物的树内路径,排好序的元组,默认空 | 不论 `enabled` 是否为空都填(`enabled` 为空时也读模型文件,晋级的暂停规则要用);树里没有坏文件时为空,其余字段与原先相同。读不出的产物在各视图里的状态记为常量 `UNREADABLE_STATUS`(取值 `unreadable`),id 从路径取,见 CP-17 |
 
 | 产物 | 路径(`control-plane/` 下) | 状态机 | 写方 | 状态 |
 |---|---|---|---|---|
@@ -383,7 +383,7 @@ def evidence_acceptable(grade: str, accept_mock: bool) -> bool: ...
 - **输出顺序固定。** 既有动作在前,之后是 `admit_recipe`、`admit_proposal`、`record_track`、`nominate_recipe`、`plan_next_round`、`start_agent_round`。同种动作内,门按 id 字典序;run 按编号的数值序,`run-<数字>` 在前,不合约定的名字按字典序排在后面,同编号再按 run id 字典序。数值序是为了让 `reconcile --once` 的输出与 run 的先后一致(字典序会把 `run-10` 排在 `run-2` 前面);同一 tick 里这些动作彼此独立,次序不影响结果。先收录再规划,规划就能看到刚收录的配方;先记战绩再规划,退化的配方不会被同一 tick 选中。`plan_next_round` 每个 tick 至多一条。
 - **在途轮。** 任一指令是 `pending` 或 `awaiting_confirmation`,或任一候选是 `pending_review` 或 `approved`。只有 `plan_next_round` 受它限制,提名与战绩是对已结束 run 的记账,不受限。启用提名且候选为 `effective` 时,`plan_next_round` 还要等配方入库门:来源 run 已有提名标记(`nominated` 或 `skipped`),且 `GateView` 里 id 为 `recipe-<run>` 的配方候选不在 `pending_review` 或 `approved`(CP-11)[已落地]。候选为 `rejected` 的 run 不等,因为被拒绝的候选不提名。
 - **最大 run。** 按 `run-<数字>` 整数比较。不匹配的名字不参与。一个 `run-<数字>` 都没有时不触发规划,这是刻意的失败关闭,闭环停在等人写指令。编号相同(如 `run-7` 与 `run-007`)按 run id 字典序取较大者。若用字符串序,不补零的 `run-9` 会压过 `run-011`,闭环会静默停住。
-- **读不出的产物不确定就停 [计划中]。** 状态为 `unreadable` 的产物不匹配任何触发条件,本身不会被派发、诊断、晋级或收录。在此之上两条暂停规则:`TreeState.unreadable` 非空时,六个闭环动作一个都不产生;`models/` 下有一份读不出时,`request_diagnostic` 与 `promote_candidate` 也不产生。理由是闭环处理器读树的范围很广(规划装配最近几轮与晋级基座,提名与战绩读基线模型算增益),真实评估器与晋级的重放判定都要读模型;只挡住读不出的那个对象,处理器读到别的坏文件时异常仍会漏出去。派发其余指令、等待审核这类不读模型、也不跨 run 读树的动作照常。
+- **读不出的产物不确定就停 [已落地]。** 状态为 `unreadable` 的产物不匹配任何触发条件,本身不会被派发、诊断、晋级或收录。在此之上两条暂停规则:`TreeState.unreadable` 非空时,六个闭环动作一个都不产生;`models/` 下有一份读不出时,`request_diagnostic` 与 `promote_candidate` 也不产生。理由是闭环处理器读树的范围很广(规划装配最近几轮与晋级基座,提名与战绩读基线模型算增益),真实评估器与晋级的重放判定都要读模型;只挡住读不出的那个对象,处理器读到别的坏文件时异常仍会漏出去。派发其余指令、等待审核这类不读模型、也不跨 run 读树的动作照常。
 - **只对最大版本跑轮次。** 最大 `effective` 模型的轮次到终态后,更旧的模型即使没有轮次也不补跑。`start_agent_round` 的 `run_id` 取模型 `links` 的第二项,不足两项为空串。
 - **轮次重入。** 轮次产物写回终态之前,每个 tick 都会再产生 `start_agent_round`。处理器必须先写 `pending` 的轮次产物作幂等键,重入时整份重写同一产物。
 
@@ -543,7 +543,7 @@ def evidence_acceptable(grade: str, accept_mock: bool) -> bool: ...
 | CP-14 | 资源暂时不可用走延后通道 [已落地]:基类 `DeferredError(reason, retry_after_seconds)` 放在无依赖的 `controlplane/deferred.py`;守护进程在 `reconcile_once` 里接住它,不写树、状态不动;退避取 `retry_after_seconds` 与默认 30 秒的较大者、封顶 900 秒,退避期内跳过该动作而同一 tick 的其余动作照常;同一动作连续延后超过 20 次抛 `DeferredExhaustedError`(不继承 `DeferredError`),守护进程带原因退出;退避表只在内存。派发器的通用异常分支对 `DeferredError` 原样上抛,不把它包成 `DirectiveFailedError` | 沿用「派发器抛其他异常就让守护进程退出」;只在计算层内部重试 | 验证主机上常有别人的服务,忙是常态;仓库没有监督脚本,退出等于停摆;内部重试看不到守护进程的节奏 | 上限偏小会在长队列前过早退出,偏大发现得晚;树里没有任何写入,代价只是重启一次守护进程 |
 | CP-15 | 接真实 LoRA SFT 的这一轮,训练同步阻塞调和循环,作为已评估的例外 [已落地]:限定条件是真实后端只由组合根在装配时直接启用;异步派发(CP-13)留给下一轮,不作本轮前置 | 先落地异步派发再接真实训练 | 异步派发要改指令状态机与守护循环,与真实后端叠在一起风险过大;训练期间排队的只是审核与晋级动作,树不会被写坏 | 一轮训练期间审核与晋级动作排队,可达数小时;真正做异步派发时,真实执行器要从同步形态改成提交与轮询两段 |
 | CP-16 | `BigRef` 构造即校验并冻结,校验失败抛 `InvalidBigRefError`,它继承 `TypeError` [已落地]。64 位小写十六进制的规则只有一份,即 `controlplane.envelope.SHA256_HEX`,训练配置、配方校验、mock 执行器与转换器都引用它 | 由各使用方各自校验(此前的做法,共四份正则);抛 `ValueError` | 坏引用在进树、出树的第一刻就被拦下,不再靠每个用到它的地方记得检查;转换器把 `sha256[:8]` 拼进远端路径,此前全仓只有它一处在把关。继承 `TypeError` 是因为每个读树点都已把 `KeyError`、`TypeError`、`AttributeError` 当成确定性读不出:派发器转成指令 `failed`,MindAgent 转成轮次 `failed`。若抛 `ValueError`,它会从这些分支漏出去,在派发器里被当成瞬态失败,指令保持 `pending`、每个 tick 重派 | 手写进树的坏引用此后在读取时确定性失败,错误信息点名字段;此前它能被读出,直到某个使用方才出错或根本不出错 |
-| CP-17 | 读不出的已提交产物在视图里记为 `unreadable`,不对它动作;有任何一份读不出时闭环动作整体暂停,有模型读不出时诊断与晋级也暂停;每个路径记一次警告 [计划中] | 维持退出;按「没有」处理 | 退出让一份坏文件停掉整个循环,有外部监督者时是重启再崩的死循环。按「没有」处理会做错事:规划决策「为空」正是 `plan_next_round` 的触发条件,会重新规划一次已经执行过的决策并分配第二个 run;指令或候选「没有」就不算在途,会在别的轮次还没走完时开新一轮;跳过最新的那份模型,轮次就绑到更旧的模型上。只挡住读不出的那个对象也不够:要逐个处理器列出它读哪些文件,既容易漏也没法验证,所以按粗粒度暂停 | 守护进程不再因坏文件退出,但一份坏文件(哪怕是一份旧提案)就让整个闭环停住,只靠警告日志提示;人仍要修文件。轮次产物(R19,重入时由处理器判损坏)与诊断报告(记 `stub`)沿用原有兜底,不改 |
+| CP-17 | 读不出的已提交产物在视图里记为 `unreadable`,不对它动作;有任何一份读不出时闭环动作整体暂停,有模型读不出时诊断与晋级也暂停;每个路径记一次警告 [已落地] | 维持退出;按「没有」处理 | 退出让一份坏文件停掉整个循环,有外部监督者时是重启再崩的死循环。按「没有」处理会做错事:规划决策「为空」正是 `plan_next_round` 的触发条件,会重新规划一次已经执行过的决策并分配第二个 run;指令或候选「没有」就不算在途,会在别的轮次还没走完时开新一轮;跳过最新的那份模型,轮次就绑到更旧的模型上。只挡住读不出的那个对象也不够:要逐个处理器列出它读哪些文件,既容易漏也没法验证,所以按粗粒度暂停 | 守护进程不再因坏文件退出,但一份坏文件(哪怕是一份旧提案)就让整个闭环停住,只靠警告日志提示;人仍要修文件。轮次产物(R19,重入时由处理器判损坏)与诊断报告(记 `stub`)沿用原有兜底,不改 |
 | R1 | 事件就是树里的状态事实。每个触发对应一个新动作,幂等键是 run 目录内的标记产物 | 事件订阅 | 循环无状态,崩溃后重读即续接 | 每个触发多一个小文件 [已落地] |
 | R2 | 新动作只有在对应处理器被注入时才会产生,`controlplane` 不导入任何新子系统 | 在 daemon 里直接调用新子系统 | 依赖方向不变;不注入时行为逐字节相同 | 入口要自己组装处理器 [已落地] |
 | R3 | 指令确认默认开启,新增 `awaiting_confirmation` 状态,由 `confirm` 迁到 `pending` | 全自动下发 | 先建立信任 | 闭环每轮停一次等人,关掉要显式配置 [已落地] |
@@ -566,7 +566,7 @@ def evidence_acceptable(grade: str, accept_mock: bool) -> bool: ...
 | 派发器抛 `DirectiveFailedError` | 派发器标注,默认 T2 | 指令置 `failed`,不再派发,同一 tick 其余动作继续 | 指令 `payload.failure`,提交信息带类别 |
 | 派发器抛 `DeferredError` | 资源暂时不可用,不是指令的错 | 守护进程接住,不写树,按退避重试;同一动作连续延后超过上限则抛 `DeferredExhaustedError` 带原因退出 | 结构化日志一行:动作、目标、原因、下次尝试时间;不进树 |
 | 派发器抛其他异常 | 按 T1 对待 | 原样上抛,守护进程退出,指令仍 `pending` | 只有进程输出 |
-| 产物读不出:YAML 坏、Schema 不符、版本过高、`BigRef` 不合规 | T3 | 指令、候选、规划决策、模型与门产物:视图记为 `unreadable`,不对它动作;闭环动作整体暂停,有模型读不出时诊断与晋级也暂停;其余既有动作照常;不退出 [计划中]。轮次产物与诊断报告各有既定兜底,见下两行。`OSError` 仍原样上抛,守护进程退出 | 每个读不出的路径记一行警告日志,带异常类名;同一守护进程里同一路径只记一次,修好后再坏会再记 [计划中] |
+| 产物读不出:YAML 坏、Schema 不符、版本过高、`BigRef` 不合规 | T3 | 指令、候选、规划决策、模型与门产物:视图记为 `unreadable`,不对它动作;闭环动作整体暂停,有模型读不出时诊断与晋级也暂停;其余既有动作照常;不退出 [已落地]。轮次产物与诊断报告各有既定兜底,见下两行。`OSError` 仍原样上抛,守护进程退出 | 每个读不出的路径记一行警告日志,带异常类名;同一守护进程里同一路径只记一次,修好后再坏会再记 [已落地] |
 | 非法状态迁移 | T2 | `InvalidTransitionError` 上抛 | 进程输出 |
 | 凭证缺失或凭证进树 | T2 | `MissingCredentialError`、`CredentialInGitTreeError` | 进程输出 |
 | 处理器确定性失败 | 处理器标注 | 写自己产物的 `failed` 与失败记录 | `failure-<任务>.yaml` [已落地] |
@@ -630,7 +630,7 @@ def evidence_acceptable(grade: str, accept_mock: bool) -> bool: ...
 | 调和循环、派发缝、守护循环 | [已落地] | 入口 `scripts/run_controlplane.py` 注入 MindTrainer 派发器,默认间隔 2 秒 |
 | 两类状态机与审核门① | [已落地] | 证据规则在 `reconcile` 与 `approve` 两处 |
 | 信封、迁移器链、Schema 校验 | [已落地] | `MIGRATORS` 为空,`CURRENT_SCHEMA_VERSION` 为 1 |
-| 读不出的已提交产物不让守护进程退出 | [计划中] | 规则见 CP-17 与第 8 章 |
+| 读不出的已提交产物不让守护进程退出 | [已落地] | 规则见 CP-17 与第 8 章 |
 | `BigRef` 构造即校验并冻结 | [已落地] | 规则见实体表与 CP-16;四份 sha256 正则收成 `SHA256_HEX` |
 | 基座解析、观测函数、配置加载与脱敏 | [已落地] | `cost` 的写方是 `inference_bridge` 的外部调用记账 |
 | 命令行 | [已落地] | TypeScript 五个命令(`review`、`approve`、`reject`、`confirm`、`status`);Python 侧 `factory` 有 `trace`、`cost`、`logs` 子命令 |

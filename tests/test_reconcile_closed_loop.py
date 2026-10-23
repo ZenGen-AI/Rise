@@ -12,6 +12,7 @@ from controlplane.reconcile import (
     ModelView,
     RunView,
     TreeState,
+    UNREADABLE_STATUS,
     has_round_in_flight,
     reconcile,
 )
@@ -522,3 +523,47 @@ def test_the_nomination_and_the_planning_that_waits_for_it_are_never_in_the_same
     assert [a.kind for a in reconcile(state)] == ["nominate_recipe"]
     later = dataclasses.replace(state, runs=[_run(has_nomination_note=True)])
     assert [a.kind for a in reconcile(later)] == ["plan_next_round"]
+
+
+# ---- CP-17:读不出的产物让闭环暂停 ----
+
+def _busy_state(**kw):
+    """一棵每个闭环动作都该触发的树。规划要等来源 run 的提名标记,同一个 run 不会同时触发提名与
+    规划,所以用两个 run:run-001 待提名、待记战绩;run-002 编号最大、已提名,触发规划。"""
+    base = dict(
+        runs=[_run("run-001", recipe_ref="recipe-run-000"),
+              _run("run-002", has_nomination_note=True, has_track_note=True)],
+        models=[ModelView("zengen-v1", 1, "run-001", "effective", None)],
+        gates=[GateView("recipe-run-000", "recipe_candidate", "approved"),
+               GateView("prop-1", "skill_memory_proposal", "approved")],
+        enabled=ALL,
+    )
+    base.update(kw)
+    return TreeState(**base)
+
+
+def test_the_busy_state_triggers_every_closed_loop_action():
+    """对照组:没有读不出的产物时,六种动作都在。"""
+    kinds = {a.kind for a in reconcile(_busy_state())}
+    assert set(CLOSED_LOOP_ACTIONS) <= kinds
+
+
+@pytest.mark.parametrize("path", [
+    "control-plane/runs/run-007/directive.yaml",
+    "control-plane/skill_memory_proposals/prop-9/proposal.yaml",
+    "control-plane/models/zengen-v3.yaml",
+])
+def test_any_unreadable_product_pauses_the_whole_closed_loop(path):
+    """闭环处理器读树范围很广,逐个列依赖既容易漏也没法验证:任何一份读不出就整体暂停。"""
+    actions = reconcile(_busy_state(unreadable=(path,)))
+    assert not [a for a in actions if a.kind in CLOSED_LOOP_ACTIONS]
+
+
+def test_an_unreadable_object_is_never_acted_on_itself():
+    state = TreeState(
+        directives=[DirectiveView("run-001", UNREADABLE_STATUS, "", "")],
+        candidates=[CandidateView("cand-run-002", UNREADABLE_STATUS, "run-002", has_diagnostic=True)],
+        unreadable=("control-plane/runs/run-001/directive.yaml",
+                    "control-plane/runs/run-002/candidate_checkpoint.yaml"),
+    )
+    assert reconcile(state) == []

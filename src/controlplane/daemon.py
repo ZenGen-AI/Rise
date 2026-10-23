@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+from pathlib import Path
 from collections.abc import Callable, Mapping
 
 import yaml
@@ -28,13 +29,14 @@ from controlplane.paths import (
 )
 from controlplane.reconcile import (
     CLOSED_LOOP_ACTIONS,
-    DirectiveView,
+    UNREADABLE_STATUS,
+    Action,
     CandidateView,
+    DirectiveView,
     GateView,
     ModelView,
     RunView,
     TreeState,
-    Action,
     reconcile,
 )
 from controlplane.states import assert_transition
@@ -137,6 +139,22 @@ def _iter_run_ids(store: GitStore) -> list[str]:
     return sorted(p.name for p in runs_dir.iterdir() if p.is_dir())
 
 
+# 产物"文件在、内容读不出"时的异常:YAML 解析失败(含合并冲突标记)、缺键、类型不对(BigRef 不合规
+# 抛的 InvalidBigRefError 是 TypeError 子类)、信封校验失败、schema_version 无法迁移。
+# OSError 不在其中,原样上抛(瞬态,守护进程退出)。
+_UNREADABLE = (KeyError, TypeError, AttributeError, yaml.YAMLError,
+               EnvelopeValidationError, UnknownSchemaVersionError)
+
+
+def _read_or_mark(store: GitStore, rel: str, bad: set[str]) -> Envelope | None:
+    """读一个已存在的产物;读不出时把路径记进 bad 并返回 None(控制面 CP-17)。"""
+    try:
+        return store.read_product(rel)
+    except _UNREADABLE:
+        bad.add(rel)
+        return None
+
+
 def read_tree_state(
     store: GitStore,
     *,
@@ -147,14 +165,16 @@ def read_tree_state(
 
     enabled 为空时只读既有的三项,返回值与引入闭环视图之前逐字节相同(accept_mock_evidence
     此时不起作用:没有闭环动作,它无处可用)。非空时才去填 runs / models / gates。"""
+    bad: set[str] = set()   # 读不出的产物路径(CP-17);指令与候选在下面和 run 视图里各读一次,所以用集合
     directives: list[DirectiveView] = []
     candidates: list[CandidateView] = []
     for run_id in _iter_run_ids(store):
         d_path = f"{run_dir(run_id)}/directive.yaml"
         if store.exists(d_path):
-            d = store.read_product(d_path)
+            d = _read_or_mark(store, d_path, bad)
             directives.append(
-                DirectiveView(
+                DirectiveView(id=run_id, status=UNREADABLE_STATUS, target_dimension="", recipe_ref="")
+                if d is None else DirectiveView(
                     id=d.id,
                     status=d.status,
                     target_dimension=d.payload.get("target_dimension", ""),
@@ -163,50 +183,66 @@ def read_tree_state(
             )
         c_path = f"{run_dir(run_id)}/candidate_checkpoint.yaml"
         if store.exists(c_path):
-            c = store.read_product(c_path)
+            c = _read_or_mark(store, c_path, bad)
             candidates.append(
                 CandidateView(
-                    id=c.id, status=c.status, run_id=run_id,
+                    id=f"cand-{run_id}" if c is None else c.id,
+                    status=UNREADABLE_STATUS if c is None else c.status, run_id=run_id,
                     has_diagnostic=store.exists(diagnostic_report_file(run_id)),
                 )
             )
     model_count = len(store.list_products(f"{CONTROL_PLANE_ROOT}/models"))
     top_version = max_model_version(store)
     if not enabled:
+        # 晋级的暂停规则要知道有没有读不出的模型,所以闭环关着时也逐个读模型文件
+        for rel in store.list_products(f"{CONTROL_PLANE_ROOT}/models"):
+            if version_of_file(rel) is not None:
+                _read_or_mark(store, rel, bad)
         return TreeState(
             directives=directives, candidates=candidates, model_count=model_count,
-            max_model_version=top_version,
+            max_model_version=top_version, unreadable=tuple(sorted(bad)),
         )
+    runs, models, gates = _read_run_views(store, bad), _read_model_views(store, bad), _read_gate_views(store, bad)
     return TreeState(
         directives=directives, candidates=candidates, model_count=model_count,
         max_model_version=top_version,
-        runs=_read_run_views(store), models=_read_model_views(store), gates=_read_gate_views(store),
+        runs=runs, models=models, gates=gates,
         enabled=frozenset(enabled), accept_mock_evidence=accept_mock_evidence,
+        unreadable=tuple(sorted(bad)),
     )
 
 
-def _status_or_none(store: GitStore, rel: str) -> str | None:
-    return store.read_product(rel).status if store.exists(rel) else None
+def _status_or_none(store: GitStore, rel: str, bad: set[str]) -> str | None:
+    """没有产物为 None;读不出为 UNREADABLE_STATUS,不当成没有(决策为空是规划的触发条件)。"""
+    if not store.exists(rel):
+        return None
+    env = _read_or_mark(store, rel, bad)
+    return UNREADABLE_STATUS if env is None else env.status
 
 
-def _read_run_views(store: GitStore) -> list[RunView]:
+def _read_run_views(store: GitStore, bad: set[str]) -> list[RunView]:
     # directive.yaml 的路径 ↔ cli/src/commands.ts 的 DIRECTIVE_PATTERN(confirm 与 status 读它)
     views: list[RunView] = []
     for run_id in _iter_run_ids(store):
         d_path = f"{run_dir(run_id)}/directive.yaml"
-        directive = store.read_product(d_path) if store.exists(d_path) else None
+        exists = store.exists(d_path)
+        directive = _read_or_mark(store, d_path, bad) if exists else None
         recipe_ref = directive.payload.get("recipe_ref") if directive is not None else None
+        if directive is not None:
+            directive_status = directive.status
+        else:
+            directive_status = UNREADABLE_STATUS if exists else None
         report_path = diagnostic_report_file(run_id)
         has_diagnostic = store.exists(report_path)
         views.append(RunView(
             run_id=run_id,
-            directive_status=directive.status if directive is not None else None,
+            directive_status=directive_status,
             # 人写的指令里 recipe_ref 恒为 "";None 或非字符串一律当作"没有配方"
             recipe_ref=recipe_ref if isinstance(recipe_ref, str) else "",
-            candidate_status=_status_or_none(store, candidate_checkpoint_file(run_id)),
+            candidate_status=_status_or_none(store, candidate_checkpoint_file(run_id), bad),
             has_diagnostic=has_diagnostic,
             diagnostic_grade=_report_grade(store, report_path) if has_diagnostic else None,
-            planner_decision_status=_status_or_none(store, planner_decision_file(run_id)),
+            planner_decision_status=_status_or_none(store, planner_decision_file(run_id), bad),
             has_nomination_note=store.exists(nomination_file(run_id)),
             has_track_note=store.exists(recipe_track_note_file(run_id)),
         ))
@@ -219,18 +255,22 @@ def _report_grade(store: GitStore, rel: str) -> str:
     都记为 stub(永不可接受),不让一份坏报告在读视图时把守护进程带走。"""
     try:
         payload = store.read_product(rel).payload
-    except _UNREADABLE_ROUND:
+    except _UNREADABLE:
         return "stub"
     return diagnostic_grade(payload) if isinstance(payload, dict) else "stub"
 
 
-def _read_model_views(store: GitStore) -> list[ModelView]:
+def _read_model_views(store: GitStore, bad: set[str]) -> list[ModelView]:
     views: list[ModelView] = []
     for rel in store.list_products(f"{CONTROL_PLANE_ROOT}/models"):
         version = version_of_file(rel)
         if version is None:
             continue
-        env = store.read_product(rel)
+        env = _read_or_mark(store, rel, bad)
+        if env is None:
+            views.append(ModelView(model_id=f"zengen-v{version}", version=version, run_id="",
+                                   status=UNREADABLE_STATUS, agent_round_status=None))
+            continue
         # promote_candidate 写的 links 是 [候选 id, run id]:第二项就是产生该模型的 run。
         # 计划 3 的 recipestore.gain.baseline_run_of 对同一问题取"cand-<x> 也在 links 里的那一项"
         # (以该函数为准,不按文档行号引用);两种判法目前一致,
@@ -243,12 +283,6 @@ def _read_model_views(store: GitStore) -> list[ModelView]:
     return views
 
 
-# 轮次产物"文件在、内容读不出"时的异常:YAML 解析失败(含合并冲突标记)、缺键、类型不对、
-# 信封校验失败、schema_version 无法迁移。OSError 不在其中,原样上抛(瞬态,守护进程退出)。
-_UNREADABLE_ROUND = (KeyError, TypeError, AttributeError, yaml.YAMLError,
-                     EnvelopeValidationError, UnknownSchemaVersionError)
-
-
 def _agent_round_status(store: GitStore, model_id: str) -> str | None:
     """轮次产物的信封状态;没有产物或产物读不出时为 None(R19:按"没有可用轮次"处理,让
     start_agent_round 再次触发,由轮次处理器重入时判定损坏并自己写 failed)。"""
@@ -257,16 +291,17 @@ def _agent_round_status(store: GitStore, model_id: str) -> str | None:
         return None
     try:
         return store.read_product(rel).status
-    except _UNREADABLE_ROUND:
+    except _UNREADABLE:
         return None
 
 
-def _read_gate_views(store: GitStore) -> list[GateView]:
+def _read_gate_views(store: GitStore, bad: set[str]) -> list[GateView]:
     views: list[GateView] = []
     # 配方候选:recipe_candidates/<id>.yaml,顶层文件,list_products 够用
     for rel in store.list_products(f"{CONTROL_PLANE_ROOT}/recipe_candidates"):
-        env = store.read_product(rel)
-        views.append(GateView(id=env.id, kind="recipe_candidate", status=env.status))
+        env = _read_or_mark(store, rel, bad)
+        views.append(GateView(id=Path(rel).stem, kind="recipe_candidate", status=UNREADABLE_STATUS)
+                     if env is None else GateView(id=env.id, kind="recipe_candidate", status=env.status))
     # 技能提案在子目录里(skill_memory_proposals/<id>/proposal.yaml)。list_products 不递归,
     # 所以像 _iter_run_ids 那样自己遍历目录;路径仍由 proposal_file 拼(文件夹名就是产物 id)。
     # 两类路径模式 ↔ cli/src/commands.ts 的 GATE_PATTERNS。
@@ -275,8 +310,9 @@ def _read_gate_views(store: GitStore) -> list[GateView]:
         for sub in sorted(p for p in proposals_dir.iterdir() if p.is_dir()):
             rel = proposal_file(sub.name)
             if store.exists(rel):
-                env = store.read_product(rel)
-                views.append(GateView(id=env.id, kind="skill_memory_proposal", status=env.status))
+                env = _read_or_mark(store, rel, bad)
+                views.append(GateView(id=sub.name, kind="skill_memory_proposal", status=UNREADABLE_STATUS)
+                             if env is None else GateView(id=env.id, kind="skill_memory_proposal", status=env.status))
     return views
 
 
@@ -406,6 +442,7 @@ def reconcile_once(
     evaluator: Evaluator | None = None,
     accept_mock_evidence: bool = False,
     deferrals: DeferralBook | None = None,
+    reported: set[str] | None = None,
 ) -> list[Action]:
     """一次性调和：读状态 → reconcile → 执行非人工动作。返回本轮动作列表。
     dispatcher 缺省为桩;注入后只替换"下发 directive"这一步,其余动作不变。
@@ -414,9 +451,13 @@ def reconcile_once(
 
     任何动作抛 DeferredError(资源暂时不可用,真实后端设计 §7.3):不写树、状态不动,同一 tick 的
     其他动作照常处理。传入 deferrals 时该动作进退避期(期内被跳过)并累计连续次数;不传则只接住、
-    不退避,行为与引入延后通道之前相比只多了"不再让进程退出"。返回的仍是 reconcile 给出的完整动作列表。"""
+    不退避,行为与引入延后通道之前相比只多了"不再让进程退出"。返回的仍是 reconcile 给出的完整动作列表。
+
+    读不出的已提交产物(控制面 CP-17)每个路径记一行警告。传入 reported 时只记新出现的路径,
+    已从树里消失(修好或删掉)的移出集合,再坏会再记;守护进程持有这个集合,免得每个 tick 刷屏。"""
     enabled = _check_handlers(handlers)
     state = read_tree_state(store, enabled=enabled, accept_mock_evidence=accept_mock_evidence)
+    _report_unreadable(store, state.unreadable, reported)
     actions = reconcile(state)
     for action in actions:
         key = (action.kind, action.target_id)
@@ -436,6 +477,32 @@ def reconcile_once(
     return actions
 
 
+def _report_unreadable(store: GitStore, paths: tuple[str, ...], reported: set[str] | None) -> None:
+    current = set(paths)
+    if reported is not None:
+        reported.intersection_update(current)
+    for rel in paths:
+        if reported is not None and rel in reported:
+            continue
+        _log.warning(
+            "unreadable product %s (%s); closed-loop actions are paused until it is fixed",
+            rel, _why_unreadable(store, rel),
+        )
+        if reported is not None:
+            reported.add(rel)
+
+
+def _why_unreadable(store: GitStore, rel: str) -> str:
+    """只在报告时重读一次,取异常类名:TreeState 里只存路径。读得出了(并发修好)就说明白。"""
+    try:
+        store.read_product(rel)
+    except _UNREADABLE as exc:
+        return type(exc).__name__
+    except OSError as exc:
+        return type(exc).__name__
+    return "readable again"
+
+
 def run_daemon(
     store: GitStore,
     interval_s: float,
@@ -452,11 +519,12 @@ def run_daemon(
     _check_handlers(handlers)
     with acquire_repo_lock(store.repo_root):
         deferrals = DeferralBook()  # 退避表归守护进程持有,只在内存里
+        reported: set[str] = set()  # 已记过警告的读不出路径(CP-17),同样只在内存里
         ticks = 0
         while max_ticks is None or ticks < max_ticks:
             reconcile_once(
                 store, dispatcher=dispatcher, handlers=handlers, evaluator=evaluator,
-                accept_mock_evidence=accept_mock_evidence, deferrals=deferrals,
+                accept_mock_evidence=accept_mock_evidence, deferrals=deferrals, reported=reported,
             )
             ticks += 1
             if max_ticks is not None and ticks >= max_ticks:

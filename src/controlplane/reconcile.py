@@ -61,6 +61,11 @@ class GateView:
     status: str
 
 
+# 控制面 CP-17:读不出的已提交产物在视图里的状态。任何触发条件都不匹配它,所以它本身不会被
+# 派发、诊断、晋级或收录;它在 TreeState.unreadable 里的路径另外触发两条暂停规则。
+UNREADABLE_STATUS = "unreadable"
+
+
 @dataclass
 class TreeState:
     directives: list[DirectiveView] = field(default_factory=list)
@@ -74,6 +79,8 @@ class TreeState:
     accept_mock_evidence: bool = False
     # 控制面 CP-7:models/ 下最大的 zengen 版本号。None 表示调用方没填,版本号起点退回 model_count
     max_model_version: int | None = None
+    # 控制面 CP-17:读不出的已提交产物的树内路径(排好序)。非空时闭环暂停,见 reconcile
+    unreadable: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -211,6 +218,9 @@ def reconcile(state: TreeState) -> list[Action]:
       （这只保证证据在场，不证明有人读过。）
     """
     actions: list[Action] = []
+    # CP-17:有模型读不出时,诊断(真实评估器要找基线模型)与晋级(重放判定要读每个模型的
+    # promoted_from)都判不准,暂停;派发与等待审核不读模型,照常
+    models_unreadable = any(_is_model_path(rel) for rel in state.unreadable)
     next_model_version = (
         state.max_model_version if state.max_model_version is not None else state.model_count
     )
@@ -218,6 +228,10 @@ def reconcile(state: TreeState) -> list[Action]:
         if d.status == "pending":
             actions.append(Action(kind="dispatch_directive", target_id=d.id, detail={}))
     for c in state.candidates:
+        if models_unreadable and c.status in ("pending_review", "approved"):
+            if c.status == "pending_review" and c.has_diagnostic:
+                actions.append(Action(kind="await_review", target_id=c.id, detail={}))
+            continue
         if c.status == "pending_review":
             if c.has_diagnostic:
                 actions.append(Action(kind="await_review", target_id=c.id, detail={}))
@@ -240,6 +254,14 @@ def reconcile(state: TreeState) -> list[Action]:
                     detail={"run_id": c.run_id, "model_version": next_model_version},
                 )
             )
-    if state.enabled:
+    # CP-17:任何一份读不出就整体暂停闭环。闭环处理器读树范围很广(规划装配最近几轮与晋级基座,
+    # 提名与战绩读基线模型),只挡住读不出的那个对象,处理器读到它时异常仍会漏出去
+    if state.enabled and not state.unreadable:
         actions.extend(_closed_loop_actions(state))
     return actions
+
+
+def _is_model_path(rel: str) -> bool:
+    """models/ 下的模型产物。reconcile 是纯函数,只看路径形状,不导入 paths。"""
+    parent, _, name = rel.rpartition("/")
+    return parent.endswith("/models") or parent == "models"
