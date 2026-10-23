@@ -104,6 +104,29 @@ def test_install_defaults_exits_2_while_the_repository_is_locked_and_writes_noth
     assert _snapshot(store) == before
 
 
+def test_install_defaults_on_a_hand_edited_asset_exits_2_and_installs_nothing_else(tmp_path, capsys):
+    """资产冲突是一行错误、退出码 2;先检查后写,所以冲突时连原本缺着的配置也不写,不留半截安装。"""
+    from controlplane.paths import scheduler_config_file, taxonomy_file
+    from factory.evaluation import EVALUATOR_CONFIG
+
+    s = GitStore(str(tmp_path / "cp"))
+    s.init()
+    assert main(["install-defaults", str(s.repo_root)]) == 0
+    capsys.readouterr()
+    rel = taxonomy_file("factory-tax-v1")
+    env = s.read_product(rel)
+    env.payload["l1_dimensions"].append("extra_dimension")
+    s.write_product(rel, env, "human: edit taxonomy")
+    for missing in (EVALUATOR_CONFIG, scheduler_config_file()):   # 人删掉两份配置,等着重装
+        (s.repo_root / missing).unlink()
+    before = _snapshot(s)
+
+    assert main(["install-defaults", str(s.repo_root)]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("factory: error: ") and "factory-tax-v1" in err and err.count("\n") == 1
+    assert _snapshot(s) == before                                   # 没有补写那两份配置
+
+
 def test_install_defaults_releases_the_lock_when_it_finishes(store, capsys):
     """装完就放锁:紧接着的写者能拿到锁。"""
     assert main(["install-defaults", str(store.repo_root)]) == 0

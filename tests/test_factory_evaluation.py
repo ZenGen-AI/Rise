@@ -4,7 +4,9 @@ import pytest
 from controlplane.config import write_config
 from controlplane.evidence import diagnostic_grade
 from controlplane.gitstore import GitStore
-from controlplane.paths import diagnostic_report_file, taxonomy_file
+from controlplane.paths import (
+    diagnostic_report_file, item_pool_file, persona_file, scenario_file, taxonomy_file,
+)
 from factory.defaults import DEFAULT_EVALUATOR_CONFIG, install_defaults
 from factory.errors import FactoryConfigError
 from factory.evaluation import EVALUATOR_CONFIG, EVALUATOR_KEYS, build_mock_evaluator, read_evaluator_config
@@ -25,6 +27,38 @@ def test_install_defaults_writes_assets_config_and_template_and_is_idempotent(st
     before = {p: (store.repo_root / p).read_bytes() for p in paths}
     assert install_defaults(store) == paths
     assert {p: (store.repo_root / p).read_bytes() for p in paths} == before
+
+
+def _hand_edit(store, rel, mutate):
+    """像人那样改一份已登记的资产:改载荷,经 write_product 提交。"""
+    env = store.read_product(rel)
+    mutate(env.payload)
+    store.write_product(rel, env, f"human: edit {rel}")
+
+
+ASSET_EDITS = [
+    pytest.param(lambda: taxonomy_file("factory-tax-v1"),
+                 lambda p: p["l1_dimensions"].append("extra_dimension"), id="taxonomy"),
+    pytest.param(lambda: item_pool_file("factory-pool-v1"),
+                 lambda p: p["items"][0].update(reference_answer="C"), id="item-pool"),
+    pytest.param(lambda: scenario_file("factory-deploy-s1"),
+                 lambda p: p.update(background="a different background"), id="scenario"),
+    pytest.param(lambda: persona_file("factory-user-persona"),
+                 lambda p: p.update(motivation="a different motivation"), id="persona"),
+]
+
+
+@pytest.mark.parametrize("rel_of, mutate", ASSET_EDITS)
+def test_install_defaults_refuses_to_overwrite_a_hand_edited_asset(store, rel_of, mutate):
+    """同一版本号必须对应同一份内容(题库与分类表的版本进诊断报告,分数要可比):重跑不能
+    静默还原人改过的资产,要拒绝并指出哪个文件,让人去升版本号。"""
+    install_defaults(store)
+    rel = rel_of()
+    _hand_edit(store, rel, mutate)
+    edited = (store.repo_root / rel).read_bytes()
+    with pytest.raises(FactoryConfigError, match=rel.rsplit("/", 1)[-1]):
+        install_defaults(store)
+    assert (store.repo_root / rel).read_bytes() == edited
 
 
 def test_install_defaults_keeps_a_hand_edited_evaluator_config(store):
