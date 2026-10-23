@@ -226,7 +226,7 @@ MindTrainer 分两层:入口与编排一层决定"从哪跑、跑不跑",模式�
 | 步数 | `sft_steps`、`grpo_steps` 不小于 0,合计不小于 1 |
 | 分组 | `min_group_size` 不小于 2,`group_size` 不小于 `min_group_size` |
 | 清单 | 配了 `sft_steps` 必须点 `sft` 清单;batch 配了 `grpo_steps` 必须点 `grpo_opd` 清单 |
-| 引用 | 两个 `BigRef` 的 sha256 必须是 64 位小写十六进制 |
+| 引用 | 两个 `BigRef` 的 sha256 必须是 64 位小写十六进制。这条由 `BigRef` 自己在构造时保证 [计划中];从指令读配置时坏引用转成 `InvalidTrainingConfigError`,信息点名是哪个引用 |
 | interact 角色位 | 训练位必须是 `self_play` 且不带 `model_ref`;非训练位不能是 `self_play`,必须带 `model_ref` |
 | OPD | `opd_coefficient` 是有限数且不小于 0 |
 

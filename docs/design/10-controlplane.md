@@ -221,7 +221,7 @@ ControlPlane 是系统的协调层:它不训练、不评测,只读写产物并�
 |---|---|---|
 | `Envelope` | `id`、`type`、`version`、`created_at`、`created_by`、`status`、`schema_version`、`links`、`payload` | 前七个必填,`version` 与 `schema_version` 不小于 1 |
 | `OwnerRef` | `owner`、`visibility` | 默认 `default`、`shared`;`visibility` 只取 `private` 或 `shared` |
-| `BigRef` | `uri`、`sha256`、`size_bytes`、`fetch_hint` | 大内容不进树,只存引用;`fetch_hint` 可为空。真实后端 [已落地] 下 `fetch_hint` 的 `type` 与 `format` 两个键承担「这份存点是真实的还是 mock」的判定,不再只是取回提示:`type` 为 `roll_ssh` 表示训练存点在远端主机上,`format` 区分训练存点与适配器导出 |
+| `BigRef` | `uri`、`sha256`、`size_bytes`、`fetch_hint` | 大内容不进树,只存引用。构造即校验,且不可变 [计划中]:`uri` 是非空字符串;`sha256` 是 64 位小写十六进制;`size_bytes` 是不小于 0 的整数,`bool` 不算(未知时写 0);`fetch_hint` 为空或字典,字典的内容不约束。违反任一条抛 `InvalidBigRefError`,见 CP-16。真实后端 [已落地] 下 `fetch_hint` 的 `type` 与 `format` 两个键承担「这份存点是真实的还是 mock」的判定,不再只是取回提示:`type` 为 `roll_ssh` 表示训练存点在远端主机上,`format` 区分训练存点与适配器导出 |
 | `DirectiveView` | `id`、`status`、`target_dimension`、`recipe_ref` | 由 `read_tree_state` 投影 |
 | `CandidateView` | `id`、`status`、`run_id`、`has_diagnostic` | `has_diagnostic` 默认 `False`,未知即无证据 |
 | `TreeState` | 指令视图、候选视图、`model_count` | `model_count` 是 `models/` 下 yaml 文件数;新增 `max_model_version`(默认 `None`),非 `None` 时 `reconcile` 用它加一定版本号,否则沿用 `model_count` 加一,既有 fixture 照旧 [已落地] |
@@ -310,6 +310,7 @@ payload:
 | I5 | 内容不变的重写不产生提交 | `write_product` 先查暂存区是否为空 |
 | I6 | `failed` 与 `rejected` 是终态,记录保留 | 迁移表出口为空 |
 | I7 | 读取不改写历史文件 | 惰性迁移只在内存里升版本 |
+| I8 | 任何 `BigRef` 实例的 `sha256` 都是 64 位小写十六进制,所以它可以直接拼进路径与作业参数 | `BigRef` 构造时校验、类不可变;`dataclasses.replace` 也走构造,同样校验 [计划中] |
 
 ## 5. 接口契约
 
@@ -539,6 +540,7 @@ def evidence_acceptable(grade: str, accept_mock: bool) -> bool: ...
 | CP-13 | 异步派发的契约现在定下,V1 不写代码:指令加 `submitted` 状态,派发器拆成提交与轮询,调和循环加轮询动作 [推迟];接真实 LoRA SFT 的例外见 CP-15 | V1 就实现;推迟到 V2 才设计 | 契约先于实现,真正做异步派发时不必同时改派发契约与调和循环 | 契约先于实现,真实执行器落地时细节仍会微调 |
 | CP-14 | 资源暂时不可用走延后通道 [已落地]:基类 `DeferredError(reason, retry_after_seconds)` 放在无依赖的 `controlplane/deferred.py`;守护进程在 `reconcile_once` 里接住它,不写树、状态不动;退避取 `retry_after_seconds` 与默认 30 秒的较大者、封顶 900 秒,退避期内跳过该动作而同一 tick 的其余动作照常;同一动作连续延后超过 20 次抛 `DeferredExhaustedError`(不继承 `DeferredError`),守护进程带原因退出;退避表只在内存。派发器的通用异常分支对 `DeferredError` 原样上抛,不把它包成 `DirectiveFailedError` | 沿用「派发器抛其他异常就让守护进程退出」;只在计算层内部重试 | 验证主机上常有别人的服务,忙是常态;仓库没有监督脚本,退出等于停摆;内部重试看不到守护进程的节奏 | 上限偏小会在长队列前过早退出,偏大发现得晚;树里没有任何写入,代价只是重启一次守护进程 |
 | CP-15 | 接真实 LoRA SFT 的这一轮,训练同步阻塞调和循环,作为已评估的例外 [已落地]:限定条件是真实后端只由组合根在装配时直接启用;异步派发(CP-13)留给下一轮,不作本轮前置 | 先落地异步派发再接真实训练 | 异步派发要改指令状态机与守护循环,与真实后端叠在一起风险过大;训练期间排队的只是审核与晋级动作,树不会被写坏 | 一轮训练期间审核与晋级动作排队,可达数小时;真正做异步派发时,真实执行器要从同步形态改成提交与轮询两段 |
+| CP-16 | `BigRef` 构造即校验并冻结,校验失败抛 `InvalidBigRefError`,它继承 `TypeError` [计划中]。64 位小写十六进制的规则只有一份,即 `controlplane.envelope.SHA256_HEX`,训练配置、配方校验、mock 执行器与转换器都引用它 | 由各使用方各自校验(此前的做法,共四份正则);抛 `ValueError` | 坏引用在进树、出树的第一刻就被拦下,不再靠每个用到它的地方记得检查;转换器把 `sha256[:8]` 拼进远端路径,此前全仓只有它一处在把关。继承 `TypeError` 是因为每个读树点都已把 `KeyError`、`TypeError`、`AttributeError` 当成确定性读不出:派发器转成指令 `failed`,MindAgent 转成轮次 `failed`。若抛 `ValueError`,它会从这些分支漏出去,在派发器里被当成瞬态失败,指令保持 `pending`、每个 tick 重派 | 手写进树的坏引用此后在读取时确定性失败,错误信息点名字段;此前它能被读出,直到某个使用方才出错或根本不出错 |
 | R1 | 事件就是树里的状态事实。每个触发对应一个新动作,幂等键是 run 目录内的标记产物 | 事件订阅 | 循环无状态,崩溃后重读即续接 | 每个触发多一个小文件 [已落地] |
 | R2 | 新动作只有在对应处理器被注入时才会产生,`controlplane` 不导入任何新子系统 | 在 daemon 里直接调用新子系统 | 依赖方向不变;不注入时行为逐字节相同 | 入口要自己组装处理器 [已落地] |
 | R3 | 指令确认默认开启,新增 `awaiting_confirmation` 状态,由 `confirm` 迁到 `pending` | 全自动下发 | 先建立信任 | 闭环每轮停一次等人,关掉要显式配置 [已落地] |
@@ -567,6 +569,18 @@ def evidence_acceptable(grade: str, accept_mock: bool) -> bool: ...
 | 处理器确定性失败 | 处理器标注 | 写自己产物的 `failed` 与失败记录 | `failure-<任务>.yaml` [已落地] |
 | 轮次产物读不出 | 视图兜底 | 视图按「没有轮次」处理,不抛;轮次处理器重入时判定确定性损坏,自己写 `failed`(R19) | 轮次产物 [已落地] |
 | 诊断报告读不出或载荷不是字典 | 视图兜底 | 等级记为 `stub`,永不可接受,不抛;规划、提名、战绩都不触发 | 无 [已落地] |
+| 产物里的 `BigRef` 不合规 | T3 | 读取它的地方把 `InvalidBigRefError` 转成调用方本来就按确定性失败处理的那类异常,见下表;不让它从处理器或派发器漏出去打崩守护进程 [计划中] | 各自产物的 `failed` 与失败原因,原因点名是哪个引用 |
+
+`InvalidBigRefError` 继承 `TypeError`,但不能指望每个读取点都恰好接 `TypeError`:有三处的调用方只接自己那一族异常。所以六个读取点各自显式转换,每一处都有用例 [计划中]:
+
+| 读取点 | 调用方按什么判确定性失败 | 转成 |
+|---|---|---|
+| 训练配置里的两个引用(`mindtrainer.training_config`) | 从指令读配置时 `TypeError` 转 `InvalidTrainingConfigError`,派发器置指令 `failed` | 仍是 `InvalidBigRefError`,信息前加引用名 |
+| 最新晋级模型的基座(`controlplane.models.latest_promoted_checkpoint`) | 规划动作解析把 `MissingCheckpointRefError` 转 `ResolveError`,决策 `failed` | `MissingCheckpointRefError`,含义扩为「缺失或不可用」 |
+| 规划上下文的策略经验(`trainscheduler.assemble`) | 规划处理器接 `SchedulerError`,决策 `failed` | `ContextAssemblyError`;基座缺 `checkpoint_ref` 时同样转换 |
+| MindAgent 轮次绑定的模型(`mindagent.rounds`) | 轮次处理器接 `AgentRoundFailedError`,轮次 `failed`、类别 T3 | `AgentRoundFailedError` |
+| 训练运行记录(`mindtrainer.store_adapter.read_training_run`) | 派发器的确定性元组含 `NeedsHumanError`,指令 `failed`;派发器异常分支里重读记录处同样转 `DirectiveFailedError` | `NeedsHumanError`,记录在而读不出,要人处理 |
+| 真实评测的候选导出(`factory.sombench_runner`) | 评估器接 `CandidateUnusableError`,写失败的诊断报告 | `CandidateUnusableError` |
 
 只读观测手段:
 
@@ -613,6 +627,7 @@ def evidence_acceptable(grade: str, accept_mock: bool) -> bool: ...
 | 调和循环、派发缝、守护循环 | [已落地] | 入口 `scripts/run_controlplane.py` 注入 MindTrainer 派发器,默认间隔 2 秒 |
 | 两类状态机与审核门① | [已落地] | 证据规则在 `reconcile` 与 `approve` 两处 |
 | 信封、迁移器链、Schema 校验 | [已落地] | `MIGRATORS` 为空,`CURRENT_SCHEMA_VERSION` 为 1 |
+| `BigRef` 构造即校验并冻结 | [计划中] | 规则见实体表与 CP-16;四份 sha256 正则收成 `SHA256_HEX` |
 | 基座解析、观测函数、配置加载与脱敏 | [已落地] | `cost` 的写方是 `inference_bridge` 的外部调用记账 |
 | 命令行 | [已落地] | TypeScript 五个命令(`review`、`approve`、`reject`、`confirm`、`status`);Python 侧 `factory` 有 `trace`、`cost`、`logs` 子命令 |
 | 诊断 | 桩,可替换 | 缺省调 `diagnostic_evaluator_stub`;注入评估器只替换这一步,factory 带 `--enable` 装配 mock 后端的真实评估器 |
