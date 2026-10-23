@@ -127,6 +127,44 @@ def test_the_agent_runtime_starts_lazily_and_closes(store):
     assert not runtime.started
 
 
+def test_channels_of_finished_clients_are_closed_before_a_new_one_is_handed_out(store, monkeypatch):
+    """守护进程长跑时每个轮次都要几个客户端。会话结束(收完或 abort)的客户端,通道在下一次
+    发客户端时就关掉,在途通道数不随轮次增长;close() 仍关掉剩下的全部。"""
+    import grpc
+
+    class FakeChannel:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    made = []
+
+    def fake_channel(target):
+        made.append(FakeChannel())
+        return made[-1]
+
+    class FakeStub:
+        def __init__(self, channel):
+            pass
+
+        def Interact(self, request_iterator, **kw):
+            return iter(())
+
+    monkeypatch.setattr(grpc, "insecure_channel", fake_channel)
+    runtime = AgentRuntime(store, ("hi",), stub_factory=FakeStub)
+    try:
+        for _ in range(5):
+            runtime.client_factory().abort()          # 一条 rollout 结束:驱动方在 finally 里 abort
+        in_flight = runtime.client_factory()          # 第六个仍在用
+        assert [c.closed for c in made] == [True] * 5 + [False]
+        assert not in_flight.closed
+    finally:
+        runtime.close()
+    assert all(c.closed for c in made)
+
+
 def test_every_interact_stream_carries_a_deadline(store):
     """计划 7 已知限制 4:生产用的 EnvironmentServiceClient 没有 deadline,组合根在构造 stub 时包一层。
     用假 stub 记下调用参数,不依赖真实超时。"""

@@ -79,6 +79,40 @@ def test_the_lock_file_lives_under_dot_git_and_git_does_not_track_it(store):
         assert store._git("status", "--porcelain") == ""
 
 
+def _worktree(store, tmp_path):
+    """给 store 加一个 git worktree:它的 .git 是一个文件,内容是 `gitdir: <路径>`。"""
+    _put_directive(store)                       # worktree add 需要至少一个提交
+    wt = tmp_path.parent / f"{tmp_path.name}-wt"
+    subprocess.run(["git", "-C", str(store.repo_root), "worktree", "add", "-q", "--detach", str(wt)],
+                   check=True, capture_output=True)
+    assert (wt / ".git").is_file()
+    return wt
+
+
+def test_a_worktree_takes_its_lock_in_its_own_git_directory(store, tmp_path):
+    """worktree 的 .git 是文件,不能当目录拼路径(原先会抛 NotADirectoryError)。锁放进这个
+    工作树自己的 git 目录,与 git 的 index.lock 同一粒度:同一工作树互斥,两个工作树互不干扰。"""
+    wt = _worktree(store, tmp_path)
+    with acquire_repo_lock(wt):
+        gitdir = Path(subprocess.run(["git", "-C", str(wt), "rev-parse", "--absolute-git-dir"],
+                                     check=True, capture_output=True, text=True).stdout.strip())
+        assert (gitdir / "rismforge.lock").exists()
+        with pytest.raises(RepoLockedError, match="rismforge.lock"):
+            with acquire_repo_lock(wt):
+                pass
+        with acquire_repo_lock(store.repo_root):     # 主工作树是另一棵树,照常能取
+            pass
+
+
+def test_a_relative_gitdir_in_the_dot_git_file_is_resolved_against_it(store, tmp_path):
+    """`gitdir:` 后面也可以是相对路径(git worktree repair 之后、或手写):相对 .git 文件所在目录。"""
+    wt = _worktree(store, tmp_path)
+    absolute = Path((wt / ".git").read_text().split(":", 1)[1].strip())
+    (wt / ".git").write_text(f"gitdir: {os.path.relpath(absolute, wt)}\n")
+    with acquire_repo_lock(wt):
+        assert (absolute / "rismforge.lock").exists()
+
+
 def test_run_daemon_refuses_to_start_while_the_lock_is_held_and_writes_nothing(store):
     _put_directive(store)
     commits = store._git("rev-list", "--count", "HEAD")

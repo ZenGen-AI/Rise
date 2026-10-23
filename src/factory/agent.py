@@ -114,6 +114,7 @@ class AgentRuntime:
         self._deadline = interact_deadline_s
         self._stub_factory = stub_factory
         self._server = None
+        # (客户端, 通道) 成对记下:会话结束的客户端,通道在下一次发客户端时关掉(见 client_factory)
         self._channels: list = []
         self._lock = threading.Lock()
 
@@ -128,9 +129,19 @@ class AgentRuntime:
                     scenario_resolver=lambda sid: read_scenario(self._store, sid),
                 )
                 self._server.start()
+            # 守护进程长跑时每个轮次都要几个客户端;只追加不关的话,通道随轮次增长直到关停。
+            # 两个驱动方(MindAgent 部署、MindTrainer 轨迹源)在一条 rollout 结束时都让客户端进入
+            # closed(收完,或在 finally 里 abort),所以发新客户端之前把已结束的那些通道关掉。
+            still_open = []
+            for client, channel in self._channels:
+                if client.closed:
+                    channel.close()
+                else:
+                    still_open.append((client, channel))
             channel = grpc.insecure_channel(f"127.0.0.1:{self._server.bound_port}")
-            self._channels.append(channel)
-        return EnvironmentServiceClient(DeadlineStub(self._stub_factory(channel), self._deadline))
+            client = EnvironmentServiceClient(DeadlineStub(self._stub_factory(channel), self._deadline))
+            self._channels = [*still_open, (client, channel)]
+        return client
 
     @property
     def started(self) -> bool:
@@ -138,7 +149,7 @@ class AgentRuntime:
 
     def close(self) -> None:
         with self._lock:
-            for channel in self._channels:
+            for _, channel in self._channels:
                 channel.close()
             self._channels.clear()
             if self._server is not None:
