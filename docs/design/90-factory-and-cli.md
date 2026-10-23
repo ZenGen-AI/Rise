@@ -340,7 +340,7 @@ Python 子命令 [已落地]。每个子命令的第一个位置参数都是控�
 |---|---|---|
 | `run <repo>` | 一直跑调和循环,带 `--interval-s`、`--max-ticks` | 0;装配错误 2 |
 | `reconcile <repo> --once` | 跑一轮,每个动作打印一行 `<kind> <target_id>`,没有动作打印 `no actions` | 0;不带 `--once` 或装配错误 2 |
-| `install-defaults <repo>` | 显式写默认资产与配置,打印涉及的路径 | 0 |
+| `install-defaults <repo>` | 显式写默认资产与配置,打印涉及的路径 | 0;仓库被另一个进程锁住时 2,树里不写任何东西 |
 | `import-sombench <repo> --someval-root <路径> --index <树外路径>` | 从 SoMEval 检出目录导入 SoMBench:写分类表与题库(版本带数据集哈希前缀),写污染索引;内容相同不提交 [已落地] | 0;parquet 缺失或 pyarrow 未装,退出码 2 |
 | `trace <repo> <run>` | 原样打印观测函数 `trace` 的输出 | 0;run 不存在 1 |
 | `cost <repo> <run>` | 原样打印观测函数 `cost` 的输出 | 0,没有 `run_trace` 也是 0 |
@@ -427,7 +427,7 @@ TypeScript 命令行:`rismforge <review|approve|reject|confirm|status> [id] [rea
 
 | 步 | 动作 | 失败时 |
 |---|---|---|
-| 0 | 取仓库排他文件锁(`run` 与 `reconcile` 取,只读子命令不取) | 锁已被占用,退出码 2 [已落地] |
+| 0 | 取仓库排他文件锁(`run`、`reconcile`、`install-defaults` 取,只读子命令不取) | 锁已被占用,退出码 2 [已落地] |
 | 1 | 解析 `--enable`,经 `ENABLE_MAP` 得到处理器键 | 未知开关或空项,退出码 2 |
 | 2 | 处理器键为空:只构造 `make_mindtrainer_dispatcher()`,调 `run_daemon` 时只传派发器 | 无 |
 | 3 | 读 `evaluator.yaml`,要求恰好五个键 | `FactoryConfigError`,退出码 2 |
@@ -563,7 +563,7 @@ factory 是最后一个工作包,前八个全部落地后才能施工。
 | FC-11 | `repo_commit` 取组合根所在代码仓库的 HEAD,启动时取一次 | 取控制面仓库的 HEAD | 控制面仓库不是代码仓库 | 长跑跨提交时记的是启动时的提交 |
 | FC-12 | 端到端用确定性的 `HeuristicBackend` 规划,桥接只单测正向与失败路径 | 罐头桥接 | 每一步都是真实代码,命令行一个开关选得到 | 桥接往返的格式问题要到接真实后端才暴露 |
 | FC-13 | MindAgent 用罐头后端与进程内 loopback 实时服务端,首次需要时才起 | 起外部服务端 | V1 没有加载 checkpoint 的推理后端 | 部署 episode 只证明路由与轨迹,不代表模型能力 |
-| FC-14 | `run` 与 `reconcile` 在第一个 tick 之前取仓库排他文件锁,只读子命令不取 [已落地] | 只靠只带本文件提交;把锁放进每次写入 | 挡住两个守护进程重复派发与记账互相覆盖,开销只在启动时一次 | 锁被占用时退出码 2,第二个守护进程起不来 |
+| FC-14 | `run` 与 `reconcile` 在第一个 tick 之前取仓库排他文件锁,`install-defaults` 在写第一个产物之前取,只读子命令不取 [已落地] | 只靠只带本文件提交;把锁放进每次写入 | 挡住两个守护进程重复派发与记账互相覆盖,开销只在启动时一次 | 锁被占用时退出码 2,第二个守护进程起不来 |
 | FC-15 | 真实 ROLL 执行器由显式的 `--executor roll` 启用,默认 `mock`;`--endpoint` 点名端点 [已落地]。执行器工厂接收 `run_id`:派发器按指令 id 调 `executor_factory(run_id)`,`MockExecutor` 一侧用 `lambda _: MockExecutor()` 适配 | 看树里有没有 `compute/endpoints.yaml` 就自动启用;环境变量启用 | 一次训练会同步占住调和循环数小时并真的动远端 GPU(CP-15),这个后果值得在命令行上明写;自动启用会让「提交一份配置」悄悄改变入口行为;环境变量在 `--help` 里看不见,也与已有五个开关风格不一致 | 要多输入一个参数;派发器的 `executor_factory` 签名从无参改成带 `run_id`,既有五处测试调用要跟着改 |
 | FC-16 | 真实评估器由显式的 `--evaluator someval` 启用,默认 `mock`;它要求 `--executor roll`,暂不能与 `--enable` 同用;真训练一侧不论是否评测都要求污染索引在场并通过哈希校验 [已落地] | 让 `--executor roll` 自动带上真实评估器;把评估并入 `--enable` | 评测要真实存点才有意义,所以依赖真实执行器;但真训练与真评测是两个独立后果,各自一个开关才看得清;污染索引跟着真训练走,是因为「评测题不进训练」是硬约束,与这次开不开评测无关 | 想只换评估器不开真训练做不到;索引缺失时连不开评测的真训练也起不来,要先跑一次导入 |
 

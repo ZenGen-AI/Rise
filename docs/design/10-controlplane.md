@@ -637,7 +637,7 @@ def evidence_acceptable(grade: str, accept_mock: bool) -> bool: ...
 | TypeScript 读取不经迁移器链与 Schema 校验,与 Python 不对称 | `schema_version` 升级后两边读法不一致;坏产物在命令行侧不被拒绝 | 未修 |
 | TypeScript 写入无条件提交,与 Python 不对称 | 内容相同时 `git commit` 以非零退出码失败 | 未修;提交范围改为只带本文件(CP-12)[已落地] |
 | 晋级分三次写入,不是一次提交 | 崩在写 `zengen-vN` 之后、候选置 `effective` 之前时,树里留下半程状态:模型已登记,候选仍是 `approved` | 重放靠 `promoted_from` 认出已登记的模型并复用其版本号,只补后两次写入;新版本号取现有最大版本号加一(CP-7)[已落地]。人工删文件只会留下版本号空洞 |
-| 单实例保护只覆盖入口 | 经 `run_daemon` 或 `factory reconcile` 的写者取排他文件锁,第二个守护进程起不来;但直接调 `reconcile_once`、`apply_action` 的代码不取锁,仍可能重复派发。Windows 的锁分支未在真机验证 | 入口启动取排他文件锁,所有提交只带本文件(CP-12)[已落地] |
+| 单实例保护只覆盖入口 | 经 `run_daemon`、`factory reconcile` 或 `factory install-defaults` 的写者取排他文件锁,第二个守护进程起不来;但直接调 `reconcile_once`、`apply_action` 的代码不取锁,仍可能重复派发。Windows 的锁分支未在真机验证 | 入口启动取排他文件锁,所有提交只带本文件(CP-12)[已落地] |
 | 命令行与守护进程并发提交 | 仓库锁只挡守护进程对守护进程;命令行不取锁,两边同时提交仍会撞 git 的 `index.lock`,已复现:同一仓库六个线程各写 15 次,90 次里 62 次失败。守护进程遇到即退出,命令行一侧抛错 | 守护进程由外部监督者重启,命令行重跑;提交只带本文件,重试不会卷进别人暂存的内容 [已落地] |
 | `outcome.yaml` 没有读者 | 守护进程写它,规划不读它;晋级崩在候选置 `effective` 与写它之间时它永久缺失 | 无影响,只供人与 `trace` 查看 |
 | 指令 id 必须等于 run 目录名 | 不一致时派发找不到文件 | 约定;写指令时同名 |

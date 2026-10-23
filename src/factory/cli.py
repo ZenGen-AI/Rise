@@ -19,7 +19,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from controlplane.gitstore import GitStore
-from controlplane.lock import RepoLockedError
+from controlplane.lock import RepoLockedError, acquire_repo_lock
 from controlplane.paths import run_dir
 from factory import readonly
 from factory.errors import FactoryConfigError
@@ -132,7 +132,11 @@ def main(
             return 0
         if args.command == "install-defaults":
             from factory.defaults import install_defaults  # 惰性导入:它拖进 grpc 与计划 4、5、7 的包(Ruling 16)
-            for rel in install_defaults(store):
+            # 它一次写十几个提交,是和 run、reconcile 同一类的写者:运行中的守护进程与它会争 index.lock。
+            # 锁被占用时由下面的 RepoLockedError 分支转成退出码 2,树里不写任何东西。
+            with acquire_repo_lock(args.repo_root):
+                written = install_defaults(store)
+            for rel in written:
                 print(rel)
             return 0
         if args.command == "trace":

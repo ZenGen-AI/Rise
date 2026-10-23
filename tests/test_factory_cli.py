@@ -92,6 +92,26 @@ def test_entry_script_runs_trace(store):
     assert out.stdout == observe_trace(store, RUN) + "\n"
 
 
+def test_install_defaults_exits_2_while_the_repository_is_locked_and_writes_nothing(store, capsys):
+    """install-defaults 一次写十几个提交,与运行中的守护进程会争 index.lock:它和 run、reconcile
+    一样是写者,另一个进程持锁时以退出码 2 退出,树里不留任何东西。"""
+    before = _snapshot(store)
+    with held_lock(store.repo_root):
+        code = main(["install-defaults", str(store.repo_root)])
+    assert code == 2
+    err = capsys.readouterr().err
+    assert err.startswith("factory: error: repository is locked by another process: ")
+    assert _snapshot(store) == before
+
+
+def test_install_defaults_releases_the_lock_when_it_finishes(store, capsys):
+    """装完就放锁:紧接着的写者能拿到锁。"""
+    assert main(["install-defaults", str(store.repo_root)]) == 0
+    capsys.readouterr()
+    with held_lock(store.repo_root):     # 能进来说明锁已经放掉
+        pass
+
+
 def test_the_read_only_commands_work_while_the_repository_is_locked(store, capsys):
     """只读子命令不取锁(设计 CP-12):另一个进程持锁时照常输出,不退出码 2,也不提交。"""
     before = _snapshot(store)
