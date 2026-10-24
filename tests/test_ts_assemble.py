@@ -293,3 +293,12 @@ def test_the_real_classifier_output_for_an_all_correct_family_is_accepted(store)
     assert [p.to_dict() for p in ctx.diagnostic.error_profiles] == [
         {"l2_dimension": "l2.x", "error_type_distribution": {}}]
     assert PlanningContext.from_dict(json.loads(json.dumps(ctx.to_dict()))) == ctx
+
+
+def test_regression_marks_keep_the_level_so_one_drop_on_three_levels_is_recognizable():
+    """一次 L3 下降会在 L2、L1 各再产出一条标记(诊断设计 §6):level 丢了,规划方就分不出
+    这是同一次退化的三层证据还是三次退化。没有层级的标记 level 为 None。"""
+    social = regression_mark({"kind": "social_regression", "dimension": "tom", "drop": 0.1, "level": "l1"})
+    probe = regression_mark({"kind": "g_probe_failure", "probe": "g1", "score": 0.3})
+    assert (social.level, probe.level) == ("l1", None)
+    assert social.to_dict() == {"kind": "social_regression", "subject": "tom", "magnitude": 0.1, "level": "l1"}

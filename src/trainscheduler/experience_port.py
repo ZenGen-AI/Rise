@@ -1,6 +1,7 @@
 """策略经验的读写层(设计 4、5、6)。唯一的 I/O 入口;增益只经 recipes_port 转导。"""
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from controlplane import ledger
@@ -26,6 +27,8 @@ from trainscheduler.experience import (
     strategy_key,
 )
 from trainscheduler.recipes_port import compute_gain, read_report_payload, regression_flags
+
+_log = logging.getLogger("trainscheduler.experience")
 
 NOW = "2026-10-20T00:00:00Z"
 NOTE_TYPE = "strategy_experience_note"
@@ -268,8 +271,10 @@ def _note_failure(store: GitStore, run_id: str, exc: BaseException) -> None:
 
 
 def _record_and_recompute(store: GitStore, run_id: str) -> None:
-    record, _ = collect_record(store, run_id)
+    record, ignored = collect_record(store, run_id)
     if record is None:
+        for reason in ignored:
+            _log.warning("strategy experience not recorded: %s", reason)
         return
     _write(
         store, strategy_experience_note_file(run_id),

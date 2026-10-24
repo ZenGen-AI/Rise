@@ -52,7 +52,7 @@ def _number(v: object) -> float | None:
 
 
 def regression_mark(flag: dict) -> RegressionMark:
-    """把诊断报告的一条退化标记归一化成 {kind, subject, magnitude}(计划 4 的契约)。"""
+    """把诊断报告的一条退化标记归一化成 {kind, subject, magnitude, level}(计划 4 的契约,level 可缺)。"""
     kind = flag.get("kind")
     if not isinstance(kind, str) or not kind:
         raise ContextAssemblyError(f"regression flag has no kind: {flag!r}")
@@ -69,7 +69,10 @@ def regression_mark(flag: dict) -> RegressionMark:
         magnitude = next((m for m in (_number(flag.get(k)) for k in ("drop", "score")) if m is not None), 0.0)
     if not isinstance(subject, str) or not subject or magnitude is None:
         raise ContextAssemblyError(f"regression flag of kind {kind!r} is malformed: {flag!r}")
-    return RegressionMark(kind=kind, subject=subject, magnitude=magnitude)
+    level = flag.get("level")
+    if level is not None and (not isinstance(level, str) or not level):
+        raise ContextAssemblyError(f"regression flag of kind {kind!r} has a malformed level: {flag!r}")
+    return RegressionMark(kind=kind, subject=subject, magnitude=magnitude, level=level)
 
 
 NO_ERROR_LABEL = ""

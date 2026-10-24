@@ -646,8 +646,11 @@ def test_a_reviewed_candidate_that_is_not_this_runs_is_left_for_a_human(store, e
     cfg = _batch_cfg()
     _crash_between_registration_and_executed(store, cfg)
     _review(store, "approved", **edit)  # 候选被改成不属于本 run、本配置、同一份权重
-    with pytest.raises(CandidateAlreadyReviewedError):
+    # 交给人是 NeedsHumanError(派发器把它判成 T3 的 failed);原样漏出 CandidateAlreadyReviewedError
+    # 会让守护进程退出,重启后每次都重做最后一段,直到 resume_attempts 耗尽才停。
+    with pytest.raises(NeedsHumanError, match="not this run") as caught:
         _go(store, cfg, MockExecutor())
+    assert isinstance(caught.value.__cause__, CandidateAlreadyReviewedError)
     assert read_training_run(store, RUN).status == "pending"
 
 

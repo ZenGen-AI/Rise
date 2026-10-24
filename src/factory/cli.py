@@ -120,9 +120,11 @@ def main(
         if args.command == "import-sombench":
             from factory.sombench import import_sombench
 
+            # 它写分类表与题库,和 install-defaults 一样是写者,与运行中的守护进程会争 index.lock
             try:
-                result = import_sombench(store, someval_root=Path(args.someval_root),
-                                         index_path=Path(args.index))
+                with acquire_repo_lock(args.repo_root):
+                    result = import_sombench(store, someval_root=Path(args.someval_root),
+                                             index_path=Path(args.index))
             except FactoryConfigError as exc:
                 print(f"factory: error: {exc}", file=sys.stderr)
                 return 2

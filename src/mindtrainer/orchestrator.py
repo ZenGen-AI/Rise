@@ -331,10 +331,11 @@ def run_training(
             curve_summary=summary,
             manifest_ids=[cfg.stage_manifest_refs[s] for s in STAGES if cfg.stage_manifest_refs.get(s)],
         )
-    except CandidateAlreadyReviewedError:
+    except CandidateAlreadyReviewedError as exc:
         # 崩在"注册之后、置 executed 之前",期间人批准了候选:注册其实早已完成,只差置 executed。
+        # 候选不属于本 run、本配置、同一份权重时交给人:重派只会重做最后一段再撞上同一处。
         if not _candidate_is_this_runs(store, run_id, chash, candidate_ref):
-            raise
+            raise NeedsHumanError(f"{exc}; the reviewed candidate is not this run's") from exc
     run = dataclasses.replace(run, status="executed")
     write_training_run(store, run)
     return run

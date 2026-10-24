@@ -373,3 +373,14 @@ def test_a_recording_failure_leaves_a_failure_record(tmp_path):
     finally:
         port.collect_record = original
     assert store.exists(failure_record_file("run-003", "strategy-experience"))
+
+
+def test_a_round_that_is_not_recorded_says_why_in_the_log(tmp_path, caplog):
+    """不落账的原因要留痕:collect_record 给出的原因不能被丢掉,否则没人查得到这一轮为什么没进经验。"""
+    store = make_store(tmp_path)
+    _baseline(store)
+    write_round(store, "run-003", {"tom": 0.45, "empathy": 0.70}, backends="real")
+    with caplog.at_level("WARNING", logger="trainscheduler.experience"):
+        record_and_recompute(store, "run-003", config=SchedulerConfig(strategy_experience=True, template_version="v2"))
+    assert not store.exists(strategy_experience_note_file("run-003"))
+    assert "run-003: no planner decision produced this run" in caplog.text

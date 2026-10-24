@@ -130,26 +130,35 @@ class CandidateSummary:
 @dataclass(frozen=True)
 class RegressionMark:
     """一条退化标记的摘要。kind 照抄诊断报告;subject 是维度(social_regression)、探针名
-    (g_probe_failure)或 "reward"(reward_hacking_suspected);magnitude 是下降量、探针分数或 reward_delta - diag_delta。"""
+    (g_probe_failure)或 "reward"(reward_hacking_suspected);magnitude 是下降量、探针分数或 reward_delta - diag_delta。
+    level 照抄诊断报告(l1、l2、l3):一次 L3 下降会在三个层级各产出一条,同 kind、同 level 才是同层证据;
+    没有层级的标记为 None,序列化时省略这个键。"""
 
     kind: str
     subject: str
     magnitude: float
+    level: str | None = None
 
-    _KEYS = ("kind", "subject", "magnitude")
+    _KEYS = ("kind", "subject", "magnitude", "level")
 
     def __post_init__(self) -> None:
         _check_str(self.kind, "regression_flag.kind")
         _check_str(self.subject, "regression_flag.subject")
         _check_num(self.magnitude, "regression_flag.magnitude")
+        if self.level is not None:
+            _check_str(self.level, "regression_flag.level")
 
     def to_dict(self) -> dict:
-        return {"kind": self.kind, "subject": self.subject, "magnitude": self.magnitude}
+        d = {"kind": self.kind, "subject": self.subject, "magnitude": self.magnitude}
+        if self.level is not None:
+            d["level"] = self.level
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> RegressionMark:
-        _exact_keys(d, cls._KEYS, "regression_flag")
-        return cls(kind=d["kind"], subject=d["subject"], magnitude=d["magnitude"])
+        keys = cls._KEYS if isinstance(d, dict) and "level" in d else cls._KEYS[:3]
+        _exact_keys(d, keys, "regression_flag")
+        return cls(kind=d["kind"], subject=d["subject"], magnitude=d["magnitude"], level=d.get("level"))
 
 
 @dataclass(frozen=True)

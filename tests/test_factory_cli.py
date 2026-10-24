@@ -146,3 +146,16 @@ def test_the_read_only_commands_work_while_the_repository_is_locked(store, capsy
         assert main(["logs", str(store.repo_root), RUN]) != 2
     assert "locked" not in capsys.readouterr().err
     assert _snapshot(store) == before
+
+
+def test_import_sombench_exits_2_while_the_repository_is_locked_and_writes_nothing(store, tmp_path, capsys):
+    """import-sombench 写分类表与题库,和 install-defaults 一样是写者:另一个进程持锁时
+    以退出码 2 退出,不读源数据、不写树。源目录故意不存在,取锁晚于导入就会报别的错。"""
+    before = _snapshot(store)
+    with held_lock(store.repo_root):
+        code = main(["import-sombench", str(store.repo_root),
+                     "--someval-root", str(tmp_path / "nowhere"), "--index", str(tmp_path / "idx.json")])
+    assert code == 2
+    err = capsys.readouterr().err
+    assert err.startswith("factory: error: repository is locked by another process: ")
+    assert _snapshot(store) == before
