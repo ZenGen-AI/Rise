@@ -411,7 +411,7 @@ def load_library(store) -> LibraryState: ...
 | `max_turns`、`goal_reached` | 接受,落盘 |
 | `timeout`、`role_backend_timeout`、`persistence_failed`、传输层 `UNAVAILABLE` | T1:整条重跑,至多 `max_retries_per_episode` 次;用尽后轮次保持 `pending` 并上抛 |
 | `invalid_session`、`role_backend_failure`、`client_disconnected`、其他状态码、协议错乱 | 不重跑,轮次 `failed`(T3) |
-| Actio 实例自身抛异常 | 先 `abort()` 会话,原异常原样上抛,不重跑、不包装 |
+| Actio 实例自身抛异常 | 先 `abort()` 会话,原异常原样上抛,不重跑、不包装;到了轮次处理器,`ActioDataError` 与 `MindAgentDataError` 一族收成轮次 `failed`(T3),其余异常上抛,轮次保持 `pending` |
 
 **分析器的判定**(第 6 步,[已落地])
 
@@ -437,7 +437,7 @@ def load_library(store) -> LibraryState: ...
 <!-- figure:begin 50-mindagent-admission -->
 ![提案到入库的审核链](diagrams/50-mindagent-admission.svg)
 
-**图 4　提案到入库的审核链**　验证结果先按阈值筛选,未过的写进轮次的 dropped。通过的打包成 pending_review 提案,人工在门②批准或拒绝。批准后收录处理器先校验全部增量,再写库条目、递增 library_state,最后把提案置 effective。增量不合法时记一次 T2 失败记录,提案留在 approved。
+**图 4　提案到入库的审核链**　验证结果先按阈值筛选,未过的写进轮次的 dropped。通过的打包成 pending_review 提案,人工在门②批准或拒绝。批准后收录处理器先校验全部增量,再写库条目、递增 library_state,最后把提案置 effective。增量不合法时记一次 T2 失败记录(提案缺 run_id、run 目录不在或已记过时不写),提案留在 approved。
 
 <details>
 <summary>文字版:图中的节点与连线</summary>
@@ -495,7 +495,7 @@ def load_library(store) -> LibraryState: ...
 
 **走查例子**
 
-数值取自工作包 7 的端到端测试,与 `tests/test_ma_e2e.py` 一致。配置:情境 `s1`、`s2`、`s3`,`max_turns=4`,每情境 1 个 episode,对手依次说"我真的很生气!!""好吧,你说说看""那就这样吧"。
+数值取自工作包 7 的端到端测试,与 `tests/test_ma_e2e.py` 一致。配置:情境 `s1`、`s2`、`s3`,`max_turns=4`,每情境 1 个 episode,对手脚本备了"我真的很生气!!""好吧,你说说看""那就这样吧"三句;4 轮里对手只说两次,第三句用不上。
 
 | 轮 | 前置 | 结果 |
 |---|---|---|

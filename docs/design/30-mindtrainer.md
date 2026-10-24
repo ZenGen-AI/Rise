@@ -470,7 +470,7 @@ class DataProducer(Protocol):
 |---|---|---|---|
 | 1 | 派发器 | 读并校验配置,构造归因后端;interact 检查 `client_factory` 与 `policy`;batch 检查清单在场且 id 对得上 | 失败时不写记录,指令判 `failed` |
 | 1a | 派发器 | 缺清单且指令带 `data_spec` 时先合成,插在客户端检查之后、读清单之前:先严格解析 `data_spec`(带了就解析,即便清单都在场),再检查不合成的其余阶段的清单在场,再交叉校验,最后调生产器。interact 指令只合成 `sft`。已在场的清单不重做 | 失败时不写记录,指令判 `failed` |
-| 2 | 编排器 | 读训练记录,交给 `decide_resume`;`noop` 直接返回,`escalate` 抛 `NeedsHumanError` | 无 |
+| 2 | 编排器 | 读训练记录;已有记录时先比对存点的后端类型(不一致抛 `NeedsHumanError`,即便记录已是 `executed`),再交给 `decide_resume`;`noop` 直接返回,`escalate` 抛 `NeedsHumanError` | 无 |
 | 3 | 编排器 | 新运行从 step 0 起;resume 从 `checkpoint_step` 起;restart 从 step 0 起。之后先写 `pending` 记录,再 `executor.load` | 训练记录 |
 | 4 | 编排器 | batch 且有 GRPO 步:整份 GRPO 数据集一次算完奖励,校验组大小与组数 | 失败写 `failed` |
 | 5 | 编排器 | 逐步训练:SFT 取 `sft_batch_size` 条 episode;GRPO 取 `groups_per_step` 个完整组 | 无 |

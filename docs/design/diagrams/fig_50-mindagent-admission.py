@@ -10,7 +10,7 @@ def build() -> Canvas:
         1080, 600, title="提案到入库的审核链",
         desc="验证结果先按阈值筛选,未过的写进轮次的 dropped。通过的打包成 pending_review 提案,"
              "人工在门②批准或拒绝。批准后收录处理器先校验全部增量,再写库条目、递增 library_state,"
-             "最后把提案置 effective。增量不合法时记一次 T2 失败记录,提案留在 approved。")
+             "最后把提案置 effective。增量不合法时记一次 T2 失败记录(提案缺 run_id、run 目录不在或已记过时不写),提案留在 approved。")
     w, h = 200, 76
     xs = [30, 290, 550, 810]
     ver = c.box(xs[0], 150, w, "验证结果", "fired_on_motivating\nfired_elsewhere", kind="compute", h=h)

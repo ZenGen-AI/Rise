@@ -438,6 +438,7 @@ build_recipe_candidate(store, run_id, *, config, repo_commit=None,
 | 2 | 配方不存在,或不是 `effective` |
 | 3 | 配方类型不是 batch 或 interact;interact 配方而 `allow_interact` 关 |
 | 4 | 配方维度不等于决策的 `target_dimension`;配方没有 `training_config` |
+| 4′ | `replay` 带了扰动(`replay` 原样取配方,扰动必须为空);解析阶段已拒绝这种决策,这里是防御 |
 | 5 | 扰动键不在 `perturbable` 白名单;扰动后的配置套不上或过不了 `validate_training_config` |
 
 ### 6.2 提名处理器
@@ -514,7 +515,7 @@ build_recipe_candidate(store, run_id, *, config, repo_commit=None,
 
 ### 6.3 走查:一轮 new,一轮 clone
 
-数值来自端到端测试 `tests/test_ts_e2e.py` [已落地]。初始树里有 `run-001`,候选已晋级为 `zengen-v1`,mock 报告 tom 得 0.40。
+数值来自端到端测试 `tests/test_ts_e2e.py` [已落地]。初始树里有 `run-001`,候选已晋级为 `zengen-v1`,mock 报告 tom 得 0.40。规划与提名两步由测试直接调用处理器,不经调和循环的触发门;在守护进程里走同一序列,mock 报告下要同时打开允许 mock 证据,规划还要等配方入库门。
 
 | 步 | 发生的事 | 树里的结果 |
 |---|---|---|

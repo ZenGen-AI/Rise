@@ -390,12 +390,12 @@ def bucket_key(key, baseline_model_id) -> tuple: ...
 | `attribution` 为 `medium` | 唯一可能聚合的一类 |
 | `gain` 为空 | 不聚合(没有可比基线),原因写进 `ignored` |
 | 证据等级为 `mock` | 不聚合;条目的 `evidence_scope` 记 `real` |
-| 带 `social_regression` 标记 | 聚合,但同时计一条反例 |
+| 增益为负,或带任一退化标记(`social_regression`、`g_probe_failure`、`reward_hacking_suspected` 都算) | 聚合,但同时计一条反例 |
 | `overrides` 指定了 `status` | 状态取人写的值 |
 
 ### 6.4 走查
 
-条目的累计与废弃取自 `tests/test_se_experience.py` 的用例;这些用例直接给出记录,所有记录的对照基线同为 `zengen-v2`。在真实闭环里同一基座下能连续积累的,只有候选未晋级(`rejected`)的轮次,因为每次晋级都会换基座,见第 10 章局限表。下表按这个前提读:run-003 到 run-011 都对 `zengen-v2` 评估,且都没有晋级。
+条目的累计与废弃取自 `tests/test_se_experience.py` 的用例;这些用例直接给出记录,所有记录的对照基线同为 `zengen-v2`。两行「规划」是按 6.2 的选取规则推出的,纯函数用例不装配上下文;注入本身由 `tests/test_se_loop.py` 的 `test_on_injects_matching_entries` 断言,它只断言提示含 `opd_coefficient` 与 `0.2`。在真实闭环里同一基座下能连续积累的,只有候选未晋级(`rejected`)的轮次,因为每次晋级都会换基座,见第 10 章局限表。下表按这个前提读:run-003 到 run-011 都对 `zengen-v2` 评估,且都没有晋级。
 
 | 时刻 | 发生的事 | 条目状态 |
 |---|---|---|

@@ -437,7 +437,7 @@ TypeScript 命令行:`rismforge <review|approve|reject|confirm|status> [id] [rea
 | 5 | 按 `DEFAULT_BUILDERS` 逐个构造处理器,需要时经 `build_bridge(store, role, *, env=None, log_dir=None)` 建桥接、读凭证、读 `agent.yaml`。`planner` 角色只在 `--planner-backend bridge` 时必需,`agent` 角色可选,缺了就不建桥接,提案生成回到规则模板 [已落地] | 同上;已登记的收尾函数逆序调用 |
 | 6 | 注入派发器(带数据生产器)、处理器、评估器、证据开关,启动调和循环 | 运行中的异常原样上抛,进程退出 |
 
-以上步骤全部 [已落地]。第 2 步与守护进程入口走同一条代码路径,所以两者逐字节相同。任一步出错,标准错误打印一行 `factory: error: ...`,树里不写任何东西。
+以上步骤全部 [已落地]。`--executor roll` 带任何 `--enable` 都是配置错误,装配走完 4a、4b 就返回,没有第 5 步;`--evaluator someval` 同样不能与 `--enable` 同用。第 2 步与守护进程入口走同一条代码路径,所以两者逐字节相同。任一步出错,标准错误打印一行 `factory: error: ...`,树里不写任何东西。
 
 ### 6.2 失败与恢复
 
@@ -510,7 +510,7 @@ TypeScript 命令行:`rismforge <review|approve|reject|confirm|status> [id] [rea
 
 默认 mock 评估器对变体族的基题答参考答案、对变体题恒答错,各 `sampling_k` 次。所以每个候选的一级分数严格在 0 与 1 之间,错误画像是 `{"surface_match": 1.0}`。基线全错,第一轮才有正增益;第二轮与第一轮同分,增益为 0。
 
-MindAgent 链对应 `test_the_mindagent_line_runs_inside_the_reconcile_loop` [已落地],图中第 11、12 步:`zengen-v2` 的轮次空库零提案,放入基线技能后 `zengen-v3` 的轮次产出 `pending_review` 提案,批准收录后库版本是 `{"skill": "2", "memory": "0"}`,两个值都是字符串。
+MindAgent 链对应 `test_the_mindagent_line_runs_inside_the_reconcile_loop` [已落地],是图中第 11、12 步,上表只列主链的 1 到 10 步。这个测试里 `zengen-v1` 是人工登记的基线,所以空库轮绑定 `zengen-v2`、出提案的轮次绑定 `zengen-v3`:`zengen-v2` 的轮次空库零提案,放入基线技能后 `zengen-v3` 的轮次产出 `pending_review` 提案,批准收录后库版本是 `{"skill": "2", "memory": "0"}`,两个值都是字符串。
 
 ### 6.4 九个工作包的顺序与依赖
 

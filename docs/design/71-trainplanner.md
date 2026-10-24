@@ -391,14 +391,14 @@ TrainScheduler 那一侧的配套约定:`scheduler.yaml` 的 `max_plan_attempts`
 | `attempts` | 1 |
 | `backend` / `template_version` | `heuristic` / `v1` |
 
-重试走查(工作包 4 的用例):罐头后端依次回答 `"oops"`、一条 clone、`"{}"`,`validator` 一律拒绝 clone,`max_parse_retries` 为 2。
+重试走查(工作包 4 的用例):罐头后端备了四个回答 `"oops"`、一条 clone、`"{}"`、一条合格决策,`validator` 对任何解析成功的决策都返回 `no clones today`,`max_parse_retries` 为 2。解析失败与校验违规共用同一份预算。
 
 | 尝试 | 被拒原因 |
 |---|---|
 | 1 | `parse error`:不是 JSON |
 | 2 | `invalid decision`:`no clones today` |
 | 3 | `parse error`:七个键全缺 |
-| 结果 | `PlannerFailedError`,`attempts == 3` [已落地] |
+| 结果 | `PlannerFailedError`,`attempts == 3`;第四个合格回答没被取走,预算用完后不再采样 [已落地] |
 
 ## 7. 关键决策
 

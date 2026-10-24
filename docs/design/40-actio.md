@@ -575,6 +575,8 @@ Actio 内部没有重试。它的失败全是确定性的,向上抛给调用方�
 
 第 3 轮(`turn_index` 3,第二条客户端轨迹)前对方说"好吧",不触发 `emotion_high`,`selected` 为 `null`;第 2 轮是对手轮,没有客户端轨迹。换成空技能库时,第 1 轮话语只剩记忆那一行,证明输出随技能改变。
 
+同一个测试还走完 6.2 的落盘半程:服务端落盘的 episode 里,对手轮的轨迹是 `[None, None]`,客户端轮的轨迹经 gRPC 往返后与提交时逐字段相等、类型相同,客户端本地重建的 episode 与服务端落盘的一致。
+
 轨迹不放数字的原因可以实测:`Struct.update({"skill": 3})` 经 MessageToDict 取回是 `{"skill": 3.0}`。若库版本保持整数,往返后 `4` 变成 `4.0`,与客户端提交的值类型不同。
 
 `SubmitTurn` 现在有 `utterance = 1`、`inner_thought = 2` 与可选的 `activation_trace = 3`;轨迹取 3 号字段,因为前两个编号已被占用。

@@ -454,7 +454,7 @@ def has_repro_evidence(payload: dict) -> bool: ...  # 门③"证据在场"规则
 | 候选已批准但没有 `repro` | 不收录,写一次 T2 失败记录;候选留在 `approved`,每 tick 都再出一次 `admit_recipe`,启用提名时还挡住这一 run 的规划 | 人补上 `repro`;状态机里 `approved` 不能再转 `rejected`。命令行 `approve` 要求 `repro` 在场,只有手改产物才会走到这里 |
 | 增益无法计算 | 条目照记,`gain` 为空 | 不需要;`mean_gain` 只统计非空条目 |
 
-走查例子。数值来自端到端用例 `test_admit_then_reuse_then_deprecate`(`tests/test_rs_flow.py`)。
+走查例子。数值来自用例 `test_admit_then_reuse_then_deprecate`(`tests/test_rs_flow.py`)。它直接调用收录与战绩处理器,覆盖步骤 3、6、7;提名、规划选中与门①由夹具直接造出,不经调和循环,所以不展示提名阈值与证据可接受这两个触发条件。
 
 | 时刻 | 动作 | 报告的 tom 一级分 | 增益 | 结果 |
 |---|---|---|---|---|
