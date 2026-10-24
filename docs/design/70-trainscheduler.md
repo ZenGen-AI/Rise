@@ -391,7 +391,7 @@ build_recipe_candidate(store, run_id, *, config, repo_commit=None,
 | 步 | 动作 | 失败时 |
 |---|---|---|
 | 0 | 读决策产物。终态就空操作;`pending` 且指令已在,走 (b);`pending` 而指令不在,走 (a) | 无 |
-| 1 | 只在新规划路径((a)(b) 都不走):开关 `strategy_experience` 打开时先落账上一轮的经验(见策略经验设计 6.1),再 `assemble_context` 装配上下文;缺候选或报告、stub 证据、报告形状不对都拒绝 | 落账失败不挡规划:它的异常被吞掉,只留一份失败记录,不影响决策;装配失败时决策以 `failed` 写出 |
+| 1 | 只在新规划路径((a)(b) 都不走):开关 `strategy_experience` 打开时先落账上一轮的经验(写一条 run 级记录并重算条目),再 `assemble_context` 装配上下文;缺候选或报告、stub 证据、报告形状不对都拒绝 | 落账失败不挡规划:它的异常被吞掉,只留一份失败记录,不影响决策;装配失败时决策以 `failed` 写出 |
 | 2 | `plan()` 带 validator,总尝试 `max_plan_attempts` 次 | 耗尽或任何 `BridgeError`:决策以 `failed` 写出 [已落地] |
 | 3 | `allocate_run_id` 按数值序取最大编号加一,三位补零 | 编号冲突:决策以 `failed` 写出 |
 | 4 | 写决策 `pending`,载荷带 `next_run_id` | 无 |

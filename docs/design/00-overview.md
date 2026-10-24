@@ -406,6 +406,84 @@ checkpoint 等大体量内容不进 git,只存引用 `{uri, sha256, size_bytes, 
 
 两条权重路径的差异被收窄到"轨迹来源"一个模块。奖励管线、训练执行器、checkpoint 管理器完全共享,与模式无关。GRPO 与 OPD 在同一个训练 step 里联合更新:GRPO 负责探索,OPD 在同一批轨迹上施加教师分布约束,防止偏离已验证的推理模式。
 
+### 5.2 三个典型场景
+
+三条训练路径各取一个场景,从指令走到它的产出。数值取自测试的断言;测试没断言、靠按夹具实跑得到的,在原处注明。三个场景今天都跑在 mock 后端上,证明的是编排、可追溯与路由,不是模型能力;每个场景末尾写明它今天走得到哪一步。
+
+**场景一:离线批训练。先合成静态数据,再批量训练**
+
+一条带 `data_spec` 的 batch 指令。派发器发现它点名的清单不在树里,先让 SocialSimulator 合成,再训练。合成取自 `tests/test_mt_dispatch_synthesis.py` 的 `test_a_directive_with_data_spec_synthesizes_its_data_and_trains`;诊断之后的部分取自 `tests/test_factory_e2e_loop.py` 的 `test_the_whole_loop_turns_twice`,它的 `run-001` 数据由夹具预先合成,其余与派发时合成相同。
+
+| 步 | 发生的事 | 产物与数值 |
+|---|---|---|
+| 1 | 指令带 `data_spec`:`scenario_count: 2`、`seed: 0`、`purpose: training`,阶段 `sft` 组大小 1、`grpo_opd` 组大小 2 | `directive.yaml`,`pending` |
+| 2 | 派发器判定要合成:缺清单、指令带 `data_spec`、清单 id `dsm-<run>-<stage>` 解出的 run 就是本 run,三条同时成立;否则缺清单即 `failed` | 无 |
+| 3 | 每个情境连续跑 `group_size` 条 rollout,先写 episode,最后写清单;清单是"这一阶段已完成"的标记 | episode id 形如 `run-1-grpo_opd-scen-auto-1-r1`(情境 `scen-auto-<seed+i>`,序号 r 从 0 起);清单 `dsm-run-1-sft`、`dsm-run-1-grpo_opd`,带 `episode_refs` 与 `manifest_hash`,`verify_manifest` 通过 |
+| 4 | 生成器让偶数序号的 rollout 说出奖励规则的命中词,奇数序号说中性话,所以每组奖励恰是 `[0.0, 1.0]`,没有退化组 | `degenerate_groups_total = 0` |
+| 5 | MindTrainer 先 SFT 冷启动,再 GRPO 加 OPD 联合更新;执行器是 mock,损失是合成函数 | 训练记录 `executed`;候选 `cand-<run>`,`pending_review`,`links` 为 run 与两份清单 |
+| 6 | 诊断:mock 评估器对变体族的基题答对、变体题答错 | `run-000` 基线三层全 0.0,`run-001` 三层全 0.5,增益 0.5(实跑;测试只断言增益大于 `0.01`);画像 `{surface_match: 1.0}`,无退化标记 |
+| 7 | 门①:人批准,晋级 | `zengen-v2`,`links = [cand-run-001, run-001]`;候选 `effective` |
+| 8 | 提名:增益不低于 `min_gain`(默认 0.01)且无退化标记 | 配方候选 `recipe-run-001`,`pending_review`;载荷锚定每阶段清单的 id 与 `manifest_hash` |
+| 9 | 门③:人批准,收录 | `recipes/recipe-run-001/` 下写配方、谱系、空战绩,候选 `effective` |
+| 10 | 规划:启发式后端取一级分最低的维度,有 `effective` 的 batch 配方就 clone 战绩最好的一条 | 决策 `clone recipe-run-001`;`run-002` 的指令停在 `awaiting_confirmation`,不带 `data_spec`,复用 `run-001` 的清单 |
+
+整条链要带 `--allow-mock-evidence`:mock 证据默认不可接受,不带它时晋级之后没有提名也没有规划。没有配方可 clone 时规划写 `new` 一条 batch,它带默认 `data_spec`,下一个 tick 派发时才为新 run 合成数据。
+
+今天走得到哪:mock 下全程走通。真实执行器 `--executor roll` 只支持 SFT,带 GRPO 步数的配置在训练前即判 `failed`,且暂不能与 `--enable` 同用;真实评测 `--evaluator someval` 也一样。复现性靠数据哈希锚定,与后端无关;续训逐字节等价只在 mock 下有证据。
+
+**场景二:实时交互式训练。边与社会情境模拟对话边训练**
+
+一条 interact 指令。MindTrainer 经受限直连接口①连实时环境服务,每个 GRPO step 现收一组多轮 rollout,逐句归因奖励后更新。取自 `tests/test_mt_dispatch.py` 的 `test_an_interact_directive_trains_against_a_live_server_and_leaves_a_candidate` 与 `tests/test_mt_orchestrator.py` 的 `test_an_interact_run_collects_fresh_rollouts_for_every_grpo_step`;两者用同一套策略脚本与对手脚本。
+
+| 步 | 发生的事 | 产物与数值 |
+|---|---|---|
+| 1 | 指令的 `training_config` 写明角色位:训练位 `a` 是 `self_play`,对手位 `b` 是 `frozen_reference`,`model_ref = zengen-v1`;对手由调用方指定,SocialSimulator 不写死 | `max_turns_per_episode = 4`,`group_size = 2`,奖励 `outcome_split`,规则 `goal → agreed` |
+| 2 | SFT 阶段仍读清单 `dsm-run-1-sft`;GRPO 阶段不要清单 | 无 |
+| 3 | 每个 GRPO step 按情境轮转取一个情境,连续开 `group_size` 个会话;一条 gRPC 流承载一次会话,每轮训练位提交一句,服务端驱动对手回一句 | 每条 rollout 4 轮;三步依次取 `s1`、`s2`、`s3`,服务端关闭的 episode 依次是 `s1, s1, s2, s2, s3, s3` |
+| 4 | 逐句归因:训练位任一句含命中词,结果分为 1;第 k 个训练句得 `结果分 × gamma^(K-1-k)`,对手句为空 | 本例 `gamma = 1`:命中的 rollout 是 `[1.0, 空, 1.0, 空]`,未命中的是 `[0.0, 空, 0.0, 空]`;`gamma = 0.5` 时越靠后的句分越高,`tests/test_mt_reward_pipeline.py` 断言 `[0.25, 空, 0.5, 空, 1.0, 空]` |
+| 5 | 同组两条一高一低,不退化;GRPO 加 OPD 更新(mock) | 每个 GRPO step:`n_groups = 1`、`n_degenerate_groups = 0`、`mean_reward = 0.5` |
+| 6 | 收尾存点、转换、注册候选 | 指令与训练记录 `executed`,候选 `pending_review`;候选 `links` 只含 SFT 清单 |
+| 7 | 之后与场景一相同:诊断、门①、提名、门③;interact 配方载荷记 `nondeterministic: true` | 无 |
+
+失败路径:`max_turns_per_episode` 超过服务端上限 200 时会话以 `invalid_session` 被拒,训练记录与指令当轮判 `failed`。超时、传输不可用这类瞬态原因按 `max_retries_per_episode` 重试。
+
+复现性弱于场景一。`config_hash` 覆盖情境、角色位与 `model_ref`,但 GRPO 阶段没有清单与数据哈希,rollout 是实时的,续训只保证情境轮转接得上,不声称等价。`model_ref` 只是字符串,没有带 sha256 的锚定,对手版本换了哈希会变,但权重本身不可追溯。
+
+今天走得到哪:只在测试里走通。测试自己起进程内服务端并注入 `client_factory` 与策略;默认入口与 `factory run` 都不提供这两样,interact 指令会判 `failed` 并写明原因。调度侧 `allow_interact` 默认关;打开后规划也只能 clone 已有的 interact 配方,`new` 写不出 interact 指令,因为默认配置没有情境与角色位。真实 judge 归因 [推迟],入口里 judge 模式的指令判 `failed`。服务端经 `on_session_closed` 交出 episode,落盘由调用方负责,测试里只收进内存。已知风险:对手固定时,被训模型可能学到专门对付这个对手的套路,诊断基准与配方战绩回看是延迟发现手段。
+
+**场景三:不动参数的智能体演化。技能与记忆增量**
+
+模型晋级后,MindAgent 为最新 effective 模型开一个轮次:Actio 实例经受限直连接口②跑部署 episode,分析出路由缺口,生成技能提案,离线重放验证,经门②收录进技能库。模型权重全程不变。取自 `tests/test_ma_e2e.py` 的 `test_the_full_agent_rsi_loop_over_a_real_server`,它起真实的 loopback 服务端,跑三轮。
+
+| 步 | 发生的事 | 产物与数值 |
+|---|---|---|
+| 1 | 调和循环看到最新 effective 模型没有轮次产物(或仍是 `pending`)就发 `start_agent_round`;它不看规划,也不等规划 | 轮次 `agent-round-zengen-v1` |
+| 2 | 部署:三个情境 `s1`、`s2`、`s3` 各一条,`max_turns = 4`,对手先说"我真的很生气!!"再说"好吧,你说说看";Actio 占客户端位,每句附激活轨迹,驱动器落盘 | 第一轮库为空,6 条智能体轨迹 `selected` 全为空;首轮信号 `[emotion_high, first_turn]` |
+| 3 | 分析:选中技能为空的轮次不算路由错,所以第一轮零发现、零提案;这是预期行为,V1 不能从空库自举 | 轮次 `executed`,`findings` 与 `proposals` 都为空 |
+| 4 | 人放入一条不处理情绪的基线技能 `skill-goal`,库版本 `skill 1`;第二个模型晋级后开第二轮 | `library_version = {skill: "1", memory: "0"}` |
+| 5 | 分析:对手情绪高时选中的 `skill-goal` 不针对该信号,三条 episode 都受影响,过 `min_support = 3`、`min_ratio = 0.5` | 一条发现:信号 `emotion_high`,`support = 3`,`ratio = 1.0` |
+| 6 | 提案:没接外部推理桥接时用规则模板 `rule_template.v1`;接了则由外部模型只写策略文本,触发条件仍由信号决定 | `proposal-agent-round-zengen-v2-1`,`pending_review`;草案技能触发 `{signal: emotion_high}`,指令"先回应对方的情绪,确认对方的感受,再谈具体问题" |
+| 7 | 验证:用保存的对手原话离线重放动机 episode,智能体轮次由加载候选技能的实例重新生成,度量候选在动机轮次上被选中的比例 | `fired_on_motivating = 1.0`、`fired_elsewhere = 0.0`,阈值 0.8 与 0.2;实跑 `notes` 为动机轮次 3、其余轮次 3,基线 0 次选中候选 |
+| 8 | 门②:人批准,收录 | 技能 `skill-agent-round-zengen-v2-1-1`;库版本 `{skill: "2", memory: "0"}`;提案 `effective` |
+| 9 | 第三个模型晋级后的轮次绑定新库:动机轮次选中新技能,其余轮次仍选 `skill-goal`,不再有发现 | 话语 `[skill:skill-agent-round-zengen-v2-1-1] 先回应对方的情绪,确认对方的感受,再谈具体问题` |
+
+验证度量的是"路由是否按预期改变",不度量对话质量;质量评分可选接 judge,单列在 `quality_notes`,不参与筛选。验证用的就是触发提案的同一批 episode,没有留出集 [推迟],过拟合说明写进 `notes`。
+
+今天走得到哪:闭环里已走通(`factory run --enable agent,admit`),但部署后端是罐头的 `CannedGuidedBackend`,不加载 checkpoint,对手是脚本台词,所以部署 episode 只证明路由与轨迹,不代表模型能力。V1 只生成技能增量,不生成记忆增量。agent_rsi 配方能校验与检索,但不自动提名 [推迟],要入库须人写候选,锚定字段从轮次产物取。
+
+**与早期设计里三个场景的出入**
+
+早期的子系统设计也写过这三个场景。以下几处按代码改了,不再成立:
+
+| 早期写法 | 现在 |
+|---|---|
+| MindAgent 订阅"已晋级"事件 | 没有事件总线;调和循环按产物状态发 `start_agent_round` |
+| 批训练的诊断用规则式 HiToM 打分,给出逐阶分数提升 | mock 评估器或 SoMEval;mock 分数由答法决定,不是学习证据 |
+| 交互训练由规划直接写一条新的 interact 指令 | `new` 写不出 interact 指令,只能 clone 已有的 interact 配方,且 `allow_interact` 要开 |
+| 交互训练用 LLM 判官做逐句归因 | 真实 judge [推迟];已落地的是关键词结果分按 `gamma` 分摊 |
+| 提案验证给出对话质量提升 | 只度量候选技能在动机轮次上的选中率,质量评分单列、可选 |
+| 演化路径的配方由提名器打包入库 | agent_rsi 配方不自动提名,只能人写候选 |
+
 ## 6. 部署与技术选型
 
 图 4 是目标部署。控制层决策与调度,计算层干重活。现状是全部组件在一台机器上、以 mock 运行;经 SSH 把训练与评测下发到远端 GPU 主机由远端计算层 `compute` 承担 [已落地]。MindAgent 的提案生成走本地的外部推理桥接,它要是整体放到计算层,凭证就得跟过去,与「凭证只留在控制层」冲突。V1 靠全部组件在同一进程里回避了这个问题,真实部署时怎么分是未决的部署问题。

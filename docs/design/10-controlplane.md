@@ -492,7 +492,7 @@ def evidence_acceptable(grade: str, accept_mock: bool) -> bool: ...
 | 步 | 名称 | 做什么 | 产物与提交 |
 |---|---|---|---|
 | 1 | 读树 | 按目录名排序扫 `runs/*`,读指令与候选;取 `models/` 的最大版本号;读不出的产物记为 `unreadable`(CP-17) | 无 |
-| 2 | 决策 | 先列 `pending` 指令,再按 run 顺序处理候选;注入了闭环处理器时,其后追加闭环动作(见总览第 5 章步骤 7 至 9) | 无 |
+| 2 | 决策 | 先列 `pending` 指令,再按 run 顺序处理候选;注入了闭环处理器时,其后按固定顺序追加闭环动作:`admit_recipe`、`admit_proposal`、`record_track`、`nominate_recipe`、`plan_next_round`、`start_agent_round` | 无 |
 | 3 | `dispatch_directive` | 调派发器;返回置 `executed`,确定性失败置 `failed` | 指令一次提交,另加派发器自己的提交 |
 | 4 | `request_diagnostic` | 调评估器写报告;缺省入口没有评估器,由桩写,载荷带 `stub: true` | 一次提交 |
 | 5 | `promote_candidate` | 写模型、候选置 `effective`、写结果摘要 | 三次提交 |
@@ -523,7 +523,7 @@ def evidence_acceptable(grade: str, accept_mock: bool) -> bool: ...
 | 4 | `promote_candidate`,`model_version = 1` | 写 `zengen-v1`、候选置 `effective`、写 `outcome-run-001` | 3 |
 | 5 | 空列表 | 无,闭环稳定 | 0 |
 
-同一文件的 `test_rejected_candidate_never_promoted` 走另一个出口:人把候选置 `rejected` 后,`reconcile` 输出空列表,不登记模型,候选与拒绝理由留在树里。被拒绝的候选是终态,启用规划时它照样触发下一轮规划,见工厂与命令行设计 6.3 节。
+同一文件的 `test_rejected_candidate_never_promoted` 走另一个出口:人把候选置 `rejected` 后,`reconcile` 输出空列表,不登记模型,候选与拒绝理由留在树里。被拒绝的候选是终态:启用规划时,只要它属于编号最大的 run 且证据可接受,照样触发下一轮规划,`tests/test_factory_e2e_loop.py` 的 `test_only_the_largest_run_is_planned` 钉住了这一点。
 
 桩派发器写的情境恒用维度 `tom`,与指令的 `high_order_belief` 无关(`daemon.py` 里写死)。
 
