@@ -454,7 +454,9 @@ class EnvironmentServiceClient:
 
 | 场景 | 服务端行为 | 客户端看到 | 恢复 |
 |---|---|---|---|
-| 校验不过、未知情境、重复创建、先提交后创建 | 不启动驱动器 | `SessionRejectedError`,`invalid_session` | 修输入,重试无益 |
+| 校验不过(含 `max_turns` 超过上限 200)、未知情境 | 不启动驱动器 | `SessionRejectedError`,`invalid_session` | 修输入,重试无益 |
+| 同一条流上第二次 `CreateSession` | 已在跑的第一个会话判 FAILED、不落盘,整条流以 `invalid_session` 结束 | 原始协议客户端收到 `invalid_session`;库客户端一条流只发一次创建,碰不到这种情况 | 一次会话用一条新流 |
+| 创建前就提交或结束会话,或连上后 10 秒内没有 `CreateSession` | 不启动驱动器,以 `invalid_session` 结束 | 原始协议客户端收到 `invalid_session`;库客户端的 `submit_turn` 在创建前调用是用法错误,不保证给出 `SessionRejectedError` | 先创建,再提交 |
 | 工厂或解析器抛非 `LookupError` 异常 | 不启动驱动器 | `SessionRejectedError`,`role_backend_failure` | 调用方决定是否重试 |
 | 客户端 30 秒未提交 | FAILED,不落盘 | `EndSession(timeout)` | MindTrainer 整条重跑,有上限 |
 | 对手后端 60 秒未返回 | FAILED,底层线程跑完后结果丢弃 | `EndSession(role_backend_timeout)` | 整条重跑,有上限 |
@@ -476,6 +478,17 @@ class EnvironmentServiceClient:
 | 第 3 轮 | 对手"那就各退一步";返回后 `closed` 已为真 |
 | 结果 | `ep-sess-<12 位十六进制>`,`max_turns`,4 轮 |
 | 服务端落盘的推理 | `["我想先摸底", None, None, None]`,保留客户端自己的推理 |
+
+批量流程不经实时服务,由 `produce_grouped_dataset` 一次做完:
+
+| 步 | 做什么 | 失败时 |
+|---|---|---|
+| 1 | 校验 `group_size` 不小于 1、情境列表非空 | 抛 `ValueError`,不写任何东西 |
+| 2 | 对每个情境连续跑 `group_size` 条 rollout,每条用 `backends_for_rollout(情境, k)` 给出的后端;episode id 是 `<run>-<阶段>-<情境>-r<k>` | 某条 rollout 抛异常:前面已跑完的 episode 留在树里,没有清单 |
+| 3 | 每条 episode 跑完立即写进 run 目录的 `episodes/` | 同上 |
+| 4 | 全部写完后组清单:`episode_refs` 按 id 排序,算 `manifest_hash`,最后写清单 | 清单缺失即这一阶段没完成;重跑同一 run 与阶段时 episode id 相同,原地覆盖,内容相同则不提交 |
+
+清单最后写,是"这一阶段已完成"的唯一标记:消费方只认清单,不扫 `episodes/` 目录,所以半截的 episode 不会被当成数据集。
 
 走查例子二:一份分组数据集。同一情境与角色分配,`group_size` 为 2,两条 rollout 的话语不同(批量路径没有客户端位,两个角色位都由 `backends_for_rollout` 给的后端驱动)。
 

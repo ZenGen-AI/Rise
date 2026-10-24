@@ -353,7 +353,7 @@ def write_report(store, run_id, report, *, backends: str) -> None: ...
 <!-- figure:begin 21-diagnostic-dataflow -->
 ![一次诊断的双轨数据流](diagrams/21-diagnostic-dataflow.svg)
 
-**图 3　一次诊断的双轨数据流**　静态轨从题库按档选题,经 SoMEval 运行器取 k 个回答,规则式题目重打分。动态轨由调用方给 spec,跑多轮 episode 后由 judge 给候选话语打分。两轨的 ItemResult 分开存放,分别送入错误归类与逐轨聚合,L2 融合后聚到 L1,再与基线比较,最后写报告。
+**图 3　一次诊断的双轨数据流**　静态轨从题库按档选题,经 SoMEval 运行器取 k 个回答,规则式题目重打分;someval 模式的题由运行器直接判分,不经重打分。动态轨由调用方给 spec,跑多轮 episode 后由 judge 给候选话语打分。两轨的 ItemResult 分开存放,分别送入错误归类与逐轨聚合,L2 融合后聚到 L1,再与基线比较,最后写报告。
 
 <details>
 <summary>文字版:图中的节点与连线</summary>
@@ -362,7 +362,7 @@ def write_report(store, run_id, report, *, backends: str) -> None: ...
 
 - 选题:select_items / full 全部 · quick 每 L3 一题
 - 动态 spec:调用方提供 / 题目 · 情境 · 绑定 · 后端
-- SoMEval 执行:run_static_items / 每题 k 个回答
+- SoMEval 执行:run_static_items / 每题 k 个回答 / someval 题:运行器判分
 - 多轮 episode:run_dynamic_item / 取候选角色位的话语
 - 规则重打分:RuleScorer / 只对 rule 模式题
 - judge 打分:LLMJudgeScorer / 先过自评偏差守卫
@@ -380,6 +380,7 @@ def write_report(store, run_id, report, *, backends: str) -> None: ...
 - 动态 spec → 多轮 episode
 - 多轮 episode → judge 打分:话语
 - 规则重打分 → ItemResult
+- SoMEval 执行 → ItemResult:someval 题:已判分
 - judge 打分 → ItemResult
 - ItemResult → 错误归类
 - ItemResult → 逐轨聚合:分数
@@ -394,15 +395,15 @@ def write_report(store, run_id, report, *, backends: str) -> None: ...
 | 步 | 做什么 | 关键规则 |
 |---|---|---|
 | 1 | `select_items(...)` 按档选题,只留静态题 | `full` 取全部;`quick` 每个 L3 取第一道;其余档位抛 `ValueError` |
-| 2 | 静态轨执行,规则式题用 `RuleScorer` 重打分 | 重打分前后去空白、忽略大小写;judge 模式的静态题保留精确匹配分 |
+| 2 | 静态轨执行:规则式题用 `RuleScorer` 重打分;`someval` 模式的题由运行器的 `evaluate_scored` 直接判分,不经重打分 | 重打分前后去空白、忽略大小写;judge 模式的静态题保留精确匹配分;题库里有 `someval` 题而运行器没有 `evaluate_scored` 时,一道题都不跑就抛 `ValueError`;运行器的统计取自 `last_stats()`。真实报告的分数都走 `someval` 这条路 |
 | 3 | 动态轨:每条 spec 跑一个 episode,judge 给候选话语打分 | 话语带 `goal_keyword` 时早停;先过自评偏差守卫 |
-| 4 | 错误归类,按 L2 汇总分布 | 只用两轨都完整入选的变体族 |
+| 4 | 错误归类,按 L2 汇总分布 | 静态轨只用基题与全部变体都在静态入选集合里的变体族;动态轨按话语一致性归类 |
 | 5 | 每轨各自做 L3、L2 聚合 | 按样本量合并通过次数,再算 Wilson 区间 |
 | 6 | 两轨都有的 L2 融合为 `fused`,再聚到 L1 | L1 成员轨道不一时标 `fused` |
 | 7 | 与基线分逐键比较,产出退化标记 | 无基线时不打标记 |
 | 8 | 组装报告,一致性信号置空,写入产物树 | 写入幂等 |
 
-变体族错误归类按固定优先级取第一个命中的标签。编排器不传格式校验器与拒答检测器,所以前两条在 V1 不会命中。
+变体族错误归类按固定优先级取第一个命中的标签。编排器不传格式校验器与拒答检测器,所以前两条在 V1 不会命中。动态轨的立场函数在 V1 恒返回真,所以动态轨永远归不出 `inconsistency`,动态错误画像恒为空。
 
 | 优先级 | 标签 | 条件 |
 |---|---|---|
@@ -470,7 +471,7 @@ def write_report(store, run_id, report, *, backends: str) -> None: ...
 | 真实评估器:候选不可用或评测输出不合规 | 评估器写 `stub: true` 报告并正常返回 | 该候选不再触发评测;门①看到桩报告,人决定拒绝或修好后另起一轮 [已落地] |
 | 真实评估器:资源暂时不可用 | 抛 `DeferredError` | 守护进程退避重试,不退出 [已落地] |
 
-走查例子。一个一级维度 `mental_representation`,一个二级 `belief`,一个三级 `false_belief_transfer`。一个变体族:基题 `i1` 答案 `B`,变体 `i1v` 答案 `C`。`k` 为 4,`full` 档,只跑静态轨。数值由编排器实跑得出。
+走查例子。一个一级维度 `mental_representation`,一个二级 `belief`,一个三级 `false_belief_transfer`。一个变体族:基题 `i1` 答案 `B`,变体 `i1v` 答案 `C`。`k` 为 4,`full` 档,只跑静态轨。基线一列对应 `tests/test_diag_orchestrator.py` 的夹具;候选一列的回答没有测试夹具,数值由直接调用编排器 `run_diagnostic` 实跑得出。把 `run-1` 当基线有前提:真实流程里基线由评估器解析,`run-1` 的候选必须已晋级为最新的 effective 模型,`benchmark_version` 与证据等级都与本次相同;不满足时没有基线,`run-2` 一条标记也没有,分数不变。
 
 | 量 | 基线 run(`run-1`) | 候选 run(`run-2`) |
 |---|---|---|

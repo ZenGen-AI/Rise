@@ -5,15 +5,16 @@ from svgkit import Canvas
 def build() -> Canvas:
     c = Canvas(
         1080, 640, title="一次诊断的双轨数据流",
-        desc="静态轨从题库按档选题,经 SoMEval 运行器取 k 个回答,规则式题目重打分。动态轨由调用方给 spec,"
+        desc="静态轨从题库按档选题,经 SoMEval 运行器取 k 个回答,规则式题目重打分;"
+             "someval 模式的题由运行器直接判分,不经重打分。动态轨由调用方给 spec,"
              "跑多轮 episode 后由 judge 给候选话语打分。两轨的 ItemResult 分开存放,"
              "分别送入错误归类与逐轨聚合,L2 融合后聚到 L1,再与基线比较,最后写报告。")
-    c.lane(14, 56, 726, 150, "静态轨", kind="compute", dashed=False)
+    c.lane(14, 56, 726, 160, "静态轨", kind="compute", dashed=False)
     c.lane(14, 286, 726, 150, "动态轨", kind="compute", dashed=False)
 
     sel = c.box(30, 100, 200, "选题", "select_items\nfull 全部 · quick 每 L3 一题", kind="compute", h=74)
     spec = c.box(30, 330, 200, "动态 spec", "调用方提供\n题目 · 情境 · 绑定 · 后端", kind="neutral", h=74)
-    sm = c.box(270, 100, 200, "SoMEval 执行", "run_static_items\n每题 k 个回答", kind="compute", h=74)
+    sm = c.box(270, 100, 200, "SoMEval 执行", "run_static_items\n每题 k 个回答\nsomeval 题:运行器判分", kind="compute", h=88)
     ep = c.box(270, 330, 200, "多轮 episode", "run_dynamic_item\n取候选角色位的话语", kind="compute", h=74)
     rule = c.box(510, 100, 200, "规则重打分", "RuleScorer\n只对 rule 模式题", kind="compute", h=74)
     jd = c.box(510, 330, 200, "judge 打分", "LLMJudgeScorer\n先过自评偏差守卫", kind="compute", h=74)
@@ -31,6 +32,7 @@ def build() -> Canvas:
     c.edge(spec, ep)
     c.edge(ep, jd, label="话语")
     c.edge(rule, ir, b_f=0.3)
+    c.edge(sm, ir, "top", "top", via=[(370, 78), (880, 78)], label="someval 题:已判分", label_at=0.5)
     c.edge(jd, ir, "right", "left", b_f=0.75, via=[(745, 367), (745, 252)])
     c.edge(ir, ec, "bottom", "top")
     c.edge(ir, ag, "right", "right", via=[(1030, 225), (1030, 552)], label="分数")
