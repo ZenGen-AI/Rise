@@ -409,7 +409,7 @@ def load_library(store) -> LibraryState: ...
 | 终止原因或状态 | 处理 |
 |---|---|
 | `max_turns`、`goal_reached` | 接受,落盘 |
-| `timeout`、`role_backend_timeout`、传输层 `UNAVAILABLE` | T1:整条重跑,至多 `max_retries_per_episode` 次;用尽后轮次保持 `pending` 并上抛 |
+| `timeout`、`role_backend_timeout`、`persistence_failed`、传输层 `UNAVAILABLE` | T1:整条重跑,至多 `max_retries_per_episode` 次;用尽后轮次保持 `pending` 并上抛 |
 | `invalid_session`、`role_backend_failure`、`client_disconnected`、其他状态码、协议错乱 | 不重跑,轮次 `failed`(T3) |
 | Actio 实例自身抛异常 | 先 `abort()` 会话,原异常原样上抛,不重跑、不包装 |
 

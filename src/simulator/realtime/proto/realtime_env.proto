@@ -79,6 +79,7 @@ message EndSession {
   string reason = 1;  // "max_turns" | "goal_reached" | "client_terminated"
                        // | "role_backend_failure" | "role_backend_timeout" | "timeout"
                        // | "invalid_session" | "client_disconnected"
+                       // | "persistence_failed"(会话跑完,但落盘钩子失败)
   string episode_id = 2;
   optional string failure_detail = 3;
 }

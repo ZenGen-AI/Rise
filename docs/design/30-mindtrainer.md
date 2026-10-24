@@ -606,7 +606,7 @@ class DataProducer(Protocol):
 | 远端作业非零退出 `RemoteJobFailedError` | 延后 | 同上;它是真失败,计入 `resume_attempts`,耗尽后升级为 T3 | 训练记录 `resume_attempts` |
 | 远端作业成功但指标解析不出 `MetricsMissingError` | T1 | 记录保持 `pending`,计入 `resume_attempts`;重试时作业命中已成功退出的那次尝试,只重新解析,不重训 | 训练记录 `resume_attempts` |
 | 执行器崩溃、转换器故障、读清单时 `OSError` | T1 | 原样上抛,记录与指令保持 `pending`,下一次派发续训 | 训练记录的存点进度 |
-| interact 的 `timeout`、`role_backend_timeout`、传输层 UNAVAILABLE | T1 | 原地重跑,至多 `1 + max_retries_per_episode` 次;耗尽后上抛,记录保持 `pending` | `curve_summary["failed_rollout_attempts"]` |
+| interact 的 `timeout`、`role_backend_timeout`、`persistence_failed`、传输层 UNAVAILABLE | T1 | 原地重跑,至多 `1 + max_retries_per_episode` 次;耗尽后上抛,记录保持 `pending` | `curve_summary["failed_rollout_attempts"]` |
 | interact 的 `role_backend_failure` 等其余原因 | T1 | 不重试,上抛,记录保持 `pending`,由续训上限兜底 | 同上 |
 
 T1 的上抛异常会让 `run_daemon` 退出,需要外部监督者重启。重启后同一条指令再次派发,`resume_attempts` 上限保证它最终升级为 T3,不会无限空转。`DeferredError` 的子类不在此列:守护进程接住它们,进程不退出;同一动作连续延后超过上限才带原因退出(CP-14)。

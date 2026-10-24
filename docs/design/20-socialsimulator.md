@@ -108,7 +108,7 @@ SocialSimulator 的仿真部分是工厂的"社会情境发生器":它把情境�
 | G3 | 批量与实时共用同一运行器 | 驱动器在后台线程调用 `run_episode`;`tests/test_realtime_runner_on_turn.py` |
 | G4 | 数据集可精确复现 | 清单按 sha256 锚定每条 episode;`tests/test_sim_dataset.py` |
 | G5 | 每一轮完成后立即推送,不攒批 | `TurnUpdate` 在 `on_turn` 回调后入队即发 |
-| G6 | 失败可分类,半截会话不落盘 | 终止原因八种;FAILED 不调落盘钩子 |
+| G6 | 失败可分类,半截会话不落盘 | 终止原因九种;FAILED 不调落盘钩子;落盘失败另报 `persistence_failed` |
 | G7 | 会话之间不共享可变状态 | 工厂每会话返回新后端;`tests/test_realtime_servicer_e2e.py` |
 
 | 项 | 状态 | V1 的处理 |
@@ -298,6 +298,7 @@ manifest_hash: <64 位十六进制>   # 对排序后的 episode_refs 规范化 J
 | `role_backend_timeout` | FAILED | 服务端后端 60 秒未返回 | T1 |
 | `role_backend_failure` | FAILED 或创建被拒 | 后端抛异常,或工厂、解析器故障 | T1 或 T2,协议上不区分 |
 | `client_disconnected` | FAILED | 请求流结束而未发 `EndSession` | T1 |
+| `persistence_failed` | CLOSED,但树里没有 episode | 运行器正常结束,落盘钩子抛异常 | T1 [已落地] |
 | `invalid_session` | 创建被拒 | 校验失败、协议违规、10 秒未创建 | T2 |
 
 不变量。
@@ -463,7 +464,7 @@ class EnvironmentServiceClient:
 | 对手后端抛异常 | FAILED | `EndSession(role_backend_failure)` | MindTrainer 不重试,抛 `RolloutFailedError` |
 | 客户端断连或 `abort()` | `request_abort`,FAILED | 无 | 不落盘;半截 episode 不污染数据 |
 | 策略自身抛异常 | 同断连 | 异常原样上抛 | 客户端先 `abort()`,不发 `EndSession` |
-| 落盘钩子抛异常 | 记日志(只有 episode id 与异常栈,没有内容),照常推 `EndSession` | 正常收尾 | 树里没有这条 episode,而训练侧的 metadata 引用了它的 id;日志里没有内容可补,只能在客户端还持有时补写,否则按缺失处理 |
+| 落盘钩子抛异常 | 记日志,推 `EndSession(persistence_failed)`,不给 `episode_id`,原因写进 `failure_detail` | 不是正常收尾,MindTrainer 与 MindAgent 都按瞬态失败整条重跑,不收下这条 episode | 有上限的重跑;重跑都失败时上抛,排查落盘 [已落地] |
 
 走查例子一:一次实时会话。数值来自在仓库里用 `create_server`、`ScriptedBackend` 与模板生成器实跑。
 

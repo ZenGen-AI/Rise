@@ -20,7 +20,7 @@ from simulator.store_adapter import read_episode, read_scenario, write_episode
 PURPOSE = "deployment_simulation"
 # 与 mindtrainer.trajectory_source 同一套判定(本包不导入 mindtrainer):
 ACCEPTED_REASONS = frozenset({"max_turns", "goal_reached"})
-TRANSIENT_REASONS = frozenset({"timeout", "role_backend_timeout"})
+TRANSIENT_REASONS = frozenset({"timeout", "role_backend_timeout", "persistence_failed"})
 
 
 class DeploymentFailedError(Exception):

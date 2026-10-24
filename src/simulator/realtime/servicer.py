@@ -327,11 +327,19 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
                 if self._on_session_closed is not None:
                     try:
                         self._on_session_closed(episode)
-                    except Exception:
+                    except Exception as exc:
                         # 持久化钩子失败不应把整条流也跟着弄挂——客户端仍需
-                        # 拿到收尾消息；钩子异常只记日志，不向上传播。
+                        # 拿到收尾消息;钩子异常记日志,不向上传播。但不能照报
+                        # 正常的终止原因:客户端会把这条 episode 当成已落盘收下,
+                        # 而树里没有它。改报 persistence_failed,不给 episode_id。
                         logger.exception(
                             "on_session_closed hook raised for episode %s", episode.id
+                        )
+                        end_msg = pb2.ServerMessage(
+                            end_session=pb2.EndSession(
+                                reason="persistence_failed", episode_id="",
+                                failure_detail=f"{type(exc).__name__}: {exc}"[:300],
+                            )
                         )
                 yield end_msg
                 return

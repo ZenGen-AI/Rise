@@ -288,7 +288,11 @@ def test_persistence_hook_exception_does_not_break_stream():
             end_msg = msg
             break
     assert end_msg is not None, "持久化钩子异常不应阻止 EndSession 送达客户端"
-    assert end_msg.end_session.reason == "max_turns"
+    # 落盘失败时不能报 max_turns:客户端会把这条 episode 当成已落盘的正常结束收下,
+    # 而树里没有它。改报 persistence_failed,episode_id 置空,原因写进 failure_detail。
+    assert end_msg.end_session.reason == "persistence_failed"
+    assert end_msg.end_session.episode_id == ""
+    assert "simulated persistence failure" in end_msg.end_session.failure_detail
     q.put(None)
     channel.close()
     server.stop(0)

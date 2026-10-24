@@ -66,7 +66,8 @@ class BatchTrajectorySource:
 # 只有这两种终止原因的 episode 进 batch。超时、后端失败、断连产生的半截 episode 一律不进。
 _ACCEPTED_REASONS = frozenset({"max_turns", "goal_reached"})
 # T1 瞬态:服务端报告的两种超时,加上传输层 UNAVAILABLE(见 _classify_client_error)。
-_TRANSIENT_REASONS = frozenset({"timeout", "role_backend_timeout"})
+# persistence_failed:会话跑完了,但服务端落盘钩子失败,树里没有这条 episode。整条重跑。
+_TRANSIENT_REASONS = frozenset({"timeout", "role_backend_timeout", "persistence_failed"})
 
 
 class RolloutFailedError(Exception):
