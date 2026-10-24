@@ -125,7 +125,7 @@ TrainScheduler 是决策执行器:它把 TrainPlanner 的结构化决策落成�
 | 指令先校验后写 | 写前过 `validate_training_config` 与 `data_spec` 交叉校验 [已落地] | 坏指令不进树 |
 | 只读函数 | 装配、校验、解析、提名判定、候选构造都不写树 | 可单独测试;有测试比对 HEAD |
 | 依赖收口 | 对 RecipeStore 的导入只在 `recipes_port` 一个文件 | RecipeStore 改名只改一处 |
-| 无新第三方依赖 | 只用标准库 `copy`、`dataclasses`、`math`、`re`、`collections` | 无 |
+| 无新第三方依赖 | 只用标准库 `copy`、`dataclasses`、`math`、`re`、`collections`、`logging` 等,清单见 `tests/test_ts_boundaries.py` | 无 |
 
 ## 3. 架构
 
@@ -179,7 +179,7 @@ TrainScheduler 是决策执行器:它把 TrainPlanner 的结构化决策落成�
 | `config` | 两份配置的字段表、严格解析、读取、安装 | `controlplane.config`、MindTrainer 两模块 | [已落地] |
 | `run_ids` | 按数值序分配下一个 `run-NNN` | `controlplane.paths` | [已落地] |
 | `experience` | 策略经验的纯函数层:签名、归因、桶键、条目重算、覆盖表 | 标准库 `hashlib`、`json`、`re` | [已落地] |
-| `experience_port` | 策略经验的读写:落账、读条目、筛取渲染、失败留痕 | `controlplane`、`recipes_port`、`experience` | [已落地] |
+| `experience_port` | 策略经验的读写:落账、读条目、筛取渲染、失败留痕 | `controlplane`、`recipes_port`、`experience`;标准库 `logging`(不落账的原因) | [已落地] |
 | `assemble` | `assemble_context`:从树里装配 `PlanningContext` | `recipes_port`、`experience_port`、`trainplanner.context`、`controlplane.evidence` | [已落地] |
 | `resolve` | `validate_decision` 领域校验,`resolve_action` 动作解析 | `recipes_port`、`controlplane.models`、`training_config` | [已落地] |
 | `directive` | `construct_directive`:写指令前校验,绝不覆盖 | MindTrainer 两模块 | [已落地] |
@@ -391,7 +391,7 @@ build_recipe_candidate(store, run_id, *, config, repo_commit=None,
 | 步 | 动作 | 失败时 |
 |---|---|---|
 | 0 | 读决策产物。终态就空操作;`pending` 且指令已在,走 (b);`pending` 而指令不在,走 (a) | 无 |
-| 1 | `assemble_context` 装配上下文;缺候选或报告、stub 证据、报告形状不对都拒绝 | 决策以 `failed` 写出 |
+| 1 | 只在新规划路径((a)(b) 都不走):开关 `strategy_experience` 打开时先落账上一轮的经验(见策略经验设计 6.1),再 `assemble_context` 装配上下文;缺候选或报告、stub 证据、报告形状不对都拒绝 | 落账失败不挡规划:它的异常被吞掉,只留一份失败记录,不影响决策;装配失败时决策以 `failed` 写出 |
 | 2 | `plan()` 带 validator,总尝试 `max_plan_attempts` 次 | 耗尽或任何 `BridgeError`:决策以 `failed` 写出 [已落地] |
 | 3 | `allocate_run_id` 按数值序取最大编号加一,三位补零 | 编号冲突:决策以 `failed` 写出 |
 | 4 | 写决策 `pending`,载荷带 `next_run_id` | 无 |
@@ -407,7 +407,7 @@ build_recipe_candidate(store, run_id, *, config, repo_commit=None,
 | `recent_decisions` | 只看排序键不大于来源 run 的 run,`run-<数字>` 按数值排,其他名字排在最前,按窗口取最后 K 条。决策为 `pending` 且 `next_run_id` 的指令已在,按 `executed` 收录;`failed` 的决策与指令未写的不收。重入时同一来源 run 因此看到同样的上下文 [已落地] |
 | `cost_gain` | 窗口规则同上,只收有指令且 `target_dimension` 非空的 run;增益一律用 `compute_gain` [已落地] |
 | 成本 | 一个 run 的 `gpu_hours`、`tokens` 是 `run_trace.cost_records` 里带该键的记录之和,`tokens` 求和后转整数;一条都没有就是 `None`,键必须在场,不得写 0 [已落地] |
-| 退化标记 | `social_regression` 归一化成(维度,降幅),`g_probe_failure` 成(探针,分数),`reward_hacking_suspected` 成(`reward`,奖励涨幅减诊断涨幅);不认识的 `kind` 取 `dimension`、`probe` 或 `kind` 作主体,取 `drop`、`score` 或 0.0 作幅度;认识的 `kind` 缺字段抛 `ContextAssemblyError` [已落地] |
+| 退化标记 | 照抄 `level`(可缺);`social_regression` 归一化成(维度,降幅),`g_probe_failure` 成(探针,分数),`reward_hacking_suspected` 成(`reward`,奖励涨幅减诊断涨幅);不认识的 `kind` 取 `dimension`、`probe` 或 `kind` 作主体,取 `drop`、`score` 或 0.0 作幅度;认识的 `kind` 缺字段抛 `ContextAssemblyError` [已落地] |
 | 驳回原因 | 取候选载荷的 `reject_reason`;缺失或为空是 `None`;`effective` 候选恒为 `None` [已落地] |
 
 装配只读,不写任何产物。数据类构造时抛的 `InvalidContextError` 统一包成 `ContextAssemblyError`,按确定性失败处理 [已落地]。
@@ -416,7 +416,7 @@ build_recipe_candidate(store, run_id, *, config, repo_commit=None,
 
 | 崩溃点 | 树里的状态 | 下次触发 |
 |---|---|---|
-| A,第 3 步之前 | 什么都没写 | 从第 1 步重新规划 |
+| A,第 3 步之前 | 没有决策;开关打开时可能已写落账记录与条目 | 从第 1 步重新规划;落账按 run 幂等,内容不变不提交 |
 | B,第 4 步之后、第 6 步之前 | 决策 `pending`,指令不在 | 走 (a):按已记下的 run id 从第 5 步续写,不调后端,不重新分配。续写前先防御被改坏的载荷:`next_run_id` 必须是 `run-<数字>`,空值、空串、`../escape` 判确定性失败(`ResolveError`);决策载荷读不回也判同样失败;解析动作时先再跑一次领域校验,覆盖「决策写下后配方被废弃」的情形 [已落地] |
 | C,第 6 步之后、第 7 步之前 | 决策 `pending`,指令已在 | 走 (b):只把决策置 `executed`。新指令已是最大 run,调和循环也不会再为来源 run 触发 |
 
@@ -583,7 +583,7 @@ build_recipe_candidate(store, run_id, *, config, repo_commit=None,
 |---|---|---|---|
 | 单元 | 两份配置的严格解析与安装 | 临时 git 树 | `tests/test_ts_config.py`,54 [已落地] |
 | 单元 | run id 分配 | 临时 git 树 | `tests/test_ts_run_ids.py`,30 [已落地] |
-| 单元 | 上下文装配 | 造数函数 | `tests/test_ts_assemble.py`,35 [已落地] |
+| 单元 | 上下文装配 | 造数函数 | `tests/test_ts_assemble.py`,36 [已落地] |
 | 单元 | 领域校验与动作解析 | 手工收录的配方 | `tests/test_ts_resolve.py`,27 [已落地] |
 | 单元 | 指令构造 | 无 | `tests/test_ts_directive.py`,12 [已落地] |
 | 处理器 | 规划处理器、三条重入、各类失败 | `ScriptedDecisionBackend` | `tests/test_ts_plan_handler.py`,38 [已落地] |
@@ -591,7 +591,7 @@ build_recipe_candidate(store, run_id, *, config, repo_commit=None,
 | 端到端 | new 一路到候选;提名、收录、clone 复用清单 | 罐头后端、`MockExecutor`、`TemplateDataProducer` | `tests/test_ts_e2e.py`,2 [已落地] |
 | 边界 | 依赖方向与 `__future__` 头 | 扫导入语句 | `tests/test_ts_boundaries.py`,6 [已落地] |
 
-共 238 个用例,共用 `tests/ts_fixtures.py` [已落地] 里的造数函数。策略经验的 experience 与 experience_port 由 `tests/test_se_*.py` 覆盖,共 103 个用例。不依赖外部命令行强模型、真实训练、真实诊断与网络。
+共 239 个用例,共用 `tests/ts_fixtures.py` [已落地] 里的造数函数。策略经验的 experience 与 experience_port 由 `tests/test_se_*.py` 覆盖,共 107 个用例。不依赖外部命令行强模型、真实训练、真实诊断与网络。
 
 ## 10. 现状、局限与未核实项
 

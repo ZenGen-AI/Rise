@@ -573,7 +573,7 @@ Actio 内部没有重试。它的失败全是确定性的,向上抛给调用方�
 | 4 | 渲染 | 两行:`[skill:skill-calm] 先回应对方的情绪`、`[memory:mem-temper] pb: 对方一急就会生气` |
 | 6 | 库版本整数 4 规范成字符串 | `library_version = {"skill": "4", "memory": "mem-lib-1"}` |
 
-第 2 轮对方说"好吧",不触发 `emotion_high`,`selected` 为 `null`。换成空技能库时,第 1 轮话语只剩记忆那一行,证明输出随技能改变。
+第 3 轮(`turn_index` 3,第二条客户端轨迹)前对方说"好吧",不触发 `emotion_high`,`selected` 为 `null`;第 2 轮是对手轮,没有客户端轨迹。换成空技能库时,第 1 轮话语只剩记忆那一行,证明输出随技能改变。
 
 轨迹不放数字的原因可以实测:`Struct.update({"skill": 3})` 经 MessageToDict 取回是 `{"skill": 3.0}`。若库版本保持整数,往返后 `4` 变成 `4.0`,与客户端提交的值类型不同。
 

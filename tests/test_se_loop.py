@@ -6,13 +6,14 @@ from controlplane.reconcile import Action
 from trainscheduler.assemble import assemble_context
 from trainscheduler.config import SchedulerConfig
 from trainscheduler.errors import ContextAssemblyError
-from trainscheduler.experience_port import record_and_recompute
+from trainscheduler.experience_port import load_entries, record_and_recompute
 from trainscheduler.plan_handler import make_plan_handler
 from trainplanner.backends import HeuristicBackend
 from ts_fixtures import (
     make_store,
     write_decision,
     write_directive,
+    write_model,
     write_report,
     write_round,
     write_trace,
@@ -121,3 +122,30 @@ def test_handler_records_before_it_assembles(tmp_path):
                               detail={"run_id": "run-005"}))
     from controlplane.paths import strategy_experience_note_file
     assert store.exists(strategy_experience_note_file("run-005"))
+
+
+def test_promoted_rounds_do_not_accumulate_under_the_same_base(tmp_path):
+    """钉住设计 §10 的已知缺口:条目按评估时的对照基线分桶,注入按当前晋级模型筛。
+    两轮都晋级时,第二轮的对照基线已是第一轮晋级出的新模型,于是两条同签名记录落进两个桶,
+    各自 support=1;规划时最新模型又换了一次,哪个桶都对不上。改分桶规则时这条测试应随之改写。"""
+    store = make_store(tmp_path)
+    _baseline(store)                                   # run-001 → zengen-v1
+    _round(store, "run-003", score=0.45)               # 对 v1 评估
+    write_model(store, 2, "run-003")                   # run-003 晋级 → zengen-v2
+    record_and_recompute(store, "run-003", config=ON)
+    write_round(store, "run-005", {"tom": 0.48, "empathy": 0.70}, backends="real")
+    _link_directive(store, "run-005")
+    write_decision(store, "run-004", "run-005", action="clone", dimension="tom",
+                   perturbation={"opd_coefficient": 0.2}, source_recipe_id="recipe-run-002")
+    write_report(store, "run-005", {"tom": 0.48, "empathy": 0.70}, baseline_ref="zengen-v2",
+                 benchmark_version=BENCH, backends="real")
+    write_trace(store, "run-005", [{"task_id": "train", "cost_type": "gpu", "calls": 6}])
+    write_model(store, 3, "run-005")                   # run-005 晋级 → zengen-v3
+    record_and_recompute(store, "run-005", config=ON)
+
+    entries, broken = load_entries(store)
+    assert not broken
+    assert sorted((e.baseline_model_id, e.support, e.status) for e in entries) == [
+        ("zengen-v1", 1, "insufficient"), ("zengen-v2", 1, "insufficient"),
+    ]
+    assert assemble_context(store, "run-005", config=ON).strategy_experience == []

@@ -202,7 +202,7 @@ TrainScheduler 装配好 `PlanningContext`(规划上下文)交给 TrainPlanner�
 | 子结构类 | `CandidateSummary`、`DiagnosticSummary`、`RecipeSummary`、`DecisionOutcome`、`CostGainEntry`,诊断里的 `regression_flags` 与 `error_profiles` 另用 `RegressionMark`、`ErrorProfileSummary` | 都冻结,各有严格的 `from_dict`;常量 `CANDIDATE_TERMINAL_STATES`、`PLANNABLE_GRADES`、`RECIPE_TYPES` [已落地] |
 | `candidate` | `id`、`status`、`reject_reason` | `status` 只能是 `effective` 或 `rejected`;`effective` 时 `reject_reason` 必须为 `None` |
 | `diagnostic` | `l1_scores`、`regression_flags`、`error_profiles`、`benchmark_version`、`grade` | `l1_scores` 至少一项;`grade` 只能是 `mock` 或 `real` |
-| `regression_flags[]` | `kind`、`subject`、`magnitude` | 三种退化标记归一化成同一形状 |
+| `regression_flags[]` | `kind`、`subject`、`magnitude`,可选 `level` | 三种退化标记归一化成同一形状;`level` 照抄诊断报告,同一次退化的三层证据靠它分辨,缺省时省略 |
 | `error_profiles[]` | 每个维度一条,含 `error_type_distribution` | 分布必须是映射,键是非空字符串,值是有限数;空标签会被拒绝,装配方要先丢掉空键(R21) |
 | `recipes[]` | `id`、`recipe_type`、`dimension`、`status`、`mean_gain`、`n_reuse` | `recipe_type` ∈ `batch / interact / agent_rsi`;`n_reuse` 非负整数 |
 | `recent_decisions[]` | `decision_id`、`next_run_id`、`target_dimension`、`action`、`source_recipe_id`、`candidate_status`、`gain` | `action` ∈ `new / clone / replay` |

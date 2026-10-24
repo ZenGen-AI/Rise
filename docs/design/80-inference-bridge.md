@@ -342,10 +342,10 @@ class CredentialInGitTreeError(Exception): ...
 | 3 | 起子进程 | 用 argv 模板在新建的空临时目录里起进程,环境变量只传白名单,提示词写入标准输入,超时为 `timeout_s`,结束后删除该目录 |
 | 4 | 判定本次尝试 | 启动阶段 `OSError` 判 T2;超时、非零退出、空输出判 T1;其余判成功 |
 | 5 | 退避 | T1 且未耗尽时睡 `backoff_base_s × 2^(n-1)` 秒,回到步骤 3;最后一次失败后不睡 |
-| 6 | 写日志 | 每次 `complete` 一份,含各次尝试的 stdout 与 stderr,整体过 `redact`,返回 `BigRef` |
+| 6 | 写日志 | 每次 `complete` 一份,含各次尝试的 stdout 与 stderr,整体过 `redact`,返回 `BigRef`;没有日志根目录时不写,`log_ref` 为 `None` |
 | 7 | 记账 | 成功时经 `record_bridge_cost` 记一条 `external_inference`,`calls` 为本次尝试数 |
 | 8 | 返回 BridgeResult | `text` 为去首尾空白的标准输出,两个 token 字段为 `None` |
-| 9 | 抛 BridgeError | T1 时 `attempts = max_attempts`;T2 时立即抛,不重试;都带 `log_ref` |
+| 9 | 抛 BridgeError | T1 时 `attempts = max_attempts`;T2 时立即抛,不重试;都带 `log_ref`(同上可为 `None`);失败不记账 |
 
 失败与恢复路径:
 
@@ -365,7 +365,7 @@ class CredentialInGitTreeError(Exception): ...
 | 前两次尝试 | 非零退出,判 T1 |
 | 两次退避 | 0.5 秒、1.0 秒 |
 | 第三次尝试 | 成功,返回 `finally` |
-| 记账 | `calls = 3`,不记 `tokens` |
+| 记账 | `calls = 3`,不记 `tokens`(按走查配置带 `store` 重放所得;所引两个用例不带 `store`) |
 | 全部失败时 | `BridgeError("T1")`,`attempts = 3`,退避仍是 0.5、1.0 秒 [已落地] |
 | 最坏阻塞时长 | `3 × 5 + 0.5 × (2^2 - 1)` = 16.5 秒 |
 

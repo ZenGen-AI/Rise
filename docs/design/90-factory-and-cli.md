@@ -427,7 +427,7 @@ TypeScript 命令行:`rismforge <review|approve|reject|confirm|status> [id] [rea
 
 | 步 | 动作 | 失败时 |
 |---|---|---|
-| 0 | 取仓库排他文件锁(`run`、`reconcile`、`install-defaults` 取,只读子命令不取) | 锁已被占用,退出码 2 [已落地] |
+| 0 | 取仓库排他文件锁(`run`、`reconcile`、`install-defaults`、`import-sombench` 取,只读子命令不取;`reconcile` 在装配前取,`run` 在装配后、第一个 tick 前取) | 锁已被占用,退出码 2 [已落地] |
 | 1 | 解析 `--enable`,经 `ENABLE_MAP` 得到处理器键 | 未知开关或空项,退出码 2 |
 | 2 | 处理器键为空:只构造 `make_mindtrainer_dispatcher()`,调 `run_daemon` 时只传派发器 | 无 |
 | 3 | 读 `evaluator.yaml`,要求恰好五个键 | `FactoryConfigError`,退出码 2 |
@@ -444,10 +444,11 @@ TypeScript 命令行:`rismforge <review|approve|reject|confirm|status> [id] [rea
 | 场景 | 发生什么 | 恢复 |
 |---|---|---|
 | 闭环模式缺评估器配置、诊断资产、桥接角色、凭证或 `agent.yaml` | 启动即退出码 2,指出缺哪份文件 | 跑一次 `install-defaults` 或补文件,再启动 [已落地] |
-| 缺规划提示模板或调度配置 | 装配期就拦下:`--enable plan` 或 `nominate` 时先预检 `scheduler.yaml`、`training_defaults.yaml` 与提示模板,缺任一项即以退出码 2 结束,不会起守护进程 [已落地] | 先跑 `install-defaults`,再启动 |
+| 缺规划提示模板或调度配置 | 装配期就拦下:`--enable plan` 预检 `scheduler.yaml`、`training_defaults.yaml` 与提示模板,只开 `nominate` 时预检 `scheduler.yaml`;缺任一项即以退出码 2 结束,不会起守护进程 [已落地] | 先跑 `install-defaults`,再启动 |
 | 缺凭证或凭证写进了树 | 退出码 2,信息只含变量名或键路径 | 设好环境变量,从树里删掉凭证 [已落地] |
 | 规划桥接失败 | 决策 `failed`,写 T3 失败记录,闭环停住(R18) | 人写新指令或手工重置 [已落地] |
-| 处理器或派发器抛瞬态异常 | 进程退出 | 外部监督者重启,调和循环从树续接 |
+| 处理器或派发器抛 `DeferredError` | 不写树,同一进程按退避重试;连续延后超过上限才退出 | 无需人工 [已落地] |
+| 处理器或派发器抛其他瞬态异常 | 进程退出 | 外部监督者重启,调和循环从树续接 |
 | 运行中删了诊断资产 | 评估器在调用处抛 `DiagnosticAssetError` | 补齐后重启 [已落地] |
 | `approve` 时诊断报告缺失 | 抛错,不改文件、不提交 [已落地] | 等报告出来,先 `review` 再批准 |
 
@@ -492,17 +493,17 @@ TypeScript 命令行:`rismforge <review|approve|reject|confirm|status> [id] [rea
 </details>
 <!-- figure:end 90-factory-e2e -->
 
-主链对应 `test_the_whole_loop_turns_twice` [已落地]。每一步都经 `factory reconcile --once`,人工动作用写状态模拟,与已落地的 `tests/test_mt_wire.py` 同一手法。数值取自该测试的断言。
+主链对应 `test_the_whole_loop_turns_twice` [已落地]。每一步都经 `factory reconcile --once`,人工动作用写状态模拟,与已落地的 `tests/test_mt_wire.py` 同一手法。从步骤 2 起每个 tick 都带 `--allow-mock-evidence --planner-backend heuristic`:mock 证据默认不可接受,不带它时晋级之后没有提名也没有规划(`test_without_mock_evidence_the_loop_does_not_turn`)。动作行与状态取自该测试的断言;分数与画像由 `factory/evaluation.py` 的 mock 答法决定,测试只断言增益大于 `0.01`。
 
 | 步 | 图中节点 | 动作或结果 |
 |---|---|---|
 | 1 | 登记基线 | 人工登记 `run-000` 的全错 mock 报告与 `zengen-v1`,`links = [cand-run-000, run-000]` |
-| 2 | run-001 训练 | 开关 `nominate,track,admit`;依次打印 `dispatch_directive run-001`、`request_diagnostic cand-run-001`、`await_review cand-run-001` |
+| 2 | run-001 训练 | 开关 `nominate,track,admit`;数据集清单由夹具预先写好,不走合成;依次打印 `dispatch_directive run-001`、`request_diagnostic cand-run-001`、`await_review cand-run-001` |
 | 3 | 门①批准 | 写状态模拟 `approve`,候选置 `approved` |
 | 4 | 晋级 zengen-v2 | `promote_candidate cand-run-001`;报告证据等级 `mock` |
 | 5 | 提名配方 | 增益大于 `0.01`;`nominate_recipe run-001`,配方候选 `pending_review` |
 | 6 | 门③批准并收录 | 写状态模拟批准;`admit_recipe recipe-run-001`,配方 `effective` |
-| 7 | 规划 run-002 | 开关加上 `plan`、`--planner-backend heuristic`;`plan_next_round run-001`,决策 `clone recipe-run-001`;新指令停在 `awaiting_confirmation`,下一 tick 没有动作 |
+| 7 | 规划 run-002 | 开关加上 `plan`;`plan_next_round run-001`,决策 `clone recipe-run-001`;新指令停在 `awaiting_confirmation`,下一 tick 没有动作 |
 | 8 | 确认指令 | 写状态模拟 `confirm run-002`,指令置 `pending` |
 | 9 | 第二轮训练 | 训练、诊断、批准,晋级为 `zengen-v3`;复用 `run-001` 的清单,不为 `run-002` 合成 |
 | 10 | 战绩 · 再规划 | 先一个 tick 打印 `record_track run-002`、`nominate_recipe run-002`(增益 0,跳过,写 `skipped` 标记);提名标记在场后,下一个 tick 才打印 `plan_next_round run-002`;`run-003` 的指令停在 `awaiting_confirmation` |
@@ -577,8 +578,9 @@ factory 是最后一个工作包,前八个全部落地后才能施工。
 | 缺配置、资产、桥接角色或凭证 | 装配错误,发生在启动前,不属于 T1 至 T3 | 退出码 2,`FactoryConfigError` | 无,树里不写 [已落地] |
 | 规划桥接失败 | T3 | 决策 `failed`,不写新指令(R18) | 决策与失败记录,带桥接日志的 `log_refs` [已落地] |
 | 轮次产物读不出 | T3 | 轮次处理器重写为 `failed`,循环继续(R19) | 轮次产物与失败记录 [已落地] |
-| 轮次中途瞬态异常或被杀 | T1 | 轮次留在 `pending`,下一 tick 复用已落盘的 episode 续上(R19) | 已落盘的 episode [已落地] |
-| 派发器或处理器抛瞬态异常 | T1 | 进程退出,外部监督者重启 | 树里已提交的部分 |
+| 轮次中途瞬态异常或被杀 | T1 | 轮次留在 `pending`,守护进程退出;重启后的 tick 复用已落盘的 episode 续上(R19) | 已落盘的 episode [已落地] |
+| 派发器或处理器抛 `DeferredError` | 资源暂不可用 | 不写树,按退避重试;连续延后超过上限抛 `DeferredExhaustedError` 退出 | 一行结构化日志 [已落地] |
+| 派发器或处理器抛其他瞬态异常 | T1 | 进程退出,外部监督者重启 | 树里已提交的部分 |
 | 门控写证据不在场或迁移非法 | 用法错误 | 命令抛错,不写文件、不提交 | 无 [已落地] |
 
 只读观测手段:

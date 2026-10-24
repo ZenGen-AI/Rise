@@ -250,7 +250,7 @@ name: grpo_opd
 episode_refs:            # 按 id 排序
   - {id: run-001-grpo_opd-scen-auto-0-r0, sha256: <64 位十六进制>}
   - {id: run-001-grpo_opd-scen-auto-0-r1, sha256: <64 位十六进制>}
-manifest_hash: 5acb59e29990…   # 对排序后的 episode_refs 规范化 JSON 取 sha256
+manifest_hash: <64 位十六进制>   # 对排序后的 episode_refs 规范化 JSON 取 sha256,随话语内容变
 ```
 
 实时会话状态机定义在 `src/simulator/realtime/session.py`,迁移由驱动器执行。
@@ -461,7 +461,7 @@ class EnvironmentServiceClient:
 | 对手后端抛异常 | FAILED | `EndSession(role_backend_failure)` | MindTrainer 不重试,抛 `RolloutFailedError` |
 | 客户端断连或 `abort()` | `request_abort`,FAILED | 无 | 不落盘;半截 episode 不污染数据 |
 | 策略自身抛异常 | 同断连 | 异常原样上抛 | 客户端先 `abort()`,不发 `EndSession` |
-| 落盘钩子抛异常 | 记日志,照常推 `EndSession` | 正常收尾 | 运维据日志补写 |
+| 落盘钩子抛异常 | 记日志(只有 episode id 与异常栈,没有内容),照常推 `EndSession` | 正常收尾 | 树里没有这条 episode,而训练侧的 metadata 引用了它的 id;日志里没有内容可补,只能在客户端还持有时补写,否则按缺失处理 |
 
 走查例子一:一次实时会话。数值来自在仓库里用 `create_server`、`ScriptedBackend` 与模板生成器实跑。
 
@@ -477,14 +477,14 @@ class EnvironmentServiceClient:
 | 结果 | `ep-sess-<12 位十六进制>`,`max_turns`,4 轮 |
 | 服务端落盘的推理 | `["我想先摸底", None, None, None]`,保留客户端自己的推理 |
 
-走查例子二:一份分组数据集。同一情境与角色分配,`group_size` 为 2,两条 rollout 的客户端位话语不同。
+走查例子二:一份分组数据集。同一情境与角色分配,`group_size` 为 2,两条 rollout 的话语不同(批量路径没有客户端位,两个角色位都由 `backends_for_rollout` 给的后端驱动)。
 
 | 项 | 数值 |
 |---|---|
 | 调用 | `produce_grouped_dataset(store, "run-001", "grpo_opd", group_size=2, …)` |
 | episode | `run-001-grpo_opd-scen-auto-0-r0`、`run-001-grpo_opd-scen-auto-0-r1`,各 4 轮,`max_turns` |
 | 分组键 | 两条都是 `3967e55968f712c1` |
-| 清单 | `dsm-run-001-grpo_opd`,`manifest_hash` 前 12 位 `5acb59e29990` |
+| 清单 | `dsm-run-001-grpo_opd`;`manifest_hash` 取决于两条 episode 的全部话语,本例不给具体值 |
 | run 目录 | `dataset_manifest_grpo_opd.yaml`、`episodes/` |
 | 校验 | `verify_manifest` 按清单顺序返回两条 episode |
 

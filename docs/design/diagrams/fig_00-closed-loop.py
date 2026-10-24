@@ -6,7 +6,8 @@ def build() -> Canvas:
     c = Canvas(
         1080, 700, title="一轮迭代的闭环",
         desc="主链路从写入训练指令开始,经训练、诊断评测、人工审核门①晋级为新基座。"
-             "晋级之后三条支线并行:规划下一轮并回到起点,提名配方经门③入库,MindAgent 自进化经门②入库。")
+             "晋级之后三条支线并行:规划下一轮并回到起点,提名配方经门③入库,MindAgent 自进化经门②入库。"
+             "门①拒绝时不晋级,直接规划下一轮。")
     c.lane(14, 44, 1052, 140, "主链路:每一轮都走", kind="control", dashed=False)
     c.lane(14, 330, 1052, 310, "晋级之后并行的三条支线", kind="neutral")
 
@@ -29,7 +30,8 @@ def build() -> Canvas:
 
     for s, t in ((a, b), (b, cc), (cc, d), (d, e)):
         c.edge(s, t)
-    c.edge(e, f, "bottom", "top")
+    c.edge(e, f, "bottom", "top", a_f=0.3, label="approve")
+    c.edge(e, g, "bottom", "top", via=[(xs[4] + 150, 362), (130, 362)], a_f=0.85, b_f=0.36, label="reject")
     c.edge(f, g, "left", "top", b_f=0.7)
     c.edge(f, h, "bottom", "top")
     c.edge(f, i, "right", "top")

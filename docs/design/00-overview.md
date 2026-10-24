@@ -337,7 +337,7 @@ checkpoint 等大体量内容不进 git,只存引用 `{uri, sha256, size_bytes, 
 <!-- figure:begin 00-closed-loop -->
 ![一轮迭代的闭环](diagrams/00-closed-loop.svg)
 
-**图 3　一轮迭代的闭环**　主链路从写入训练指令开始,经训练、诊断评测、人工审核门①晋级为新基座。晋级之后三条支线并行:规划下一轮并回到起点,提名配方经门③入库,MindAgent 自进化经门②入库。
+**图 3　一轮迭代的闭环**　主链路从写入训练指令开始,经训练、诊断评测、人工审核门①晋级为新基座。晋级之后三条支线并行:规划下一轮并回到起点,提名配方经门③入库,MindAgent 自进化经门②入库。门①拒绝时不晋级,直接规划下一轮。
 
 <details>
 <summary>文字版:图中的节点与连线</summary>
@@ -364,7 +364,8 @@ checkpoint 等大体量内容不进 git,只存引用 `{uri, sha256, size_bytes, 
 - 派发并训练 → 候选 checkpoint
 - 候选 checkpoint → 诊断评测
 - 诊断评测 → 门①人工审核
-- 门①人工审核 → 晋级 zengen-vN
+- 门①人工审核 → 晋级 zengen-vN:approve
+- 门①人工审核 → 规划下一轮:reject
 - 晋级 zengen-vN → 规划下一轮
 - 晋级 zengen-vN → 提名配方
 - 晋级 zengen-vN → MindAgent 轮次
@@ -379,13 +380,13 @@ checkpoint 等大体量内容不进 git,只存引用 `{uri, sha256, size_bytes, 
 
 | 步 | 触发 | 动作 | 产出 |
 |---|---|---|---|
-| 1 | 人工或调度器 | 写入训练指令,默认进入 `awaiting_confirmation`,`confirm` 后变 `pending` | `directive.yaml` |
-| 2 | 指令 `pending` | 派发器读数据集清单,缺则先合成,再训练,指令置 `executed` | `training_run`、候选 |
+| 1 | 人工或调度器 | 写入训练指令。人写的直接是 `pending`;调度器写的默认进入 `awaiting_confirmation`,`confirm` 后变 `pending`(`confirm_directives` 关闭时直接 `pending`) | `directive.yaml` |
+| 2 | 指令 `pending` | 派发器读数据集清单;缺清单且指令带 `data_spec` 时先合成,否则判 `failed`;再训练,指令置 `executed` | `training_run`、候选 |
 | 3 | 候选 `pending_review` 无报告 | `request_diagnostic` 产出诊断报告 | `diagnostic_report` |
 | 4 | 报告在场 | 评测给出分数、置信区间、错误类型、退化标记 | 报告内容 |
 | 5 | 人工 | `review` 看证据,`approve` 或 `reject` | 候选状态变更 |
-| 6 | 候选 `approved` | `promote_candidate` 登记新版本,写结果摘要 | `zengen-vN`、`outcome` |
-| 7 | 候选到终态;候选 `effective` 且启用提名时还要等步骤 8 的配方候选过门③ | 规划:落账上一轮的经验,装配上下文,后端决策,校验,写下一条指令 | `strategy_experience`、`planner_decision`、新指令 |
+| 6 | 候选 `approved` 且诊断报告在场 | `promote_candidate` 登记新版本,写结果摘要;`reject` 则不晋级,直接到步骤 7 | `zengen-vN`、`outcome` |
+| 7 | 编号最大的 run 的候选到终态(`effective` 或 `rejected`)、证据可接受、无在途轮;候选 `effective` 且启用提名时还要等步骤 8 的配方候选过门③ | 规划:落账上一轮的经验(开关 `strategy_experience` 打开时),装配上下文,后端决策,校验,写下一条指令 | `strategy_experience`(默认不写)、`planner_decision`、新指令 |
 | 8 | 候选 `effective` | 增益达标且无退化则提名配方,门③批准后入库 | 配方候选、配方 |
 | 9 | 新模型晋级 | MindAgent 绑定新模型,部署模拟,分析,提案,验证,门②批准后入库 | 提案、技能库与记忆库 |
 
@@ -467,7 +468,7 @@ checkpoint 等大体量内容不进 git,只存引用 `{uri, sha256, size_bytes, 
 | L2 指标流 | 逐步 loss、reward、学习率 | 计算层文件,树里只存引用 | 研究者 |
 | L3 原始日志 | 进程输出、外部命令行完整请求与响应,须脱敏 | 进程输出与训练日志在计算层;外部推理桥接的请求响应日志在控制面仓库内的 `.rismforge/logs/`,由自带的忽略规则挡在版本控制之外 | 研究者 |
 
-全链路追踪复用两个键:`run_id` 与 `links`。成本是规划的一等输入信号:桥接每次调用外部模型,都经记账模块把调用次数写进 `run_trace.yaml`,规划上下文直接读它,不经结果摘要。GPU 小时与墙钟时长在真实执行器接入前没有写入方 [推迟]。未记录的成本省略该键,不写 0,因为 0 会被读成"免费"。只读命令 `trace`、`cost`、`logs` 的函数 [已落地]。
+全链路追踪复用两个键:`run_id` 与 `links`。成本是规划的一等输入信号:桥接每次成功调用外部模型,都经记账模块把这次的尝试次数写进 `run_trace.yaml`,规划上下文直接读它,不经结果摘要;重试耗尽的失败调用不记账。GPU 小时与墙钟时长在真实执行器接入前没有写入方 [推迟]。未记录的成本省略该键,不写 0,因为 0 会被读成"免费"。只读命令 `trace`、`cost`、`logs` 的函数 [已落地]。
 
 ### 7.2 配置与凭证
 

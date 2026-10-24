@@ -9,7 +9,7 @@ def build() -> Canvas:
         1080, 680, title="一轮 agent_round 的处理",
         desc="调和循环为最新 effective 模型产生 start_agent_round。处理器先判终态,再取代旧轮次,"
              "写 pending 轮次产物作幂等键,然后部署、分析、提案、验证、打包,最后置 executed。"
-             "确定性错误与任何桥接失败置 failed 并记 T3;非桥接瞬态上抛,轮次保持 pending,下一 tick 重入。")
+             "确定性错误与任何桥接失败置 failed 并记 T3;非桥接瞬态上抛,轮次保持 pending,守护进程退出,重启后的 tick 重入。")
     w, h = 200, 84
     xs = [40, 310, 580, 850]
     s1 = c.box(xs[0], 160, w, "产生动作", "最新 effective 模型\n轮次缺失或 pending", kind="control", h=h)

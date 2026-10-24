@@ -350,7 +350,7 @@ def load_library(store) -> LibraryState: ...
 <!-- figure:begin 50-mindagent-round-flow -->
 ![一轮 agent_round 的处理](diagrams/50-mindagent-round-flow.svg)
 
-**图 3　一轮 agent_round 的处理**　调和循环为最新 effective 模型产生 start_agent_round。处理器先判终态,再取代旧轮次,写 pending 轮次产物作幂等键,然后部署、分析、提案、验证、打包,最后置 executed。确定性错误与任何桥接失败置 failed 并记 T3;非桥接瞬态上抛,轮次保持 pending,下一 tick 重入。
+**图 3　一轮 agent_round 的处理**　调和循环为最新 effective 模型产生 start_agent_round。处理器先判终态,再取代旧轮次,写 pending 轮次产物作幂等键,然后部署、分析、提案、验证、打包,最后置 executed。确定性错误与任何桥接失败置 failed 并记 T3;非桥接瞬态上抛,轮次保持 pending,守护进程退出,重启后的 tick 重入。
 
 <details>
 <summary>文字版:图中的节点与连线</summary>
@@ -487,7 +487,7 @@ def load_library(store) -> LibraryState: ...
 
 | 情形 | 结果 | 恢复 |
 |---|---|---|
-| 部署会话 T1 重跑用尽 | 上抛,轮次 `pending` | 下一 tick 重入,复用已落盘 episode,只补跑缺的会话 |
+| 部署会话 T1 重跑用尽 | 上抛,轮次 `pending`,守护进程退出 | 外部监督者重启后的 tick 重入,复用已落盘 episode,只补跑缺的会话 |
 | 打包后、置 `executed` 前崩溃 | 轮次 `pending`,提案已写 | 重入得到同一提案 id,载荷相同不提交 |
 | 重入时通过的草案变少 | 编号超出本次数目的旧提案仍为 `pending_review` | 写进 `dropped`,标为 stale,审核前核对 |
 | 收录在第 2、3、4 步之间崩溃 | 提案仍 `approved` | 重入收敛:版本只加一,条目只一份 |
@@ -537,7 +537,7 @@ def load_library(store) -> LibraryState: ...
 
 | 失败点 | 类 | 处理 | 留痕产物 |
 |---|---|---|---|
-| 部署会话超时、后端超时、传输不可用 | T1 | 整条重跑;用尽后上抛,轮次 `pending` | 无;下一 tick 重入 |
+| 部署会话超时、后端超时、传输不可用 | T1 | 整条重跑;用尽后上抛,轮次 `pending`,守护进程退出 | 无;重启后的 tick 重入 |
 | 人格加载器等非桥接异常 | T1 | 原样上抛,轮次 `pending` | 无 |
 | 不可重跑的会话失败、会话被拒 | T3 | 轮次 `failed` | `failure-agent-<model>.yaml` |
 | 情境或人格不在树里、库条目不合法、轨迹引用库外技能 | T3 | 轮次 `failed`,不建会话或中止 | `failure-agent-<model>.yaml` |

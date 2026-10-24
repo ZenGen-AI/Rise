@@ -526,13 +526,13 @@ class DataProducer(Protocol):
 | 崩溃在第一次存点之前 | 记录 `pending` 且无引用,下一次派发 restart,从基座 step 0 重来 |
 | 崩溃在存点之后 | 下一次派发 resume,从 `checkpoint_step` 续,`make_sources` 收到 `max(0, start - sft_steps)` |
 | 崩溃在最终存点之后、注册之前 | 下一次派发 resume 到 `checkpoint_step = total`,不重训任何一步,直接转换并注册 |
-| 注册之后、置 `executed` 之前被人批准 | 候选确属本 run、本配置、同一份权重,视为注册已完成,照常置 `executed`;否则交给人 |
+| 注册之后、置 `executed` 之前被人批准 | 候选确属本 run、本配置、同一份权重,视为注册已完成,照常置 `executed`;否则抛 `NeedsHumanError`,派发器把指令判 T3 的 `failed`,交给人 [已落地] |
 | 每次续训都在同一步崩溃 | `resume_attempts` 到 `max_resume_attempts` 后升级为 T3 |
 | 续训时配置变了 | `config_hash` 不同,抛 `NeedsHumanError`,记录不改 |
 | interact 的 rollout | 失败的会话整条重跑,不续接;续训时 `InteractTrajectorySource` 的 `start_step` 让情境轮转接着走 |
 | 合成中途崩溃 | 已在树里的清单不再合成;episode 写完而清单未写的阶段整段重跑覆盖,逐字节相同的文件不产生新提交 |
 
-走查例子:batch 指令在第 3 步崩溃,从第 2 步的存点续训,第 6 步完成。数值来自 `tests/test_mt_orchestrator.py` 的同一套夹具,经 `uv run python` 实跑。
+走查例子:batch 指令在进入 step 3 时崩溃,从 `@2`(已完成两步)的存点续训,共 6 步完成;step 从 0 计。数值来自 `tests/test_mt_orchestrator.py` 的同一套夹具,经 `uv run python` 在编排器层实跑。接入守护进程时,第一次崩溃是 T1,原样上抛让守护进程退出,指令全程是 `pending`;第二次派发发生在外部监督者重启之后。
 
 | 配置项 | 值 |
 |---|---|
@@ -545,8 +545,8 @@ class DataProducer(Protocol):
 
 | 时刻 | 事件 | 训练记录 |
 |---|---|---|
-| 第一次派发 | 跑完 step 0、1,第 2 步之后存点 `@2`;跑完 step 2;进入 step 3 时执行器崩溃 | `pending`,`checkpoint_step=2`,`resume_attempts=0`,摘要只含 2 个 SFT 步 |
-| 第二次派发 | `decide_resume` 判 resume;`resume_attempts` 加到 1 并落盘;新执行器 load `@2`,重跑 step 2,再跑 step 3 到 5 | 第 4 步之后存点 `@4` |
+| 第一次派发 | 跑完 step 0、1,存点 `@2`;跑完 step 2;进入 step 3 时执行器崩溃 | `pending`,`checkpoint_step=2`,`resume_attempts=0`,摘要只含 2 个 SFT 步 |
+| 第二次派发 | `decide_resume` 判 resume;`resume_attempts` 加到 1 并落盘;新执行器 load `@2`,重跑 step 2,再跑 step 3 到 5 | 完成四步后存点 `@4` |
 | 收尾 | 最终存点 `@6`,转换为 `@6.hf`,注册候选 `cand-run-1` | `executed`,`checkpoint_step=6`,`resume_attempts=1` |
 
 | step | 阶段 | 主要指标 |
@@ -558,7 +558,7 @@ class DataProducer(Protocol):
 | 4 | grpo_opd | `grpo_loss=0.2`,`total_loss=0.21`,`mean_reward=0.5` |
 | 5 | grpo_opd | `grpo_loss=0.1667`,`total_loss=0.175`,`mean_reward=0.5` |
 
-与一次跑完的对照:执行器终态哈希相同(前缀 `26c1ec45fa6f`),候选的 `checkpoint_ref` 相同,`curve_summary` 相同。唯一的差别是 `resume_attempts`,一次跑完为 0,续训为 1。step 2 在崩溃前后各跑一次,因为它在 `@2` 存点之后、崩溃之前。
+与一次跑完的对照(mock 执行器;真实执行器的续训等价没有证据):执行器终态哈希相同(前缀 `26c1ec45fa6f`),候选的 `checkpoint_ref` 相同,`curve_summary` 相同。唯一的差别是 `resume_attempts`,一次跑完为 0,续训为 1。step 2 在崩溃前后各跑一次,因为它在 `@2` 存点之后、崩溃之前。
 
 ## 7. 关键决策
 

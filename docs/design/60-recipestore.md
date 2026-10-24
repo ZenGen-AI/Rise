@@ -410,7 +410,7 @@ def has_repro_evidence(payload: dict) -> bool: ...  # 门③"证据在场"规则
 </details>
 <!-- figure:end 60-recipestore-flow -->
 
-步骤 1 由 TrainScheduler 完成,步骤 2 由人完成,步骤 5 由计算层与门①完成,其余由 RecipeStore 完成。第 4 步的虚线表示配方只是"可被检索",并不主动触发复用。第 7 步把条目写回配方目录,必要时废弃配方。
+步骤 1 与 4 由 TrainScheduler 完成,步骤 2 由人完成,步骤 5 由计算层与门①完成,其余由 RecipeStore 完成。第 4 步的虚线表示配方只是"可被检索",并不主动触发复用。第 6、7 步是同一个处理器:先写战绩条目,必要时废弃配方,最后写标记。
 
 | 步 | 名称 | 执行者 | 读 | 写 |
 |---|---|---|---|---|
@@ -451,7 +451,7 @@ def has_repro_evidence(payload: dict) -> bool: ...  # 门③"证据在场"规则
 | 收录崩在第 1 至 3 次写之后 | 候选仍是 `approved` | 下一 tick 再触发,已写的跳过 |
 | 战绩崩在条目写入之后 | 标记未写 | 重跑时条目按 `run_id` 幂等,不重复 |
 | 废弃崩在谱系与配方状态之间 | 谱系已有 `deprecated` 事件 | 重跑补改状态,触发 run 仍以谱系为准 |
-| 候选已批准但没有 `repro` | 不收录,写一次 T2 失败记录 | 人修好候选,或拒绝它 |
+| 候选已批准但没有 `repro` | 不收录,写一次 T2 失败记录;候选留在 `approved`,每 tick 都再出一次 `admit_recipe`,启用提名时还挡住这一 run 的规划 | 人补上 `repro`;状态机里 `approved` 不能再转 `rejected`。命令行 `approve` 要求 `repro` 在场,只有手改产物才会走到这里 |
 | 增益无法计算 | 条目照记,`gain` 为空 | 不需要;`mean_gain` 只统计非空条目 |
 
 走查例子。数值来自端到端用例 `test_admit_then_reuse_then_deprecate`(`tests/test_rs_flow.py`)。
@@ -464,7 +464,7 @@ def has_repro_evidence(payload: dict) -> bool: ...  # 门③"证据在场"规则
 | 复用二 | run-004 克隆,候选 `rejected` | 0.7 | 0.2 | 条目 2,`promoted` 为假,`keep` |
 | 检索 | `find_recipes` | 无 | 无 | `n_reuse` 2,`mean_gain` 0.15 |
 | 复用三 | run-005 克隆,报告带社交退化标记 | 0.2 | -0.3 | 条目 3,`deprecate` |
-| 结果 | 默认检索不再返回它 | 无 | 无 | `n_reuse` 3,`mean_gain` 0.0;谱系事件为 `admitted`、`deprecated` |
+| 结果 | 默认检索不再返回它;按 `states=("deprecated",)` 检索才读到 | 无 | 无 | `n_reuse` 3,`mean_gain` 0.0;谱系事件为 `admitted`、`deprecated` |
 
 ## 7. 关键决策
 

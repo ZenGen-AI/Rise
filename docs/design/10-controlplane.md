@@ -132,7 +132,7 @@ ControlPlane 是系统的协调层:它不训练、不评测,只读写产物并�
 | 并行多轮在途 | [推迟] | 同一时间只允许一轮,规则 [已落地] |
 | 异步派发 | [推迟] | 契约已定,V1 派发器同步返回;接真实 LoRA SFT 的这一轮作为有限定的例外接受同步阻塞(CP-15) |
 | 图形界面 | [推迟] | 只有命令行 |
-| 损坏产物的自动隔离 | 不做 | 读不出就抛,守护进程退出;轮次产物与诊断报告例外,见失败处理 [已落地] |
+| 损坏产物的自动隔离 | 不做 | 读不出的产物不移走、不改写:视图记为 `unreadable`、闭环暂停,等人修(CP-17)[已落地] |
 
 | 约束 | 内容 | 影响 |
 |---|---|---|
@@ -454,21 +454,22 @@ def evidence_acceptable(grade: str, accept_mock: bool) -> bool: ...
 <!-- figure:begin 10-controlplane-tick -->
 ![一次调和 tick](diagrams/10-controlplane-tick.svg)
 
-**图 4　一次调和 tick**　读树投影成视图,纯函数算出动作列表,逐个执行。下发指令走派发器,诊断走评估器,晋级做三次写入,等待审核不做事。未捕获的异常让守护进程退出;正常结束后休眠再来。
+**图 4　一次调和 tick**　读树投影成视图,纯函数算出动作列表,逐个执行。下发指令走派发器,诊断走评估器,晋级做三次写入,等待审核不做事。资源暂时不可用时延后重试;读不出的产物记为 unreadable 并暂停闭环;其余未捕获的异常让守护进程退出;正常结束后休眠再来。
 
 <details>
 <summary>文字版:图中的节点与连线</summary>
 
 **节点**
 
-- 读树 read_tree_state:扫 runs/* 的指令与候选 / 数 models/ 下的产物
+- 读树 read_tree_state:扫 runs/* 的指令与候选 / 取 models/ 的最大版本号 / 读不出的记为 unreadable
 - 决策 reconcile:纯函数,无 IO / 输出有序动作列表
 - 休眠 interval_s:max_ticks 到达则退出
 - dispatch_directive:调派发器 / 返回 → executed / DirectiveFailedError → failed
 - request_diagnostic:评估器写 diagnostic_report / 缺省时由桩占位
 - promote_candidate:写 zengen-vN / 候选 → effective / 写 outcome
 - await_review:无自动动作 / 等人工审核门①
-- 未捕获异常上抛:派发器其他异常 / git 失败 · 坏产物 / 守护进程退出 / 指令仍 pending 等重启
+- 未捕获异常上抛:派发器其他异常 / git 失败 · OSError / 守护进程退出 / 指令仍 pending 等重启
+- DeferredError 延后:不写树 · 状态不动 / 退避重试,超上限才退出
 - git 产物树:每次写入一个提交 · 内容相同不提交
 
 **连线**
@@ -481,6 +482,7 @@ def evidence_acceptable(grade: str, accept_mock: bool) -> bool: ...
 - 决策 reconcile → promote_candidate
 - 决策 reconcile → await_review
 - dispatch_directive → 未捕获异常上抛:其他异常
+- dispatch_directive → DeferredError 延后:资源暂不可用
 - request_diagnostic → git 产物树
 - promote_candidate → git 产物树:三次写入
 
@@ -489,10 +491,10 @@ def evidence_acceptable(grade: str, accept_mock: bool) -> bool: ...
 
 | 步 | 名称 | 做什么 | 产物与提交 |
 |---|---|---|---|
-| 1 | 读树 | 按目录名排序扫 `runs/*`,读指令与候选;数 `models/` 下的 yaml | 无 |
-| 2 | 决策 | 先列 `pending` 指令,再按 run 顺序处理候选 | 无 |
+| 1 | 读树 | 按目录名排序扫 `runs/*`,读指令与候选;取 `models/` 的最大版本号;读不出的产物记为 `unreadable`(CP-17) | 无 |
+| 2 | 决策 | 先列 `pending` 指令,再按 run 顺序处理候选;注入了闭环处理器时,其后追加闭环动作(见总览第 5 章步骤 7 至 9) | 无 |
 | 3 | `dispatch_directive` | 调派发器;返回置 `executed`,确定性失败置 `failed` | 指令一次提交,另加派发器自己的提交 |
-| 4 | `request_diagnostic` | 桩写报告,载荷带 `stub: true` | 一次提交 |
+| 4 | `request_diagnostic` | 调评估器写报告;缺省入口没有评估器,由桩写,载荷带 `stub: true` | 一次提交 |
 | 5 | `promote_candidate` | 写模型、候选置 `effective`、写结果摘要 | 三次提交 |
 | 6 | `await_review` | 不做事,等审核门① | 无 |
 | 7 | 休眠 | 睡 `interval_s` 秒;到 `max_ticks` 就退出 | 无 |
@@ -501,9 +503,11 @@ def evidence_acceptable(grade: str, accept_mock: bool) -> bool: ...
 
 | 失败点 | 结果 | 恢复 |
 |---|---|---|
-| 派发器抛普通异常 | 守护进程退出,指令仍 `pending` | 外部重启后再派发 |
-| 晋级三次写入中途崩溃 | 已写的模型文件留在树里 | 重启后候选仍 `approved`;晋级先找 `promoted_from` 等于该候选的模型,找到就复用它的版本号,只补做后两次写入,不再登记 vN+1(CP-7)[已落地] |
-| 读到损坏产物 | 抛异常,守护进程退出,重启后同处再抛 | 人工修复或删除该文件 |
+| 派发器抛 `DeferredError` | 不写树,状态不动 | 同一进程按退避重试;连续延后超过上限才退出(CP-14)[已落地] |
+| 派发器抛其他异常 | 守护进程退出,指令仍 `pending` | 外部重启后再派发 |
+| 晋级三次写入中途崩溃 | 已写的模型文件留在树里 | 崩在第二次写入之前:重启后候选仍 `approved`;晋级先找 `promoted_from` 等于该候选的模型,找到就复用它的版本号,只补做后两次写入,不再登记 vN+1(CP-7)[已落地]。崩在第二、三次之间:候选已是 `effective`,不再晋级,结果摘要缺失;它只供人与追溯查看 |
+| 读到损坏产物 | 视图记为 `unreadable`,不对它动作;闭环动作整体暂停,模型读不出时诊断与晋级也暂停;每个路径记一行警告,不退出(CP-17)[已落地] | 人工修复或删除该文件,下一 tick 自动续上 |
+| 读产物时 `OSError` | 原样上抛,守护进程退出 | 排查磁盘或权限后重启 |
 | git 命令非零退出 | 子进程异常上抛,守护进程退出 | 人工排查仓库 |
 
 晋级动作的幂等键是模型产物里的 `promoted_from`。重启后候选仍是 `approved`,`apply_action` 先扫描 `models/` 找 `promoted_from` 等于该候选的模型:找到就复用它的版本号,只补做候选置 `effective` 与写结果摘要;找不到才按动作里的 `model_version` 新登记。`reconcile` 给出的 `model_version` 是现有最大版本号加一,所以人工删文件只会留下版本号空洞,不会重复 [已落地]。
@@ -519,7 +523,9 @@ def evidence_acceptable(grade: str, accept_mock: bool) -> bool: ...
 | 4 | `promote_candidate`,`model_version = 1` | 写 `zengen-v1`、候选置 `effective`、写 `outcome-run-001` | 3 |
 | 5 | 空列表 | 无,闭环稳定 | 0 |
 
-桩派发器写的情境恒用维度 `tom`,与指令的 `high_order_belief` 无关,测试专门钉住了这一点。
+同一文件的 `test_rejected_candidate_never_promoted` 走另一个出口:人把候选置 `rejected` 后,`reconcile` 输出空列表,不登记模型,候选与拒绝理由留在树里。被拒绝的候选是终态,启用规划时它照样触发下一轮规划,见工厂与命令行设计 6.3 节。
+
+桩派发器写的情境恒用维度 `tom`,与指令的 `high_order_belief` 无关(`daemon.py` 里写死)。
 
 ## 7. 关键决策
 
@@ -652,7 +658,7 @@ def evidence_acceptable(grade: str, accept_mock: bool) -> bool: ...
 | 局限 | 影响 | 缓解 |
 |---|---|---|
 | `daemon.py` 导入 `simulator.stubs` | 包级循环依赖;controlplane 不能脱离 simulator 单独安装 | 骨架桩移出 controlplane 之后解除 |
-| 未捕获异常让守护进程退出 | 需要外部监督;坏产物会卡死循环 | 人工修复;读取层兜底不在本期,只有轮次产物与诊断报告有兜底 [已落地] |
+| 未捕获异常让守护进程退出 | 需要外部监督;`OSError`、git 失败与派发器的其他异常仍会退出 | 外部监督者重启;读不出的产物已不再让它退出(CP-17)[已落地] |
 | TypeScript 读取不经迁移器链与 Schema 校验,与 Python 不对称 | `schema_version` 升级后两边读法不一致;坏产物在命令行侧不被拒绝 | 未修 |
 | TypeScript 写入无条件提交,与 Python 不对称 | 内容相同时 `git commit` 以非零退出码失败 | 未修;提交范围改为只带本文件(CP-12)[已落地] |
 | 晋级分三次写入,不是一次提交 | 崩在写 `zengen-vN` 之后、候选置 `effective` 之前时,树里留下半程状态:模型已登记,候选仍是 `approved` | 重放靠 `promoted_from` 认出已登记的模型并复用其版本号,只补后两次写入;新版本号取现有最大版本号加一(CP-7)[已落地]。人工删文件只会留下版本号空洞 |
