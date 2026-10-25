@@ -342,3 +342,139 @@ def test_a_scripted_driver_survives_the_grpc_hop_and_loops_the_scenario_script(s
     finally:
         runtime.close()
     assert heard == ["剧本一", "剧本二", "剧本一", "剧本二"]
+
+
+# ---------------- AgentRuntime 的会话登记与 episode 落盘(--interact 与部署共用一个运行时) ----------------
+
+def _play_session(runtime, scenario_id):
+    """经运行时的真实 loopback 服务端跑完一条两轮会话,返回客户端重建的 episode。"""
+    from simulator.datamodel import Persona, RoleAssignment, RoleBinding, RoleSlot, Scenario
+    from simulator.store_adapter import write_scenario
+    if not runtime._store.exists(f"control-plane/scenarios/{scenario_id}.yaml"):
+        write_scenario(runtime._store, Scenario(scenario_id, "bg", [RoleSlot("b", "b"), RoleSlot("a", "a")],
+                                                "c", ["n"], "training"))
+    personas = {pid: Persona(pid, ["t"], "m", "s", ["v"]) for pid in ("pa", "pb")}
+    assignment = RoleAssignment(scenario_id, [RoleBinding("a", "pa", "self_play"),
+                                              RoleBinding("b", "pb", "frozen_reference")], 2)
+    client = runtime.client_factory()
+    client.create_session(scenario_id=scenario_id, role_assignment=assignment, personas=personas,
+                          purpose="training", client_driven_slot="a")
+    while not client.closed:
+        client.submit_turn("嗯")
+    return client.drain_until_end()
+
+
+def _stored_episode_ids(store, run_id):
+    from controlplane.paths import episodes_dir
+    return [p.rsplit("/", 1)[-1].removesuffix(".yaml") for p in store.list_products(episodes_dir(run_id))]
+
+
+def test_a_registered_session_is_written_to_its_runs_directory(store):
+    from simulator.store_adapter import read_episode
+    runtime = AgentRuntime(store, ("hi",))
+    try:
+        runtime.register_session("s-int", "run-int")
+        episode = _play_session(runtime, "s-int")
+        assert _stored_episode_ids(store, "run-int") == [episode.id]
+        assert read_episode(store, "run-int", episode.id).scenario_id == "s-int"
+        assert runtime.episode_write_failures == []
+    finally:
+        runtime.close()
+
+
+def test_an_unregistered_session_is_not_written_so_deployment_keeps_its_own_driver_in_charge(store):
+    """部署会话没有训练登记,由 MindAgent 驱动器自己落盘;钩子再写一遍就是同一条 episode 被两边各写一次。"""
+    runtime = AgentRuntime(store, ("hi",))
+    try:
+        runtime.register_session("s-int", "run-int")
+        _play_session(runtime, "s-deploy")
+        assert _stored_episode_ids(store, "run-int") == []
+        assert not any(store.list_products(f"control-plane/runs/{d}/episodes")
+                       for d in ("run-int", "s-deploy", "run-deploy"))
+        assert runtime.episode_write_failures == []
+    finally:
+        runtime.close()
+
+
+def test_unregistering_stops_later_episodes_of_that_scenario_from_being_written(store):
+    runtime = AgentRuntime(store, ("hi",))
+    try:
+        runtime.register_session("s-int", "run-int")
+        first = _play_session(runtime, "s-int")
+        runtime.unregister_session("s-int")
+        _play_session(runtime, "s-int")
+        assert _stored_episode_ids(store, "run-int") == [first.id]
+        runtime.unregister_session("s-int")           # 重复注销是空操作
+        runtime.unregister_session("never-registered")
+    finally:
+        runtime.close()
+
+
+def test_a_failing_write_is_recorded_not_raised_and_never_carries_the_exception_text(store, monkeypatch):
+    """钩子跑在 gRPC 服务端的线程池里,异常出去就被吞掉、不留痕迹;失败写进 episode_write_failures。
+    异常信息可能带凭证,清单里只留类名、episode id 与 run id。"""
+    import factory.agent as agent_mod
+
+    def boom(store_, run_id, episode):
+        raise RuntimeError("push to https://user:sk-secret-123@git.example failed")
+
+    monkeypatch.setattr(agent_mod, "write_episode", boom)
+    runtime = AgentRuntime(store, ("hi",))
+    try:
+        runtime.register_session("s-int", "run-int")
+        episode = _play_session(runtime, "s-int")      # 不抛:钩子吞掉了异常
+        assert len(runtime.episode_write_failures) == 1
+        (line,) = runtime.episode_write_failures
+        assert episode.id in line and "run-int" in line and "RuntimeError" in line
+        assert "sk-secret-123" not in line and "git.example" not in line
+        assert _stored_episode_ids(store, "run-int") == []
+    finally:
+        runtime.close()
+
+
+def test_the_episode_is_written_outside_the_runtime_lock(store, monkeypatch):
+    """close() 持锁停服务端并等它停完;钩子若持锁写文件,两边会互相等。"""
+    import factory.agent as agent_mod
+    held = []
+    real = agent_mod.write_episode
+
+    def spy(store_, run_id, episode):
+        held.append(runtime._lock.locked())
+        return real(store_, run_id, episode)
+
+    monkeypatch.setattr(agent_mod, "write_episode", spy)
+    runtime = AgentRuntime(store, ("hi",))
+    try:
+        runtime.register_session("s-int", "run-int")
+        _play_session(runtime, "s-int")
+        assert held == [False]
+    finally:
+        runtime.close()
+
+
+def test_the_interact_deadline_is_settable_and_read_when_a_client_is_built(store):
+    """调和循环一次只派一条指令,所以一个可变值够用。设值之后新造的客户端用新值;已造好的 stub 不回头改。"""
+    from factory.agent import INTERACT_DEADLINE_S
+    calls = []
+
+    class FakeStub:
+        def __init__(self, channel):
+            pass
+
+        def Interact(self, request_iterator, **kw):
+            calls.append(kw)
+            return iter(())
+
+    runtime = AgentRuntime(store, ("hi",), stub_factory=FakeStub)
+    try:
+        assert runtime.interact_deadline_s == INTERACT_DEADLINE_S
+        runtime.interact_deadline_s = 7.0
+        assert runtime.interact_deadline_s == 7.0
+        built_before = runtime.client_factory()
+        assert calls[-1] == {"timeout": 7.0}
+        runtime.interact_deadline_s = 3.0
+        assert built_before._stub.timeout_s == 7.0     # 已造好的不变
+        runtime.client_factory()
+        assert calls[-1] == {"timeout": 3.0}
+    finally:
+        runtime.close()

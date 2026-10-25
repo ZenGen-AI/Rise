@@ -8,6 +8,7 @@ agent.yaml 是组合根自己的配置信封(control-plane/config/agent.yaml),�
 """
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import Callable
 from dataclasses import fields
@@ -21,11 +22,13 @@ from factory.errors import FactoryConfigError
 from factory.opponents import driver_for
 from mindagent.config import AgentConfig
 from simulator.backends import ModelBackend, ScriptedBackend
-from simulator.datamodel import RoleBinding, Scenario
+from simulator.datamodel import Episode, RoleBinding, Scenario
 from simulator.realtime.client import EnvironmentServiceClient
 from simulator.realtime.proto import realtime_env_pb2_grpc as pb2_grpc
 from simulator.realtime.server import create_server
-from simulator.store_adapter import read_persona, read_scenario
+from simulator.store_adapter import read_persona, read_scenario, write_episode
+
+logger = logging.getLogger(__name__)
 
 AGENT_CONFIG = f"{CONTROL_PLANE_ROOT}/config/agent.yaml"
 AGENT_BACKENDS = ("canned",)
@@ -109,7 +112,12 @@ class AgentRuntime:
 
     opponent_backend_factory(binding, scenario) 给 vllm 与 external_api 驱动的对手位造后端,没传(None)时
     这两种也和过去一样用 ScriptedBackend 说 opponent_lines:MindAgent 部署会话的绑定多是 frozen_reference,
-    没有真模型可加载,行为必须原样不变。"""
+    没有真模型可加载,行为必须原样不变。
+
+    会话登记(register_session / unregister_session):--interact 与 MindAgent 部署共用这一个服务端。登记表按情境 id
+    记该会话属于哪个 run;落盘钩子只写登记过的会话,把 episode 写进对应 run。没登记的(部署会话)钩子不碰,
+    仍由 MindAgent 驱动器自己落盘,两边的 episode 不混写、不重复写。落盘失败不向上抛(钩子跑在 gRPC 服务端线程池里,
+    异常出去会被吞掉、不留痕迹),描述记进 episode_write_failures,供调用方在 rollout 结束后检查。"""
 
     def __init__(self, store: GitStore, opponent_lines: tuple[str, ...], *, turn_timeout_s: float = 5.0,
                  interact_deadline_s: float = INTERACT_DEADLINE_S,
@@ -125,6 +133,46 @@ class AgentRuntime:
         # (客户端, 通道) 成对记下:会话结束的客户端,通道在下一次发客户端时关掉(见 client_factory)
         self._channels: list = []
         self._lock = threading.Lock()
+        self._sessions: dict[str, str] = {}              # 情境 id -> run id,只有训练登记过的会话落盘
+        self.episode_write_failures: list[str] = []      # 每条一句描述,只含类名与 id,不含异常文字
+
+    @property
+    def interact_deadline_s(self) -> float:
+        with self._lock:
+            return self._deadline
+
+    @interact_deadline_s.setter
+    def interact_deadline_s(self, value: float) -> None:
+        """改之后新造的客户端(client_factory 构造 DeadlineStub 时读)用新值,已造好的不回头改。
+        调和循环一次只派一条指令,同一时刻只有一个 run 在用这个运行时,所以一个可变值就够,不必按会话记。"""
+        with self._lock:
+            self._deadline = value
+
+    def register_session(self, scenario_id: str, run_id: str) -> None:
+        """登记:该情境 id 的会话属于 run_id,会话结束时钩子把 episode 写进这个 run。同 id 再登记则覆盖。"""
+        with self._lock:
+            self._sessions[scenario_id] = run_id
+
+    def unregister_session(self, scenario_id: str) -> None:
+        """注销;没登记过也不报错。此后该情境 id 的 episode 不再被钩子写。"""
+        with self._lock:
+            self._sessions.pop(scenario_id, None)
+
+    def _on_session_closed(self, episode: Episode) -> None:
+        """服务端的落盘钩子,跑在 gRPC 线程池的线程里。持锁只查登记表,写文件在锁外:
+        close() 持同一把锁停服务端并等它停完,钩子若持锁写文件,两边会互相等。"""
+        with self._lock:
+            run_id = self._sessions.get(episode.scenario_id)
+        if run_id is None:
+            return
+        try:
+            write_episode(self._store, run_id, episode)
+        except Exception as exc:
+            # 只记类名、episode id 与 run id:异常文字可能带远端地址或凭证。
+            detail = f"{type(exc).__name__} writing episode {episode.id} for run {run_id}"
+            logger.error("episode write failed: %s", detail)
+            with self._lock:
+                self.episode_write_failures.append(detail)
 
     def _driver_of(self, binding: RoleBinding) -> str | None:
         """没传工厂时,只有显式写了 scripted 的绑定才改变行为,其余一律不判驱动、给原来的罐头后端:
@@ -158,6 +206,7 @@ class AgentRuntime:
                 self._server = create_server(
                     self._backends, port=0, turn_timeout_s=self._timeout,
                     scenario_resolver=lambda sid: read_scenario(self._store, sid),
+                    on_session_closed=self._on_session_closed,
                 )
                 self._server.start()
             # 守护进程长跑时每个轮次都要几个客户端;只追加不关的话,通道随轮次增长直到关停。
