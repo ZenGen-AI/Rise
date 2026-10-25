@@ -11,7 +11,7 @@ ADAPTER = "/data/work/exports/683fbdd6"
 
 
 def _cfg(**kw) -> VllmServeConfig:
-    base = dict(model_path=BASE, adapter_name="forge", adapter_path=ADAPTER, remote_port=18081)
+    base = dict(model_path=BASE, adapters=(("forge", ADAPTER),), remote_port=18081)
     base.update(kw)
     return VllmServeConfig(**base)
 
@@ -21,6 +21,16 @@ def _flag(argv, name):
     i = argv.index(name)
     nxt = argv[i + 1] if i + 1 < len(argv) else None
     return True if nxt is None or nxt.startswith("--") else nxt
+
+
+def _values(argv, name):
+    """取 `--name v1 v2 ...` 里的全部取值,到下一个 `--flag` 或末尾为止(vLLM 的 --lora-modules 是 nargs='+')。"""
+    i = argv.index(name) + 1
+    out = []
+    while i < len(argv) and not argv[i].startswith("--"):
+        out.append(argv[i])
+        i += 1
+    return out
 
 
 def test_the_command_serves_the_base_model_with_the_adapter_as_a_lora_module():
@@ -66,12 +76,6 @@ def test_the_working_directory_is_not_invented():
 @pytest.mark.parametrize("field,value", [
     ("model_path", "relative/path"),
     ("model_path", "/data/../etc"),
-    ("adapter_path", "not/absolute"),
-    ("adapter_path", "/data/../x"),
-    ("adapter_name", "has space"),
-    ("adapter_name", "a=b"),          # 会破坏 name=path 的拼法
-    ("adapter_name", "base"),         # 与基座同名,请求会分不清
-    ("adapter_name", ""),
     ("remote_port", 0),
     ("remote_port", 70000),
     ("tensor_parallel_size", 0),
@@ -84,9 +88,65 @@ def test_a_config_that_could_corrupt_the_command_is_refused(field, value):
         _cfg(**{field: value})
 
 
+@pytest.mark.parametrize("adapters", [
+    (("forge", "not/absolute"),),
+    (("forge", "/data/../x"),),
+    (("has space", ADAPTER),),
+    (("a=b", ADAPTER),),              # 会破坏 name=path 的拼法
+    (("base", ADAPTER),),             # 与基座同名,请求会分不清
+    (("", ADAPTER),),
+    (("forge", "/data/a=b"),),        # vLLM 按 '=' 切 name=path,路径里再有 '=' 会切错
+    (("forge", "/data/a,b"),),        # 含 ',' 的取值 vLLM 会当 JSON 解析,必然失败
+    ((("a", "/p"), ("a", "/q"))),     # 名字重复
+    (("a", "/p"), ("b", "/q"), ("c", "/r")),   # 一个进程至多两个适配器
+    ("forge=/x",),                    # 不是 (名字, 路径) 对
+    (("forge",),),
+    (("forge", 7),),
+    (("forge", ADAPTER, "extra"),),
+    [("forge", ADAPTER)],             # 必须是元组,配置是冻结值
+])
+def test_an_adapter_list_that_could_corrupt_the_command_is_refused(adapters):
+    with pytest.raises(ComputeError):
+        _cfg(adapters=adapters)
+
+
 def test_values_from_the_config_never_become_flags():
     """路径或名字以 `--` 开头会被 vLLM 当成另一个参数。校验要在它们进 argv 之前拦住。"""
     with pytest.raises(ComputeError):
-        _cfg(adapter_name="--api-key")
+        _cfg(adapters=(("--api-key", ADAPTER),))
     with pytest.raises(ComputeError):
         _cfg(model_path="--help")
+
+
+# ---------------- 多适配器 ----------------
+# --lora-modules 的写法依据:vLLM 把列表型的配置项声明成 nargs='+'(vllm/engine/arg_utils.py 的 get_kwargs),
+# lora_modules 是 list[LoRAModulePath];LoRAParserAction 对每个取值项:含 '=' 且不含 ',' 的按 name=path 切,
+# 其余按 JSON 解析。所以多个适配器是「一个 --lora-modules 后面跟多个独立的 name=path」,
+# 逗号拼接的 "a=/x,b=/y" 会被当成 JSON 而报错。官方文档的写法也是 `--lora-modules {name}={path} {name}={path}`。
+
+def test_two_adapters_are_separate_items_after_one_lora_modules_flag():
+    argv = list(build_serve_job(_cfg(adapters=(("trained", "/a"), ("opponent", "/b")))).argv)
+    assert argv.count("--lora-modules") == 1
+    assert _values(argv, "--lora-modules") == ["trained=/a", "opponent=/b"]
+    assert not any("," in item for item in argv)       # 绝不是逗号拼接
+    assert _flag(argv, "--max-loras") == "2"
+    assert _flag(argv, "--enable-lora") is True
+    assert _flag(argv, "--max-lora-rank") == "64"
+
+
+def test_one_adapter_keeps_the_old_command_line():
+    argv = list(build_serve_job(_cfg()).argv)
+    assert _values(argv, "--lora-modules") == [f"forge={ADAPTER}"]
+    assert _flag(argv, "--max-loras") == "1"
+
+
+def test_without_adapters_none_of_the_four_lora_flags_is_emitted():
+    argv = list(build_serve_job(_cfg(adapters=())).argv)
+    for flag in ("--enable-lora", "--max-lora-rank", "--max-loras", "--lora-modules"):
+        assert flag not in argv
+    assert _flag(argv, "--served-model-name") == "base"      # 基座照常服务
+
+
+def test_the_config_has_no_single_adapter_fields_any_more():
+    cfg = _cfg()
+    assert not hasattr(cfg, "adapter_name") and not hasattr(cfg, "adapter_path")

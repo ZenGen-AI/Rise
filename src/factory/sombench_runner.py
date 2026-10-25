@@ -175,8 +175,7 @@ class SomevalRunner:
     def _served(self, ref: BigRef) -> Iterator[ServiceHandle]:
         cfg = VllmServeConfig(
             model_path=self.endpoint.base_model_path,
-            adapter_name=ADAPTER,
-            adapter_path=self._adapter_path(ref),
+            adapters=((ADAPTER, self._adapter_path(ref)),),
             remote_port=self.cfg.serve_port,
             max_model_len=SOMBENCH_MAX_MODEL_LEN,
             # 权重体积只有宿主机的索引文件里有;读不到就跳过预检,由 vLLM 自己裁决。

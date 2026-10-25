@@ -106,9 +106,10 @@ def resolve_model_ref(store: GitStore, model_ref: str) -> BigRef:
 # ---------------- 对话消息 ----------------
 
 def chat_messages(persona: Persona, scenario: Scenario, history: list[TurnRecord], speaker_slot: str) -> list[dict]:
-    """给聊天补全接口的消息:一条 system(人格与情境),历史里每个回合一条 user(前缀说话的角色位)。
-    只放话语,不放别人的内心独白与激活轨迹(那是评估材料,不是对手该看见的)。
-    历史为空(对手先开口)时补一条开场的 user,免得有的服务拒收没有 user 消息的请求。"""
+    """给聊天补全接口的消息:一条 system(人格与情境),历史里每个回合一条:说话者自己的发言是 assistant
+    (vLLM 的聊天模板把模型自己说过的话放在 assistant 轮,不带前缀),别人的发言是 user(前缀说话的角色位)。
+    只放话语,不放内心独白与激活轨迹(那是评估材料,不是对手该看见的)。
+    历史为空、或第一条就是自己的发言时,先补一条开场的 user:有的聊天模板要求 user 轮打头。"""
     role = next((r.description for r in scenario.role_slots if r.slot_id == speaker_slot), "")
     lines = [f"你在一段社会情境对话里扮演角色位「{speaker_slot}」" + (f"({role})。" if role else "。")]
     if scenario.background:
@@ -126,9 +127,13 @@ def chat_messages(persona: Persona, scenario: Scenario, history: list[TurnRecord
         lines.append("你的人格——" + ";".join(described))
     lines.append("只说出你这一轮要说的话,不要加角色名前缀,不要解释。")
     messages = [{"role": "system", "content": "\n".join(lines)}]
-    messages += [{"role": "user", "content": f"{t.speaker_slot}:{t.utterance}"} for t in history]
-    if not history:
+    if not history or history[0].speaker_slot == speaker_slot:
         messages.append({"role": "user", "content": "对话刚开始,请你先开口。"})
+    for turn in history:
+        if turn.speaker_slot == speaker_slot:
+            messages.append({"role": "assistant", "content": turn.utterance})
+        else:
+            messages.append({"role": "user", "content": f"{turn.speaker_slot}:{turn.utterance}"})
     return messages
 
 
@@ -136,7 +141,7 @@ def chat_messages(persona: Persona, scenario: Scenario, history: list[TurnRecord
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     """不跟随重定向:urllib 会把 Authorization 头带到重定向的目的地,密钥会跑到另一台主机上。
-    返回 None 后 3xx 作为 HTTPError 抛出,由 ExternalApiBackend 报成非 200。"""
+    返回 None 后 3xx 作为 HTTPError 抛出,由 post_chat 报成非 200。"""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
@@ -145,22 +150,88 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 _OPENER = urllib.request.build_opener(_NoRedirect)
 
 
+def require_http_url(base_url: object) -> urllib.parse.SplitResult:
+    """base_url 必须是带主机的 http(s) 地址。urllib 的默认 opener 还认 file: 与 ftp:,在这里挡掉。"""
+    parts = urllib.parse.urlsplit(base_url) if isinstance(base_url, str) else None
+    if parts is None or parts.scheme not in ("http", "https") or not parts.netloc:
+        raise ValueError(f"base_url must be an http(s) URL, got {base_url!r}")
+    return parts
+
+
+def require_timeout(timeout_s: object) -> float:
+    if isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float)) or not (
+        math.isfinite(timeout_s) and timeout_s > 0
+    ):
+        raise ValueError(f"timeout_s must be a finite number > 0, got {timeout_s!r}")
+    return float(timeout_s)
+
+
+def post_chat(
+    base_url: str, model: str, api_key: str, messages: list[dict], *, timeout_s: float, host_label: str,
+) -> str:
+    """向 OpenAI 兼容的 `<base_url>/v1/chat/completions` POST 一次,返回 choices[0].message.content。
+
+    外部 API 与 vLLM 服务共用这一处:不重试(重试与降级是调用方的事),不跟随重定向,回复体有上限。
+    失败一律抛 OpponentApiError,信息只含状态码、host_label、异常类型名,不含响应体;密钥若出现在
+    信息里会被抹掉,且切断异常链(from None),回溯里没有携带请求头的原异常。
+    host_label 是写进错误信息的"对端是谁"(外部 API 用 host:port,vLLM 用服务名)。"""
+    require_http_url(base_url)
+    timeout = require_timeout(timeout_s)
+
+    def fail(message: str) -> OpponentApiError:
+        """所有失败走这一处,出口前抹掉密钥(原异常的文本理论上不该含,这里是第二道防线)。"""
+        return OpponentApiError(message.replace(api_key, "***") if api_key else message)
+
+    payload = {"model": model, "messages": messages}
+    request = urllib.request.Request(
+        f"{base_url.rstrip('/')}/v1/chat/completions",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"), method="POST",
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+    )
+    try:
+        with _OPENER.open(request, timeout=timeout) as response:
+            status = response.status
+            raw = response.read(MAX_REPLY_BYTES + 1)
+    except urllib.error.HTTPError as exc:
+        exc.close()
+        raise fail(f"HTTP {exc.code} from {host_label}") from None
+    except TimeoutError:
+        raise fail(f"request to {host_label} timed out after {timeout:g}s") from None
+    except urllib.error.URLError as exc:
+        if isinstance(exc.reason, TimeoutError):
+            raise fail(f"request to {host_label} timed out after {timeout:g}s") from None
+        raise fail(f"request to {host_label} failed ({type(exc.reason).__name__}: {exc.reason})") from None
+    except OSError as exc:  # 连接被重置、对端中途断开
+        raise fail(f"request to {host_label} failed ({type(exc).__name__})") from None
+    except Exception as exc:  # http.client.HTTPException 不是 OSError 的子类(状态行不合规、读到一半断开等)
+        raise fail(f"request to {host_label} failed ({type(exc).__name__})") from None
+    if status != 200:
+        raise fail(f"HTTP {status} from {host_label}")
+    if len(raw) > MAX_REPLY_BYTES:
+        raise fail(f"the reply from {host_label} is larger than {MAX_REPLY_BYTES} bytes")
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except ValueError:  # UnicodeDecodeError 与 JSONDecodeError 都是 ValueError
+        raise fail(f"the reply from {host_label} is not valid JSON") from None
+    try:
+        content = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        raise fail(f"the reply from {host_label} has no choices[0].message.content") from None
+    if not isinstance(content, str) or not content.strip():
+        raise fail(f"the reply from {host_label} has an empty or non-text choices[0].message.content")
+    return content
+
+
 class ExternalApiBackend:
     """ModelBackend:把对手位的发言交给 OpenAI 兼容的聊天补全接口。一次 respond 一次 POST,不重试
     (重试与降级是调用方的事:服务端用 TimeoutBackend 限时,失败按角色位后端故障处理)。
 
     密钥只在构造时校验、只放进 Authorization 头。校验不过抛 OpponentCredentialError(信息只含 api_key_env);
-    请求失败抛 OpponentApiError,信息只含状态码、主机、异常类型名,不含响应体,密钥出现也会被抹掉,
-    且切断异常链(from None),回溯里没有携带请求头的原异常。"""
+    请求与失败处理见 post_chat(与 vLLM 后端共用)。"""
 
     def __init__(self, base_url: str, model: str, *, api_key: str, api_key_env: str, timeout_s: float) -> None:
-        parts = urllib.parse.urlsplit(base_url) if isinstance(base_url, str) else None
-        if parts is None or parts.scheme not in ("http", "https") or not parts.netloc:
-            raise ValueError(f"base_url must be an http(s) URL, got {base_url!r}")
-        if isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float)) or not (
-            math.isfinite(timeout_s) and timeout_s > 0
-        ):
-            raise ValueError(f"timeout_s must be a finite number > 0, got {timeout_s!r}")
+        parts = require_http_url(base_url)
+        timeout = require_timeout(timeout_s)
         if not isinstance(api_key, str) or not api_key.strip():
             raise OpponentCredentialError(
                 f"the opponent API key is empty; set the environment variable {api_key_env}"
@@ -170,11 +241,11 @@ class ExternalApiBackend:
             raise OpponentCredentialError(
                 f"the opponent API key in {api_key_env} has characters that cannot go into an HTTP header"
             )
-        self._url = f"{base_url.rstrip('/')}/v1/chat/completions"
+        self._base_url = base_url
         self._host = parts.netloc
         self._model = model
         self._api_key = api_key
-        self._timeout = float(timeout_s)
+        self._timeout = timeout
 
     def respond(
         self,
@@ -183,44 +254,9 @@ class ExternalApiBackend:
         history: list[TurnRecord],
         speaker_slot: str,
     ) -> tuple[str, str | None]:
-        payload = {"model": self._model, "messages": chat_messages(persona, scenario, history, speaker_slot)}
-        request = urllib.request.Request(
-            self._url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"), method="POST",
-            headers={"Content-Type": "application/json", "Authorization": f"Bearer {self._api_key}"},
+        content = post_chat(
+            self._base_url, self._model, self._api_key,
+            chat_messages(persona, scenario, history, speaker_slot),
+            timeout_s=self._timeout, host_label=self._host,
         )
-        try:
-            with _OPENER.open(request, timeout=self._timeout) as response:
-                status = response.status
-                raw = response.read(MAX_REPLY_BYTES + 1)
-        except urllib.error.HTTPError as exc:
-            exc.close()
-            raise self._fail(f"HTTP {exc.code} from {self._host}") from None
-        except TimeoutError:
-            raise self._fail(f"request to {self._host} timed out after {self._timeout:g}s") from None
-        except urllib.error.URLError as exc:
-            if isinstance(exc.reason, TimeoutError):
-                raise self._fail(f"request to {self._host} timed out after {self._timeout:g}s") from None
-            raise self._fail(f"request to {self._host} failed ({type(exc.reason).__name__}: {exc.reason})") from None
-        except OSError as exc:  # 连接被重置、对端中途断开
-            raise self._fail(f"request to {self._host} failed ({type(exc).__name__})") from None
-        except Exception as exc:  # http.client.HTTPException 不是 OSError 的子类(状态行不合规、读到一半断开等)
-            raise self._fail(f"request to {self._host} failed ({type(exc).__name__})") from None
-        if status != 200:
-            raise self._fail(f"HTTP {status} from {self._host}")
-        if len(raw) > MAX_REPLY_BYTES:
-            raise self._fail(f"the reply from {self._host} is larger than {MAX_REPLY_BYTES} bytes")
-        try:
-            data = json.loads(raw.decode("utf-8"))
-        except ValueError:  # UnicodeDecodeError 与 JSONDecodeError 都是 ValueError
-            raise self._fail(f"the reply from {self._host} is not valid JSON") from None
-        try:
-            content = data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError):
-            raise self._fail(f"the reply from {self._host} has no choices[0].message.content") from None
-        if not isinstance(content, str) or not content.strip():
-            raise self._fail(f"the reply from {self._host} has an empty or non-text choices[0].message.content")
         return content, None
-
-    def _fail(self, message: str) -> OpponentApiError:
-        """所有失败走这一处,出口前抹掉密钥(原异常的文本理论上不该含,这里是第二道防线)。"""
-        return OpponentApiError(message.replace(self._api_key, "***"))

@@ -19,6 +19,7 @@ from factory.opponents import (
     OpponentCredentialError,
     chat_messages,
     driver_for,
+    post_chat,
     resolve_model_ref,
 )
 from factory.sombench_runner import EXPORT_FORMAT
@@ -150,25 +151,47 @@ def test_resolve_wraps_an_unreadable_model_file(store):
 
 # ---------------- chat_messages ----------------
 
-def test_chat_messages_is_one_system_message_then_one_user_message_per_turn():
+def test_chat_messages_labels_the_speakers_own_turns_assistant_and_everyone_elses_user():
+    """vLLM 的聊天模板把说话者自己的历史发言当 assistant 轮;别人的话是 user,带角色位前缀。"""
     history = [
-        TurnRecord(0, "b", "你为什么不付?"),
-        TurnRecord(1, "a", "我付过了", inner_thought="其实没付", activation_trace={"skill": ["x"]}),
+        TurnRecord(0, "a", "你为什么不付?"),
+        TurnRecord(1, "b", "我付过了", inner_thought="其实没付", activation_trace={"skill": ["x"]}),
+        TurnRecord(2, "a", "证据呢"),
     ]
     messages = chat_messages(_persona(), _scenario(), history, "b")
-    assert [m["role"] for m in messages] == ["system", "user", "user"]
+    assert [m["role"] for m in messages] == ["system", "user", "assistant", "user"]
     system = messages[0]["content"]
     for needle in ("b", "室友乙", "合租屋里水电费分摊", "谁该多付", "不人身攻击",
                    "急躁", "想让对方道歉", "短句,带情绪", "公平"):
         assert needle in system, needle
-    assert "你为什么不付?" in messages[1]["content"] and "b" in messages[1]["content"]
-    assert "我付过了" in messages[2]["content"] and "a" in messages[2]["content"]
+    assert messages[1]["content"] == "a:你为什么不付?"
+    assert messages[2]["content"] == "我付过了"        # 自己的发言不带前缀,免得模型学着加
+    assert messages[3]["content"] == "a:证据呢"
+
+
+def test_chat_messages_gives_every_other_speaker_the_user_role_with_its_own_prefix():
+    history = [TurnRecord(0, "a", "甲说"), TurnRecord(1, "c", "丙说"), TurnRecord(2, "b", "乙说")]
+    messages = chat_messages(_persona(), _scenario(), history, "b")
+    assert [(m["role"], m["content"]) for m in messages[1:]] == [
+        ("user", "a:甲说"), ("user", "c:丙说"), ("assistant", "乙说")]
+
+
+def test_chat_messages_opens_with_a_user_message_when_the_speaker_itself_spoke_first():
+    """自己的发言是 assistant 轮;它前面没有 user 轮时补开场,与历史为空时补开场同理。"""
+    history = [TurnRecord(0, "b", "我先说"), TurnRecord(1, "a", "好")]
+    messages = chat_messages(_persona(), _scenario(), history, "b")
+    assert [m["role"] for m in messages] == ["system", "user", "assistant", "user"]
+    assert messages[2]["content"] == "我先说" and messages[3]["content"] == "a:好"
 
 
 def test_chat_messages_never_shows_the_other_sides_inner_thought_or_trace():
-    history = [TurnRecord(0, "a", "我付过了", inner_thought="SECRET-THOUGHT", activation_trace={"k": "SECRET-TRACE"})]
+    history = [
+        TurnRecord(0, "a", "我付过了", inner_thought="SECRET-THOUGHT", activation_trace={"k": "SECRET-TRACE"}),
+        TurnRecord(1, "b", "是吗", inner_thought="MY-THOUGHT", activation_trace={"k": "MY-TRACE"}),
+    ]
     text = json.dumps(chat_messages(_persona(), _scenario(), history, "b"), ensure_ascii=False)
-    assert "SECRET-THOUGHT" not in text and "SECRET-TRACE" not in text
+    for secret in ("SECRET-THOUGHT", "SECRET-TRACE", "MY-THOUGHT", "MY-TRACE"):
+        assert secret not in text
 
 
 def test_chat_messages_gives_an_opening_user_message_when_the_opponent_speaks_first():
@@ -367,3 +390,37 @@ def test_the_key_appears_in_no_error_message_or_traceback(stub):
             _respond(_backend(stub.url))
         rendered = "".join(traceback.format_exception(info.value))
         assert SECRET not in str(info.value) and SECRET not in repr(info.value) and SECRET not in rendered
+
+
+# ---------------- post_chat:ExternalApiBackend 与 vLLM 后端共用的一次 POST ----------------
+
+def _msgs():
+    return [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}]
+
+
+def test_post_chat_returns_the_reply_text_and_sends_model_messages_and_bearer(stub):
+    stub.script.append(_ok("好的"))
+    assert post_chat(stub.url + "/", "m1", SECRET, _msgs(), timeout_s=5.0, host_label="the stub") == "好的"
+    (request,) = stub.requests
+    assert request["method"] == "POST" and request["path"] == "/v1/chat/completions"
+    assert request["headers"]["authorization"] == f"Bearer {SECRET}"
+    assert json.loads(request["body"]) == {"model": "m1", "messages": _msgs()}
+
+
+@pytest.mark.parametrize("script", [
+    (500, b"x"), (302, b"", {"Location": "http://127.0.0.1:1/"}), (200, b"not json"), (200, b"{}"),
+])
+def test_post_chat_failures_are_api_errors_naming_the_label_and_never_the_key(stub, script):
+    stub.script.append(script)
+    with pytest.raises(OpponentApiError, match="the stub") as info:
+        post_chat(stub.url, "m1", SECRET, _msgs(), timeout_s=5.0, host_label="the stub")
+    rendered = "".join(traceback.format_exception(info.value))
+    assert SECRET not in str(info.value) and SECRET not in rendered
+
+
+def test_post_chat_scrubs_the_key_even_if_it_shows_up_in_a_failure_text(stub):
+    """第二道防线:label 里若混进密钥(调用方的错),抛出前也被抹掉。"""
+    stub.script.append((500, b"x"))
+    with pytest.raises(OpponentApiError) as info:
+        post_chat(stub.url, "m1", SECRET, _msgs(), timeout_s=5.0, host_label=f"host-{SECRET}")
+    assert SECRET not in str(info.value) and "***" in str(info.value)

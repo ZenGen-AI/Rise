@@ -12,7 +12,7 @@ from compute.errors import ComputeBusyError, DeferredError, ServeStartupError
 from compute.service import MAX_ATTEMPTS, ServiceHandle, serve
 from compute.vllm_service import VllmServeConfig, build_serve_job
 
-CFG = VllmServeConfig(model_path="/data/m", adapter_name="forge", adapter_path="/data/a", remote_port=18081)
+CFG = VllmServeConfig(model_path="/data/m", adapters=(("forge", "/data/a"),), remote_port=18081)
 
 
 class Clock:
@@ -93,7 +93,7 @@ class FakeTunnel:
         return False
 
 
-def _run(client, *, healthy_after=1, clock=None, tunnel_fails=False, timeout_s=300.0, body=None):
+def _run(client, *, healthy_after=1, clock=None, tunnel_fails=False, timeout_s=300.0, body=None, cfg=CFG):
     clock = clock or Clock()
     probes = []
 
@@ -103,7 +103,7 @@ def _run(client, *, healthy_after=1, clock=None, tunnel_fails=False, timeout_s=3
 
     seen = {}
     with serve(
-        client, CFG, build_job=build_serve_job, tunnel_factory=lambda: FakeTunnel(client.calls, fails=tunnel_fails),
+        client, cfg, build_job=build_serve_job, tunnel_factory=lambda: FakeTunnel(client.calls, fails=tunnel_fails),
         probe=probe, startup_timeout_s=timeout_s, poll_s=5.0, clock=clock, sleep=clock.sleep,
     ) as handle:
         seen["handle"] = handle
@@ -130,6 +130,17 @@ def test_the_handle_gives_a_local_address_and_the_key_for_this_start():
     assert seen["url"] == "http://127.0.0.1:49152"
     assert seen["key"] and len(seen["key"]) >= 24
     assert seen["models"] == ("base", "forge")
+
+
+def test_the_handle_lists_the_base_and_every_adapter_the_config_serves():
+    two = VllmServeConfig(model_path="/data/m", adapters=(("trained", "/data/a"), ("opponent", "/data/b")),
+                          remote_port=18081)
+    seen = {}
+    _run(FakeServiceClient(), cfg=two, body=lambda h: seen.update(models=h.model_names))
+    assert seen["models"] == ("base", "trained", "opponent")
+    bare = VllmServeConfig(model_path="/data/m", adapters=(), remote_port=18081)
+    _run(FakeServiceClient(), cfg=bare, body=lambda h: seen.update(models=h.model_names))
+    assert seen["models"] == ("base",)
 
 
 def test_the_same_key_goes_to_the_server_and_to_the_health_probe():

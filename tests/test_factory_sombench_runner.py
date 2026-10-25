@@ -166,7 +166,7 @@ def test_the_server_gets_the_export_and_the_large_context(tmp_path):
     _runner(tmp_path, rows=[_row("i1")], store=store, serve=serve).evaluate_scored(_items("i1"), "cand-run-1", 1)
     cfg, kw = serve.configs[0]
     assert cfg.model_path == "/models/base"
-    assert cfg.adapter_name == "forge" and cfg.adapter_path == "/work/exports/abc123"
+    assert cfg.adapters == (("forge", "/work/exports/abc123"),)
     assert cfg.max_model_len == 40960
     assert trace == [("serve_enter",), ("serve_exit",)]
 

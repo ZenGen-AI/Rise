@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import AbstractContextManager, ExitStack, nullcontext
 
 from controlplane.daemon import DirectiveFailedError, Dispatcher
 from controlplane.deferred import DeferredError
@@ -226,13 +227,13 @@ def _batch_sources(store: GitStore, run_id: str, cfg: TrainingConfig) -> Callabl
 
 def _interact_sources(
     store: GitStore,
-    run_id: str,
     cfg: TrainingConfig,
+    manifests: dict[str, DatasetManifest],
     client_factory: Callable[[], object],
     policy: ModelBackend,
 ) -> Callable[[int], dict[str, TrajectorySource]]:
-    """interact 的 grpo_opd 来自实时会话,只有 sft 用清单;清单缺失同样在这里先判。"""
-    manifests = _batch_manifests(store, run_id, cfg)
+    """interact 的 grpo_opd 来自实时会话,只有 sft 用清单。清单由调用方先读好(_batch_manifests):
+    缺失、读不出这类确定性的错要在占用推理服务之前就判,不能等策略上下文进入之后。"""
 
     def make_sources(start: int) -> dict[str, TrajectorySource]:
         sources: dict[str, TrajectorySource] = {
@@ -253,6 +254,7 @@ def make_mindtrainer_dispatcher(
     converter: CheckpointConverter | None = None,
     client_factory: Callable[[], object] | None = None,
     policy: ModelBackend | None = None,
+    policy_factory: Callable[[str, TrainingConfig], AbstractContextManager[ModelBackend]] | None = None,
     data_producer: DataProducer | None = None,
 ) -> Dispatcher:
     """构造 MindTrainer 派发器。它只做一件事:把一条 pending 的 directive 跑成候选。
@@ -261,7 +263,12 @@ def make_mindtrainer_dispatcher(
     下一轮重新派发时从 training_run 的存点接着跑,不从头再来。
 
     - batch:按 stage_manifest_refs 读数据集清单。
-    - interact:另需 client_factory 与 policy,注入后 grpo_opd 走实时会话。
+    - interact:另需 client_factory 与策略,注入后 grpo_opd 走实时会话。策略二选一:
+      policy 是现成的后端;policy_factory(run_id, cfg) 每次派发调用一次,返回一个上下文管理器,
+      进入时交出策略后端、退出时收尾(起停推理服务、登记会话都放在这一进一出里)。cfg 是回写后、
+      严格校验过的配置。上下文覆盖 _interact_sources 与整个 resume_or_run,且在分类异常的 try 里:
+      进入时抛的延后异常(租约被占、服务起不来)照常走延后通道,此时训练记录一个字节都没写;
+      进入时抛的确定性错误照常判 failed。两者同给是调用方的错,构造时 ValueError。
     - data_producer:指令带 data_spec 且本 run 名下的清单缺失时,用它先合成数据(两种模式都可,
       interact 只合成 sft)。不带 data_spec 的指令行为与改动前完全相同;带 data_spec 的指令总是
       先严格解析,写错的判 failed;需要合成而没有注入生产器时判 failed 并写明缺什么。
@@ -271,6 +278,8 @@ def make_mindtrainer_dispatcher(
     - 确定性失败(数据不对、配置不合法、该人工介入)抛 DirectiveFailedError,调和循环把
       directive 置 failed,不再重试;其余异常原样上抛,保持 pending 等下一轮。
     """
+    if policy is not None and policy_factory is not None:
+        raise ValueError("pass either policy or policy_factory to make_mindtrainer_dispatcher, not both")
     converter = converter or MockConverter()
 
     def dispatch(store: GitStore, directive: Envelope) -> None:
@@ -290,20 +299,29 @@ def make_mindtrainer_dispatcher(
         except ValueError as exc:
             raise DirectiveFailedError(f"directive {run_id}: {exc}") from exc
         if cfg.mode == "interact":
-            if client_factory is None or policy is None:
+            if client_factory is None or (policy is None and policy_factory is None):
                 raise DirectiveFailedError(
-                    f"directive {run_id}: interact mode needs a client_factory and a policy"
+                    f"directive {run_id}: interact mode needs a client_factory and a policy or policy_factory"
                 )
             _synthesize_missing(store, run_id, cfg, directive, data_producer)
-            make_sources = _interact_sources(store, run_id, cfg, client_factory, policy)
+            # 清单缺失在进策略上下文(起 vLLM、占租约)之前就判
+            manifests = _batch_manifests(store, run_id, cfg)
         else:
             _synthesize_missing(store, run_id, cfg, directive, data_producer)
             make_sources = _batch_sources(store, run_id, cfg)
         try:
-            resume_or_run(
-                cfg, store=store, run_id=run_id, make_sources=make_sources,
-                attribution=attribution, executor=executor_factory(run_id), converter=converter,
-            )
+            # ExitStack 等价于 `with scope as pol:`。interact 的上下文在 try 之内进入,所以进入时抛的异常
+            # 与训练中抛的一样被下面的分支分类;退出发生在 resume_or_run 返回或抛出之后,无论哪种。
+            with ExitStack() as stack:
+                if cfg.mode == "interact":
+                    scope = nullcontext(policy) if policy is not None else policy_factory(run_id, cfg)
+                    make_sources = _interact_sources(
+                        store, cfg, manifests, client_factory, stack.enter_context(scope)
+                    )
+                resume_or_run(
+                    cfg, store=store, run_id=run_id, make_sources=make_sources,
+                    attribution=attribution, executor=executor_factory(run_id), converter=converter,
+                )
         except _DETERMINISTIC as exc:
             # NeedsHumanError 的含义是"该人工介入"(设计 §6.2、resume.py),是 T3,不是 T2;
             # _DETERMINISTIC 里其余几种都是数据/配置层面的确定性失败,仍是 T2。

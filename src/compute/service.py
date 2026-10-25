@@ -97,7 +97,7 @@ def serve(
             if not exc.log_tail:
                 exc.log_tail = _tail(client, job_id)
             raise
-        yield ServiceHandle(job_id, base_url, api_key, (BASE_MODEL_NAME, getattr(cfg, "adapter_name")))
+        yield ServiceHandle(job_id, base_url, api_key, (BASE_MODEL_NAME, *(name for name, _ in cfg.adapters)))
     finally:
         try:
             tunnels.close()

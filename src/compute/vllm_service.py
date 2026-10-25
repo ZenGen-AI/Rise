@@ -9,6 +9,9 @@
 - 只绑 127.0.0.1:vLLM 的 HTTP 接口没有别的访问控制,同机其他容器共用主机网络。
 - 接入密钥走 secret_env:密钥不进命令行(进程列表里看得到)、不进日志。
 - --enforce-eager:跳过图捕获,启动快;吞吐不是这个组件现在要回答的问题。
+- --lora-modules 的多适配器写法:一个 flag 后面跟多个独立的 name=path(vLLM 把列表型配置项声明成
+  nargs='+',LoRAParserAction 对每一项:含 '=' 且不含 ',' 的按 name=path 切,其余按 JSON 解析)。
+  逗号拼接的 "a=/x,b=/y" 会被当成 JSON 而启动失败,所以不用。依据见 tests/test_compute_vllm_service.py。
 """
 from __future__ import annotations
 
@@ -23,13 +26,14 @@ from compute.sizing import DEFAULT_OVERHEAD_GIB, MemorySizing, check_memory_fits
 SECRET_ENV = "VLLM_API_KEY"
 BASE_MODEL_NAME = "base"
 _ADAPTER_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+MAX_ADAPTERS = 2    # 设计:一个 vLLM 进程至多挂两个 LoRA(被训练的策略一个、对手一个)
 
 
 @dataclass(frozen=True)
 class VllmServeConfig:
     model_path: str
-    adapter_name: str
-    adapter_path: str
+    # ((名字, 导出路径), ...),至多 MAX_ADAPTERS 个;空表示只服务基座,不开 LoRA
+    adapters: tuple[tuple[str, str], ...]
     remote_port: int
     tensor_parallel_size: int = 8       # 取决于主机的卡数,所以是配置项而不是常量
     max_lora_rank: int = 64
@@ -42,13 +46,9 @@ class VllmServeConfig:
     memory_overhead_gib: float = DEFAULT_OVERHEAD_GIB
 
     def __post_init__(self) -> None:
-        for name in ("model_path", "adapter_path"):
-            if not is_clean_abs_path(getattr(self, name)):
-                raise ComputeError(f"{name} must be an absolute path below / without '..'")
-        if not isinstance(self.adapter_name, str) or not _ADAPTER_NAME.match(self.adapter_name):
-            raise ComputeError("adapter_name has an invalid form")
-        if self.adapter_name == BASE_MODEL_NAME:
-            raise ComputeError(f"adapter_name must differ from the base model name {BASE_MODEL_NAME!r}")
+        if not is_clean_abs_path(self.model_path):
+            raise ComputeError("model_path must be an absolute path below / without '..'")
+        self._check_adapters()
         if not (isinstance(self.remote_port, int) and not isinstance(self.remote_port, bool)
                 and 1024 <= self.remote_port <= 65535):
             raise ComputeError("remote_port must be an integer in [1024, 65535]")
@@ -62,6 +62,43 @@ class VllmServeConfig:
             raise ComputeError("gpu_memory_utilization must be in (0, 1]")
 
 
+    def _check_adapters(self) -> None:
+        adapters = self.adapters
+        if not isinstance(adapters, tuple):
+            raise ComputeError("adapters must be a tuple of (name, path) pairs")
+        if len(adapters) > MAX_ADAPTERS:
+            raise ComputeError(f"at most {MAX_ADAPTERS} adapters can be served by one vLLM process")
+        names: set[str] = set()
+        for pair in adapters:
+            if not (isinstance(pair, tuple) and len(pair) == 2):
+                raise ComputeError("every adapter must be a (name, path) pair")
+            name, path = pair
+            if not isinstance(name, str) or not _ADAPTER_NAME.match(name):
+                raise ComputeError("adapter name has an invalid form")
+            if name == BASE_MODEL_NAME:
+                raise ComputeError(f"adapter name must differ from the base model name {BASE_MODEL_NAME!r}")
+            if name in names:
+                raise ComputeError("adapter names must be unique")
+            names.add(name)
+            if not is_clean_abs_path(path):
+                raise ComputeError("adapter path must be an absolute path below / without '..'")
+            if "=" in path or "," in path:
+                # vLLM 按 '=' 切 name=path、含 ',' 的项当 JSON 解析:这两个字符会让服务在启动时才报错
+                raise ComputeError("adapter path must not contain '=' or ','")
+
+
+def _lora_args(cfg: VllmServeConfig) -> tuple[str, ...]:
+    if not cfg.adapters:
+        return ()
+    return (
+        "--enable-lora",
+        "--max-lora-rank", str(cfg.max_lora_rank),
+        "--max-loras", str(len(cfg.adapters)),
+        # 一个 flag 后面跟多个独立的 name=path(nargs='+'),不是逗号拼接
+        "--lora-modules", *(f"{name}={path}" for name, path in cfg.adapters),
+    )
+
+
 def build_serve_job(cfg: VllmServeConfig) -> JobSpec:
     argv = (
         "vllm", "serve", cfg.model_path,
@@ -69,10 +106,7 @@ def build_serve_job(cfg: VllmServeConfig) -> JobSpec:
         "--host", "127.0.0.1", "--port", str(cfg.remote_port),
         "--tensor-parallel-size", str(cfg.tensor_parallel_size),
         "--enable-expert-parallel",
-        "--enable-lora",
-        "--max-lora-rank", str(cfg.max_lora_rank),
-        "--max-loras", "1",
-        "--lora-modules", f"{cfg.adapter_name}={cfg.adapter_path}",
+        *_lora_args(cfg),
         "--trust-remote-code",
         "--max-model-len", str(cfg.max_model_len),
         *(["--enforce-eager"] if cfg.enforce_eager else []),

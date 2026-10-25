@@ -15,7 +15,7 @@ from mindtrainer.grouping import DegenerateGroupError
 from mindtrainer.orchestrator import NotEnoughGroupsError
 from mindtrainer.resume import NeedsHumanError
 from mindtrainer.reward_pipeline import AttributionError
-from mindtrainer.training_config import InvalidTrainingConfigError, RewardConfig
+from mindtrainer.training_config import InvalidTrainingConfigError, RewardConfig, TrainingConfig
 from simulator.backends import ScriptedBackend
 from simulator.datamodel import Persona, RoleAssignment, RoleBinding, RoleSlot, Scenario
 from simulator.dataset import DatasetIntegrityError, produce_grouped_dataset, read_manifest
@@ -609,4 +609,181 @@ def test_the_executor_factory_is_called_with_the_directive_id(store):
     _directive(store, payload={"target_dimension": "tom", "recipe_ref": "", "training_config": _cfg_dict()})
     reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(executor_factory=factory))
     assert seen == [RUN]
+    assert store.read_product(f"{run_dir(RUN)}/directive.yaml").status == "executed"
+
+
+# ---------------- policy_factory:按 run 现造的策略,返回上下文管理器 ----------------
+
+def _interact_directive(store):
+    cfg = _cfg_dict(
+        mode="interact", grpo_steps=2, scenario_ids=["s1", "s2"], max_turns_per_episode=4,
+        stage_manifest_refs={"sft": f"dsm-{RUN}-sft"},
+        bindings=[RoleBinding("a", "pa", "self_play").to_dict(),
+                  RoleBinding("b", "pb", "frozen_reference", model_ref="zengen-v1").to_dict()],
+    )
+    _directive(store, payload={"target_dimension": "tom", "recipe_ref": "", "training_config": cfg})
+
+
+class _Scope:
+    """policy_factory 给出的上下文:记下进出,进入时交出策略;enter_raises 非空时进入就抛。"""
+
+    def __init__(self, trace, policy, enter_raises=None):
+        self.trace, self.policy, self.enter_raises = trace, policy, enter_raises
+
+    def __enter__(self):
+        self.trace.append("enter")
+        if self.enter_raises is not None:
+            raise self.enter_raises
+        return self.policy
+
+    def __exit__(self, exc_type, exc, tb):
+        self.trace.append(("exit", exc_type))
+        return False
+
+
+class _TracingPolicy(ScriptedBackend):
+    """每说一句就往 trace 里记一笔,用来确认训练发生在上下文之内。"""
+
+    def __init__(self, trace):
+        super().__init__({"a": ["agreed", "x", "no", "x"] * 8})
+        self._trace = trace
+
+    def respond(self, persona, scenario, history, speaker_slot):
+        self._trace.append("respond")
+        return super().respond(persona, scenario, history, speaker_slot)
+
+
+def test_the_policy_factory_context_is_entered_once_with_the_run_id_and_the_validated_config(store, live):
+    env = live()
+    _interact_directive(store)
+    trace, calls = [], []
+
+    def policy_factory(run_id, cfg):
+        calls.append((run_id, cfg))
+        return _Scope(trace, _TracingPolicy(trace))
+
+    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
+        client_factory=env.client_factory, policy_factory=policy_factory))
+    assert store.read_product(f"{run_dir(RUN)}/directive.yaml").status == "executed"
+    assert store.read_product(candidate_checkpoint_file(RUN)).status == "pending_review"
+    (run_id, cfg), = calls                                  # 每次派发只造一次
+    assert run_id == RUN
+    assert isinstance(cfg, TrainingConfig) and cfg.mode == "interact"
+    assert cfg.scenario_ids == ["s1", "s2"] and cfg.trained_slot == "a"
+    assert [b.slot_id for b in cfg.bindings] == ["a", "b"]
+    assert trace[0] == "enter" and trace[-1] == ("exit", None)
+    assert trace.count("enter") == 1 and trace.count(("exit", None)) == 1
+    assert "respond" in trace[1:-1]                         # 训练全程在上下文之内
+
+
+def test_the_policy_factory_context_is_exited_when_training_raises(store, live):
+    env = live()
+    _interact_directive(store)
+    trace = []
+    disp = make_mindtrainer_dispatcher(
+        client_factory=env.client_factory, policy_factory=lambda run_id, cfg: _Scope(trace, _TracingPolicy(trace)),
+        executor_factory=lambda run_id: MockExecutor(crash_at_step=1))
+    with pytest.raises(SimulatedCrashError):
+        reconcile_once(store, dispatcher=disp)
+    assert trace[0] == "enter" and trace[-1] == ("exit", SimulatedCrashError)
+    assert trace.count("enter") == trace.count(("exit", SimulatedCrashError)) == 1
+    assert store.read_product(f"{run_dir(RUN)}/directive.yaml").status == "pending"   # 瞬态:留待下一轮
+
+
+def test_a_deferred_error_on_entering_the_policy_context_defers_without_writing_a_training_run(store, live):
+    """服务起不来(租约被占、启动超时)是延后通道的事:指令保持 pending,训练记录一个字节都没写。"""
+    from controlplane.daemon import DeferralBook
+    from controlplane.deferred import DeferredError
+
+    class LeaseBusy(DeferredError):
+        pass
+
+    env = live()
+    _interact_directive(store)
+    trace = []
+    disp = make_mindtrainer_dispatcher(
+        client_factory=env.client_factory,
+        policy_factory=lambda run_id, cfg: _Scope(trace, None, enter_raises=LeaseBusy("gpu lease is held")))
+    directive = store.read_product(f"{run_dir(RUN)}/directive.yaml")
+    with pytest.raises(LeaseBusy):
+        disp(store, directive)                               # 原样上抛,没有被包成 DirectiveFailedError
+    reconcile_once(store, dispatcher=disp, deferrals=DeferralBook())   # 守护进程接住,不抛
+    assert store.read_product(f"{run_dir(RUN)}/directive.yaml").status == "pending"
+    assert not store.exists(f"{run_dir(RUN)}/training_run.yaml")
+    assert not store.exists(candidate_checkpoint_file(RUN))
+    assert trace.count("enter") == 2                         # 两次派发各进一次;进入失败所以没有退出
+
+
+def test_a_deterministic_error_on_entering_the_policy_context_fails_the_directive(store, live):
+    env = live()
+    _interact_directive(store)
+    disp = make_mindtrainer_dispatcher(
+        client_factory=env.client_factory,
+        policy_factory=lambda run_id, cfg: _Scope([], None, enter_raises=DatasetIntegrityError("bad data")))
+    reconcile_once(store, dispatcher=disp)
+    env_d = store.read_product(f"{run_dir(RUN)}/directive.yaml")
+    assert env_d.status == "failed" and env_d.payload["failure"]["category"] == "T2"
+    assert "bad data" in env_d.payload["failure"]["reason"]
+    assert not store.exists(f"{run_dir(RUN)}/training_run.yaml")
+
+
+def test_a_missing_manifest_fails_the_directive_before_the_policy_context_is_entered(store, live):
+    """进上下文要起 vLLM、占 GPU 租约;清单不在场这种确定性的错不该先付这笔代价。"""
+    env = live()
+    cfg = _cfg_dict(
+        mode="interact", grpo_steps=2, scenario_ids=["s1", "s2"], max_turns_per_episode=4,
+        stage_manifest_refs={"sft": "dsm-run-9-sft"},        # run-9 没有数据
+        bindings=[RoleBinding("a", "pa", "self_play").to_dict(),
+                  RoleBinding("b", "pb", "frozen_reference", model_ref="zengen-v1").to_dict()],
+    )
+    _directive(store, payload={"target_dimension": "tom", "recipe_ref": "", "training_config": cfg})
+    trace = []
+    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
+        client_factory=env.client_factory, policy_factory=lambda run_id, c: _Scope(trace, _TracingPolicy(trace))))
+    env_d = store.read_product(f"{run_dir(RUN)}/directive.yaml")
+    assert env_d.status == "failed" and "manifest" in env_d.payload["failure"]["reason"]
+    assert trace == []                                       # 上下文一次也没进
+    assert not store.exists(f"{run_dir(RUN)}/training_run.yaml")
+
+
+def test_a_plain_policy_still_works_and_needs_no_factory(store, live):
+    env = live()
+    _interact_directive(store)
+    policy = _TracingPolicy(trace := [])
+    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
+        client_factory=env.client_factory, policy=policy))
+    assert store.read_product(f"{run_dir(RUN)}/directive.yaml").status == "executed"
+    assert "respond" in trace
+
+
+def test_a_policy_and_a_policy_factory_together_are_refused_at_construction():
+    with pytest.raises(ValueError, match="policy_factory") as info:
+        make_mindtrainer_dispatcher(policy=ScriptedBackend({}), policy_factory=lambda run_id, cfg: None)
+    assert "policy" in str(info.value) and "both" in str(info.value)
+
+
+def test_interact_with_neither_a_policy_nor_a_factory_fails_with_the_new_message(store, live):
+    env = live()
+    _interact_directive(store)
+    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(client_factory=env.client_factory))
+    env_d = store.read_product(f"{run_dir(RUN)}/directive.yaml")
+    assert env_d.status == "failed" and env_d.payload["failure"]["category"] == "T2"
+    assert "interact mode needs a client_factory and a policy or policy_factory" in env_d.payload["failure"]["reason"]
+
+
+def test_a_policy_factory_without_a_client_factory_still_fails_the_directive(store):
+    _interact_directive(store)
+    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
+        policy_factory=lambda run_id, cfg: _Scope([], ScriptedBackend({}))))
+    env_d = store.read_product(f"{run_dir(RUN)}/directive.yaml")
+    assert env_d.status == "failed"
+    assert "client_factory" in env_d.payload["failure"]["reason"]
+
+
+def test_a_batch_directive_never_calls_the_policy_factory(store):
+    _directive(store, payload={"target_dimension": "tom", "recipe_ref": "", "training_config": _cfg_dict()})
+    calls = []
+    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
+        policy_factory=lambda run_id, cfg: calls.append(run_id)))
+    assert calls == []
     assert store.read_product(f"{run_dir(RUN)}/directive.yaml").status == "executed"
