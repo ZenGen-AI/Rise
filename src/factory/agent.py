@@ -116,8 +116,8 @@ class AgentRuntime:
 
     会话登记(register_session / unregister_session):--interact 与 MindAgent 部署共用这一个服务端。登记表按情境 id
     记该会话属于哪个 run;落盘钩子只写登记过的会话,把 episode 写进对应 run。没登记的(部署会话)钩子不碰,
-    仍由 MindAgent 驱动器自己落盘,两边的 episode 不混写、不重复写。落盘失败不向上抛(钩子跑在 gRPC 服务端线程池里,
-    异常出去会被吞掉、不留痕迹),描述记进 episode_write_failures,供调用方在 rollout 结束后检查。"""
+    仍由 MindAgent 驱动器自己落盘,两边的 episode 不混写、不重复写。落盘失败先把描述记进 episode_write_failures(只含类名与 id),
+    再把原异常抛回 servicer:servicer 据此给客户端报 persistence_failed、不给 episode_id,轨迹源把它当瞬时失败重跑。"""
 
     def __init__(self, store: GitStore, opponent_lines: tuple[str, ...], *, turn_timeout_s: float = 5.0,
                  interact_deadline_s: float = INTERACT_DEADLINE_S,
@@ -160,7 +160,7 @@ class AgentRuntime:
 
     def _on_session_closed(self, episode: Episode) -> None:
         """服务端的落盘钩子,跑在 gRPC 线程池的线程里。持锁只查登记表,写文件在锁外:
-        close() 持同一把锁停服务端并等它停完,钩子若持锁写文件,两边会互相等。"""
+        close() 持同一把锁停服务端并等它停完,钩子若持锁写文件,两边会互相等。写失败记录后原样再抛。"""
         with self._lock:
             run_id = self._sessions.get(episode.scenario_id)
         if run_id is None:
@@ -173,6 +173,10 @@ class AgentRuntime:
             logger.error("episode write failed: %s", detail)
             with self._lock:
                 self.episode_write_failures.append(detail)
+            # 必须再抛:servicer 看到钩子抛错才会把结束原因改报 persistence_failed 并清空 episode_id,
+            # 轨迹源据此整条重跑。吞掉的话客户端收到正常的结束原因与 episode id,把树里没有的 episode 当成已落盘。
+            # 原样抛原异常,不包新类型;servicer 自己记日志并吞下,不会传出线程池。
+            raise
 
     def _driver_of(self, binding: RoleBinding) -> str | None:
         """没传工厂时,只有显式写了 scripted 的绑定才改变行为,其余一律不判驱动、给原来的罐头后端:

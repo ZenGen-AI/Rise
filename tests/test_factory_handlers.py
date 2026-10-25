@@ -410,23 +410,44 @@ def test_unregistering_stops_later_episodes_of_that_scenario_from_being_written(
         runtime.close()
 
 
-def test_a_failing_write_is_recorded_not_raised_and_never_carries_the_exception_text(store, monkeypatch):
-    """钩子跑在 gRPC 服务端的线程池里,异常出去就被吞掉、不留痕迹;失败写进 episode_write_failures。
-    异常信息可能带凭证,清单里只留类名、episode id 与 run id。"""
+def test_a_failing_write_is_recorded_and_surfaces_to_the_client_as_persistence_failed(store, monkeypatch):
+    """钩子必须把异常再抛出去:servicer 看到钩子抛错,才会把结束原因改报 persistence_failed 并清空 episode_id,
+    轨迹源据此把它当作可重跑的瞬时失败。钩子若吞掉异常,客户端会收到正常的结束原因与 episode id,
+    把一条树里没有的 episode 当成已落盘。清单里只留类名、episode id 与 run id,不留异常文字(可能带凭证)。"""
     import factory.agent as agent_mod
 
     def boom(store_, run_id, episode):
         raise RuntimeError("push to https://user:sk-secret-123@git.example failed")
 
+    class RecordingStub:
+        """包住真实 stub,记下服务端发来的每条 end_session(客户端自己不读 end_session.episode_id)。"""
+        ends: list = []
+
+        def __init__(self, channel):
+            self._stub = pb2_grpc.EnvironmentServiceStub(channel)
+
+        def Interact(self, request_iterator, **kw):
+            for msg in self._stub.Interact(request_iterator, **kw):
+                if msg.WhichOneof("payload") == "end_session":
+                    RecordingStub.ends.append(msg.end_session)
+                yield msg
+
+    from simulator.realtime.proto import realtime_env_pb2_grpc as pb2_grpc
     monkeypatch.setattr(agent_mod, "write_episode", boom)
-    runtime = AgentRuntime(store, ("hi",))
+    runtime = AgentRuntime(store, ("hi",), stub_factory=RecordingStub)
     try:
         runtime.register_session("s-int", "run-int")
-        episode = _play_session(runtime, "s-int")      # 不抛:钩子吞掉了异常
+        episode = _play_session(runtime, "s-int")      # 会话照常收尾,客户端不抛
+        # (a) 失败记进清单
         assert len(runtime.episode_write_failures) == 1
         (line,) = runtime.episode_write_failures
         assert episode.id in line and "run-int" in line and "RuntimeError" in line
         assert "sk-secret-123" not in line and "git.example" not in line
+        # (b) 客户端看到的是 persistence_failed,线上的 episode_id 为空
+        assert episode.terminated_reason == "persistence_failed"
+        (end,) = RecordingStub.ends
+        assert end.reason == "persistence_failed" and end.episode_id == ""
+        # (c) run 目录里什么都没有
         assert _stored_episode_ids(store, "run-int") == []
     finally:
         runtime.close()
