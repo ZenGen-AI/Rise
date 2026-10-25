@@ -1,4 +1,5 @@
 """MindTrainer 派发器:把调和循环的 pending 指令跑成候选。"""
+import subprocess
 import time
 from types import SimpleNamespace
 
@@ -614,14 +615,15 @@ def test_the_executor_factory_is_called_with_the_directive_id(store):
 
 # ---------------- policy_factory:按 run 现造的策略,返回上下文管理器 ----------------
 
-def _interact_directive(store):
-    cfg = _cfg_dict(
+def _interact_directive(store, **overrides):
+    fields = dict(
         mode="interact", grpo_steps=2, scenario_ids=["s1", "s2"], max_turns_per_episode=4,
         stage_manifest_refs={"sft": f"dsm-{RUN}-sft"},
         bindings=[RoleBinding("a", "pa", "self_play").to_dict(),
                   RoleBinding("b", "pb", "frozen_reference", model_ref="zengen-v1").to_dict()],
     )
-    _directive(store, payload={"target_dimension": "tom", "recipe_ref": "", "training_config": cfg})
+    fields.update(overrides)
+    _directive(store, payload={"target_dimension": "tom", "recipe_ref": "", "training_config": _cfg_dict(**fields)})
 
 
 class _Scope:
@@ -787,3 +789,188 @@ def test_a_batch_directive_never_calls_the_policy_factory(store):
         policy_factory=lambda run_id, cfg: calls.append(run_id)))
     assert calls == []
     assert store.read_product(f"{run_dir(RUN)}/directive.yaml").status == "executed"
+
+
+# ---------------- policy_backend:interact 路径把后端写进 training_run,batch 路径什么都不传 ----------------
+
+def _commit_count(store):
+    out = subprocess.run(["git", "-C", str(store.repo_root), "rev-list", "--count", "HEAD"],
+                         capture_output=True, text=True, check=True)
+    return int(out.stdout)
+
+
+def _record(store):
+    return store.read_product(f"{run_dir(RUN)}/training_run.yaml")
+
+
+def _run_interact(store, env, **dispatcher_kw):
+    policy = ScriptedBackend({"a": ["agreed", "x", "no", "x"] * 8})
+    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
+        client_factory=env.client_factory, policy=policy, **dispatcher_kw))
+
+
+def test_an_interact_run_records_which_backend_produced_its_data(store, live):
+    _interact_directive(store)
+    _run_interact(store, live(), policy_endpoint="gpu-1")
+    assert _record(store).status == "executed"
+    assert _record(store).payload["policy_backend"] == {
+        "trained": {"ref": "file:///ckpt/base", "kind": "base", "endpoint": "gpu-1"},
+        "opponents": {"b": {"driver": "vllm", "source": "zengen-v1"}},
+        "real_inference_with_mock_training": True,
+    }
+
+
+def test_the_endpoint_is_none_when_the_dispatcher_was_given_none(store, live):
+    _interact_directive(store)
+    _run_interact(store, live())
+    assert _record(store).payload["policy_backend"]["trained"]["endpoint"] is None
+
+
+@pytest.mark.parametrize(
+    "hint, kind",
+    [
+        (None, "base"),
+        ({"type": "mock", "tag": "t"}, "base"),
+        ({"type": "roll_ssh", "format": "qwen4_exp_vllm_2d"}, "adapter"),
+        ({"type": "roll_ssh"}, "adapter"),
+    ],
+    ids=["no hint", "mock hint", "roll_ssh export", "roll_ssh only"],
+)
+def test_the_trained_kind_follows_the_base_checkpoint_fetch_hint(store, live, hint, kind):
+    ref = BigRef("file:///ckpt/base", "a" * 64, 1, hint)
+    _interact_directive(store, base_checkpoint_ref=ref.to_dict())
+    _run_interact(store, live())
+    trained = _record(store).payload["policy_backend"]["trained"]
+    assert (trained["ref"], trained["kind"]) == ("file:///ckpt/base", kind)
+
+
+@pytest.mark.parametrize(
+    "backend, driver, expected",
+    [
+        ("frozen_reference", None, "vllm"),
+        ("external_api", None, "external_api"),
+        ("frozen_reference", "scripted", "scripted"),
+        ("frozen_reference", "external_api", "external_api"),
+        ("external_api", "vllm", "vllm"),
+    ],
+)
+def test_the_opponent_driver_is_the_explicit_one_else_the_backend_default(store, live, backend, driver, expected):
+    binding = RoleBinding("b", "pb", backend, model_ref="zengen-v7", driver=driver)
+    _interact_directive(store, bindings=[RoleBinding("a", "pa", "self_play").to_dict(), binding.to_dict()])
+    _run_interact(store, live())
+    assert _record(store).payload["policy_backend"]["opponents"] == {
+        "b": {"driver": expected, "source": "zengen-v7"},
+    }
+
+
+def test_the_backend_is_json_safe_plain_data(store, live):
+    import json
+    _interact_directive(store)
+    _run_interact(store, live(), policy_endpoint="gpu-1")
+    backend = _record(store).payload["policy_backend"]
+    assert json.loads(json.dumps(backend)) == backend
+
+
+def test_the_policy_factory_route_records_the_backend_too(store, live):
+    env = live()
+    _interact_directive(store)
+    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
+        client_factory=env.client_factory, policy_endpoint="gpu-2",
+        policy_factory=lambda run_id, cfg: _Scope([], ScriptedBackend({"a": ["agreed", "x", "no", "x"] * 8}))))
+    assert _record(store).payload["policy_backend"]["trained"]["endpoint"] == "gpu-2"
+
+
+def test_a_resume_after_a_crash_keeps_the_backend_the_first_attempt_wrote(store, live):
+    env = live()
+    _interact_directive(store)
+    policy = ScriptedBackend({"a": ["agreed", "x", "no", "x"] * 16})
+    with pytest.raises(SimulatedCrashError):
+        reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
+            client_factory=env.client_factory, policy=policy, policy_endpoint="gpu-1",
+            executor_factory=lambda run_id: MockExecutor(crash_at_step=1)))
+    assert _record(store).status == "pending"
+    assert _record(store).payload["policy_backend"]["trained"]["endpoint"] == "gpu-1"
+
+    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
+        client_factory=env.client_factory, policy=policy, policy_endpoint="gpu-2"))
+    run = _record(store)
+    assert (run.status, run.payload["resume_attempts"]) == ("executed", 1)
+    assert run.payload["policy_backend"]["trained"]["endpoint"] == "gpu-1"   # 第二次换了端点,记录不改
+
+
+def test_a_noop_redispatch_does_not_rewrite_the_recorded_backend(store, live):
+    env = live()
+    _interact_directive(store)
+    policy = ScriptedBackend({"a": ["agreed", "x", "no", "x"] * 16})
+    directive = store.read_product(f"{run_dir(RUN)}/directive.yaml")
+    make_mindtrainer_dispatcher(
+        client_factory=env.client_factory, policy=policy, policy_endpoint="gpu-1")(store, directive)
+    before, commits = _record(store), _commit_count(store)
+    make_mindtrainer_dispatcher(                             # 记录已 executed:resume_or_run 走 noop
+        client_factory=env.client_factory, policy=policy, policy_endpoint="gpu-2")(store, directive)
+    assert _record(store) == before
+    assert _record(store).payload["policy_backend"]["trained"]["endpoint"] == "gpu-1"
+    assert _commit_count(store) == commits
+
+
+def test_a_batch_run_passes_no_backend_to_the_orchestrator_and_records_none(store, monkeypatch):
+    from mindtrainer import dispatch as dispatch_module
+
+    seen = []
+    real = dispatch_module.resume_or_run
+
+    def spy(cfg, **kwargs):
+        seen.append(kwargs)
+        return real(cfg, **kwargs)
+
+    monkeypatch.setattr(dispatch_module, "resume_or_run", spy)
+    _directive(store, payload={"target_dimension": "tom", "recipe_ref": "", "training_config": _cfg_dict()})
+    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(policy_endpoint="gpu-1"))
+    (kwargs,) = seen
+    assert "policy_backend" not in kwargs
+    assert _record(store).status == "executed"
+    assert "policy_backend" not in _record(store).payload
+
+
+def test_an_interact_run_hands_the_orchestrator_the_backend_as_a_keyword(store, live, monkeypatch):
+    from mindtrainer import dispatch as dispatch_module
+
+    seen = []
+    real = dispatch_module.resume_or_run
+
+    def spy(cfg, **kwargs):
+        seen.append(kwargs)
+        return real(cfg, **kwargs)
+
+    monkeypatch.setattr(dispatch_module, "resume_or_run", spy)
+    _interact_directive(store)
+    _run_interact(store, live(), policy_endpoint="gpu-1")
+    (kwargs,) = seen
+    assert kwargs["policy_backend"]["trained"]["endpoint"] == "gpu-1"
+
+
+def test_the_backend_has_one_opponent_entry_per_non_trained_slot_and_none_for_a_missing_source():
+    from mindtrainer.dispatch import _policy_backend
+    from mindtrainer.training_config import TrainingConfig
+
+    cfg = TrainingConfig(
+        mode="interact", trained_slot="a", base_checkpoint_ref=BASE, teacher_model_ref=TEACHER,
+        reward=REWARD, sft_steps=0, grpo_steps=1, sft_batch_size=1, groups_per_step=1, group_size=2,
+        grpo_config={}, opd_coefficient=0.1, checkpoint_every_steps=1, allow_resume=True,
+        scenario_ids=["s1"], max_turns_per_episode=4,
+        bindings=[
+            RoleBinding("a", "pa", "self_play"),
+            RoleBinding("b", "pb", "frozen_reference", model_ref="zengen-v1"),
+            RoleBinding("c", "pc", "external_api"),   # 没有 model_ref:不合规的配置,但映射不应抛错
+            RoleBinding("d", "pd", "frozen_reference", model_ref="zengen-v2", driver="scripted"),
+        ],
+    )
+    assert _policy_backend(cfg, None) == {
+        "trained": {"ref": "file:///ckpt/base", "kind": "base", "endpoint": None},
+        "opponents": {
+            "b": {"driver": "vllm", "source": "zengen-v1"},
+            "c": {"driver": "external_api", "source": None},
+            "d": {"driver": "scripted", "source": "zengen-v2"},
+        },
+        "real_inference_with_mock_training": True,
+    }

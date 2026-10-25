@@ -89,6 +89,10 @@ class TrainingRun:
     failure 仅在 failed 时有值:{"category": "T2", "point": ..., "detail": ...}。
     逐步指标序列不进 git(补充 D.2),只留 curve_summary 摘要和指标流引用。
     metric_stream_refs 的键名固定,rismforge trace 读的就是它。
+    policy_backend 只在 interact 训练里有值:说明这条记录的数据是哪种后端产出的(训练位的起点与
+    端点、各对手位的驱动与来源),读的人不必从配置里重新推导。纯 JSON 类型的字典,形状由派发器定。
+    与 last_checkpoint_ref 不同,to_dict 在它为 None 时不写这个键:加字段之前写下的记录
+    重新序列化后逐字节不变。
     """
 
     run_id: str
@@ -100,9 +104,10 @@ class TrainingRun:
     metric_stream_refs: list[BigRef] = field(default_factory=list)
     status: str = "pending"
     failure: dict | None = None
+    policy_backend: dict | None = None
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "run_id": self.run_id,
             "config_hash": self.config_hash,
             "checkpoint_step": self.checkpoint_step,
@@ -114,6 +119,9 @@ class TrainingRun:
             "metric_stream_refs": [r.to_dict() for r in self.metric_stream_refs],
             "failure": copy.deepcopy(self.failure),
         }
+        if self.policy_backend is not None:
+            d["policy_backend"] = copy.deepcopy(self.policy_backend)
+        return d
 
     @classmethod
     def from_dict(cls, d: dict, *, status: str = "pending") -> "TrainingRun":
@@ -128,4 +136,5 @@ class TrainingRun:
             metric_stream_refs=[BigRef.from_dict(r) for r in d.get("metric_stream_refs", [])],
             status=status,
             failure=copy.deepcopy(d.get("failure")),
+            policy_backend=copy.deepcopy(d.get("policy_backend")),
         )

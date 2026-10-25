@@ -148,6 +148,7 @@ def run_training(
     resume_from: TrainingRun | None = None,
     metric_stream_refs: list[BigRef] | None = None,
     on_step: Callable[[StepResult], None] | None = None,
+    policy_backend: dict | None = None,
 ) -> TrainingRun:
     """薄编排:不含判定逻辑,只调下层纯函数和协议(沿用 run_diagnostic 的做法)。
 
@@ -165,6 +166,8 @@ def run_training(
       其余异常(含 timeout 用尽、role_backend_failure)不吞,run 保持 pending。
     - metric_stream_refs 与 on_step:逐步指标不进 git(补充 D.2),on_step 是调用方观察
       每一步的唯一出口;指标流文件本身由调用方写,只把引用交给这里记录。
+    - policy_backend:说明这条记录的数据来自哪种后端(interact 才有)。只在构造新记录时写入;
+      续训沿用已有记录的值,传什么都不改,所以记录里的后端永远是第一次尝试写下的那个。
     """
     chash = config_hash(cfg)
     if resume_from is not None:
@@ -177,7 +180,7 @@ def run_training(
                 f"config changed since run {run_id} started "
                 f"({resume_from.config_hash[:12]} -> {chash[:12]}); resuming would not be reproducible"
             )
-    base = resume_from or TrainingRun(run_id, chash)
+    base = resume_from or TrainingRun(run_id, chash, policy_backend=copy.deepcopy(policy_backend))
 
     reason = validate_training_config(cfg)
     if reason is not None:
@@ -374,15 +377,17 @@ def resume_or_run(
     converter: CheckpointConverter,
     metric_stream_refs: list[BigRef] | None = None,
     on_step: Callable[[StepResult], None] | None = None,
+    policy_backend: dict | None = None,
 ) -> TrainingRun:
     """入口:读已有的 training_run,交给 decide_resume 判定。
-    noop 直接返回已有记录;resume / restart 带记录进入 run_training;
-    escalate 抛 NeedsHumanError(带原因)。没有记录就是新运行。"""
+    noop 直接返回已有记录(不重写,所以记录的后端仍是第一次尝试写下的);resume / restart 带记录进入
+    run_training;escalate 抛 NeedsHumanError(带原因)。没有记录就是新运行。
+    policy_backend 经 kwargs 交给 run_training,只在新建记录时生效(见 run_training)。"""
     existing = read_training_run(store, run_id)
     kwargs = dict(
         store=store, run_id=run_id, make_sources=make_sources, attribution=attribution,
         executor=executor, converter=converter,
-        metric_stream_refs=metric_stream_refs, on_step=on_step,
+        metric_stream_refs=metric_stream_refs, on_step=on_step, policy_backend=policy_backend,
     )
     preflight = getattr(executor, "preflight", None)
     if existing is None:

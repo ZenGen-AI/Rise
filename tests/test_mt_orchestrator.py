@@ -8,7 +8,7 @@ import pytest
 from controlplane.envelope import BigRef
 from controlplane.gitstore import GitStore
 from controlplane.observe import trace
-from controlplane.paths import candidate_checkpoint_file
+from controlplane.paths import candidate_checkpoint_file, training_run_file
 from mindtrainer.checkpoint import CandidateAlreadyReviewedError, MockConverter
 from mindtrainer.datamodel import StepResult, TrainingRun, TrajectoryBatch
 from mindtrainer.executor import MockExecutor, SimulatedCrashError
@@ -260,6 +260,89 @@ def test_a_finished_run_is_returned_untouched_and_the_executor_never_loaded(stor
     ex, steps = MockExecutor(), []
     again = _go(store, _batch_cfg(), ex, steps=steps)
     assert again == first and steps == [] and ex.state_hash is None
+
+
+# ====================== policy_backend:新记录带上,续训保留,noop 不碰 ======================
+
+BACKEND_A = {
+    "trained": {"ref": "file:///ckpt/base", "kind": "base", "endpoint": "gpu-1"},
+    "opponents": {"b": {"driver": "vllm", "source": "zengen-v1"}},
+    "real_inference_with_mock_training": True,
+}
+BACKEND_B = {
+    "trained": {"ref": "file:///ckpt/other", "kind": "adapter", "endpoint": None},
+    "opponents": {},
+    "real_inference_with_mock_training": True,
+}
+
+
+def test_a_new_run_records_the_policy_backend_it_was_given(store):
+    run = _go(store, _batch_cfg(), MockExecutor(), policy_backend=BACKEND_A)
+    assert run.status == "executed" and run.policy_backend == BACKEND_A
+    assert read_training_run(store, RUN).policy_backend == BACKEND_A
+
+
+def test_the_backend_is_in_the_very_first_pending_record_not_only_the_final_one(store):
+    with pytest.raises(SimulatedCrashError):
+        _go(store, _batch_cfg(), MockExecutor(crash_at_step=0), policy_backend=BACKEND_A)
+    pending = read_training_run(store, RUN)
+    assert pending.status == "pending" and pending.policy_backend == BACKEND_A
+
+
+def test_a_new_run_without_a_backend_has_none_and_no_key_in_the_file(store):
+    run = _go(store, _batch_cfg(), MockExecutor())
+    assert run.policy_backend is None
+    assert "policy_backend" not in store.read_product(training_run_file(RUN)).payload
+
+
+def test_run_training_applies_the_backend_to_a_new_record(store):
+    run = run_training(
+        _batch_cfg(), store=store, run_id=RUN, make_sources=_batch_sources(store),
+        attribution=build_attribution_backend(REWARD), executor=MockExecutor(),
+        converter=MockConverter(), policy_backend=BACKEND_A,
+    )
+    assert run.policy_backend == BACKEND_A
+
+
+def test_a_config_that_fails_validation_still_leaves_the_backend_on_the_failed_record(store):
+    with pytest.raises(InvalidTrainingConfigError):
+        _go(store, _batch_cfg(sft_steps=-1), MockExecutor(), policy_backend=BACKEND_A)
+    failed = read_training_run(store, RUN)
+    assert failed.status == "failed" and failed.policy_backend == BACKEND_A
+
+
+@pytest.mark.parametrize("passed", [BACKEND_B, None], ids=["a different one", "none"])
+def test_resuming_keeps_the_original_backend_whatever_is_passed(store, passed):
+    with pytest.raises(SimulatedCrashError):
+        _go(store, _batch_cfg(), MockExecutor(crash_at_step=3), policy_backend=BACKEND_A)
+    resumed = _go(store, _batch_cfg(), MockExecutor(), policy_backend=passed)
+    assert resumed.resume_attempts == 1 and resumed.status == "executed"
+    assert resumed.policy_backend == BACKEND_A
+    assert read_training_run(store, RUN).policy_backend == BACKEND_A
+
+
+def test_resuming_a_record_that_had_no_backend_does_not_acquire_one(store):
+    with pytest.raises(SimulatedCrashError):
+        _go(store, _batch_cfg(), MockExecutor(crash_at_step=3))
+    resumed = _go(store, _batch_cfg(), MockExecutor(), policy_backend=BACKEND_A)
+    assert resumed.policy_backend is None
+    assert "policy_backend" not in store.read_product(training_run_file(RUN)).payload
+
+
+def test_resuming_from_the_start_when_no_checkpoint_survived_also_keeps_the_original(store):
+    with pytest.raises(SimulatedCrashError):
+        _go(store, _batch_cfg(), MockExecutor(crash_at_step=0), policy_backend=BACKEND_A)
+    assert read_training_run(store, RUN).last_checkpoint_ref is None   # 崩在第一次存点之前:从头重来
+    resumed = _go(store, _batch_cfg(), MockExecutor(), policy_backend=BACKEND_B)
+    assert resumed.resume_attempts == 1 and resumed.policy_backend == BACKEND_A
+
+
+def test_a_noop_returns_the_existing_record_and_does_not_rewrite_it(store, tmp_path):
+    first = _go(store, _batch_cfg(), MockExecutor(), policy_backend=BACKEND_A)
+    before = store.read_product(training_run_file(RUN))
+    again = _go(store, _batch_cfg(), MockExecutor(), policy_backend=BACKEND_B)
+    assert again == first and again.policy_backend == BACKEND_A
+    assert store.read_product(training_run_file(RUN)) == before
 
 
 # ====================== 确定性失败 ======================

@@ -516,6 +516,23 @@ def test_interact_write_back_fills_scenario_ids_and_personas(store, live):
     assert _subjects(store).count(WRITE_BACK) == 1
 
 
+def test_the_recorded_backend_is_built_from_the_written_back_config(store, live):
+    """生成路:persona_id 与 scenario_ids 回写之后才是严格配置;policy_backend 取的是回写后的绑定,
+    对手位的 driver(调度器写进去的 scripted)与 model_ref 原样进记录。"""
+    server = live()
+    _directive(store, cfg=_interact_cfg())
+    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
+        client_factory=server.client_factory, policy=ScriptedBackend({"a": _POLICY_LINES}),
+        data_producer=TemplateDataProducer(), policy_endpoint="gpu-1"))
+    run = store.read_product(f"{run_dir(RUN)}/training_run.yaml")
+    assert run.status == "executed"
+    assert run.payload["policy_backend"] == {
+        "trained": {"ref": "file:///ckpt/base", "kind": "base", "endpoint": "gpu-1"},
+        "opponents": {"b": {"driver": "scripted", "source": "zengen-v1"}},
+        "real_inference_with_mock_training": True,
+    }
+
+
 def test_write_back_happens_once_and_stays_stable(store, live):
     server = live()
 

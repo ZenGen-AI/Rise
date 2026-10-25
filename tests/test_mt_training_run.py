@@ -32,6 +32,19 @@ def _run(**kw):
     return TrainingRun(**base)
 
 
+_POLICY_BACKEND = {
+    "trained": {"ref": "file:///ckpt/base", "kind": "base", "endpoint": "gpu-1"},
+    "opponents": {"b": {"driver": "vllm", "source": "zengen-v1"}},
+    "real_inference_with_mock_training": True,
+}
+
+# 加字段之前 training_run 载荷的全部键(顺序也算):policy_backend 为 None 时必须一个都不多
+_LEGACY_KEYS = [
+    "run_id", "config_hash", "checkpoint_step", "last_checkpoint_ref", "resume_attempts",
+    "curve_summary", "metric_stream_refs", "failure",
+]
+
+
 def _commits(root):
     out = subprocess.run(
         ["git", "-C", str(root), "rev-list", "--count", "HEAD"],
@@ -83,12 +96,76 @@ def test_to_dict_is_plain_data_and_does_not_alias():
     assert run.curve_summary["curve"]["mean"] == 0.5 and run.failure["category"] == "T2"
 
 
+# ---------------- policy_backend ----------------
+
+def test_policy_backend_defaults_to_none():
+    assert _run().policy_backend is None
+
+
+def test_round_trip_keeps_policy_backend():
+    run = _run(policy_backend=_POLICY_BACKEND)
+    assert TrainingRun.from_dict(run.to_dict()) == run
+    assert TrainingRun.from_dict(run.to_dict()).policy_backend == _POLICY_BACKEND
+
+
+def test_the_key_is_written_only_when_there_is_a_backend():
+    assert list(_run().to_dict()) == _LEGACY_KEYS   # 与加字段之前逐键相同,既有记录的序列化不变
+    assert "policy_backend" not in _run(policy_backend=None).to_dict()
+    assert _run(policy_backend=_POLICY_BACKEND).to_dict()["policy_backend"] == _POLICY_BACKEND
+
+
+def test_an_empty_backend_dict_is_still_written_because_it_is_not_none():
+    assert _run(policy_backend={}).to_dict()["policy_backend"] == {}
+
+
+def test_a_payload_without_the_key_reads_back_as_none():
+    payload = _run().to_dict()
+    assert "policy_backend" not in payload
+    assert TrainingRun.from_dict(payload).policy_backend is None
+
+
+def test_policy_backend_to_dict_is_plain_data_and_does_not_alias():
+    run = _run(policy_backend=_POLICY_BACKEND)
+    d = run.to_dict()
+    assert json.loads(json.dumps(d)) == d
+    assert yaml.safe_load(yaml.safe_dump(d)) == d
+    d["policy_backend"]["trained"]["kind"] = "adapter"
+    assert run.policy_backend["trained"]["kind"] == "base"
+    back = TrainingRun.from_dict(run.to_dict())
+    back.policy_backend["opponents"]["b"]["driver"] = "scripted"
+    assert run.policy_backend["opponents"]["b"]["driver"] == "vllm"
+
+
 # ---------------- 存储适配 ----------------
 
 def test_write_then_read_round_trips_with_the_status(store):
     run = _run(checkpoint_step=2, last_checkpoint_ref=_ref("a"), status="pending")
     write_training_run(store, run)
     assert read_training_run(store, "run-1") == run
+
+
+def test_write_then_read_round_trips_policy_backend(store):
+    run = _run(policy_backend=_POLICY_BACKEND)
+    path = write_training_run(store, run)
+    assert store.read_product(path).payload["policy_backend"] == _POLICY_BACKEND
+    assert read_training_run(store, "run-1") == run
+
+
+def test_a_record_without_a_backend_has_no_key_in_the_file_and_replays_without_a_commit(store, tmp_path):
+    path = write_training_run(store, _run(checkpoint_step=2))
+    assert list(store.read_product(path).payload) == _LEGACY_KEYS
+    assert "policy_backend" not in (tmp_path / path).read_text()
+    before = _commits(tmp_path)
+    write_training_run(store, read_training_run(store, "run-1"))
+    assert _commits(tmp_path) == before
+
+
+def test_a_finished_record_cannot_have_its_backend_rewritten(store):
+    write_training_run(store, _run(status="executed", policy_backend=_POLICY_BACKEND))
+    other = dict(_POLICY_BACKEND, real_inference_with_mock_training=False)
+    with pytest.raises(ValueError, match="finished record"):
+        write_training_run(store, _run(status="executed", policy_backend=other))
+    assert read_training_run(store, "run-1").policy_backend == _POLICY_BACKEND
 
 
 def test_reading_a_run_that_was_never_written_is_none(store):

@@ -5,7 +5,7 @@ from contextlib import AbstractContextManager, ExitStack, nullcontext
 
 from controlplane.daemon import DirectiveFailedError, Dispatcher
 from controlplane.deferred import DeferredError
-from controlplane.envelope import Envelope
+from controlplane.envelope import BigRef, Envelope
 from controlplane.gitstore import UNREADABLE_PRODUCT_ERRORS, GitStore
 from controlplane.paths import dataset_manifest_file, run_dir
 from mindtrainer.checkpoint import CheckpointConverter, MockConverter
@@ -248,6 +248,38 @@ def _interact_sources(
     return make_sources
 
 
+# 对手位没写 driver 时按 model_backend 取的默认驱动。与 factory.opponents.driver_for 必须一致:
+# mindtrainer 不得导入 factory,所以这里复制一份;改一处要改另一处。
+_DEFAULT_OPPONENT_DRIVER = {"frozen_reference": "vllm", "external_api": "external_api"}
+
+
+def _is_adapter_export(ref: BigRef) -> bool:
+    """起点是不是适配器导出:fetch_hint 的 type 为 roll_ssh(roll_converter 写的就是它)。
+    factory.opponents.resolve_model_ref 另外还要求 format,这里不要求:mindtrainer 不知道导出格式名,
+    也不必知道。两处必须对"什么算适配器"意见一致,改判法要两处一起改。"""
+    return (ref.fetch_hint or {}).get("type") == "roll_ssh"
+
+
+def _policy_backend(cfg: TrainingConfig, endpoint: str | None) -> dict:
+    """interact 训练的后端说明,写进 training_run.policy_backend,让读记录的人不必从配置重新推导。
+    只含 JSON 安全的类型(要写进产物树)。cfg 是回写后、严格校验过的配置;对手位 = 除训练位以外的绑定。"""
+    return {
+        "trained": {
+            "ref": cfg.base_checkpoint_ref.uri,
+            "kind": "adapter" if _is_adapter_export(cfg.base_checkpoint_ref) else "base",
+            "endpoint": endpoint,
+        },
+        "opponents": {
+            b.slot_id: {
+                "driver": b.driver if b.driver is not None else _DEFAULT_OPPONENT_DRIVER.get(b.model_backend),
+                "source": b.model_ref,
+            }
+            for b in cfg.bindings if b.slot_id != cfg.trained_slot
+        },
+        "real_inference_with_mock_training": True,
+    }
+
+
 def make_mindtrainer_dispatcher(
     *,
     executor_factory: Callable[[str], TrainingExecutor] = lambda run_id: MockExecutor(),
@@ -256,6 +288,7 @@ def make_mindtrainer_dispatcher(
     policy: ModelBackend | None = None,
     policy_factory: Callable[[str, TrainingConfig], AbstractContextManager[ModelBackend]] | None = None,
     data_producer: DataProducer | None = None,
+    policy_endpoint: str | None = None,
 ) -> Dispatcher:
     """构造 MindTrainer 派发器。它只做一件事:把一条 pending 的 directive 跑成候选。
 
@@ -269,6 +302,8 @@ def make_mindtrainer_dispatcher(
       严格校验过的配置。上下文覆盖 _interact_sources 与整个 resume_or_run,且在分类异常的 try 里:
       进入时抛的延后异常(租约被占、服务起不来)照常走延后通道,此时训练记录一个字节都没写;
       进入时抛的确定性错误照常判 failed。两者同给是调用方的错,构造时 ValueError。
+    - policy_endpoint:策略所用计算端点的名字,只用来写进 interact 运行的 training_run.policy_backend。
+      由装配方给(派发器不得导入 factory,自己查不到);没给就记 None。batch 路径不写 policy_backend。
     - data_producer:指令带 data_spec 且本 run 名下的清单缺失时,用它先合成数据(两种模式都可,
       interact 只合成 sft)。不带 data_spec 的指令行为与改动前完全相同;带 data_spec 的指令总是
       先严格解析,写错的判 failed;需要合成而没有注入生产器时判 failed 并写明缺什么。
@@ -313,14 +348,18 @@ def make_mindtrainer_dispatcher(
             # ExitStack 等价于 `with scope as pol:`。interact 的上下文在 try 之内进入,所以进入时抛的异常
             # 与训练中抛的一样被下面的分支分类;退出发生在 resume_or_run 返回或抛出之后,无论哪种。
             with ExitStack() as stack:
+                extra: dict = {}
                 if cfg.mode == "interact":
                     scope = nullcontext(policy) if policy is not None else policy_factory(run_id, cfg)
                     make_sources = _interact_sources(
                         store, cfg, manifests, client_factory, stack.enter_context(scope)
                     )
+                    # 只有 interact 记后端;batch 不传,既有 training_run 逐字节不变
+                    extra["policy_backend"] = _policy_backend(cfg, policy_endpoint)
                 resume_or_run(
                     cfg, store=store, run_id=run_id, make_sources=make_sources,
                     attribution=attribution, executor=executor_factory(run_id), converter=converter,
+                    **extra,
                 )
         except _DETERMINISTIC as exc:
             # NeedsHumanError 的含义是"该人工介入"(设计 §6.2、resume.py),是 T3,不是 T2;
