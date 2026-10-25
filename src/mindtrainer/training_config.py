@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 import hashlib
 import json
 import math
@@ -332,6 +333,10 @@ def _validate_interact(cfg: TrainingConfig) -> str | None:
         return f"max_turns_per_episode must be >= 1, got {cfg.max_turns_per_episode}"
     if not cfg.bindings:
         return "bindings must be non-empty"
+    for i, b in enumerate(cfg.bindings):
+        if not b.persona_id:
+            # 空串是生成路指令在回写前的占位;走到严格口径还空着,说明人格没配上,read_persona("") 也读不出来
+            return f"bindings[{i}].persona_id must be non-empty"
     slots = [b.slot_id for b in cfg.bindings]
     duplicated = sorted({s for s in slots if slots.count(s) > 1})
     if duplicated:
@@ -416,22 +421,41 @@ def validate_training_config(cfg: TrainingConfig) -> str | None:
     return None
 
 
-def validate_pending_interact(cfg: TrainingConfig) -> str | None:
-    """指令构造期的宽口径,只给 trainscheduler.directive.check_directive 用,且只在指令带 data_spec 时用。
-
-    生成路的 interact 指令在构造时 scenario_ids 与 bindings 都还是空列表,要到派发时才由合成出的数据回写。
-    这种配置(mode 为 interact 且两者同为空)只跳过 _validate_interact 里的检查(情境、绑定,以及同在其中的
-    max_turns_per_episode >= 1),_validate_common 的类型、步数、批量、清单点名、奖励检查照常全跑;
-    回写之后派发器再按 validate_training_config 全量复检。
-    其余任何配置(含只空了一个的半成品)与 validate_training_config 的结论完全相同。"""
-    if (
+def _is_pending_interact(cfg: TrainingConfig) -> bool:
+    """生成路 interact 在回写前的形状:情境为空,角色位布局已展开,但每个绑定的 persona_id 还是空串。
+    只有"全空"才算;一部分配上了人格、一部分没有的半成品不算,走严格口径。"""
+    return (
         isinstance(cfg, TrainingConfig)
         and cfg.mode == "interact"
         and cfg.scenario_ids == []
-        and cfg.bindings == []
-    ):
-        return _validate_common(cfg)
-    return validate_training_config(cfg)
+        and isinstance(cfg.bindings, list)
+        and len(cfg.bindings) > 0
+        and all(isinstance(b, RoleBinding) and b.persona_id == "" for b in cfg.bindings)
+    )
+
+
+def validate_pending_interact(cfg: TrainingConfig) -> str | None:
+    """指令构造期的宽口径,只给 trainscheduler.directive.check_directive 用,且只在指令带 data_spec 时用。
+
+    生成路的 interact 指令在构造时 scenario_ids 为空、每个绑定的 persona_id 为空串,角色位布局
+    (谁是训练位、对手的 model_backend、model_ref)已经在 bindings 里,情境与人格要到派发时才由合成出的数据回写。
+    这种配置(见 _is_pending_interact)的校验分两步:先跑 _validate_common(类型、步数、批量、清单点名、奖励);
+    通过后换上占位的情境(每步一个,数量等于 groups_per_step)与占位人格,再跑 _validate_interact,
+    所以 max_turns_per_episode、训练位必须 self_play 且不带 model_ref、对手要有 model_ref、slot_id 不重复等
+    检查在构造期就生效,只有"真实的情境与人格还没生成"这一件事被延后。占位只用于校验,不写进指令。
+    其余任何配置(含 bindings 为空、半成品、已回写完的)与 validate_training_config 的结论完全相同;
+    回写之后派发器再按 validate_training_config 全量复检。"""
+    if not _is_pending_interact(cfg):
+        return validate_training_config(cfg)
+    reason = _validate_common(cfg)
+    if reason is not None:
+        return reason
+    probe = dataclasses.replace(
+        cfg,
+        scenario_ids=[f"pending-{i}" for i in range(cfg.groups_per_step)],
+        bindings=[dataclasses.replace(b, persona_id="pending") for b in cfg.bindings],
+    )
+    return _validate_interact(probe)
 
 
 def ensure_valid_config(cfg: TrainingConfig) -> TrainingConfig:

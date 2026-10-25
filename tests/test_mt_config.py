@@ -122,6 +122,10 @@ INVALID = [
     ("groups_exceed_scenarios", lambda: _interact(groups_per_step=3), "exceeds number of scenario_ids"),
     ("max_turns_zero", lambda: _interact(max_turns_per_episode=0), "max_turns_per_episode must be >= 1"),
     ("no_bindings", lambda: _interact(bindings=[]), "bindings must be non-empty"),
+    ("empty_persona_id", lambda: _interact(bindings=[RoleBinding("a", "", "self_play"), _opponent()]),
+     "bindings[0].persona_id must be non-empty"),
+    ("empty_persona_id_on_the_opponent", lambda: _interact(bindings=[_trained(), RoleBinding("b", "", "frozen_reference", model_ref="x")]),
+     "bindings[1].persona_id must be non-empty"),
     ("dup_slot", lambda: _interact(bindings=[_trained(), _trained()]), "duplicate slot_id"),
     ("trained_not_bound", lambda: _interact(trained_slot="ghost"), "is not among bound slots"),
     ("trained_not_self_play", lambda: _interact(bindings=[_a_frozen, _opponent()]), "must be self_play"),
@@ -160,25 +164,48 @@ def test_judge_fields_are_not_required_for_outcome_split():
 
 # ---------------- 生成路 interact 回写前的宽口径 ----------------
 
+def _pending_bindings() -> list[RoleBinding]:
+    """生成路指令里的绑定:角色位布局已展开,人格要等派发时才配上,所以 persona_id 都是空串。"""
+    return [RoleBinding("a", "", "self_play"), RoleBinding("b", "", "frozen_reference", model_ref="zengen-v1")]
+
+
 def _pending(**kw) -> TrainingConfig:
-    """生成路的 interact:情境与绑定要等派发时才回写,指令构造时两者都还是空列表。"""
-    return _interact(scenario_ids=[], bindings=[], **kw)
+    """生成路的 interact:情境为空,绑定带着角色位布局但人格为空串。"""
+    return _interact(**{"scenario_ids": [], "bindings": _pending_bindings(), **kw})
 
 
-def test_strict_validation_still_rejects_an_empty_scenario_list():
+def test_strict_validation_rejects_an_empty_scenario_list():
     reason = validate_training_config(_pending())
     assert reason is not None and "scenario_ids must be non-empty and unique" in reason
+
+
+def test_strict_validation_rejects_an_empty_persona_id_even_when_the_scenarios_are_filled():
+    reason = validate_training_config(_pending(scenario_ids=["s1", "s2"]))
+    assert reason is not None and "bindings[0].persona_id" in reason and "must be non-empty" in reason
 
 
 def test_a_pending_interact_config_passes_the_lenient_check():
     assert validate_pending_interact(_pending()) is None
 
 
+def test_the_lenient_check_does_not_change_or_mutate_the_config_it_looked_at():
+    cfg = _pending()
+    before = cfg.to_dict()
+    assert validate_pending_interact(cfg) is None
+    assert cfg.to_dict() == before and cfg.scenario_ids == [] and [b.persona_id for b in cfg.bindings] == ["", ""]
+
+
 def test_a_pending_interact_config_with_sft_steps_still_passes():
     assert validate_pending_interact(_pending(sft_steps=2, stage_manifest_refs={"sft": "dsm-run-2-sft"})) is None
 
 
+@pytest.mark.parametrize("groups_per_step", [1, 2, 5])
+def test_the_placeholder_scenarios_follow_groups_per_step(groups_per_step):
+    assert validate_pending_interact(_pending(groups_per_step=groups_per_step)) is None
+
+
 @pytest.mark.parametrize("build,needle", [
+    # _validate_common 的检查
     (lambda: _pending(sft_steps=-1), "sft_steps must be >= 0"),
     (lambda: _pending(sft_steps=0, grpo_steps=0), "at least one training step"),
     (lambda: _pending(group_size=1, min_group_size=2), "is below min_group_size"),
@@ -188,18 +215,50 @@ def test_a_pending_interact_config_with_sft_steps_still_passes():
     (lambda: _pending(opd_coefficient=-0.1), "opd_coefficient must be"),
     (lambda: _pending(max_turns_per_episode="6"), "max_turns_per_episode must be an int"),
     (lambda: _pending(mode="online"), "mode must be one of"),
+    # 角色位布局的检查:在构造期就拦,不等到派发
+    (lambda: _pending(max_turns_per_episode=0), "max_turns_per_episode must be >= 1"),
+    (lambda: _pending(trained_slot="ghost"), "is not among bound slots"),
+    (lambda: _pending(bindings=[RoleBinding("a", "", "frozen_reference", model_ref="x"), _pending_bindings()[1]]),
+     "must be self_play"),
+    (lambda: _pending(bindings=[RoleBinding("a", "", "self_play", model_ref="x"), _pending_bindings()[1]]),
+     "must not carry model_ref"),
+    (lambda: _pending(bindings=[_pending_bindings()[0], RoleBinding("b", "", "frozen_reference")]),
+     "needs a non-empty model_ref"),
+    (lambda: _pending(bindings=[_pending_bindings()[0], RoleBinding("b", "", "self_play")]),
+     "must not be self_play"),
+    (lambda: _pending(bindings=[_pending_bindings()[0], RoleBinding("b", "", "magic", model_ref="x")]),
+     "frozen_reference or external_api"),
+    (lambda: _pending(bindings=[_pending_bindings()[0], RoleBinding("a", "", "frozen_reference", model_ref="x")]),
+     "duplicate slot_id"),
 ], ids=["negative_sft", "no_steps", "group_below_min", "sft_without_manifest", "empty_trained_slot",
-        "bad_gamma", "bad_opd", "max_turns_str", "bad_mode"])
-def test_the_lenient_check_only_defers_scenarios_and_bindings_not_the_rest(build, needle):
+        "bad_gamma", "bad_opd", "max_turns_str", "bad_mode",
+        "max_turns_zero", "trained_not_bound", "trained_not_self_play", "trained_has_ref",
+        "opp_no_ref", "opp_self_play", "opp_unknown_backend", "dup_slot"])
+def test_the_lenient_check_only_defers_the_generated_scenarios_and_personas_not_the_rest(build, needle):
     reason = validate_pending_interact(build())
     assert reason is not None and needle in reason, reason
 
 
-@pytest.mark.parametrize("build", [lambda: _interact(scenario_ids=[]), lambda: _interact(bindings=[])],
-                         ids=["only_scenarios_empty", "only_bindings_empty"])
-def test_a_half_filled_interact_config_stays_on_the_strict_path(build):
+@pytest.mark.parametrize("build", [
+    lambda: _interact(scenario_ids=[]),
+    lambda: _interact(bindings=[]),
+    lambda: _interact(scenario_ids=[], bindings=[]),
+    lambda: _pending(bindings=[RoleBinding("a", "pa", "self_play"), RoleBinding("b", "", "frozen_reference", model_ref="x")]),
+    lambda: _pending(bindings=[RoleBinding("a", "", "self_play"), RoleBinding("b", "pb", "frozen_reference", model_ref="x")]),
+    lambda: _pending(scenario_ids=["s1", "s2"]),
+], ids=["only_scenarios_empty", "only_bindings_empty", "both_empty", "half_pending_trained_has_persona",
+        "half_pending_opponent_has_persona", "scenarios_filled_personas_empty"])
+def test_anything_that_is_not_fully_pending_stays_on_the_strict_path(build):
     reason = validate_pending_interact(build())
     assert reason is not None and reason == validate_training_config(build())
+
+
+def test_a_half_pending_config_is_refused_by_the_persona_check_not_waved_through():
+    half = _pending(bindings=[RoleBinding("a", "pa", "self_play"), RoleBinding("b", "", "frozen_reference", model_ref="x")])
+    reason = validate_pending_interact(half)
+    assert "scenario_ids must be non-empty" in reason  # 情境还是空的,严格口径照常拦
+    full_scenarios = dataclasses.replace(half, scenario_ids=["s1", "s2"])
+    assert "bindings[1].persona_id must be non-empty" in validate_pending_interact(full_scenarios)
 
 
 @pytest.mark.parametrize("build,needle", [(b, n) for _, b, n in INVALID], ids=[i for i, _, _ in INVALID])
@@ -215,12 +274,22 @@ def test_valid_complete_configs_pass_the_lenient_check_too():
 def test_the_lenient_check_does_not_relax_batch_mode():
     assert validate_pending_interact(_batch(sft_steps=-1)) == validate_training_config(_batch(sft_steps=-1))
     assert validate_pending_interact(_batch(stage_manifest_refs={})) is not None
+    # 批量模式下 persona_id 为空、情境为空也不算待回写:本来就不被检查,结论与严格口径一致
+    cfg = _batch(scenario_ids=[], bindings=_pending_bindings())
+    assert validate_pending_interact(cfg) == validate_training_config(cfg) is None
 
 
 @pytest.mark.parametrize("junk", [None, "cfg", 3, {}])
 def test_the_lenient_check_reports_something_that_is_not_a_config_instead_of_raising(junk):
     reason = validate_pending_interact(junk)
     assert reason is not None and reason == validate_training_config(junk)
+
+
+@pytest.mark.parametrize("bindings", ["ab", [None], [{"slot_id": "a"}], [3]])
+def test_the_lenient_check_does_not_raise_on_malformed_bindings(bindings):
+    cfg = _pending(bindings=bindings)
+    reason = validate_pending_interact(cfg)
+    assert reason is not None and reason == validate_training_config(cfg)
 
 
 def test_ensure_valid_config_returns_the_config_or_raises_with_the_reason():

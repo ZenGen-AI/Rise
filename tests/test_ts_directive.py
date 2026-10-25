@@ -155,7 +155,7 @@ def _bindings():
 
 def _interact_cfg(**kw):
     cfg = copy.deepcopy(DEFAULT_TRAINING_CONFIG)
-    cfg.update(mode="interact", trained_slot="a", max_turns_per_episode=4, **kw)
+    cfg.update({"mode": "interact", "trained_slot": "a", "max_turns_per_episode": 4, **kw})
     return cfg
 
 
@@ -163,8 +163,13 @@ def _named_cfg(**kw):
     return _interact_cfg(**{"scenario_ids": ["s1", "s2"], "bindings": _bindings(), "sft_steps": 0, **kw})
 
 
+def _pending_bindings():
+    """生成路指令里的绑定:角色位布局已展开,人格等派发时才配,所以 persona_id 都是空串。"""
+    return [{**b, "persona_id": ""} for b in _bindings()]
+
+
 def _pending_cfg(**kw):
-    return _interact_cfg(**{"scenario_ids": [], "bindings": [], **kw})
+    return _interact_cfg(**{"scenario_ids": [], "bindings": _pending_bindings(), **kw})
 
 
 def _spec():
@@ -186,7 +191,7 @@ def test_directive_construction_allows_a_pending_interact_config():
     payload = directive_payload(resolved, new_run_id="run-002", planner_decision_id="planner-run-001")
     assert payload["data_spec"] == _spec().to_dict()
     assert payload["training_config"]["scenario_ids"] == []  # 回写前为空,放行
-    assert payload["training_config"]["bindings"] == []
+    assert payload["training_config"]["bindings"] == _pending_bindings()  # 布局随指令走,人格留空
     assert payload["training_config"]["stage_manifest_refs"] == {"sft": "dsm-run-002-sft"}
 
 
@@ -204,7 +209,9 @@ def test_a_generated_path_directive_is_written_and_reads_back(store):
                                planner_decision_id="planner-run-001")
     env = store.read_product(path)
     cfg = load_config_from_directive(env)
-    assert (cfg.mode, cfg.scenario_ids, cfg.bindings) == ("interact", [], [])
+    assert (cfg.mode, cfg.scenario_ids) == ("interact", [])
+    assert [(b.slot_id, b.persona_id, b.model_backend, b.model_ref) for b in cfg.bindings] == [
+        ("a", "", "self_play", None), ("b", "", "frozen_reference", "zengen-v1")]
     assert cfg.stage_manifest_refs == {"sft": "dsm-run-002-sft"}
     assert validate_pending_interact(cfg) is None
     assert validate_training_config(cfg) is not None  # 严格口径仍拒绝:回写前不能直接训练
@@ -287,3 +294,74 @@ def test_a_pending_config_still_has_its_data_spec_checked_against_the_config(sto
     with pytest.raises(DirectiveConstructionError, match="has no entry for stage 'sft'"):
         construct_directive(store, bad, new_run_id="run-002", confirm=True, planner_decision_id="planner-run-001")
     assert not store.exists("control-plane/runs/run-002/directive.yaml")
+
+
+def test_the_lenient_path_still_checks_the_slot_layout_a_pending_config_with_a_bad_opponent_is_refused(store):
+    bindings = _pending_bindings()
+    del bindings[1]["model_ref"]  # 对手没有 model_ref:事后无法追查对手是谁
+    bad = ResolvedAction("tom", "new", "", _pending_cfg(bindings=bindings), _spec(), None)
+    head = _head(store)
+    with pytest.raises(DirectiveConstructionError, match="needs a non-empty model_ref"):
+        construct_directive(store, bad, new_run_id="run-002", confirm=True, planner_decision_id="planner-run-001")
+    assert not store.exists("control-plane/runs/run-002/directive.yaml")
+    assert _head(store) == head
+
+
+def test_the_lenient_path_still_checks_max_turns_and_the_trained_slot(store):
+    for edit, match in ((dict(max_turns_per_episode=0), "max_turns_per_episode must be >= 1"),
+                        (dict(trained_slot="ghost"), "is not among bound slots")):
+        bad = ResolvedAction("tom", "new", "", _pending_cfg(**edit), _spec(), None)
+        with pytest.raises(DirectiveConstructionError, match=match):
+            construct_directive(store, bad, new_run_id="run-002", confirm=True, planner_decision_id="planner-run-001")
+    assert not store.exists("control-plane/runs/run-002/directive.yaml")
+
+
+def test_an_interact_directive_with_neither_scenarios_nor_bindings_is_refused_even_with_a_data_spec(store):
+    """布局丢了(bindings 为空)的指令不是待回写:派发器无从知道谁是对手,构造期就拒。"""
+    bad = ResolvedAction("tom", "new", "", _pending_cfg(bindings=[]), _spec(), None)
+    head = _head(store)
+    with pytest.raises(DirectiveConstructionError, match="scenario_ids must be non-empty and unique"):
+        construct_directive(store, bad, new_run_id="run-002", confirm=True, planner_decision_id="planner-run-001")
+    assert not store.exists("control-plane/runs/run-002/directive.yaml")
+    assert _head(store) == head
+
+
+@pytest.mark.parametrize("empty_slot", ["a", "b"])
+def test_a_half_pending_directive_is_refused_even_with_a_data_spec(store, empty_slot):
+    """一部分绑定配了人格、一部分还空着:不是任何一个阶段的合法形状,走严格口径被拒。"""
+    bindings = [{**b, "persona_id": "" if b["slot_id"] == empty_slot else "p-x"} for b in _bindings()]
+    bad = ResolvedAction("tom", "new", "", _pending_cfg(bindings=bindings), _spec(), None)
+    head = _head(store)
+    with pytest.raises(DirectiveConstructionError, match="scenario_ids must be non-empty and unique"):
+        construct_directive(store, bad, new_run_id="run-002", confirm=True, planner_decision_id="planner-run-001")
+    assert not store.exists("control-plane/runs/run-002/directive.yaml")
+    assert _head(store) == head
+
+
+def test_a_named_path_directive_with_an_empty_persona_id_is_refused(store):
+    bindings = _bindings()
+    bindings[0]["persona_id"] = ""
+    bad = ResolvedAction("tom", "new", "", _named_cfg(bindings=bindings), None, None)
+    with pytest.raises(DirectiveConstructionError, match=r"bindings\[0\]\.persona_id must be non-empty"):
+        construct_directive(store, bad, new_run_id="run-002", confirm=True, planner_decision_id="planner-run-001")
+    assert not store.exists("control-plane/runs/run-002/directive.yaml")
+
+
+def test_a_generated_path_directive_keeps_the_whole_slot_layout_including_driver_in_its_payload(store):
+    """派发器要靠指令里的 bindings 重建角色位布局;driver 不是 RoleBinding 的字段,只在原始载荷里。"""
+    section = _interact_section("generated")
+    section["slots"][1]["driver"] = "scripted"
+    raw = default_training_defaults_payload()
+    raw["interact"] = section
+    decision = PlannerDecision("tom", "new", "interact", None, {}, "", "r")
+    resolved = resolve_action(store, decision, config=SchedulerConfig(allow_interact=True),
+                              defaults=parse_training_defaults(raw))
+    path = construct_directive(store, resolved, new_run_id="run-002", confirm=False,
+                               planner_decision_id="planner-run-001")
+    written = store.read_product(path).payload["training_config"]
+    assert written["trained_slot"] == "a" and written["scenario_ids"] == []
+    assert written["bindings"] == [
+        {"slot_id": "a", "persona_id": "", "model_backend": "self_play"},
+        {"slot_id": "b", "persona_id": "", "model_backend": "frozen_reference", "model_ref": "zengen-v1",
+         "driver": "scripted"},
+    ]

@@ -298,12 +298,41 @@ def test_a_named_path_config_passes_the_strict_validation(store, named):
     assert cfg["bindings"][0]["model_backend"] == "self_play" and "model_ref" not in cfg["bindings"][0]
 
 
-def test_generated_path_leaves_scenarios_and_bindings_empty_and_carries_the_data_spec(store, generated):
+def test_generated_path_leaves_scenarios_empty_keeps_the_slot_layout_and_carries_the_data_spec(store, generated):
     r = resolve_action(store, _d(mode="interact"), config=ALLOW, defaults=generated)
     cfg = r.training_config
     assert (cfg["mode"], cfg["trained_slot"], cfg["max_turns_per_episode"]) == ("interact", "a", 4)
-    assert cfg["scenario_ids"] == [] and cfg["bindings"] == []
+    assert cfg["scenario_ids"] == []
+    # 角色位布局随指令走(派发器读不到调度器的 interact 段);人格留空,等派发时配上
+    assert cfg["bindings"] == [
+        {"slot_id": "a", "persona_id": "", "model_backend": "self_play"},
+        {"slot_id": "b", "persona_id": "", "model_backend": "frozen_reference", "model_ref": "zengen-v1"},
+    ]
     assert r.data_spec == generated.interact.data_spec and r.data_spec.scenario_count == 2
+
+
+def test_generated_and_named_paths_expand_the_same_slot_layout(store, named, generated):
+    def layout(defaults):
+        bindings = resolve_action(store, _d(mode="interact"), config=ALLOW, defaults=defaults).training_config["bindings"]
+        return [{k: v for k, v in b.items() if k != "persona_id"} for b in bindings]
+
+    assert layout(generated) == layout(named)
+
+
+def test_a_generated_path_binding_carries_driver_only_when_the_slot_has_one(store):
+    section = _generated_section()
+    section["slots"][1]["driver"] = "scripted"
+    cfg = resolve_action(store, _d(mode="interact"), config=ALLOW, defaults=_defaults_with(section)).training_config
+    assert "driver" not in cfg["bindings"][0]
+    assert cfg["bindings"][1]["driver"] == "scripted"
+    assert [b["persona_id"] for b in cfg["bindings"]] == ["", ""]
+
+
+def test_generated_path_bindings_follow_the_slot_order_of_the_section(store):
+    section = _generated_section()
+    section["slots"].reverse()
+    cfg = resolve_action(store, _d(mode="interact"), config=ALLOW, defaults=_defaults_with(section)).training_config
+    assert [b["slot_id"] for b in cfg["bindings"]] == ["b", "a"]
 
 
 def test_generated_path_keeps_the_default_sft_steps(store, generated):

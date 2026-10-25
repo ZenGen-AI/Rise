@@ -124,21 +124,26 @@ def _interact_config(cfg: dict, section: InteractDefaults) -> tuple[dict, DataSp
 
     点名路:情境取自段,每个角色位的 persona_id 取自 persona_ids,sft_steps 强制为 0
     (没有 data_spec 可合成 SFT 数据,也不做冷启动),data_spec 为 None。
-    生成路:scenario_ids 与 bindings 都留空,由派发器生成后回写;sft_steps 保持默认,data_spec 取自段。
+    生成路:scenario_ids 留空,由派发器生成后回写;bindings 照点名路按段里 slots 的顺序展开,但 persona_id 一律为空串,
+    由派发器配上生成出的人格后回写(角色位布局只能在这里留下,派发器读不到调度器的 interact 段)。
+    sft_steps 保持默认,data_spec 取自段。
     角色位的值照段里写的搬过来,不替人改正:训练位必须是 self_play 且不带 model_ref,写错由展开后的校验报出。"""
     cfg["mode"] = "interact"
     cfg["trained_slot"] = section.trained_slot
     cfg["max_turns_per_episode"] = section.max_turns_per_episode
     if section.data_spec is not None:
         cfg["scenario_ids"] = []
-        cfg["bindings"] = []
+        cfg["bindings"] = _bindings(section, {slot["slot_id"]: "" for slot in section.slots})
         return cfg, section.data_spec
     cfg["sft_steps"] = 0
     cfg["scenario_ids"] = list(section.scenario_ids)
-    cfg["bindings"] = [
-        {"persona_id": section.persona_ids[slot["slot_id"]], **copy.deepcopy(slot)} for slot in section.slots
-    ]
+    cfg["bindings"] = _bindings(section, section.persona_ids)
     return cfg, None
+
+
+def _bindings(section: InteractDefaults, persona_ids: dict[str, str]) -> list[dict]:
+    """每个角色位一条绑定,按段里 slots 的顺序;driver、model_ref 只在角色位有时才带。"""
+    return [{"persona_id": persona_ids[slot["slot_id"]], **copy.deepcopy(slot)} for slot in section.slots]
 
 
 def _promoted_base(store: GitStore) -> tuple[dict | None, str | None]:
