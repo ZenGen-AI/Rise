@@ -40,8 +40,9 @@ class FactoryOptions:
     planner_backend: str = "bridge"
     repo_commit: str | None = None  # None:取代码仓库的 git rev-parse HEAD(取不到仍是 None)
     executor: str = "mock"  # roll:真实 ROLL LoRA SFT 执行器(设计 FC-15),默认 mock
-    endpoint: str | None = None  # 只在 executor == "roll" 时有意义:点名 compute/endpoints.yaml 里的端点
+    endpoint: str | None = None  # 只在 executor == "roll" 或 interact 时有意义:点名 compute/endpoints.yaml 里的端点
     evaluator: str = "mock"  # someval:真实 SoMEval 评测(设计 FC-16);必须与 --executor roll 同用
+    interact: bool = False  # 给派发器注入实时客户端与策略工厂,让 interact 指令跑完;与 --executor roll 互斥
 
 
 CODE_ROOT = Path(__file__).resolve().parents[2]  # src/factory/wire.py -> 代码仓库根
@@ -220,8 +221,14 @@ def assemble(
     keys = handler_keys(options.switches)
     if options.executor not in EXECUTORS:
         raise FactoryConfigError(f"executor must be one of {list(EXECUTORS)}, got {options.executor!r}")
-    if options.endpoint is not None and options.executor != "roll":
-        raise FactoryConfigError("--endpoint only makes sense with --executor roll")
+    if options.interact and options.executor == "roll":
+        # 设计 90 拒绝项 1:真实执行器只支持 SFT(supported_phases 是 {"sft"}),开不了 interact 的实时会话
+        raise FactoryConfigError(
+            "--interact cannot be combined with --executor roll: the real executor only supports SFT, "
+            "so it cannot run a live interact session"
+        )
+    if options.endpoint is not None and options.executor != "roll" and not options.interact:
+        raise FactoryConfigError("--endpoint only makes sense with --executor roll or --interact")
     if options.evaluator not in EVALUATORS:
         raise FactoryConfigError(f"evaluator must be one of {list(EVALUATORS)}, got {options.evaluator!r}")
     if options.evaluator == "someval" and options.executor != "roll":

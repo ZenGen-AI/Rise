@@ -1,7 +1,7 @@
 """Python 入口(闭环集成设计 §10.2、R16):调和与只读可观测。门控写命令在 TypeScript 命令行。
 
     factory run <repo> [--enable ...] [--allow-mock-evidence] [--confirm-directives | --no-confirm-directives]
-                       [--planner-backend bridge|heuristic] [--repo-commit SHA]
+                       [--planner-backend bridge|heuristic] [--repo-commit SHA] [--interact]
                        [--interval-s S] [--max-ticks N]
     factory reconcile <repo> --once [同上的装配开关]
     factory install-defaults <repo>
@@ -45,10 +45,14 @@ def _assembly_flags(p: argparse.ArgumentParser) -> None:
                    help="训练执行器:mock 是确定性替身(默认);roll 经 SSH 在远端 GPU 主机上跑真实 ROLL LoRA SFT,"
                         "一次训练会同步占住调和循环数小时,且暂不能与 --enable 同用")
     p.add_argument("--endpoint", default=None,
-                   help="只在 --executor roll 时有意义:点名 compute/endpoints.yaml 里的端点 id;只有一个端点时可省")
+                   help="只在 --executor roll 或 --interact 时有意义:点名 compute/endpoints.yaml 里的端点 id;"
+                        "只有一个端点时可省")
     p.add_argument("--evaluator", choices=EVALUATORS, default="mock",
                    help="诊断评估器:mock 是确定性替身(默认);someval 起 vLLM 服务并用 SoMEval 评测真实候选,"
                         "必须同时给 --executor roll,且暂不能与 --enable 同用")
+    p.add_argument("--interact", action="store_true",
+                   help="给派发器注入实时客户端与策略工厂,让 interact 指令在真实入口跑完(训练位经 vLLM 由真模型说话);"
+                        "不能与 --executor roll 同用")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -94,6 +98,7 @@ def _options(args: argparse.Namespace) -> FactoryOptions:
         executor=args.executor,
         endpoint=args.endpoint,
         evaluator=getattr(args, "evaluator", "mock"),
+        interact=getattr(args, "interact", False),
     )
 
 
