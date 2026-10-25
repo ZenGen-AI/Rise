@@ -18,6 +18,7 @@ from mindtrainer.roll_executor import TrainingDataRejectedError
 from mindtrainer.grouping import DegenerateGroupError
 from mindtrainer.orchestrator import NotEnoughGroupsError, resume_or_run
 from mindtrainer.resume import NeedsHumanError
+from mindtrainer.roll_converter import EXPORT_FORMAT
 from mindtrainer.reward_pipeline import (
     AttributionError, AttributionBackend, build_attribution_backend,
 )
@@ -254,10 +255,12 @@ _DEFAULT_OPPONENT_DRIVER = {"frozen_reference": "vllm", "external_api": "externa
 
 
 def _is_adapter_export(ref: BigRef) -> bool:
-    """起点是不是适配器导出:fetch_hint 的 type 为 roll_ssh(roll_converter 写的就是它)。
-    factory.opponents.resolve_model_ref 另外还要求 format,这里不要求:mindtrainer 不知道导出格式名,
-    也不必知道。两处必须对"什么算适配器"意见一致,改判法要两处一起改。"""
-    return (ref.fetch_hint or {}).get("type") == "roll_ssh"
+    """起点是不是适配器导出:fetch_hint 的 type 是 roll_ssh 且 format 是 EXPORT_FORMAT。
+    与 factory.opponents.resolve_model_ref、SomevalRunner 同一个两条件判法。只看 type 不够:
+    roll_executor 写的训练存点 type 也是 roll_ssh(format 是 roll_lora_legacy),它不是适配器导出,
+    记成 adapter 会让读记录的人以为训练位挂着 LoRA 在说话。EXPORT_FORMAT 与本模块同包,可以直接导入。"""
+    hint = ref.fetch_hint or {}
+    return hint.get("type") == "roll_ssh" and hint.get("format") == EXPORT_FORMAT
 
 
 def _policy_backend(cfg: TrainingConfig, endpoint: str | None) -> dict:

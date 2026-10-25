@@ -15,6 +15,7 @@ from mindtrainer.executor import MockExecutor, SimulatedCrashError
 from mindtrainer.grouping import DegenerateGroupError
 from mindtrainer.orchestrator import NotEnoughGroupsError
 from mindtrainer.resume import NeedsHumanError
+from mindtrainer.roll_converter import EXPORT_FORMAT
 from mindtrainer.reward_pipeline import AttributionError
 from mindtrainer.training_config import InvalidTrainingConfigError, RewardConfig, TrainingConfig
 from simulator.backends import ScriptedBackend
@@ -831,10 +832,15 @@ def test_the_endpoint_is_none_when_the_dispatcher_was_given_none(store, live):
     [
         (None, "base"),
         ({"type": "mock", "tag": "t"}, "base"),
-        ({"type": "roll_ssh", "format": "qwen4_exp_vllm_2d"}, "adapter"),
-        ({"type": "roll_ssh"}, "adapter"),
+        ({"type": "roll_ssh", "format": EXPORT_FORMAT}, "adapter"),
+        # roll_executor 写的训练存点:type 同为 roll_ssh,但它不是适配器导出,训练位并没有挂 LoRA 在说话
+        ({"type": "roll_ssh", "format": "roll_lora_legacy"}, "base"),
+        ({"type": "roll_ssh"}, "base"),
+        ({"format": EXPORT_FORMAT}, "base"),
+        ({"type": "mock", "format": EXPORT_FORMAT}, "base"),
     ],
-    ids=["no hint", "mock hint", "roll_ssh export", "roll_ssh only"],
+    ids=["no hint", "mock hint", "roll_ssh export", "roll_ssh training checkpoint",
+         "roll_ssh without format", "export format without type", "export format on another type"],
 )
 def test_the_trained_kind_follows_the_base_checkpoint_fetch_hint(store, live, hint, kind):
     ref = BigRef("file:///ckpt/base", "a" * 64, 1, hint)
