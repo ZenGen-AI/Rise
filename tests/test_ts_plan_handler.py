@@ -136,13 +136,13 @@ def test_a_new_interact_violation_names_the_missing_section_and_the_retry_succee
 def test_a_new_interact_decision_is_accepted_and_resolved_from_the_defaults_section(store, monkeypatch):
     _allow_interact_with_section(store)
     seen = []
+    real = ph.construct_directive
 
     def record(store_, resolved, **kwargs):
         seen.append((resolved, kwargs["new_run_id"]))
-        return DIRECTIVE.format(kwargs["new_run_id"])
+        return real(store_, resolved, **kwargs)
 
-    # 指令构造对 interact 的放宽在后续任务里落地;这里只钉住处理器把 defaults 传进了校验与解析两处
-    monkeypatch.setattr(ph, "construct_directive", record)
+    monkeypatch.setattr(ph, "construct_directive", record)  # 真实构造,只旁路记录它收到的解析结果
     backend = ScriptedDecisionBackend([decision_json(mode="interact")])
     make_plan_handler(backend=backend)(store, _act())
     assert len(backend.calls) == 1  # 校验一次通过,没有重采样
@@ -151,6 +151,10 @@ def test_a_new_interact_decision_is_accepted_and_resolved_from_the_defaults_sect
     assert run_id == "run-002"
     assert resolved.training_config["mode"] == "interact"
     assert resolved.training_config["scenario_ids"] == ["s1", "s2"]
+    assert store.exists(DIRECTIVE.format("run-002"))
+    directive = store.read_product(DIRECTIVE.format("run-002"))
+    assert directive.payload["training_config"]["mode"] == "interact"
+    assert "data_spec" not in directive.payload  # 点名路不带 data_spec
 
 
 def test_a_clone_decision_reuses_the_recipe(store):

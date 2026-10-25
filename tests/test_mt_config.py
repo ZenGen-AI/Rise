@@ -8,7 +8,7 @@ from controlplane.envelope import BigRef, Envelope, OwnerRef
 from mindtrainer.training_config import (
     InvalidTrainingConfigError, RewardConfig, TrainingConfig, config_hash,
     ensure_valid_config, load_config_from_directive, phase_at, total_steps,
-    validate_training_config,
+    validate_pending_interact, validate_training_config,
 )
 from simulator.datamodel import RoleBinding
 
@@ -156,6 +156,71 @@ def test_invalid_config_is_rejected_with_the_specific_reason(build, needle):
 
 def test_judge_fields_are_not_required_for_outcome_split():
     assert validate_training_config(_interact(reward=_reward(judge_model_id=None, rubric_version=None))) is None
+
+
+# ---------------- 生成路 interact 回写前的宽口径 ----------------
+
+def _pending(**kw) -> TrainingConfig:
+    """生成路的 interact:情境与绑定要等派发时才回写,指令构造时两者都还是空列表。"""
+    return _interact(scenario_ids=[], bindings=[], **kw)
+
+
+def test_strict_validation_still_rejects_an_empty_scenario_list():
+    reason = validate_training_config(_pending())
+    assert reason is not None and "scenario_ids must be non-empty and unique" in reason
+
+
+def test_a_pending_interact_config_passes_the_lenient_check():
+    assert validate_pending_interact(_pending()) is None
+
+
+def test_a_pending_interact_config_with_sft_steps_still_passes():
+    assert validate_pending_interact(_pending(sft_steps=2, stage_manifest_refs={"sft": "dsm-run-2-sft"})) is None
+
+
+@pytest.mark.parametrize("build,needle", [
+    (lambda: _pending(sft_steps=-1), "sft_steps must be >= 0"),
+    (lambda: _pending(sft_steps=0, grpo_steps=0), "at least one training step"),
+    (lambda: _pending(group_size=1, min_group_size=2), "is below min_group_size"),
+    (lambda: _pending(sft_steps=2), "stage_manifest_refs['sft']"),
+    (lambda: _pending(trained_slot=""), "trained_slot must be non-empty"),
+    (lambda: _pending(reward=_reward(gamma=1.5)), "reward.gamma must be in (0, 1]"),
+    (lambda: _pending(opd_coefficient=-0.1), "opd_coefficient must be"),
+    (lambda: _pending(max_turns_per_episode="6"), "max_turns_per_episode must be an int"),
+    (lambda: _pending(mode="online"), "mode must be one of"),
+], ids=["negative_sft", "no_steps", "group_below_min", "sft_without_manifest", "empty_trained_slot",
+        "bad_gamma", "bad_opd", "max_turns_str", "bad_mode"])
+def test_the_lenient_check_only_defers_scenarios_and_bindings_not_the_rest(build, needle):
+    reason = validate_pending_interact(build())
+    assert reason is not None and needle in reason, reason
+
+
+@pytest.mark.parametrize("build", [lambda: _interact(scenario_ids=[]), lambda: _interact(bindings=[])],
+                         ids=["only_scenarios_empty", "only_bindings_empty"])
+def test_a_half_filled_interact_config_stays_on_the_strict_path(build):
+    reason = validate_pending_interact(build())
+    assert reason is not None and reason == validate_training_config(build())
+
+
+@pytest.mark.parametrize("build,needle", [(b, n) for _, b, n in INVALID], ids=[i for i, _, _ in INVALID])
+def test_every_config_that_is_not_pending_gets_exactly_the_strict_verdict(build, needle):
+    assert validate_pending_interact(build()) == validate_training_config(build())
+
+
+def test_valid_complete_configs_pass_the_lenient_check_too():
+    assert validate_pending_interact(_interact()) is None
+    assert validate_pending_interact(_batch()) is None
+
+
+def test_the_lenient_check_does_not_relax_batch_mode():
+    assert validate_pending_interact(_batch(sft_steps=-1)) == validate_training_config(_batch(sft_steps=-1))
+    assert validate_pending_interact(_batch(stage_manifest_refs={})) is not None
+
+
+@pytest.mark.parametrize("junk", [None, "cfg", 3, {}])
+def test_the_lenient_check_reports_something_that_is_not_a_config_instead_of_raising(junk):
+    reason = validate_pending_interact(junk)
+    assert reason is not None and reason == validate_training_config(junk)
 
 
 def test_ensure_valid_config_returns_the_config_or_raises_with_the_reason():

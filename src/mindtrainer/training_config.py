@@ -360,12 +360,8 @@ def _validate_interact(cfg: TrainingConfig) -> str | None:
     return None
 
 
-def validate_training_config(cfg: TrainingConfig) -> str | None:
-    """返回第一条违规的可读原因;全部合法返回 None。纯函数。
-
-    类型检查在任何比较之前跑:任何字段(含嵌套的 reward、bindings、两个 BigRef 与各容器的元素,
-    甚至传进来的根本不是 TrainingConfig)的错误类型都绝不抛异常,一律返回可读原因
-    (原因里含字段名和 "must be"),不能以裸 TypeError 或静默通过的形式逃出去。"""
+def _validate_common(cfg: TrainingConfig) -> str | None:
+    """两种模式共有的校验:类型、模式名、步数与批量、清单点名、奖励。interact 专用的情境与绑定检查不在这里。"""
     type_reason = _check_types(cfg)
     if type_reason is not None:
         return type_reason
@@ -403,12 +399,39 @@ def validate_training_config(cfg: TrainingConfig) -> str | None:
         return "stage_manifest_refs['sft'] is required when sft_steps > 0"
     if cfg.mode == "batch" and cfg.grpo_steps > 0 and not cfg.stage_manifest_refs.get("grpo_opd"):
         return "stage_manifest_refs['grpo_opd'] is required for batch mode when grpo_steps > 0"
-    reason = _validate_reward(cfg.reward)
+    return _validate_reward(cfg.reward)
+
+
+def validate_training_config(cfg: TrainingConfig) -> str | None:
+    """返回第一条违规的可读原因;全部合法返回 None。纯函数。
+
+    类型检查在任何比较之前跑:任何字段(含嵌套的 reward、bindings、两个 BigRef 与各容器的元素,
+    甚至传进来的根本不是 TrainingConfig)的错误类型都绝不抛异常,一律返回可读原因
+    (原因里含字段名和 "must be"),不能以裸 TypeError 或静默通过的形式逃出去。"""
+    reason = _validate_common(cfg)
     if reason is not None:
         return reason
     if cfg.mode == "interact":
         return _validate_interact(cfg)
     return None
+
+
+def validate_pending_interact(cfg: TrainingConfig) -> str | None:
+    """指令构造期的宽口径,只给 trainscheduler.directive.check_directive 用,且只在指令带 data_spec 时用。
+
+    生成路的 interact 指令在构造时 scenario_ids 与 bindings 都还是空列表,要到派发时才由合成出的数据回写。
+    这种配置(mode 为 interact 且两者同为空)只跳过 _validate_interact 里的检查(情境、绑定,以及同在其中的
+    max_turns_per_episode >= 1),_validate_common 的类型、步数、批量、清单点名、奖励检查照常全跑;
+    回写之后派发器再按 validate_training_config 全量复检。
+    其余任何配置(含只空了一个的半成品)与 validate_training_config 的结论完全相同。"""
+    if (
+        isinstance(cfg, TrainingConfig)
+        and cfg.mode == "interact"
+        and cfg.scenario_ids == []
+        and cfg.bindings == []
+    ):
+        return _validate_common(cfg)
+    return validate_training_config(cfg)
 
 
 def ensure_valid_config(cfg: TrainingConfig) -> TrainingConfig:

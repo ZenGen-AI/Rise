@@ -15,6 +15,7 @@ from mindtrainer.training_config import (
     InvalidTrainingConfigError,
     TrainingConfig,
     load_config_from_directive,
+    validate_pending_interact,
     validate_training_config,
 )
 from trainscheduler.assemble import directive_file
@@ -40,7 +41,8 @@ def directive_payload(resolved: ResolvedAction, *, new_run_id: str, planner_deci
     if resolved.action == "new":
         stages = required_stages(TrainingConfig.from_dict(cfg))
         cfg["stage_manifest_refs"] = {stage: manifest_id(new_run_id, stage) for stage in stages}
-        payload["data_spec"] = resolved.data_spec.to_dict()
+        if resolved.data_spec is not None:  # 点名路的 interact 数据是现成的,不合成,也就没有 data_spec
+            payload["data_spec"] = resolved.data_spec.to_dict()
     return payload
 
 
@@ -52,12 +54,17 @@ def _envelope(new_run_id: str, payload: dict, status: str, links: list[str]) -> 
 
 
 def check_directive(env: Envelope) -> None:
-    """指令必须能被 MindTrainer 派发器读回并通过校验;new 的 data_spec 必须够合成它点名的阶段。"""
+    """指令必须能被 MindTrainer 派发器读回并通过校验;带 data_spec 的指令,它必须够合成指令点名的阶段。
+
+    带 data_spec 的指令用宽口径:生成路的 interact 在这时 scenario_ids 与 bindings 还是空的,
+    要到派发时由合成出的数据回写,回写后派发器再按严格口径复检。不带 data_spec 的指令
+    (点名路、clone、replay、手写)一律走严格口径。"""
     try:
         cfg = load_config_from_directive(env)
     except InvalidTrainingConfigError as exc:
         raise DirectiveConstructionError(str(exc)) from exc
-    reason = validate_training_config(cfg)
+    validate = validate_pending_interact if "data_spec" in env.payload else validate_training_config
+    reason = validate(cfg)
     if reason is not None:
         raise DirectiveConstructionError(f"directive {env.id}: {reason}")
     if "data_spec" in env.payload:
