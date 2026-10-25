@@ -97,6 +97,8 @@ interact 的 `sft` 阶段从清单读数据(`required_stages` 对两种模式都
 
 替代方案是让点名路也带 `data_spec`、只为 SFT 合成数据,但那样一条指令里同时有"人工点名的情境"与"模板生成的情境",与本设计 D2 的"两路不能混用"冲突,不采用。
 
+连带改动:`directive_payload` 现在对 `new` 无条件调 `resolved.data_spec.to_dict()`(`src/trainscheduler/directive.py:40-43`),点名路没有 `data_spec` 会抛 `AttributeError`。改成"有 `data_spec` 才写这个键"。`check_directive` 里对 `data_spec` 的校验已经是"键存在才校验",不用改。
+
 ### 3.3 回写
 
 派发时数据生产器把最终的情境 id 与 `bindings`(含人格 id)回写指令的 `training_config`,只在 `scenario_ids` 为空时写一次;此后 `config_hash` 覆盖它们,续训与复现都按这一份。回写之后立刻跑严格校验。今天生产器已经会为带 `data_spec` 的指令补清单,回写只是多写一个字段。
@@ -176,6 +178,7 @@ policy_backend:
 | 点名路同时给了 `sft_steps > 0` | 配置错误 | 装配期退出码 2(点名路不做冷启动) |
 | 指令构造时 `scenario_ids` 为空且没有 `data_spec` | 配置错误 | `DirectiveConstructionError`,树里不写 |
 | 派发回写后 `scenario_ids` 或 `bindings` 仍不合法 | T2 | 指令 `failed` |
+| 情境数少于 `groups_per_step`(默认 2) | 配置错误 | 装配期退出码 2;一个 GRPO step 要取 `groups_per_step` 个情境,不够时同一情境会在一步里出现两次、两组被并成一组 |
 | 对手 `model_ref` 解析不到,或不是适配器导出 | T2 | 指令 `failed`,原因点名引用 |
 | 合成情境或人格失败 | T2 | 指令 `failed`,不留半套 |
 | 回写 `training_config` 失败 | T1 | 上抛,指令仍 `pending`,重跑内容相同不提交 |
@@ -203,8 +206,8 @@ policy_backend:
 ## 10. 实施顺序
 
 1. 数据模型:`Scenario.opponent_script`。
-2. 配置与校验:`interact` 段、`opponent` 段、两路互斥、`purpose` 校验。
-3. 指令链:`resolve_action` 支持 `new interact`、指令构造的宽口径校验、生成与回写、回写后的严格复校。
+2. 配置与校验:`interact` 段、`opponent` 段、两路互斥、`purpose` 校验、情境数不少于 `groups_per_step`。
+3. 指令链:`resolve_action` 支持 `new interact`;`directive_payload` 改成"有 `data_spec` 才写";指令构造的宽口径校验;生成与回写;回写后的严格复校。
 4. 对手三驱动与 `model_ref` 解析。
 5. vLLM:多适配器、策略工厂、按指令起停。
 6. 超时与 `policy_backend` 记录。

@@ -511,7 +511,7 @@ vLLM 服务按指令起停,不常驻。一条 interact 指令派发时起服务,
 | 租约被占 | `ComputeBusyError`(`src/compute/errors.py:20`) | 延后通道 |
 | 起服务失败:启动超时、进程提前退出、隧道建不起来 | `ServeStartupError`(`src/compute/errors.py:42`) | 延后通道 |
 
-两者都是 `DeferredError`。守护进程接住它们,按退避重试,进程不退出。服务在 `resume_or_run` 之前起,校验、数据合成与清单检查都在进入服务上下文之前,所以这两种失败不写训练记录,不耗 `resume_attempts`,确定性失败的指令也不占租约。
+两者都是 `DeferredError`。守护进程接住它们,按退避重试;同一动作连续延后超过上限时抛 `DeferredExhaustedError`,它刻意不继承 `DeferredError`,守护进程带原因退出,由外部监督者重启(`src/controlplane/daemon.py:60-66` 与 `:97-103`)。起服务最长等 900 秒,反复起不来会走到这一步。服务在 `resume_or_run` 之前起,校验、数据合成与清单检查都在进入服务上下文之前,所以这两种失败不写训练记录,不耗 `resume_attempts`,确定性失败的指令也不占租约。
 
 ### 5.4 超时口径 [计划中]
 

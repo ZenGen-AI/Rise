@@ -249,9 +249,14 @@ interact:
 | 来源二选一 | 点名路是 `scenario_ids` 加 `persona_ids`,生成路是 `data_spec`。两路同时写,或两路都缺,都抛错 |
 | 成对 | 写了 `scenario_ids` 就必须写 `persona_ids`,反之亦然。只写一半抛错 |
 | 解析不读树 | 点名的 id 在不在树里、情境 `purpose` 是不是 `training`,解析不查;由 factory 的 `--interact` 装配期查,失败退出码 2 |
+| 情境数下限 | 情境数不得少于 `groups_per_step`(默认 2);`_validate_interact` 会拒绝,因为同一情境在一步里出现两次会让两批 rollout 并成一组(`src/mindtrainer/training_config.py:325-330`) |
 | 展开后仍过校验 | 展开成的 interact 训练配置要过 `validate_training_config`,与其他指令一致 |
 
-生成路的指令写出时 `training_config.scenario_ids` 为空。MindTrainer 的派发器生成情境与人格后,把最终的情境 id 与带人格 id 的 `bindings` 回写一次。回写后 `config_hash` 覆盖这些 id。调度器自己不生成,也不回写。
+生成路的指令写出时 `training_config.scenario_ids` 为空,而 `validate_training_config` 要求它非空。所以指令构造改用一个宽口径:带 `data_spec`、`scenario_ids` 为空时放行,其余调用点仍用严格校验;派发器回写之后重新跑一次严格校验。宽口径只在调度器按 `new` 构造且带 `data_spec` 时成立 [计划中]。
+
+MindTrainer 的派发器生成情境与人格后,把最终的情境 id 与带人格 id 的 `bindings` 回写一次。回写后 `config_hash` 覆盖这些 id。调度器自己不生成,也不回写。
+
+点名路没有 `data_spec`,所以 `directive_payload` 里"对 `new` 无条件写 `data_spec`"要改成"有才写"(`src/trainscheduler/directive.py:40-43`),否则点名路会抛 `AttributeError` [计划中]。
 
 | 产物类型 | 路径 | 状态机种类 | 写方 | 状态 |
 |---|---|---|---|---|

@@ -109,7 +109,7 @@ factory 是组合根:系统里唯一知道所有包的地方。它把各子系�
 
 | 编号 | 目标 | 验收方式 |
 |---|---|---|
-| G1 | 不传 `--enable` 时与现有守护进程入口行为相同 | 两棵相同的仓库分别跑两个入口,整棵 `control-plane/` 与全部提交说明逐字节相同 [已落地]。`--interact` 加入后,此条件改为 `--enable` 与 `--interact` 都不传,新开关默认关,不影响这一比较 [计划中] |
+| G1 | 不传 `--enable`、执行器为默认 mock 时,与现有守护进程入口行为相同 | 两棵相同的仓库分别跑两个入口,整棵 `control-plane/` 与全部提交说明逐字节相同 [已落地]。`--interact` 加入后,此条件改为 `--enable` 与 `--interact` 都不传,新开关默认关,不影响这一比较 [计划中] |
 | G2 | 五个开关恰好覆盖六个闭环处理器键 | 开关映射表的单测;每个键接到真实处理器 [已落地] |
 | G3 | 闭环模式的装配全部在第一个 tick 之前完成 | 缺配置、资产、角色、凭证时退出码 2、一行错误、树里不写东西 [已落地] |
 | G4 | 门控写命令证据不在场就拒绝 | 候选缺诊断、配方候选缺 `repro`、提案缺 `verification` 时 `approve` 抛错且不提交 [已落地] |
@@ -248,7 +248,7 @@ factory 是组合根:系统里唯一知道所有包的地方。它把各子系�
 
 | 实体 | 字段与含义 | 约束 |
 |---|---|---|
-| `FactoryOptions` | `switches`、`allow_mock_evidence`、`confirm_directives`、`planner_backend`、`repo_commit` | 冻结数据类;`confirm_directives` 三态,`None` 表示用配置 [已落地]。新增布尔字段 `interact`,默认 `False` [计划中] |
+| `FactoryOptions` | `switches`、`allow_mock_evidence`、`confirm_directives`、`planner_backend`、`repo_commit`、`executor`、`endpoint`、`evaluator` | 冻结数据类;`confirm_directives` 三态,`None` 表示用配置 [已落地]。新增布尔字段 `interact`,默认 `False` [计划中] |
 | `BuildContext` | 仓库、证据开关、确认覆盖、规划后端、环境变量、日志目录、`repo_commit`、收尾函数列表 | 交给处理器构造器;`bridge(role)` 每次新建一个桥接 [已落地] |
 | `Assembly` | 派发器、处理器字典、评估器、证据开关、收尾函数 | 处理器为空即默认路径;`close()` 逆序收尾 [已落地] |
 | `ENABLE_MAP` | 开关到处理器键的固定表 | 五个开关、六个键,见下表 [已落地] |
@@ -298,7 +298,7 @@ sampling_k: 4       # 整数,至少 1
 
 不变量:
 
-1. 不传 `--enable` 时,factory 不读任何配置文件,不注入派发器以外的任何东西 [已落地]。传了 `--interact` 就要读 `training_defaults.yaml`、`scheduler.yaml` 与点名的情境、人格,并给派发器多注入实时客户端与策略工厂;不传 `--interact` 时这条不变量原样成立 [计划中]。
+1. 不传 `--enable`、且执行器是默认 mock 时,factory 不读任何配置文件,不注入派发器以外的任何东西 [已落地]。`--executor roll` 是例外:它读端点与本机主机映射,并注入执行器与转换器(`src/factory/wire.py:141-160`)。传了 `--interact` 就要读 `training_defaults.yaml`、`scheduler.yaml` 与点名的情境、人格,并给派发器多注入实时客户端与策略工厂;不传 `--interact` 时这条不变量原样成立 [计划中]。
 2. 开了任一闭环开关,就同时注入数据生产器与 mock 后端的真实评估器 [已落地]。
 3. 证据开关只有一个来源:命令行 `--allow-mock-evidence`。同一个值交给调和循环与提名处理器 [已落地]。
 4. 确认覆盖不写回 `scheduler.yaml`,只改 loader 的返回值 [已落地]。
