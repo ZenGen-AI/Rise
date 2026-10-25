@@ -167,7 +167,7 @@ interact 的 `sft` 阶段从清单读数据(`required_stages` 对两种模式都
 
 `factory run|reconcile` 增加 `--interact`:
 
-- 打开时读 `training_defaults.yaml` 的 `interact` 段与 `scheduler.yaml` 的 `allow_interact`,缺任一项退出码 2 并指出缺哪个;
+- 打开时不要求 `interact` 段与 `allow_interact`:这两样是调度器构造 `new` interact 指令用的,人写的指令与只跑人写指令的部署都不需要它们。装配只检查与 `--executor roll` 互斥、以及外部 API 对手的凭证在场;
 - 构造带落盘钩子的 `AgentRuntime` 与策略工厂,注入派发器;若已因 `--enable agent` 构造了运行时,复用同一个;
 - 与 `--executor roll` 同用直接拒绝(真实执行器开不了 interact 会话)。
 
@@ -191,7 +191,7 @@ policy_backend:
 
 | 失败点 | 类 | 处理 |
 |---|---|---|
-| `--interact` 打开但缺 `interact` 段或缺 `allow_interact` | 配置错误 | 装配期退出码 2 |
+| `--interact` 打开但没有 `interact` 段 | 不拦 | 只有规划器构造 `new` interact 时才需要它;装配照常 |
 | 点名的情境 `purpose` 不是 `training` | 配置错误 | 装配期退出码 2 |
 | 点名的情境与人格只写了一半 | 配置错误 | 装配期退出码 2 |
 | 点名的情境或人格不在树里 | 配置错误 | 装配期退出码 2 |

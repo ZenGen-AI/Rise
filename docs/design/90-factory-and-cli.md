@@ -360,7 +360,7 @@ Python 子命令 [已落地]。每个子命令的第一个位置参数都是控�
 | `--executor` | `mock`(默认)、`roll` | `roll` 装配真实 ROLL LoRA SFT 执行器与适配器导出转换器 [已落地],装配步骤见下文的 4a,取舍见 FC-15 |
 | `--endpoint` | 端点 id | 只在 `--executor roll` 时有意义,点名 `compute/endpoints.yaml` 里的哪个端点;只有一个端点时可省 [已落地] |
 | `--evaluator` | `mock`(默认)、`someval` | `someval` 装配真实评估器:起 vLLM 服务、跑 SoMEval 子进程、把结果转成诊断报告。必须同时给 `--executor roll`,暂不能与 `--enable` 同用 [已落地] |
-| `--interact` | 布尔,默认关 | 装配实时客户端与策略工厂,让 interact 指令在真实入口跑完。与 `--executor roll` 互斥;读 `training_defaults.yaml` 的 `interact` 段与 `scheduler.yaml` 的 `allow_interact`,缺项退出码 2 [计划中] |
+| `--interact` | 布尔,默认关 | 装配实时客户端与策略工厂,让 interact 指令在真实入口跑完。与 `--executor roll` 互斥;不要求 `interact` 段与 `allow_interact`——那两样只给调度器构造 `new` interact 用 [计划中] |
 
 TypeScript 命令行:`rismforge <review|approve|reject|confirm|status> [id] [reason]` [已落地],五个命令都在 `cli/src`。
 
@@ -462,7 +462,7 @@ TypeScript 命令行:`rismforge <review|approve|reject|confirm|status> [id] [rea
 |---|---|---|
 | 1 | 不与 `--executor roll` 同用 | 真实执行器只支持 SFT(`supported_phases` 是 `{"sft"}`,`src/mindtrainer/roll_executor.py:87`),开不了 interact 的实时会话。选项层面的检查,与 `--evaluator someval` 的互斥检查同处(`src/factory/wire.py:227` 起) |
 | 2 | `training_defaults.yaml` 有 `interact` 段 | 缺段。错误信息点名缺的是 `interact` 段 |
-| 3 | `scheduler.yaml` 的 `allow_interact` 为真 | 默认关(`src/trainscheduler/config.py:63`)。错误信息点名 `allow_interact` |
+| 3 | 有角色位用 `external_api` 时,其凭证环境变量在场 | 与 `factory.bridges` 同一口径:凭证在装配期解析,缺就起不来;异常只报变量名。`allow_interact` 不在装配期检查,它只管调度器构造 `new` interact |
 | 4 | 点名了 `scenario_ids` 就必须点 `persona_ids`,反之亦然 | 只写了一半 |
 | 5 | 点名的情境与人格都在产物树里 | 不在树里 |
 | 6 | 点名的情境 `purpose` 是 `training` | `install-defaults` 写入的三个部署情境 `purpose` 是 `deployment_simulation`,拿它们训练等于污染;人格不受此限 |
