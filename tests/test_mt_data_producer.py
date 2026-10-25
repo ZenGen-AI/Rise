@@ -229,3 +229,65 @@ def test_max_turns_is_checked_at_construction(max_turns, exc):
 def test_the_opponent_model_ref_must_be_non_empty(ref):
     with pytest.raises(ValueError):
         TemplateDataProducer(opponent_model_ref=ref)
+
+
+# ---------------------------------------------------------------------------
+# world_for_interact:interact 生成路的情境与人格
+# ---------------------------------------------------------------------------
+
+def _interact_cfg(**kw):
+    base = dict(
+        mode="interact", sft_steps=0, grpo_steps=2, stage_manifest_refs={},
+        scenario_ids=[], max_turns_per_episode=4,
+        bindings=[RoleBinding("a", "", "self_play"),
+                  RoleBinding("b", "", "frozen_reference", model_ref="zengen-v1")],
+    )
+    base.update(kw)
+    return _cfg(**base)
+
+
+def test_world_for_interact_makes_one_scenario_per_count_and_one_persona_per_slot():
+    scenarios, personas = TemplateDataProducer().world_for_interact(_interact_cfg(), _spec(seed=5))
+    assert [s.id for s in scenarios] == ["scen-auto-5", "scen-auto-6", "scen-auto-7"]
+    assert list(personas) == ["a", "b"]
+    assert [personas[slot].id for slot in ("a", "b")] == ["pers-auto-10", "pers-auto-11"]
+    for scenario in scenarios:
+        assert [r.slot_id for r in scenario.role_slots] == ["a", "b"]
+        assert scenario.purpose == "training"
+
+
+def test_world_for_interact_follows_the_binding_order_not_the_trained_slot_first():
+    cfg = _interact_cfg(
+        trained_slot="b",
+        bindings=[RoleBinding("a", "", "frozen_reference", model_ref="zengen-v1"),
+                  RoleBinding("b", "", "self_play")],
+    )
+    scenarios, personas = TemplateDataProducer().world_for_interact(cfg, _spec())
+    assert list(personas) == ["a", "b"]
+    assert all([r.slot_id for r in s.role_slots] == ["a", "b"] for s in scenarios)
+
+
+def test_world_for_interact_is_deterministic():
+    first = TemplateDataProducer().world_for_interact(_interact_cfg(), _spec())
+    second = TemplateDataProducer().world_for_interact(_interact_cfg(), _spec())
+    assert [s.to_dict() for s in first[0]] == [s.to_dict() for s in second[0]]
+    assert {k: p.to_dict() for k, p in first[1].items()} == {k: p.to_dict() for k, p in second[1].items()}
+
+
+def test_world_for_interact_personas_are_distinct_per_slot():
+    _, personas = TemplateDataProducer().world_for_interact(_interact_cfg(), _spec())
+    assert len({p.id for p in personas.values()}) == len(personas)
+
+
+@pytest.mark.parametrize(
+    "bindings, fragment",
+    [
+        ([], "bindings is empty"),
+        ([RoleBinding("a", "", "self_play"), RoleBinding("a", "", "frozen_reference", model_ref="m")],
+         "bind a slot more than once"),
+    ],
+    ids=["empty", "duplicate_slot"],
+)
+def test_world_for_interact_refuses_an_unusable_slot_layout(bindings, fragment):
+    with pytest.raises(DataSynthesisError, match=fragment):
+        TemplateDataProducer().world_for_interact(_interact_cfg(bindings=bindings), _spec())

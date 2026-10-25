@@ -421,9 +421,10 @@ def validate_training_config(cfg: TrainingConfig) -> str | None:
     return None
 
 
-def _is_pending_interact(cfg: TrainingConfig) -> bool:
+def is_pending_interact(cfg: TrainingConfig) -> bool:
     """生成路 interact 在回写前的形状:情境为空,角色位布局已展开,但每个绑定的 persona_id 还是空串。
-    只有"全空"才算;一部分配上了人格、一部分没有的半成品不算,走严格口径。"""
+    只有"全空"才算;一部分配上了人格、一部分没有的半成品不算,走严格口径。
+    构造期的宽口径(validate_pending_interact)与派发期的回写(mindtrainer.dispatch)共用这一个判定。"""
     return (
         isinstance(cfg, TrainingConfig)
         and cfg.mode == "interact"
@@ -439,13 +440,13 @@ def validate_pending_interact(cfg: TrainingConfig) -> str | None:
 
     生成路的 interact 指令在构造时 scenario_ids 为空、每个绑定的 persona_id 为空串,角色位布局
     (谁是训练位、对手的 model_backend、model_ref)已经在 bindings 里,情境与人格要到派发时才由合成出的数据回写。
-    这种配置(见 _is_pending_interact)的校验分两步:先跑 _validate_common(类型、步数、批量、清单点名、奖励);
+    这种配置(见 is_pending_interact)的校验分两步:先跑 _validate_common(类型、步数、批量、清单点名、奖励);
     通过后换上占位的情境(每步一个,数量等于 groups_per_step)与占位人格,再跑 _validate_interact,
     所以 max_turns_per_episode、训练位必须 self_play 且不带 model_ref、对手要有 model_ref、slot_id 不重复等
     检查在构造期就生效,只有"真实的情境与人格还没生成"这一件事被延后。占位只用于校验,不写进指令。
     其余任何配置(含 bindings 为空、半成品、已回写完的)与 validate_training_config 的结论完全相同;
     回写之后派发器再按 validate_training_config 全量复检。"""
-    if not _is_pending_interact(cfg):
+    if not is_pending_interact(cfg):
         return validate_training_config(cfg)
     reason = _validate_common(cfg)
     if reason is not None:

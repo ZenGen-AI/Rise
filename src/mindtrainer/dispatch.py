@@ -6,7 +6,7 @@ from controlplane.daemon import DirectiveFailedError, Dispatcher
 from controlplane.deferred import DeferredError
 from controlplane.envelope import Envelope
 from controlplane.gitstore import UNREADABLE_PRODUCT_ERRORS, GitStore
-from controlplane.paths import dataset_manifest_file
+from controlplane.paths import dataset_manifest_file, run_dir
 from mindtrainer.checkpoint import CheckpointConverter, MockConverter
 from mindtrainer.data_spec import (
     DataProducer, DataSynthesisError, InvalidDataSpecError, check_data_spec_against_config,
@@ -22,13 +22,15 @@ from mindtrainer.reward_pipeline import (
 )
 from mindtrainer.store_adapter import read_training_run
 from mindtrainer.training_config import (
-    InvalidTrainingConfigError, TrainingConfig, load_config_from_directive, validate_training_config,
+    InvalidTrainingConfigError, TrainingConfig, is_pending_interact, load_config_from_directive,
+    validate_training_config,
 )
 from mindtrainer.trajectory_source import (
     BatchTrajectorySource, InteractTrajectorySource, TrajectorySource,
 )
 from simulator.backends import ModelBackend
 from simulator.dataset import DatasetIntegrityError, DatasetManifest, read_manifest
+from simulator.store_adapter import write_persona, write_scenario
 
 # 确定性地做不成的失败:重试同样的指令还会再失败,所以映射成 directive 的 failed。
 # 其余异常原样上抛,directive 保持 pending,下一轮重新派发(瞬态恢复)。
@@ -53,6 +55,78 @@ def _data_run_id(run_id: str, ref: str, stage: str) -> str:
             f"of the form 'dsm-<run>-{stage}'"
         )
     return data_run
+
+
+def _prepare_interact(
+    store: GitStore,
+    run_id: str,
+    cfg: TrainingConfig,
+    directive: Envelope,
+    data_producer: DataProducer | None,
+) -> TrainingConfig:
+    """生成路 interact 指令的回写:情境与人格到派发时才生成,落树后写回指令,返回回写后的配置。
+
+    只有"待回写"(is_pending_interact:interact、scenario_ids 为空、bindings 非空且 persona_id 全是空串)
+    才动手。其余配置原样返回,交给紧随其后的严格校验:点名路本来就完整;生成路已回写过的指令重入时
+    也不再是待回写,所以回写只做一次;半成品(部分 persona_id 空、scenario_ids 空而人格齐、bindings 为空)
+    不回写,由严格校验判 T2。
+
+    写入顺序:情境与人格先落树,指令最后回写。回写前崩溃,重入时 world_for_interact 生成同样的 id 与
+    同样的内容,重写是空操作(GitStore 对相同内容不提交),随后回写。
+    直接改指令里的原始字典,而不是 TrainingConfig.to_dict():调度器写进 binding 的、TrainingConfig
+    还不认的键(driver)要原样留下。确定性做不成判 failed(T2);瞬态错误(OSError 等)原样上抛,
+    指令保持 pending。"""
+    if not is_pending_interact(cfg):
+        return cfg
+    try:
+        spec = data_spec_from_directive(directive)
+    except InvalidDataSpecError as exc:
+        raise DirectiveFailedError(f"directive {run_id}: {exc}") from exc
+    missing = []
+    if spec is None:
+        missing.append("a data_spec in the directive")
+    if data_producer is None:
+        missing.append("a data_producer")
+    if missing:
+        raise DirectiveFailedError(
+            f"directive {run_id}: the interact config has no scenario_ids and no persona_id, so they must "
+            f"be generated at dispatch time, which needs {' and '.join(missing)}"
+        )
+    make_world = getattr(data_producer, "world_for_interact", None)
+    if make_world is None:
+        raise DirectiveFailedError(
+            f"directive {run_id}: the interact config must be generated at dispatch time, but the "
+            f"data_producer {type(data_producer).__name__} has no world_for_interact"
+        )
+    try:
+        scenarios, personas = make_world(cfg, spec)
+    except (DataSynthesisError, *_DETERMINISTIC) as exc:
+        raise DirectiveFailedError(
+            f"directive {run_id}: data synthesis failed ({type(exc).__name__}: {exc})"
+        ) from exc
+    slots = [b.slot_id for b in cfg.bindings]
+    absent = [slot for slot in slots if slot not in personas]
+    if absent:
+        # 生产器违约:缺人格会在下面变成 KeyError,被当成瞬态失败每轮重派
+        raise DirectiveFailedError(
+            f"directive {run_id}: data synthesis failed (world_for_interact returned no persona "
+            f"for slot(s) {absent})"
+        )
+    for scenario in scenarios:
+        write_scenario(store, scenario)
+    for slot in slots:
+        write_persona(store, personas[slot])
+    path = f"{run_dir(run_id)}/directive.yaml"
+    env = store.read_product(path)
+    raw = env.payload["training_config"]
+    raw["scenario_ids"] = [scenario.id for scenario in scenarios]
+    for binding in raw["bindings"]:
+        binding["persona_id"] = personas[binding["slot_id"]].id
+    store.write_product(path, env, "mindtrainer: write back interact scenarios")
+    try:
+        return load_config_from_directive(env)
+    except InvalidTrainingConfigError as exc:
+        raise DirectiveFailedError(f"directive {run_id}: {exc}") from exc
 
 
 def _synthesize_missing(
@@ -191,6 +265,9 @@ def make_mindtrainer_dispatcher(
     - data_producer:指令带 data_spec 且本 run 名下的清单缺失时,用它先合成数据(两种模式都可,
       interact 只合成 sft)。不带 data_spec 的指令行为与改动前完全相同;带 data_spec 的指令总是
       先严格解析,写错的判 failed;需要合成而没有注入生产器时判 failed 并写明缺什么。
+    - 生成路的 interact 指令(scenario_ids 为空、persona_id 全空)另需生产器的 world_for_interact
+      (DataProducer 协议之外的可选方法):派发时生成情境与人格,落树后回写进指令,再按严格口径复校
+      (见 _prepare_interact)。点名路与已回写的指令不经过它。
     - 确定性失败(数据不对、配置不合法、该人工介入)抛 DirectiveFailedError,调和循环把
       directive 置 failed,不再重试;其余异常原样上抛,保持 pending 等下一轮。
     """
@@ -202,6 +279,8 @@ def make_mindtrainer_dispatcher(
             cfg = load_config_from_directive(directive)
         except InvalidTrainingConfigError as exc:
             raise DirectiveFailedError(f"directive {run_id}: {exc}") from exc
+        # 生成路的 interact 指令此刻 scenario_ids 与 persona_id 还空着:先回写,再让严格校验看回写后的配置
+        cfg = _prepare_interact(store, run_id, cfg, directive, data_producer)
         reason = validate_training_config(cfg)
         if reason is not None:
             raise DirectiveFailedError(f"directive {run_id}: {reason}")

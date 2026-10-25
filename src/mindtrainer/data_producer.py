@@ -133,6 +133,38 @@ class TemplateDataProducer:
             )
         return scenarios, personas, slots
 
+    def world_for_interact(
+        self, cfg: TrainingConfig, data_spec: DataSpec
+    ) -> tuple[list[Scenario], dict[str, Persona]]:
+        """interact 生成路的情境与人格,不写树、不跑 rollout。
+
+        interact 指令的 bindings 每个角色位一条,对所有情境共用(trajectory_source 每次 rollout 都按它
+        读人格),所以人格按角色位生成一份,而不是像 _world 那样按 (情境, 角色位) 各生成一份。
+        情境的 role_slots 照 bindings 的角色位顺序排;其余字段取自模板生成的基底。
+        确定性:同一份 (cfg 的角色位, data_spec) 恒得到相同的 id,所以回写前崩溃、重入时
+        重新生成并重写的内容与上次逐字节相同(GitStore 对相同内容是空操作)。
+        返回 (情境列表, {slot_id: 人格});角色位顺序即 bindings 的顺序。"""
+        slots = [b.slot_id for b in cfg.bindings]
+        if not slots:
+            raise DataSynthesisError("bindings is empty: an interact world needs the slot layout")
+        if len(set(slots)) != len(slots):
+            raise DataSynthesisError(f"bindings bind a slot more than once: {slots}")
+        scenarios: list[Scenario] = []
+        for i in range(data_spec.scenario_count):
+            base = generate_scenario(self._generation, data_spec.seed + i, data_spec.purpose)
+            scenarios.append(Scenario(
+                id=base.id, background=base.background,
+                role_slots=[RoleSlot(slot, f"角色位 {slot}") for slot in slots],
+                conflict=base.conflict, norms=list(base.norms),
+                purpose=base.purpose, source=base.source,
+                opponent_script={k: list(v) for k, v in base.opponent_script.items()},
+            ))
+        personas = {
+            slot: generate_persona(self._generation, data_spec.seed * len(slots) + j)
+            for j, slot in enumerate(slots)
+        }
+        return scenarios, personas
+
     def produce(self, store: GitStore, run_id: str, cfg: TrainingConfig, data_spec: DataSpec) -> None:
         stages = stages_to_synthesize(store, run_id, cfg)
         if not stages:
