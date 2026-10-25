@@ -486,9 +486,9 @@ build_recipe_candidate(store, run_id, *, config, repo_commit=None,
 |---|---|
 | `mode` | `interact` |
 | `trained_slot`、`max_turns_per_episode` | 取自 `interact` 段 |
-| `bindings` | 取自 `slots` 的 `slot_id`、`model_backend`、`model_ref`;点名路再按 `persona_ids` 补人格 id |
-| `scenario_ids` | 点名路取自段;生成路为空,由派发器回写 |
-| 奖励、步数、组大小、教师引用 | 取自默认 batch 配置 |
+| `bindings` | 取自 `slots` 的 `slot_id`、`model_backend`、`model_ref`、可选 `driver`。生成路写指令时 `bindings` 为空(`RoleBinding.persona_id` 必填,人格还没生成),由派发器回写时补人格 id;点名路直接按 `persona_ids` 补齐 |
+| `scenario_ids` | 点名路取自段;生成路为空,由派发器回写。两路都必须不少于 `groups_per_step` |
+| 奖励、步数、组大小、教师引用 | 取自默认 batch 配置;**点名路例外**:`sft_steps` 强制为 0(点名路不做冷启动,也没有 `data_spec` 可合成 SFT 数据),`grpo_steps` 仍取默认 |
 | `base_checkpoint_ref` | 与 `new` 加 `batch` 相同:最新已晋级模型,没有就用默认初始基座 |
 | `ResolvedAction.data_spec` | 生成路取自 `interact.data_spec`;点名路为 `None` |
 | 清单 id | interact 的 `required_stages` 只含 `sft`,`grpo_opd` 来自实时会话(`src/mindtrainer/data_spec.py:148-160`),所以只写 `dsm-<新 run>-sft` |
@@ -686,16 +686,16 @@ build_recipe_candidate(store, run_id, *, config, repo_commit=None,
 | 规划等门③ | 启用提名且候选 `effective` 时规划要等来源 run 的配方候选离开 `pending_review` 与 `approved`,每轮多停一次等人;没有提名标记的 run(人手放进树的候选)规划永不触发 | 人手写下一条指令,或关掉提名开关 [已落地] |
 | 第一次闭环没有基线模型 | 没有可比增益就不会提名 | 先登记一个已晋级的基线模型 |
 
-签名与符号名、用例数、与调和循环的联动、组合根的参数传递都已按代码核实,不再列为未核实项。剩下的两条仍未核实;场景二接通另有两条设计缺口 [计划中]。
+签名与符号名、用例数、与调和循环的联动、组合根的参数传递都已按代码核实,不再列为未核实项。剩下的两条仍未核实;场景二接通的两条约束已定,见下表末两行 [计划中]。
 
 | 未核实项 | 影响 | 核实办法 |
 |---|---|---|
 | 真实桥接后端下的规划 | 只用罐头与启发式后端测过 | 用真实 `claude`、`codex` 各规划一次 |
 | mock 切到 real 之后的头几轮 | real 候选对非 real 基线无可比增益,提名会跳过 | 切换后观察提名标记的 `reason` |
-| 生成路指令在回写前 `scenario_ids` 为空 [计划中] | `validate_training_config` 现要求 interact 配置的 `scenario_ids` 非空且不重复(`src/mindtrainer/training_config.py`);`construct_directive` 写前校验,不变量 4 也要求指令能被读回,生成路指令过不了这条 | 施工时定下放行条件(指令带 `data_spec` 且 `scenario_ids` 为空时放宽),或让调度器先写占位 id,并补测试 |
-| 点名路下 SFT 阶段的数据来源 [计划中] | 点名路不带 `data_spec`,而 `sft_steps` 大于 0 时 `required_stages` 含 `sft`,指令需要一份可合成或已存在的 `sft` 清单 | 施工时读派发器对「无 `data_spec` 且缺 `sft` 清单」指令的处理;出路有两条:点名路也带 `data_spec`,或 interact 的 `sft_steps` 取 0 |
+| 生成路指令在回写前 `scenario_ids` 为空 [计划中] | `validate_training_config` 现要求 interact 配置的 `scenario_ids` 非空且不重复(`src/mindtrainer/training_config.py`);`construct_directive` 写前校验,不变量 4 也要求指令能被读回,生成路指令过不了这条 | 已定:严格校验不动,另加只给 `check_directive` 用的宽口径(带 `data_spec`、`scenario_ids` 与 `bindings` 都为空时放行);派发回写后再跑一次严格校验 [计划中] |
+| 点名路下 SFT 阶段的数据来源 [计划中] | 点名路不带 `data_spec`,而 `sft_steps` 大于 0 时 `required_stages` 含 `sft`,指令需要一份可合成或已存在的 `sft` 清单 | 已定:点名路 `sft_steps` 必须为 0,装配期拒绝「点名 + `sft_steps > 0`」;生成路照旧带 `data_spec` 合成 SFT 数据 [计划中] |
 
-明确不做:判定触发条件、构造 AgentRSI 指令、提名 agent_rsi 配方、为 `new` 构造 interact 指令、并行多轮在途、失败决策的自动恢复。场景二接通后,「为 `new` 构造 interact 指令」收窄为只在缺 `interact` 段时不做 [计划中]。
+明确不做:判定触发条件、构造 AgentRSI 指令、提名 agent_rsi 配方、并行多轮在途、失败决策的自动恢复。为 `new` 构造 interact 指令只在 `interact` 段在场且 `allow_interact` 打开时做,其余情形仍不做 [计划中]。
 
 ## 附 本文术语
 

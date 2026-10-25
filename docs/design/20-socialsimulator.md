@@ -140,7 +140,7 @@ SocialSimulator 的仿真部分是工厂的"社会情境发生器":它把情境�
 | 单会话最多轮次 `max_turns_cap` | 200 | `EnvironmentServicer.__init__` |
 | 等待 `CreateSession` | 10 秒 | `create_timeout_s` |
 | 等客户端提交一轮 | 30 秒 | `turn_timeout_s` |
-| 服务端后端单次调用 | 60 秒;接真模型时可配,`--interact` 装配拟用 15 秒 [计划中] | `backend_timeout_s` |
+| 服务端后端单次调用 | 默认 60 秒;`--interact` 装配拟改传 15 秒,该默认值本身不变 [计划中] | `backend_timeout_s` |
 | 并发会话上限 | 16 | `max_workers`,与 `maximum_concurrent_rpcs` 对齐 |
 | keepalive 间隔与超时 | 30000 / 10000 毫秒 | `create_server` |
 
@@ -259,7 +259,7 @@ interact 的情境与人格来源 [计划中]。场景二的情境与人格有�
 
 点名情境的 `purpose` 必须是 `training`。组合根装入的默认部署素材里,三个情境都是 `deployment_simulation`(`src/factory/defaults.py:50`),拿它们训练等于把部署素材混进训练数据。人格没有这条限制。
 
-派发时回写。生成路的指令进派发器时,`training_config.scenario_ids` 为空。派发器用生成器生成并写入情境与人格,再把最终的情境 id 与带人格 id 的 `bindings` 回写进指令的 `training_config`,只在 `scenario_ids` 为空时写这一次。此后 `config_hash` 覆盖这些 id,续训与复现都按回写后的这一份。点名路的指令本来就带 id,不回写。
+派发时回写。生成路的指令进派发器时,`training_config.scenario_ids` 为空。派发器用生成器生成并写入情境与人格,再把最终的情境 id 与带人格 id 的 `bindings` 回写进指令的 `training_config`,只在 `scenario_ids` 为空时写这一次。此后 `config_hash` 覆盖这些 id,续训与复现在**配置层面**按回写后的这一份;它不是轨迹层面的等价保证。点名路的指令本来就带 id,不回写。
 
 | 产物类型 | 路径 | 状态机种类 | 写方 | 状态 |
 |---|---|---|---|---|
@@ -591,7 +591,8 @@ interact 会话前的准备 [计划中]。下表是派发器与组合根在起�
 | 生成路合成情境或人格失败 [计划中] | T2 | 指令 `failed`,不留半套情境与人格 | 失败记录 |
 | 回写 `training_config` 失败 [计划中] | T1 | 上抛,指令仍 `pending`;重跑内容相同不提交 | 无 |
 | 外部 API 对手单次调用超时 [计划中] | T1 | 套 `TimeoutBackend`,归 `role_backend_timeout`,整条重跑,有上限 | `EndSession` 的 `reason` |
-| 外部 API 对手缺凭证或返回非 200 [计划中] | T1 或 T2,协议上不区分 | 后端抛异常,归 `role_backend_failure`;异常信息只含环境变量名,不含凭证 | `EndSession(role_backend_failure)` |
+| 外部 API 对手返回非 200 [计划中] | T1 或 T2,协议上不区分 | 后端抛异常,归 `role_backend_failure`;整条重跑,有上限 | `EndSession(role_backend_failure)` |
+| 外部 API 对手缺凭证 [计划中] | 配置错误,装配期 | 不进会话:factory 的 `--interact` 装配期解析凭证,缺则退出码 2,异常只报环境变量名 | 一行 `factory: error: ...` |
 
 只读观测手段。
 
@@ -685,8 +686,8 @@ interact 会话前的准备 [计划中]。下表是派发器与组合根在起�
 | keepalive 30 秒能否及时发现跨网段死连接 | 断连判定延迟 | 跨机部署时拔网线实测 |
 | pb2 生成物与当前 protobuf 版本兼容 | 实时服务能否启动 | 已在本地跑通 `tests/test_realtime_proto_smoke.py`;升级 protobuf 后重跑 |
 | 客户端重建与服务端落盘的 Episode 是否逐字节一致 | 对账 | 比较两边 `episode_digest` |
-| 驱动选择的配置键 [计划中] | 默认固定对话时,绑定里的 `model_backend` 仍可标 `frozen_reference`;靠哪个配置键选驱动,设计尚未定下 | 施工时由 `opponent` 配置段定下,并补进本篇 |
-| 固定对话循环的实现位置 [计划中] | 循环放进 `ScriptedBackend`,还是放在组合根的包装里,影响现有用法对“(无更多发言)”的依赖 | 施工时 grep 该字符串的全部使用方 |
+| 驱动选择的配置键 [计划中] | `model_backend` 只有三个合法值,没有「固定对话」 | 已定:角色位加可选 `driver`(`vllm` / `external_api` / `scripted`),缺省按 `model_backend` 推;`scripted` 必须显式写,且可与 `frozen_reference` 并存,此时 `model_ref` 只作身份标签 |
+| 固定对话循环的实现位置 [计划中] | 循环是新行为,现有用法依赖「(无更多发言)」 | 已定:`ScriptedBackend` 加默认关闭的 `loop` 参数,只有本次装配处传 `loop=True` |
 | 外部 API 对手的速率上限与成本 [计划中] | 限流时 `role_backend_timeout` 的重跑次数会耗尽 | 按实际供应商压测 |
 | 站内 vLLM 同时服务训练位与对手位时的单次延迟 [计划中] | 能否稳在 `backend_timeout_s` 内 | 真机测两个 LoRA 并发的延迟 |
 

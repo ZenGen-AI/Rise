@@ -82,7 +82,7 @@ interact:
 裁决:**把"情境已定"与"情境待生成"分成两种校验**。
 
 - `validate_training_config` 保持严格,派发器与训练入口照旧用它;任何时刻看到空的 `scenario_ids` 都拒绝。
-- 新增一个只给指令构造用的宽口径:带 `data_spec`、`scenario_ids` 为空时放行,视为"待生成"。`check_directive` 用宽口径,其余调用点不换。
+- 新增一个只给指令构造用的宽口径:带 `data_spec`、`scenario_ids` 与 `bindings` 都为空时放行,视为"待生成"。`bindings` 也要放宽——`RoleBinding.persona_id` 是必填(`src/simulator/datamodel.py:96`),而生成路的人格还没生成。`check_directive` 用宽口径,其余调用点不换。
 - 派发器回写之后重新跑一次严格校验;此时情境与人格都已就位,过不了就是 T2。
 - 宽口径只在"调度器按 `new` 构造、且带 `data_spec`"时成立。人写的指令没有 `data_spec`,必须自带 `scenario_ids`,与今天的人工路径一致。
 
@@ -105,14 +105,18 @@ interact 的 `sft` 阶段从清单读数据(`required_stages` 对两种模式都
 
 ## 4. 对手位三种驱动(D4、D5)
 
-| `model_backend` | 驱动 | 来源 |
-|---|---|---|
-| `frozen_reference` | 站内 vLLM 上挂对手模型的 LoRA | `model_ref` 经树里的模型产物解析成 `checkpoint_ref` |
-| `external_api` | OpenAI 兼容 HTTP | 新增 `opponent` 配置:端点、模型名、凭证的环境变量名 |
-| 固定对话 | `ScriptedBackend` | 情境自带剧本优先,没带时用全局台词 |
+`model_backend` 只有三个合法值(`self_play` / `frozen_reference` / `external_api`),没有"固定对话"这一项。所以驱动由角色位自己的一个可选键选,缺省时按 `model_backend` 推:
+
+| `driver` | 驱动 | 来源 | 缺省条件 |
+|---|---|---|---|
+| `vllm` | 站内 vLLM 上挂对手模型的 LoRA | `model_ref` 经树里的模型产物解析成 `checkpoint_ref` | `model_backend` 为 `frozen_reference` |
+| `external_api` | OpenAI 兼容 HTTP | `opponent` 配置:端点、模型名、凭证的环境变量名 | `model_backend` 为 `external_api` |
+| `scripted` | `ScriptedBackend` | 情境自带剧本优先,没带时用全局台词 | 无;必须显式写 |
+
+`driver: scripted` 允许与 `frozen_reference` 同时出现:这时 `model_ref` 只作为这个角色的身份标签,不加载权重。这样"固定对话"不必新增 `model_backend` 取值,也不必改 `RoleBinding` 的校验。
 
 - **情境自带剧本**:`Scenario` 增加可选字段 `opponent_script`,形如 `{b: ["台词一", "台词二"]}`,按角色位给一串台词,像 `ScriptedBackend` 一样按序消耗;台词用完仍在说话时循环。今天 `ScriptedBackend` 用完返回「(无更多发言)」、不循环(`src/simulator/backends.py:52-55`),所以循环是新行为:给它加一个默认关闭的 `loop` 参数,只有本设计的装配处传 `loop=True`,既有调用点行为不变。`to_dict` 只在非空时写这个键,`from_dict` 用 `d.get` 读,旧产物与既有哈希不变。默认配置不写它,所以默认仍用全局台词。
-- **`model_ref` 解析**:全仓库现在没有一处把 `model_ref` 解析成权重,本设计新增。解析不到、或指到的不是适配器导出,派发时确定性失败,不静默退回脚本台词。
+- **`model_ref` 解析**:全仓库现在没有一处把 `model_ref` 解析成权重,本设计新增。解析必须发生在**起服务之前**,在派发器里做完:放进 `AgentRuntime._backends` 的话,异常会被服务端归成 `role_backend_failure`,按瞬态整条重跑,重试永远不会变好。解析不到、或指到的不是适配器导出,判 T2、指令 `failed`,不静默退回脚本台词。
 - **外部 API**:仓库现在没有 OpenAI 兼容客户端,新增一个极小的(`urllib` 即可,与 `src/compute/tunnel.py:35-48` 的 HTTP 探测同一手法)。凭证只从环境变量读,异常信息只报变量名(与 `factory.bridges` 同一口径)。超时由服务端的 `TimeoutBackend` 兜住,单次调用超时归 `role_backend_timeout`,按瞬态整条重跑。
 
 三类驱动都在 `AgentRuntime._backends` 里按角色位选,实现在组合根;模拟器本身仍只认后端协议。
@@ -137,6 +141,8 @@ interact 的 `sft` 阶段从清单读数据(`required_stages` 对两种模式都
 一条 interact 指令派发时起服务,整轮训练在服务句柄的上下文里跑,退出即停、放租约。租约被占抛 `ComputeBusyError`,走延后通道;起服务失败抛 `ServeStartupError`,同样是 `DeferredError`;连续延后超过上限抛 `DeferredExhaustedError`,它刻意不继承 `DeferredError`,守护进程会带原因退出,等外部监督者重启(`src/controlplane/daemon.py:60-66`)。
 
 服务上下文由**派发器**持有,在 `resume_or_run` 之前起。由此:租约被占不写训练记录、不耗 `resume_attempts`;校验、数据合成与清单检查都在进入服务之前,失败的指令不占租约。
+
+一个例外:`ServeStartupError` 也用于"收尾时发现服务仍在运行"。走到这一步时候选已经写完,若按瞬态重派,会在下一轮重新起服务、再次撞上同一处。所以收尾时发现服务仍在运行,判 T2、指令 `failed`,写明要人清掉占显存的作业;只有起服务阶段的失败才走延后通道。
 
 ### 5.4 超时
 
@@ -200,7 +206,7 @@ policy_backend:
 | 单次角色后端调用超时 | T1 | `role_backend_timeout`,整条重跑,有上限 |
 | 落盘钩子失败 | T1 | `persistence_failed`,整条重跑 |
 
-复现性:interact 的 `grpo_opd` 没有清单与数据哈希,不声称续训等价;`config_hash` 覆盖情境、人格、角色位与 `model_ref`,所以配置层面可复现。
+复现性:interact 的 `grpo_opd` 没有清单与数据哈希,不声称续训等价;`config_hash` 覆盖情境 id、人格 id、角色位、`bindings` 与 `base_checkpoint_ref` 这类**配置层**的东西,不含 `driver` 实际连到哪个端点、`opponent_script` 的台词内容,也不含 `policy_backend`。所以能保证的是"同一份配置重跑得出同一份指令",不是"重跑得出同样的轨迹"。
 
 ## 9. 测试策略
 
@@ -213,7 +219,7 @@ policy_backend:
 | 集成 | `AgentRuntime` 落盘钩子;三类对手驱动各一条 | loopback 服务端 |
 | 集成 | 外部 API 对手的 HTTP 客户端:成功、超时、非 200、缺凭证只报变量名 | 本地 HTTP 替身 |
 | 端到端 | `factory reconcile --once --interact` 走到候选 `pending_review`,episode 都在树里 | 假 vLLM(本地 HTTP 回固定文本)、mock 执行器 |
-| 装配 | `--interact` 的六条拒绝项各一条 | 无 |
+| 装配 | `--interact` 的十条拒绝项各一条 | 无 |
 
 不依赖 GPU、真实网络与真实模型。真机验证单列,标未核实。
 

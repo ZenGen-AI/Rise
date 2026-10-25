@@ -205,6 +205,7 @@ MindTrainer 分两层:入口与编排一层决定"从哪跑、跑不跑",模式�
 依赖方向规则:
 
 - `mindtrainer` 可以导入 `controlplane` 与 `simulator`。复用 `Episode`、`RoleBinding` 等数据结构是允许的,受限的是子系统间的运行时调用。真实执行器与转换器另可导入 `compute`;`compute` 反过来不认识训练,只导入标准库与 `controlplane.deferred`。
+- interact 的 vLLM 服务上下文由组合根持有:组合根注入一个返回上下文管理器的可调用对象,`mindtrainer` 只把它当上下文管理器用,不导入 `compute`、也不决定端点 [计划中]。`model_ref` 的解析在派发器里、起服务之前完成,失败判 T2;放进运行时的后端工厂会被服务端归成 `role_backend_failure`,按瞬态重跑到上限也不会变好 [计划中]。
 - `mindtrainer` 不导入 `diagnostic`。系统没有 MindTrainer 与诊断评测之间的直连;OPD 是否失效由诊断侧判定。
 - 编排器只调下层纯函数和协议,不含判定逻辑。续训判定在 `resume.py`,失败到类别的映射在 `dispatch.py`。
 - TrainScheduler 只可导入 `mindtrainer.data_spec` 与 `mindtrainer.training_config` 两个模块。factory 可以导入 `mindtrainer.dispatch` 与 `mindtrainer.data_producer`。
@@ -456,7 +457,7 @@ class DataProducer(Protocol):
 - 只支持 `outcome_split` 归因,其他归因抛 `DataSynthesisError`。第 i 个情境用种子 `seed + i`。
 - **V1 训练数据里的奖励差异是人造的,只证明流程跑通,不代表任何社会能力。**
 - 情境的角色位按训练配置改写:带 `bindings`(interact)就照它,训练位排第一;不带(batch)就配一个 `frozen_reference` 的对手位 `opponent`。
-- 生产器只写 episode 与清单,不写 `scenarios/` 与 `personas/`。
+- 生产器今天只写 episode 与清单,不写 `scenarios/` 与 `personas/`。interact 生成路要它额外写这两个目录 [计划中]:生成路的情境 id 在写指令时还不存在,只能到派发时由数据生产器按 `data_spec` 生成情境与人格并写进产物树,再回写进指令的 `training_config`。点名路的情境与人格本来就在树里,生产器不碰。
 
 ### 5.1 策略工厂 [计划中]
 
@@ -509,9 +510,12 @@ vLLM 服务按指令起停,不常驻。一条 interact 指令派发时起服务,
 | 情况 | 异常 | 处理 |
 |---|---|---|
 | 租约被占 | `ComputeBusyError`(`src/compute/errors.py:20`) | 延后通道 |
-| 起服务失败:启动超时、进程提前退出、隧道建不起来 | `ServeStartupError`(`src/compute/errors.py:42`) | 延后通道 |
+| 起服务阶段失败:启动超时、进程提前退出、隧道建不起来 | `ServeStartupError`(`src/compute/errors.py:42`) | 延后通道 |
+| 收尾时发现服务仍在运行 | 同一个 `ServeStartupError` | T2,指令 `failed`,不走延后通道 |
 
-两者都是 `DeferredError`。守护进程接住它们,按退避重试;同一动作连续延后超过上限时抛 `DeferredExhaustedError`,它刻意不继承 `DeferredError`,守护进程带原因退出,由外部监督者重启(`src/controlplane/daemon.py:60-66` 与 `:97-103`)。起服务最长等 900 秒,反复起不来会走到这一步。服务在 `resume_or_run` 之前起,校验、数据合成与清单检查都在进入服务上下文之前,所以这两种失败不写训练记录,不耗 `resume_attempts`,确定性失败的指令也不占租约。
+两者都是 `DeferredError`。守护进程接住它们,按退避重试;同一动作连续延后超过上限时抛 `DeferredExhaustedError`,它刻意不继承 `DeferredError`,守护进程带原因退出,由外部监督者重启(`src/controlplane/daemon.py:60-66` 与 `:97-103`)。起服务最长等 900 秒,反复起不来会走到这一步。服务在 `resume_or_run` 之前起,校验、数据合成与清单检查都在进入服务上下文之前,所以租约被占与起服务阶段的失败不写训练记录,不耗 `resume_attempts`,确定性失败的指令也不占租约。
+
+`ServeStartupError` 不能整类归延后通道,它有一个例外:它也用于「收尾时发现服务仍在运行」。走到这一步时训练记录与候选已经写完,若按瞬态重派,下一轮会重新起服务,再次撞上同一处,反复起服务。所以这一种判 T2、指令 `failed`,原因写明要人清掉占显存的作业;只有起服务阶段的失败才走延后通道。判错的代价:把它当瞬态,会让守护进程在已完成的训练上空转到延后上限;当 T2 则要人工介入一次。
 
 ### 5.4 超时口径 [计划中]
 
@@ -579,6 +583,15 @@ vLLM 服务按指令起停,不常驻。一条 interact 指令派发时起服务,
 | 6 | 编排器 | 每 `checkpoint_every_steps` 步存点(最后一步除外),回写引用、step 与曲线摘要 | 训练记录 |
 | 7 | 编排器 | 存最终 checkpoint,先回写 `pending` 记录,再转换格式 | 训练记录 |
 | 8 | 编排器 | 注册候选,记录置 `executed`;派发器返回,调和循环把指令置 `executed` | 候选、训练记录 |
+
+interact 的生成路多一条「生成、写树、回写、复校」的链路 [计划中]。它由第 1a 步的同一个数据生产器完成,全部发生在第 1b 步起服务之前:
+
+| 环节 | 做什么 | 理由与判错的代价 |
+|---|---|---|
+| 指令写出 | `training_config` 里 `scenario_ids` 与 `bindings` 都为空,只带 `data_spec`。写指令前的 `check_directive` 靠一个只给它用的宽口径放行:带 `data_spec`、两者都为空时视为「待生成」 | 严格的 `validate_training_config` 要求 `scenario_ids` 非空且唯一,`RoleBinding.persona_id` 又是必填,照今天的规则这条指令根本写不出来。派发器与训练入口照旧用严格口径。宽口径只在调度器按 `new` 构造、且带 `data_spec` 时成立;人写的指令没有 `data_spec`,必须自带 `scenario_ids`。宽口径若被别的入口用到,空的 `scenario_ids` 会绕过校验 |
+| 生成并写树 | 派发器调数据生产器,按 `data_spec` 的 `seed` 生成 `scenario_count` 个情境、每个角色位一个人格,写进产物树的 `scenarios/` 与 `personas/` | 情境 id 与人格 id 到这一步才存在 |
+| 回写 | 把情境 id 与带人格 id 的 `bindings` 回写进指令的 `training_config`,只在 `scenario_ids` 为空时写一次 | 此后 `config_hash` 覆盖它们,续训与复现都按这一份;写多次会让同一条指令的哈希前后不同 |
+| 复校 | 回写后立刻跑严格的 `validate_training_config`;不合法判 T2,指令 `failed` | 此时情境与人格都已就位,再不合法就是数据错,重试不会变好 |
 
 第 2 步的判定规则如下,先命中者生效。
 
@@ -709,7 +722,8 @@ vLLM 服务按指令起停,不常驻。一条 interact 指令派发时起服务,
 | 跨模式续训:mock 存点配真实执行器,或反过来 | T3 | 在 `checkpoint_intact` 之前比对存点的 `fetch_hint.type` 与执行器的 `checkpoint_type`,不一致抛 `NeedsHumanError`,理由写「后端模式不一致」,记录不改 | 指令 `failure.category = T3` |
 | `supported_phases` 不覆盖配置要求的阶段 | T2 | 配置校验期记录写 `failed`,指令判 `failed`,一步都不动执行器 | 训练记录 `failure`、指令 `failure` |
 | 资源暂时不可用:`ComputeBusyError` | 延后 | 预检在 `run_training` 之前,不写记录,不耗 `resume_attempts`;守护进程接住并按退避重试 | 守护进程结构化日志 |
-| interact 起 vLLM 服务:租约被占 `ComputeBusyError`,或起服务失败 `ServeStartupError` [计划中] | 延后 | 服务在 `resume_or_run` 之前起,不写记录,不耗 `resume_attempts`;经延后通道按退避重试 | 守护进程结构化日志 |
+| interact 起 vLLM 服务:租约被占 `ComputeBusyError`,或起服务阶段失败 `ServeStartupError` [计划中] | 延后 | 服务在 `resume_or_run` 之前起,不写记录,不耗 `resume_attempts`;经延后通道按退避重试 | 守护进程结构化日志 |
+| interact 收尾时发现服务仍在运行(同样抛 `ServeStartupError`) [计划中] | T2 | 训练记录与候选已写完,重派会反复起服务,所以不走延后通道;指令判 `failed`,原因写明要人清掉占显存的作业 | 指令 `payload["failure"]` |
 | 传输层故障 `TransportError`、远端作业超时 `RemoteJobTimeoutError` | 延后 | 同上,经延后通道重试;进入 `run_training` 之后抛出的,`resume_attempts` 已加一,重试仍受 G5 的上限约束 | 同上 |
 | 远端作业非零退出 `RemoteJobFailedError` | 延后 | 同上;它是真失败,计入 `resume_attempts`,耗尽后升级为 T3 | 训练记录 `resume_attempts` |
 | 远端作业成功但指标解析不出 `MetricsMissingError` | T1 | 记录保持 `pending`,计入 `resume_attempts`;重试时作业命中已成功退出的那次尝试,只重新解析,不重训 | 训练记录 `resume_attempts` |
@@ -718,6 +732,8 @@ vLLM 服务按指令起停,不常驻。一条 interact 指令派发时起服务,
 | interact 的 `role_backend_failure` 等其余原因 | T1 | 不重试,上抛,记录保持 `pending`,由续训上限兜底 | 同上 |
 
 T1 的上抛异常会让 `run_daemon` 退出,需要外部监督者重启。重启后同一条指令再次派发,`resume_attempts` 上限保证它最终升级为 T3,不会无限空转。`DeferredError` 的子类不在此列:守护进程接住它们,进程不退出;同一动作连续延后超过上限才带原因退出(CP-14)。
+
+interact 的 `config_hash` 覆盖配置层的东西 [计划中]:情境 id、人格 id、角色位、`bindings` 与 `base_checkpoint_ref`。它不含 `driver` 实际连到哪个端点、`opponent_script` 的台词内容,也不含 `policy_backend`。所以只保证「同一份配置重跑得出同一份指令」,不保证重跑得出同样的轨迹;要知道某一轮实际是谁在说话,读训练记录的 `policy_backend`。
 
 只读观测手段:
 
@@ -816,7 +832,7 @@ T1 的上抛异常会让 `run_daemon` 退出,需要外部监督者重启。重�
 | 真模型的单轮推理延迟 | 决定客户端提交上限 30 秒够不够;不够时慢策略被当作 T1 重试,推理成本按重试次数放大 | 在真机上测训练位与站内对手的单轮延迟 |
 | 一个 vLLM 进程挂两个 LoRA 的切换开销与显存余量 | 按 `--max-loras 2` 设计;切换慢或显存不足时,两位共用一个进程不成立 | 真机上同时挂两个适配器,测切换延迟与显存 |
 | `VllmServeConfig` 改成适配器列表后,真实评测运行器的调用点(`src/factory/sombench_runner.py:176`)能否原样工作 | 改坏会让 `--evaluator someval` 起不来 | 改完后跑涉及 `VllmServeConfig` 的测试,并核对该调用点 |
-| 接通的几处细节设计里没有定:`policy` 与 `policy_factory` 同时给时取谁;vLLM 服务的上下文由派发器还是策略工厂持有;`policy_backend` 由谁在何时写进记录;`trained.ref` 在 `kind` 为 `base` 时的具体形态 | 不定下来,实现之间接口对不上 | 写施工计划时逐项定下,并各补一条测试 |
+| `policy_backend` 里 `trained.ref` 在 `kind` 为 `base` 时的具体形态 | 记录的可读性 | 施工时按引用原样写 `uri` 与 `sha256` [计划中] |
 
 明确不做:MindTrainer 不读诊断结果,不决定练什么,不改指令状态,不写成本记录,不并行 rollout。
 

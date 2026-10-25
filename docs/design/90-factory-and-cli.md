@@ -115,7 +115,7 @@ factory 是组合根:系统里唯一知道所有包的地方。它把各子系�
 | G4 | 门控写命令证据不在场就拒绝 | 候选缺诊断、配方候选缺 `repro`、提案缺 `verification` 时 `approve` 抛错且不提交 [已落地] |
 | G5 | 只读命令不改 `HEAD` 与工作区 | 前后比较 `HEAD` 与工作区快照 [已落地] |
 | G6 | 闭环能从一条人工指令转到第二轮训练 | 端到端测试 `test_the_whole_loop_turns_twice` [已落地] |
-| G7 | `--interact` 配置不齐就不装配 | 六条拒绝项各有一条装配测试:退出码 2、一行错误、树里不写东西 [计划中] |
+| G7 | `--interact` 配置不齐就不装配 | 十一条拒绝项各有一条装配测试:退出码 2、一行错误、树里不写东西 [计划中] |
 
 | 非目标 | 状态 | V1 的处理 |
 |---|---|---|
@@ -439,6 +439,7 @@ TypeScript 命令行:`rismforge <review|approve|reject|confirm|status> [id] [rea
 | 4a | `--executor roll` 时:读 `compute/endpoints.yaml` 与本机主机映射,选定端点,造 `ComputeClient`,再造执行器工厂与转换器 [已落地] | `FactoryConfigError`,退出码 2;缺文件、键缺失或多余、映射里查不到端点、别名形态不合、`--endpoint` 点名了不存在的端点、有多个端点却没点名,全在第一个 tick 之前报 |
 | 4b | `--executor roll` 时:读污染索引,校验数据集哈希,把准入检查注入执行器;`--evaluator someval` 时另把真实运行器注入评估器 | `FactoryConfigError`,退出码 2;索引缺失、哈希对不上、stub 前端断言失败 |
 | 4c | `--interact` 时 [计划中]:先查与 `--executor roll` 互斥,再读 `training_defaults.yaml` 的 `interact` 段与 `scheduler.yaml` 的 `allow_interact`,校验点名的情境与人格,最后构造带落盘钩子的 `AgentRuntime` 与策略工厂。已因 `--enable agent` 构造了运行时就复用同一个 | `FactoryConfigError`,退出码 2,指出缺哪一项 |
+| 4d | 没传 `--interact` 且 `--enable` 含 `plan` 时 [计划中]:读 `scheduler.yaml` 的 `allow_interact`,为真就拒绝装配。此时规划器可能写出 interact 指令,而没有 `--interact` 派发必然判 `failed` | `FactoryConfigError`,退出码 2,点名缺 `--interact` |
 | 5 | 按 `DEFAULT_BUILDERS` 逐个构造处理器,需要时经 `build_bridge(store, role, *, env=None, log_dir=None)` 建桥接、读凭证、读 `agent.yaml`。`planner` 角色只在 `--planner-backend bridge` 时必需,`agent` 角色可选,缺了就不建桥接,提案生成回到规则模板 [已落地] | 同上;已登记的收尾函数逆序调用 |
 | 6 | 注入派发器(带数据生产器)、处理器、评估器、证据开关,启动调和循环 | 运行中的异常原样上抛,进程退出 |
 
@@ -451,11 +452,11 @@ TypeScript 命令行:`rismforge <review|approve|reject|confirm|status> [id] [rea
 | 注入什么 | `client_factory`:进程内实时服务端的客户端工厂,服务端带落盘钩子;`policy_factory`:按 run id 与基座引用构造训练位策略。两者交给 `make_mindtrainer_dispatcher` |
 | 落盘钩子 | 会话结束时由服务端的 `on_session_closed` 把 episode 写进产物树。轨迹源不写 episode,只在 metadata 里记 id |
 | 对手位 | 组合根按角色位选驱动:固定对话、站内 vLLM 上的对手模型、外部 OpenAI 兼容 API。模拟器本身只认后端协议 |
-| 运行时复用 | 已因 `--enable agent` 构造了 `AgentRuntime` 就复用同一个,不起第二个服务端;运行时登记收尾函数,与处理器同一机制逆序收尾 |
+| 运行时复用 | 已因 `--enable agent` 构造了 `AgentRuntime` 就复用同一个,不起第二个服务端;运行时登记收尾函数,与处理器同一机制逆序收尾。共用的影响面不止落盘钩子:训练登记表按会话记录该会话属于哪个 run,落盘钩子只处理训练登记过的会话,把 episode 写进对应 run;部署会话没有训练登记,仍由 MindAgent 驱动器自己落盘,两边的 episode 不混写。判错的代价是部署 episode 被误写进 interact 的数据,或同一条 episode 被两边各写一次 [计划中] |
 | 不打开时 | 不注入这两样,interact 指令仍判 `failed`(T2),原因点名 `--interact`,今天的原因文字是 `interact mode needs a client_factory and a policy`。`--enable agent` 构造过运行时也不改变这一点 |
 | 与 `--evaluator someval` | `someval` 要求 `--executor roll`,而 `--interact` 与 `--executor roll` 互斥,所以两者无法同用 |
 
-装配期的六条拒绝项。检查全部在第一个 tick 之前,出错都是退出码 2、一行错误、树里不写东西:
+装配期的十一条拒绝项。前十条在 `--interact` 打开时检查,第 11 条在没传 `--interact` 时检查。检查全部在第一个 tick 之前,出错都是退出码 2、一行错误、树里不写东西:
 
 | 序 | 检查 | 失败原因 |
 |---|---|---|
@@ -465,6 +466,11 @@ TypeScript 命令行:`rismforge <review|approve|reject|confirm|status> [id] [rea
 | 4 | 点名了 `scenario_ids` 就必须点 `persona_ids`,反之亦然 | 只写了一半 |
 | 5 | 点名的情境与人格都在产物树里 | 不在树里 |
 | 6 | 点名的情境 `purpose` 是 `training` | `install-defaults` 写入的三个部署情境 `purpose` 是 `deployment_simulation`,拿它们训练等于污染;人格不受此限 |
+| 7 | 点名路不给 `sft_steps > 0` | 点名路不带 `data_spec`,没有合成,`sft` 阶段会因缺清单判 `failed`;点名路不做冷启动 |
+| 8 | 情境数不少于 `groups_per_step`(默认 2) | 一个 GRPO step 要取 `groups_per_step` 个情境,不够时同一情境会在一步里出现两次、两组并成一组 |
+| 9 | 对手用 `external_api` 时凭证环境变量在场 | 与 `factory.bridges` 同一口径:凭证在装配期解析,缺就起不来;异常只报变量名 |
+| 10 | `policy` 与 `policy_factory` 不同时给 | 两个来源说不清谁生效,宁可报错 |
+| 11 | `--enable` 含 `plan`、`scheduler.yaml` 的 `allow_interact` 为真时,必须同时传 `--interact` [计划中] | 规划器可能写出 interact 指令,而没有 `--interact` 时派发必然判 `failed`,闭环停住。这是启动时就看得出的配置矛盾,不留到第一条指令。错误信息点名缺 `--interact`,并说明二选一:加 `--interact`,或把 `allow_interact` 关掉 |
 
 没点名时按 `data_spec` 的 `seed` 生成情境与人格,生成发生在派发时,装配期不检查。开关名、检查顺序与错误文字取自设计,施工时可能微调。
 
@@ -475,6 +481,7 @@ TypeScript 命令行:`rismforge <review|approve|reject|confirm|status> [id] [rea
 | 闭环模式缺评估器配置、诊断资产、桥接角色、凭证或 `agent.yaml` | 启动即退出码 2,指出缺哪份文件 | 跑一次 `install-defaults` 或补文件,再启动 [已落地] |
 | 缺规划提示模板或调度配置 | 装配期就拦下:`--enable plan` 预检 `scheduler.yaml`、`training_defaults.yaml` 与提示模板,只开 `nominate` 时预检 `scheduler.yaml`;缺任一项即以退出码 2 结束,不会起守护进程 [已落地] | 先跑 `install-defaults`,再启动 |
 | `--interact` 缺 `interact` 段、`allow_interact` 未打开、点名的情境与人格对不上,或与 `--executor roll` 同用 [计划中] | 启动即退出码 2,指出缺哪一项 | 补 `training_defaults.yaml` 与 `scheduler.yaml`,或去掉 `--executor roll`,再启动 |
+| `--enable plan` 开着、`allow_interact` 为真,但没传 `--interact` [计划中] | 启动即退出码 2,错误信息点名缺 `--interact`。不拦的话规划器可能写出 interact 指令,派发时必然判 `failed`,闭环停住 | 加 `--interact`,或把 `scheduler.yaml` 的 `allow_interact` 关掉,再启动 |
 | 缺凭证或凭证写进了树 | 退出码 2,信息只含变量名或键路径 | 设好环境变量,从树里删掉凭证 [已落地] |
 | 规划桥接失败 | 决策 `failed`,写 T3 失败记录,闭环停住(R18) | 人写新指令或手工重置 [已落地] |
 | 处理器或派发器抛 `DeferredError` | 不写树,同一进程按退避重试;连续延后超过上限才退出 | 无需人工 [已落地] |
@@ -599,6 +606,7 @@ factory 是最后一个工作包,前八个全部落地后才能施工。
 | FC-16 | 真实评估器由显式的 `--evaluator someval` 启用,默认 `mock`;它要求 `--executor roll`,暂不能与 `--enable` 同用;真训练一侧不论是否评测都要求污染索引在场并通过哈希校验 [已落地] | 让 `--executor roll` 自动带上真实评估器;把评估并入 `--enable` | 评测要真实存点才有意义,所以依赖真实执行器;但真训练与真评测是两个独立后果,各自一个开关才看得清;污染索引跟着真训练走,是因为「评测题不进训练」是硬约束,与这次开不开评测无关 | 想只换评估器不开真训练做不到;索引缺失时连不开评测的真训练也起不来,要先跑一次导入 |
 | FC-17 | 默认不接真推理:不传 `--interact` 时不注入实时客户端与策略工厂,interact 指令判 `failed`;测试与库级调用方自己注入替身策略;`--interact` 才接真推理 [计划中] | 默认就接真推理 | 默认跑测试不碰远端、不占卡 | 打开时要在装配期确认配置齐全,缺项就退出码 2 |
 | FC-18 | `--interact` 是 `run` 与 `reconcile` 的独立装配开关,与 `--executor roll` 互斥 [计划中] | 并进 `--enable` | `--enable` 管调和动作的处理器,不管派发器装配;真实执行器只支持 SFT,interact 指令带 `grpo_steps` 大于 0,同用必然在训练前被判 `failed`,不如装配期拒绝 | 漏开时 interact 指令判 `failed`,所以失败原因必须点名这个开关 |
+| FC-19 | `--enable` 含 `plan`、`scheduler.yaml` 的 `allow_interact` 为真、却没传 `--interact` 时,装配期拒绝并点名缺 `--interact` [计划中] | 只打一行警告后继续;不检查,等第一条 interact 指令判 `failed` | 这是启动时就能知道的配置矛盾:规划器可能写出 interact 指令,派发时必然 `failed`,闭环停住。与既有拒绝项同一口径(FC-6),宁可启动失败也不留到运行中 | 想让规划器先写 interact 指令、之后再单独带 `--interact` 派发的用法做不到,要先关掉 `allow_interact` 或补上开关 |
 
 ## 8. 失败处理与可观测
 
@@ -610,6 +618,7 @@ factory 是最后一个工作包,前八个全部落地后才能施工。
 | 缺配置、资产、桥接角色或凭证 | 装配错误,发生在启动前,不属于 T1 至 T3 | 退出码 2,`FactoryConfigError` | 无,树里不写 [已落地] |
 | `--interact` 与 `--executor roll` 同用 | 用法错误 | 退出码 2,一行错误,树里不写 | 无 [计划中] |
 | `--interact` 打开但缺 `interact` 段,或 `allow_interact` 未打开 | 装配错误,发生在启动前 | 退出码 2,`FactoryConfigError`,指出缺哪一项 | 无,树里不写 [计划中] |
+| `--enable plan` 开着、`allow_interact` 为真,但没传 `--interact` | 装配错误,发生在启动前 | 同上,错误信息点名缺 `--interact` | 同上 |
 | 点名的情境 `purpose` 不是 `training` | 装配错误 | 同上 | 同上 |
 | 点名的情境与人格只写了一半 | 装配错误 | 同上 | 同上 |
 | 点名的情境或人格不在树里 | 装配错误 | 同上 | 同上 |
@@ -654,7 +663,7 @@ factory 是最后一个工作包,前八个全部落地后才能施工。
 | 处理器构造 | 六个构造器、证据开关单一来源、Interact 流超时 | 罐头后端 | `tests/test_factory_handlers.py` | 18 [已落地] |
 | 端到端 | 完整闭环、R5、规划等配方入库门、R18、R19、MindAgent 链 | `HeuristicBackend`、罐头后端 | `tests/test_factory_e2e_loop.py` | 10 [已落地] |
 | 跨工作包 | 共享用例表、分层规则、run 编号数值序 | 无 | `tests/test_factory_cross_plan.py`、`tests/test_factory_run_order.py` | 31、3 [已落地] |
-| `--interact` 装配 | 六条拒绝项各一条;不打开时 interact 指令的失败原因点名开关;打开后派发器带上实时客户端与策略工厂 | 无 | 尚无 | 尚无 [计划中] |
+| `--interact` 装配 | 十一条拒绝项各一条;不打开时 interact 指令的失败原因点名开关;打开后派发器带上实时客户端与策略工厂 | 无 | 尚无 | 尚无 [计划中] |
 | `--interact` 端到端 | `factory reconcile --once --interact` 走到候选 `pending_review`,episode 都在产物树里 | 假 vLLM(本地 HTTP 回固定文本)、mock 执行器 | 尚无 | 尚无 [计划中] |
 
 上表的 pytest 用例数由 `pytest --collect-only -q` 逐个文件实测,按参数化展开计;TypeScript 的两个数按测试文件的 `it(` 计,未跑 vitest 收集。工作包 9 另有一个前置核对脚本 `scripts/check_factory_assumptions.py`:它逐行核对各包的符号名与签名,本次运行有 20 行 `OK`、1 行 `MISMATCH`,缺的是 `SchedulerConfig` 上新增的 `strategy_experience` 字段。
@@ -674,7 +683,7 @@ factory 是最后一个工作包,前八个全部落地后才能施工。
 | 完整闭环与跨工作包核对 | [已落地] | 任务 108 至 109;端到端只用 mock 证据、`HeuristicBackend` 与罐头后端 |
 | 真实 ROLL LoRA SFT(经远端计算层) | [已落地] | 由 `--executor roll` 装配,暂不能与 `--enable` 同用;真机只跑通单段两步 |
 | 真实 SoMEval 与 `import-sombench` | [已落地] | 由 `--evaluator someval` 装配,必须同时给 `--executor roll`;真机只验证到预测阶段 |
-| `--interact`:interact 指令在真实入口跑通 | [计划中] | 真推理加 mock 训练,与 `--executor roll` 互斥;装配期六条拒绝项;不打开时 interact 指令的失败原因点名该开关 |
+| `--interact`:interact 指令在真实入口跑通 | [计划中] | 真推理加 mock 训练,与 `--executor roll` 互斥;装配期十一条拒绝项;不打开时 interact 指令的失败原因点名该开关 |
 | 真实 GRPO 加 OPD 训练与真实 judge | [推迟] | 仍用 mock |
 
 | 局限 | 影响 | 缓解 |
@@ -704,9 +713,9 @@ factory 是最后一个工作包,前八个全部落地后才能施工。
 | 第一次闭环没有基线模型 | 没有可比增益就不会提名 | 真实部署前检查 `models/` 下是否已有晋级模型 |
 | `factory run` 长跑 | 只用 `--max-ticks` 跑过几轮;端口与 15 秒超时都没实测。通道数有界由用例证明:会话结束的客户端,通道在下一次发客户端时关掉,在途只留尚未结束的那几条 [已落地];长跑下的文件句柄未实测 | 跑数小时长循环,监控进程的端口与文件句柄 |
 | `--interact` 与 `--enable agent` 共用一个运行时时,落盘钩子是否也收到部署会话的 episode,是否与轮次处理器自己的落盘重复 [计划中] | 部署 episode 重复落盘或被误写进 interact 的数据 | 施工时对共用运行时的两种会话各写一条测试,数产物树里的 episode |
-| `--interact` 单独使用(不带 `--enable`)时是否注入数据生产器 | 「按种子生成」一路要靠生产器合成,不注入则这类指令判 `failed` | 定下后补一条带 `data_spec` 的 interact 指令走 `reconcile --once --interact` 的测试 |
-| 策略工厂连哪个计算端点:`--endpoint` 现在只在 `--executor roll` 时有意义,而 `--interact` 与它互斥 | 端点来源不明,`policy_backend` 的 `trained.endpoint` 无从取值 | 施工计划定下 `--interact` 复用 `--endpoint` 还是另给,并补装配期检查与测试 |
-| 对手用 `external_api` 时缺凭证环境变量,是装配期拒绝还是派发期失败 | 装配期的拒绝项目前只有六条,不含它 | 定下后补一条测试;凭证异常只报变量名 |
+| `--interact` 打开时注入数据生产器 [计划中] | 「按种子生成」一路要靠生产器合成,不注入则这类指令判 `failed` | 已定:`--interact` 一律注入 `TemplateDataProducer`;补一条带 `data_spec` 的 interact 指令走 `reconcile --once --interact` 的测试 |
+| 策略工厂连哪个计算端点 [计划中] | 端点来源不明,`policy_backend` 的 `trained.endpoint` 无从取值 | 已定:`--interact` 允许与 `--endpoint` 同用;只有一个端点时自动选,多个时必须在 `endpoint` 或命令行点名。`--endpoint` 今天只在 `--executor roll` 时有意义的限制随之放宽 |
+| 对手用 `external_api` 时缺凭证环境变量 [计划中] | 已定:装配期拒绝(第 9 条拒绝项),不是派发期失败 | 与 `factory.bridges` 同一口径:凭证在装配期解析,缺就起不来;异常只报变量名。补一条装配测试 |
 | TypeScript 泛化只按测试文件的用例清单核对过 | 本次没有在 `cli/` 仓库里实跑 vitest,用例数按源码里的 `it(` 计 | 在仓库里跑一次 `npx vitest run` |
 
 明确不做:真实 GRPO 加 OPD 训练与真实 judge 的接入;桥接的 API 形态;运行中热加载配置;进程内自动重试与自我重启;两种语言合并成一个命令行;图形界面。
