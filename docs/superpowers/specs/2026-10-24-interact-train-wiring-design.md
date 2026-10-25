@@ -75,7 +75,31 @@ interact:
 - 点名的情境 `purpose` 必须是 `training`(D3);人格不做此限制。
 - 缺整个 `interact` 段时,`new` 加 `interact` 仍判违规,与今天一致。
 
-派发时合成器把最终的情境 id 与 `bindings`(含人格 id)回写指令的 `training_config`,只在 `scenario_ids` 为空时写一次。此后 `config_hash` 覆盖它们,续训与复现都按这一份。合成器今天已经会为带 `data_spec` 的指令补清单,回写只是多写一个字段。
+### 3.1 生成路:情境 id 在写指令时还不存在
+
+`construct_directive` 写指令前就调 `check_directive`,后者跑 `validate_training_config`(`src/trainscheduler/directive.py:60-63`),而 interact 的校验要求 `scenario_ids` 非空且唯一(`src/mindtrainer/training_config.py:322`)。生成路要到派发时才知道情境 id,照今天的规则这条指令根本写不出来,回写也就没有机会发生。
+
+裁决:**把"情境已定"与"情境待生成"分成两种校验**。
+
+- `validate_training_config` 保持严格,派发器与训练入口照旧用它;任何时刻看到空的 `scenario_ids` 都拒绝。
+- 新增一个只给指令构造用的宽口径:带 `data_spec`、`scenario_ids` 为空时放行,视为"待生成"。`check_directive` 用宽口径,其余调用点不换。
+- 派发器回写之后重新跑一次严格校验;此时情境与人格都已就位,过不了就是 T2。
+- 宽口径只在"调度器按 `new` 构造、且带 `data_spec`"时成立。人写的指令没有 `data_spec`,必须自带 `scenario_ids`,与今天的人工路径一致。
+
+### 3.2 点名路没有 SFT 清单
+
+interact 的 `sft` 阶段从清单读数据(`required_stages` 对两种模式都含 `sft`,见 `src/mindtrainer/data_spec.py:148-157`),而清单由数据生产器按 `data_spec` 合成。点名路不走 `data_spec`,所以 `sft_steps > 0` 时一定因缺清单判 `failed`。
+
+裁决:**点名路的 `sft_steps` 必须是 0**。
+
+- 点名路是"直接进 GRPO 的交互训练",不做冷启动;`sft_steps > 0` 与点名同时出现,装配期判配置错误,并说明要么去掉点名、要么把 `sft_steps` 设为 0。
+- 生成路不变:带 `data_spec`,SFT 数据照今天的路径合成,清单在场后再训练。
+
+替代方案是让点名路也带 `data_spec`、只为 SFT 合成数据,但那样一条指令里同时有"人工点名的情境"与"模板生成的情境",与本设计 D2 的"两路不能混用"冲突,不采用。
+
+### 3.3 回写
+
+派发时数据生产器把最终的情境 id 与 `bindings`(含人格 id)回写指令的 `training_config`,只在 `scenario_ids` 为空时写一次;此后 `config_hash` 覆盖它们,续训与复现都按这一份。回写之后立刻跑严格校验。今天生产器已经会为带 `data_spec` 的指令补清单,回写只是多写一个字段。
 
 ## 4. 对手位三种驱动(D4、D5)
 
@@ -85,7 +109,7 @@ interact:
 | `external_api` | OpenAI 兼容 HTTP | 新增 `opponent` 配置:端点、模型名、凭证的环境变量名 |
 | 固定对话 | `ScriptedBackend` | 情境自带剧本优先,没带时用全局台词 |
 
-- **情境自带剧本**:`Scenario` 增加可选字段 `opponent_script`,形如 `{b: ["台词一", "台词二"]}`,按角色位给一串台词,像 `ScriptedBackend` 一样按序消耗;台词用完仍在说话时循环。`to_dict` 只在非空时写这个键,`from_dict` 用 `d.get` 读,旧产物与既有哈希不变。默认配置不写它,所以默认仍用全局台词。
+- **情境自带剧本**:`Scenario` 增加可选字段 `opponent_script`,形如 `{b: ["台词一", "台词二"]}`,按角色位给一串台词,像 `ScriptedBackend` 一样按序消耗;台词用完仍在说话时循环。今天 `ScriptedBackend` 用完返回「(无更多发言)」、不循环(`src/simulator/backends.py:52-55`),所以循环是新行为:给它加一个默认关闭的 `loop` 参数,只有本设计的装配处传 `loop=True`,既有调用点行为不变。`to_dict` 只在非空时写这个键,`from_dict` 用 `d.get` 读,旧产物与既有哈希不变。默认配置不写它,所以默认仍用全局台词。
 - **`model_ref` 解析**:全仓库现在没有一处把 `model_ref` 解析成权重,本设计新增。解析不到、或指到的不是适配器导出,派发时确定性失败,不静默退回脚本台词。
 - **外部 API**:仓库现在没有 OpenAI 兼容客户端,新增一个极小的(`urllib` 即可,与 `src/compute/tunnel.py:35-48` 的 HTTP 探测同一手法)。凭证只从环境变量读,异常信息只报变量名(与 `factory.bridges` 同一口径)。超时由服务端的 `TimeoutBackend` 兜住,单次调用超时归 `role_backend_timeout`,按瞬态整条重跑。
 
@@ -104,6 +128,7 @@ interact:
 - 训练位:`base_checkpoint_ref` 是 `roll_ssh` 适配器导出就挂它,否则用基座。
 - 站内对手:`model_ref` 解析出的引用,同样要求是适配器导出。
 - 闭环里的候选是 `mock://` 引用,所以闭环里训练位永远退回基座。这个事实写进记录(D10)。
+- 挂哪个 LoRA 由角色位的 `model_backend` 决定:训练位看 `base_checkpoint_ref` 是不是 `roll_ssh` 适配器导出;对手位看 `frozen_reference` 的 `model_ref`。取固定对话的角色位用 `ScriptedBackend`,不占服务。
 
 ### 5.3 生命周期(D7)
 
@@ -148,6 +173,9 @@ policy_backend:
 | 点名的情境 `purpose` 不是 `training` | 配置错误 | 装配期退出码 2 |
 | 点名的情境与人格只写了一半 | 配置错误 | 装配期退出码 2 |
 | 点名的情境或人格不在树里 | 配置错误 | 装配期退出码 2 |
+| 点名路同时给了 `sft_steps > 0` | 配置错误 | 装配期退出码 2(点名路不做冷启动) |
+| 指令构造时 `scenario_ids` 为空且没有 `data_spec` | 配置错误 | `DirectiveConstructionError`,树里不写 |
+| 派发回写后 `scenario_ids` 或 `bindings` 仍不合法 | T2 | 指令 `failed` |
 | 对手 `model_ref` 解析不到,或不是适配器导出 | T2 | 指令 `failed`,原因点名引用 |
 | 合成情境或人格失败 | T2 | 指令 `failed`,不留半套 |
 | 回写 `training_config` 失败 | T1 | 上抛,指令仍 `pending`,重跑内容相同不提交 |
@@ -176,7 +204,7 @@ policy_backend:
 
 1. 数据模型:`Scenario.opponent_script`。
 2. 配置与校验:`interact` 段、`opponent` 段、两路互斥、`purpose` 校验。
-3. 指令链:`resolve_action` 支持 `new interact`、合成器生成与回写。
+3. 指令链:`resolve_action` 支持 `new interact`、指令构造的宽口径校验、生成与回写、回写后的严格复校。
 4. 对手三驱动与 `model_ref` 解析。
 5. vLLM:多适配器、策略工厂、按指令起停。
 6. 超时与 `policy_backend` 记录。
@@ -188,4 +216,5 @@ policy_backend:
 - 真模型单轮推理延迟,决定 30 秒提交上限够不够。要真机测。
 - 一个 vLLM 进程挂两个 LoRA 时,切换的开销与显存余量。按 `--max-loras 2` 设计,真机确认。
 - `VllmServeConfig` 从单适配器改成列表后,现有 `SomevalRunner` 的调用点能否原样工作。
+- 宽口径校验放宽到"`scenario_ids` 为空也放行"之后,是否有别的入口误用它绕过校验;要靠边界测试钉住"只有 `check_directive` 用宽口径"。
 - 外部 API 对手的速率上限与成本,按实际供应商测。

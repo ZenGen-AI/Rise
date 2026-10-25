@@ -3,13 +3,13 @@
 | 项 | 内容 |
 |---|---|
 | 一句话 | 两个可注入调和循环的处理器:一轮结束后规划并写出下一条训练指令;一轮成功后判定是否提名配方候选 |
-| 状态 | [已落地] errors、recipes_port、config、run_ids、assemble、resolve、directive、plan_handler、nominate 与策略经验的 experience、experience_port,都有测试;两个处理器由 `factory` 组合根注入调和循环,默认入口的训练执行器与诊断评估器是 mock;规划默认走桥接后端,只用罐头与启发式后端测过;策略经验开关 `strategy_experience` 默认关 |
+| 状态 | [已落地] errors、recipes_port、config、run_ids、assemble、resolve、directive、plan_handler、nominate 与策略经验的 experience、experience_port,都有测试;两个处理器由 `factory` 组合根注入调和循环,默认入口的训练执行器与诊断评估器是 mock;规划默认走桥接后端,只用罐头与启发式后端测过;策略经验开关 `strategy_experience` 默认关;`training_defaults.yaml` 的可选 `interact` 段与 `new` 加 `interact` 的构造 [计划中] |
 | 所在层 | 控制层 |
 | 代码位置 | `src/trainscheduler` [已落地] |
 | 基线提交 | `b826440`(2026-10-21) |
 | 依赖 | ControlPlane(产物树、信封、路径、账本、证据等级)、TrainPlanner、RecipeStore、外部推理桥接(只取 `BridgeError`)、MindTrainer 的 `training_config` 与 `data_spec` 两个模块 |
 | 被依赖 | ControlPlane 调和循环(注入两个处理器)、factory 组合根 |
-| 对应实施计划 | 工作包 5(任务 60 至 68) |
+| 对应实施计划 | 工作包 5(任务 60 至 68);场景二接通在本篇的范围是 `interact` 段与 `new` 加 `interact` 的解析,施工单尚未编号 [计划中] |
 
 ## 0. 系统速览
 
@@ -113,7 +113,7 @@ TrainScheduler 是决策执行器:它把 TrainPlanner 的结构化决策落成�
 |---|---|---|
 | 判定触发条件(候选终态、证据可接受、最大 run、在途轮) | 不做 | 由调和循环判,处理器不重复判断 |
 | 构造 AgentRSI 指令、提名 agent_rsi 配方 | 不做 | 只处理 batch 与 interact |
-| `new` 构造 interact 指令 | 不做 | `training_defaults.yaml` 只有一份 batch 配置 |
+| `new` 构造 interact 指令 | 不做 | `training_defaults.yaml` 只有一份 batch 配置;加可选 `interact` 段后由 `resolve_action` 构造,缺段仍不做 [计划中] |
 | 并行多轮在途 | [推迟] | 同一时间只有一轮在途 |
 | 异步规划 | [推迟] | 规划同步执行,外部推理期间调和循环被阻塞 |
 | 按目标维度定制合成数据 | [推迟] | `new` 指令的 `data_spec` 每轮相同(种子 0) |
@@ -176,12 +176,12 @@ TrainScheduler 是决策执行器:它把 TrainPlanner 的结构化决策落成�
 |---|---|---|---|
 | `errors` | `SchedulerError` 及四个子类 `ContextAssemblyError`、`ResolveError`、`DirectiveConstructionError`、`RunIdOrderError`;`SchedulerConfigError` 是 `ValueError` 的子类,不属于 `SchedulerError` | 无 | [已落地] |
 | `recipes_port` | 对 RecipeStore 的全部导入 | `recipestore` | [已落地] |
-| `config` | 两份配置的字段表、严格解析、读取、安装 | `controlplane.config`、MindTrainer 两模块 | [已落地] |
+| `config` | 两份配置的字段表、严格解析、读取、安装;`interact` 段的解析 [计划中] | `controlplane.config`、MindTrainer 两模块 | [已落地] |
 | `run_ids` | 按数值序分配下一个 `run-NNN` | `controlplane.paths` | [已落地] |
 | `experience` | 策略经验的纯函数层:签名、归因、桶键、条目重算、覆盖表 | 标准库 `hashlib`、`json`、`re` | [已落地] |
 | `experience_port` | 策略经验的读写:落账、读条目、筛取渲染、失败留痕 | `controlplane`、`recipes_port`、`experience`;标准库 `logging`(不落账的原因) | [已落地] |
 | `assemble` | `assemble_context`:从树里装配 `PlanningContext` | `recipes_port`、`experience_port`、`trainplanner.context`、`controlplane.evidence` | [已落地] |
-| `resolve` | `validate_decision` 领域校验,`resolve_action` 动作解析 | `recipes_port`、`controlplane.models`、`training_config` | [已落地] |
+| `resolve` | `validate_decision` 领域校验,`resolve_action` 动作解析;`new` 加 `interact` 的放行与解析 [计划中] | `recipes_port`、`controlplane.models`、`training_config` | [已落地] |
 | `directive` | `construct_directive`:写指令前校验,绝不覆盖 | MindTrainer 两模块 | [已落地] |
 | `plan_handler` | `make_plan_handler`:规划的写入顺序与重入 | 以上全部、`trainplanner`、`BridgeError` | [已落地] |
 | `nominate` | `nomination_check`、`build_recipe_candidate`、`make_nominate_handler` | `recipes_port`、`controlplane.evidence` | [已落地] |
@@ -207,7 +207,7 @@ TrainScheduler 是决策执行器:它把 TrainPlanner 的结构化决策落成�
 | 实体 | 字段与含义 | 约束 |
 |---|---|---|
 | `SchedulerConfig` [已落地] | 十个键,见下表 | 冻结;`scheduler.yaml` 缺失取全部默认值 |
-| `TrainingDefaults` [已落地] | `training_config`:完整 batch 配置,不含 `stage_manifest_refs`;`data_spec`:合成规格 | `training_defaults.yaml` 缺失抛 `SchedulerConfigError` |
+| `TrainingDefaults` [已落地] | `training_config`:完整 batch 配置,不含 `stage_manifest_refs`;`data_spec`:合成规格;`interact`:可选的 interact 段 [计划中] | `training_defaults.yaml` 缺失抛 `SchedulerConfigError`;今天出现 `interact` 键会被当未知键拒绝(`src/trainscheduler/config.py:249`) |
 | `ResolvedAction` [已落地] | `target_dimension`、`action`、`recipe_ref`、`training_config`、`data_spec`、`base_model_id` | 冻结;只有 `new` 带 `data_spec`;`new` 的 `recipe_ref` 是空串 |
 | `NominationVerdict` [已落地] | `nominate`、`reason`、`gain`、`baseline_run_id`、`not_yet` | 冻结;`not_yet` 为真表示前置条件还没到 |
 
@@ -225,6 +225,33 @@ TrainScheduler 是决策执行器:它把 TrainPlanner 的结构化决策落成�
 | `strategy_experience` | bool | `false` | 是否落账策略经验并注入下一轮规划。为真时 `template_version` 必须在 `STRATEGY_TEMPLATE_VERSIONS` 里,否则构造即抛 `SchedulerConfigError`:模板不含第七段等于功能静默空转 |
 
 `training_defaults.yaml` 的默认值 [已落地]:被训角色位是 `zengen`,`sft_steps`、`grpo_steps`、`groups_per_step`、`group_size` 都是 2,`sft_batch_size` 与 `checkpoint_every_steps` 是 1,允许续训,`opd_coefficient` 是 0.1,学习率 1.0e-5,奖励是单分量 `goal` 的 `outcome_split`(关键词 `agreed`、`同意`)。初始基座与教师是 `file:///compute/checkpoints/` 下的占位引用,哈希为 64 个 0。这份默认配置里 `mode` 必须是 `batch`,且不得写 `stage_manifest_refs`,清单 id 每轮由指令构造按新 run id 写。默认 `data_spec` 是 4 个情境、种子 0、用途 `training`,`sft` 组大小 1,`grpo_opd` 组大小 2。`sft` 取 1,是因为默认 rollout 下同组奇数序号的样本是无内容的中性话,组大小大于 1 会让一半 SFT 数据没有信息 [已落地]。
+
+`training_defaults.yaml` 的可选 `interact` 段 [计划中]。段里写 interact 训练线的角色位、轮数和情境人格来源。段缺时文件与今天完全相同。形状取自设计,施工时可能微调。
+
+```yaml
+interact:
+  trained_slot: a
+  slots:
+    - {slot_id: a, model_backend: self_play}
+    - {slot_id: b, model_backend: frozen_reference, model_ref: zengen-v1}
+  max_turns_per_episode: 4
+  # 点名路:scenario_ids 与 persona_ids 成对出现
+  scenario_ids: [scen-auto-0, scen-auto-1]
+  persona_ids: {a: pers-auto-0, b: pers-auto-1}
+  # 生成路:与点名路二选一,不能同时写
+  data_spec: {scenario_count: 2, seed: 0, purpose: training, stages: {sft: {group_size: 1}}}
+```
+
+| 规则 | 内容 |
+|---|---|
+| 段可选 | 缺整个段时,`new` 加 `interact` 仍判领域违规,与今天一致 |
+| 严格解析 | 与另两份配置同一口径:未知键、类型错、范围错抛 `SchedulerConfigError`;顶层键集合加上 `interact` |
+| 来源二选一 | 点名路是 `scenario_ids` 加 `persona_ids`,生成路是 `data_spec`。两路同时写,或两路都缺,都抛错 |
+| 成对 | 写了 `scenario_ids` 就必须写 `persona_ids`,反之亦然。只写一半抛错 |
+| 解析不读树 | 点名的 id 在不在树里、情境 `purpose` 是不是 `training`,解析不查;由 factory 的 `--interact` 装配期查,失败退出码 2 |
+| 展开后仍过校验 | 展开成的 interact 训练配置要过 `validate_training_config`,与其他指令一致 |
+
+生成路的指令写出时 `training_config.scenario_ids` 为空。MindTrainer 的派发器生成情境与人格后,把最终的情境 id 与带人格 id 的 `bindings` 回写一次。回写后 `config_hash` 覆盖这些 id。调度器自己不生成,也不回写。
 
 | 产物类型 | 路径 | 状态机种类 | 写方 | 状态 |
 |---|---|---|---|---|
@@ -337,6 +364,7 @@ build_recipe_candidate(store, run_id, *, config, repo_commit=None,
 | TrainPlanner | `plan(ctx, validator)`、`PlanningContext`、`PlannerDecision`、`load_template`、`DecisionBackend` [已落地] | 装配好的上下文;`validate_decision` 作 validator |
 | RecipeStore | `find_recipes`、`get_recipe`、`compute_gain`、`read_report_payload`、`regression_flags`、`recipe_id_for`、`validate_reproducibility` [已落地] | 配方候选以 `pending_review` 写出,载荷带 `repro` |
 | MindTrainer | `TrainingConfig`、`validate_training_config`、`load_config_from_directive`、`parse_data_spec`、`required_stages`、`check_data_spec_against_config`、`manifest_data_run` [已落地] | 指令能被派发器读回;`new` 指令点名本 run 的清单 id,clone 点名配方来源 run 的清单 |
+| MindTrainer 派发器(场景二接通) | 无 | `new` 加 `interact` 指令:点名路带完整 `scenario_ids` 与 `bindings`;生成路带 `data_spec` 与空 `scenario_ids`,派发器生成情境与人格后回写一次 [计划中] |
 | 外部推理桥接 | `BridgeError` 的 `category`、`reason`、`attempts`、`log_ref` [已落地] | 无 |
 | 人工命令行 | `reject` 把驳回原因写进候选的 `payload.reject_reason` [已落地] | `confirm` 把 `awaiting_confirmation` 改为 `pending`;审核门③审配方候选 |
 
@@ -441,6 +469,27 @@ build_recipe_candidate(store, run_id, *, config, repo_commit=None,
 | 4′ | `replay` 带了扰动(`replay` 原样取配方,扰动必须为空);解析阶段已拒绝这种决策,这里是防御 |
 | 5 | 扰动键不在 `perturbable` 白名单;扰动后的配置套不上或过不了 `validate_training_config` |
 
+`new` 加 `interact` 的放行与解析 [计划中]。`validate_decision` 对这个组合的违规收窄,`resolve_action` 随之不再对 `new` 非 batch 一律抛错。今天的两处写法在 `src/trainscheduler/resolve.py:88-95` 与 `src/trainscheduler/resolve.py:139-142`。
+
+| 条件 | `validate_decision` | `resolve_action` |
+|---|---|---|
+| `allow_interact` 关 | 违规,提示改用 batch,与今天一致 | 到不了这一步 |
+| `allow_interact` 开,缺 `interact` 段 | 仍违规,与今天一致 | 到不了这一步 |
+| `allow_interact` 开,有 `interact` 段 | 放行 | 按下表组配置 |
+
+| 字段 | `new` 加 `interact` 的取值 |
+|---|---|
+| `mode` | `interact` |
+| `trained_slot`、`max_turns_per_episode` | 取自 `interact` 段 |
+| `bindings` | 取自 `slots` 的 `slot_id`、`model_backend`、`model_ref`;点名路再按 `persona_ids` 补人格 id |
+| `scenario_ids` | 点名路取自段;生成路为空,由派发器回写 |
+| 奖励、步数、组大小、教师引用 | 取自默认 batch 配置 |
+| `base_checkpoint_ref` | 与 `new` 加 `batch` 相同:最新已晋级模型,没有就用默认初始基座 |
+| `ResolvedAction.data_spec` | 生成路取自 `interact.data_spec`;点名路为 `None` |
+| 清单 id | interact 的 `required_stages` 只含 `sft`,`grpo_opd` 来自实时会话(`src/mindtrainer/data_spec.py:148-160`),所以只写 `dsm-<新 run>-sft` |
+
+规划侧不变:TrainPlanner 的决策形状、`assemble_context` 与 `plan()` 都不改,`HeuristicBackend` 仍只 clone batch 配方。`new` 加 `interact` 只在桥接后端或罐头后端给出这样的决策时出现。
+
 ### 6.2 提名处理器
 
 提名处理器以提名标记为幂等键,把"还没到"与"终局不提名"分开处理。
@@ -542,7 +591,7 @@ build_recipe_candidate(store, run_id, *, config, repo_commit=None,
 | R21 | 装配上下文前丢掉错误分布里的空标签 `""`,不重新归一化 | 保留空标签 | `PlanningContext` 拒绝空键,保留会让全答对的候选卡在规划 | 分布和可以小于 1,规划器看不到二级维度的答对比例 [已落地] |
 | TS-1 | 先写 `pending` 决策带 `next_run_id`,再解析与写指令,最后置 `executed` | 先写指令后记决策 | 解析失败与崩溃走同一条重入路径,run id 不重复分配 | 失败决策可能带着已分配但没用的 run id |
 | TS-2 | `clone` 换上最新已晋级基座;`replay` 一字不换 | `clone` 沿用配方旧基座 | 克隆是"在当前最好的模型上再用一次";复现换了基座就不是复现 | `clone` 的战绩混合配方与基座两种贡献,`mean_gain` 偏乐观 |
-| TS-3 | `new` 只构造 batch,`new` 加 interact 判领域违规 | 凭空构造 interact | interact 要点名情境与绑定,默认配置没有;违规还能重采样 | 规划器开不了新的 interact 训练线 |
+| TS-3 | `new` 只构造 batch,`new` 加 interact 判领域违规 | 凭空构造 interact | interact 要点名情境与绑定,默认配置没有;违规还能重采样 | 规划器开不了新的 interact 训练线;`interact` 段落地后收窄为缺段时才违规 [计划中] |
 | TS-4 | 扰动键是点路径,首段必须是 `TrainingConfig` 字段;多段时首段只能是 `grpo_config` 或 `reward`;锚定身份的字段永不可扰动 | 任意键 | 设计只说"在白名单内";防止扰动改掉基座、清单、模式 | 合法的新扰动要先改白名单 |
 | TS-5 | 配置错与模板缺失不算 `SchedulerError`,原样上抛,决策保持原状 | 判决策 `failed` | 失败的规划不会自动恢复,配置写错是人改一下就好的事 | 配置写错时守护循环每个 tick 都抛同一异常并退出 [已落地] |
 | TS-6 | `max_plan_attempts` 是总尝试次数,传给 `plan()` 的是减一后的重试次数 | 配置写重试次数 | 人读配置不用做减法;失败记录的尝试数等于配置值 | 无 |
@@ -550,6 +599,8 @@ build_recipe_candidate(store, run_id, *, config, repo_commit=None,
 | TS-8 | 候选已在而标记不在时只补 `nominated` 标记,不改候选 | 重写候选 | 重写会把 `approved` 改回 `pending_review` | 人手放的候选也会被标为 `nominated` |
 | TS-9 | 配方候选的 `eval_anchor` 只填有的版本,缺口如实进 `repro.errors` | 编造或省略 | 校验结果不硬拒绝,由审核门③参考 | V1 每个 batch 候选都带两条锚点错误,审核人容易脱敏 |
 | TS-10 | run id 按 `^run-[0-9]+$` 的数值序分配,与调和循环判最大 run 同一口径 | 字典序 | 超过 999 轮仍正确;非规范名不挡路 | 人手建了编号更大的目录时判编号冲突 |
+| TS-11 | `training_defaults.yaml` 加可选 `interact` 段;段在且 `allow_interact` 开时,`new` 加 `interact` 可解析,段缺仍判领域违规 [计划中] | 凭空构造 interact 配置;把情境与绑定塞进 `training_config` 默认值 | interact 要点名情境与角色位,这些只能来自人写的配置;段可选,缺段时文件与行为同今天;`allow_interact` 仍是总开关 | 段缺时规划器开不了 interact 线;违规回给规划器重采样,耗用 `max_plan_attempts` |
+| TS-12 | `interact` 段的解析只做不读树的校验(键、类型、成对、两路互斥);点名的 id 在不在树里、情境 `purpose` 是否为 `training`,推到 factory 装配期 [计划中] | 解析时读树校验 | 解析函数不带树参数(`src/trainscheduler/config.py:242`),`trainscheduler` 也不得导入 `simulator`;装配期有树,也认情境类型 | 树里缺东西要到 `--interact` 装配期才暴露,规划阶段不拦;段写错时整份文件解析失败,batch 规划也一并停(同 TS-5) |
 
 ## 8. 失败处理与可观测
 
@@ -565,6 +616,8 @@ build_recipe_candidate(store, run_id, *, config, repo_commit=None,
 | 解析或构造指令失败 | T3 | 决策置 `failed`,保留 `next_run_id` | 同上 |
 | 非桥接异常(`OSError` 等)、`SchedulerConfigError`、模板缺失 | 不分类 | 原样上抛,决策保持原状 | 无;守护循环退出,需外部监督 [已落地] |
 | 提名终局不通过 | 不分类 | 写 `skipped` 标记 | `nomination.yaml` [已落地] |
+| `new` 加 `interact`,但 `allow_interact` 关或缺 `interact` 段 [计划中] | 领域违规 | 回给规划器重采样,预算用完按规划耗尽处理 | 同规划耗尽 |
+| `interact` 段写错:未知键、点名只写一半、两路同写或都缺 [计划中] | 不分类 | `SchedulerConfigError` 原样上抛,决策保持原状;batch 规划也一并停 | 无;守护循环退出,需外部监督 |
 
 只读观测手段:
 
@@ -591,6 +644,7 @@ build_recipe_candidate(store, run_id, *, config, repo_commit=None,
 | 处理器 | 提名判定、候选构造、四种候选状态 | 造数函数 | `tests/test_ts_nominate.py`,34 [已落地] |
 | 端到端 | new 一路到候选;提名、收录、clone 复用清单 | 罐头后端、`MockExecutor`、`TemplateDataProducer` | `tests/test_ts_e2e.py`,2 [已落地] |
 | 边界 | 依赖方向与 `__future__` 头 | 扫导入语句 | `tests/test_ts_boundaries.py`,6 [已落地] |
+| 单元 | `interact` 段的严格解析、两路互斥与成对;`new` 加 `interact` 的校验与解析,`allow_interact` 关与缺段两种拒绝 | 临时 git 树 | 增补 `tests/test_ts_config.py` 与 `tests/test_ts_resolve.py` [计划中] |
 
 共 239 个用例,共用 `tests/ts_fixtures.py` [已落地] 里的造数函数。策略经验的 experience 与 experience_port 由 `tests/test_se_*.py` 覆盖,共 107 个用例。不依赖外部命令行强模型、真实训练、真实诊断与网络。
 
@@ -607,6 +661,7 @@ build_recipe_candidate(store, run_id, *, config, repo_commit=None,
 | 策略经验(落账、聚合、注入第七段) | [已落地] | 设计见 `55-strategy-experience.md`;开关默认关 |
 | 端到端与边界测试 | [已落地] | 任务 67 |
 | 被调和循环调用 | [已落地] | 调和循环产出 `plan_next_round` 与 `nominate_recipe`;`factory` 组合根注入两个处理器;`scripts/run_controlplane.py` 不注入 |
+| `interact` 段与 `new` 加 `interact` 的构造 | [计划中] | 场景二接通;`allow_interact` 仍须打开,缺段仍判违规 |
 
 | 局限 | 影响 | 缓解 |
 |---|---|---|
@@ -620,20 +675,22 @@ build_recipe_candidate(store, run_id, *, config, repo_commit=None,
 | 失败决策里的 run id 会被复用 | 同一编号可能出现在两份决策里 | 分配只看目录,不影响正确性 |
 | 重入时外部推理成本少记 | 账本按 `(task_id, cost_type)` 先到者为准,重跑的成本被去重 | 成本数字是下限 |
 | 二级维度的答对比例不进上下文 | 规划器只能从一级分数看总体表现 | 无 |
-| `HeuristicBackend` 只 clone batch 配方 | 开了 `allow_interact` 也不会选 interact 配方 | 用桥接后端 [已落地] |
+| `HeuristicBackend` 只 clone batch 配方 | 开了 `allow_interact` 也不会选 interact 配方 | 用桥接后端 [已落地];场景二接通后规划侧不变,启发式后端仍只 clone batch 配方 [计划中] |
 | 规划处理器不判证据等级 | 绕过调和循环直接调用时会接受 mock 证据;装配只拒绝桩报告 | 证据由调和循环判 [已落地] |
 | 证据不可接受记为终局 | `skipped` 之后打开接受 mock 证据的开关也不会补提名 | 人删掉 `nomination.yaml` 重判 [已落地] |
 | 规划等门③ | 启用提名且候选 `effective` 时规划要等来源 run 的配方候选离开 `pending_review` 与 `approved`,每轮多停一次等人;没有提名标记的 run(人手放进树的候选)规划永不触发 | 人手写下一条指令,或关掉提名开关 [已落地] |
 | 第一次闭环没有基线模型 | 没有可比增益就不会提名 | 先登记一个已晋级的基线模型 |
 
-签名与符号名、用例数、与调和循环的联动、组合根的参数传递都已按代码核实,不再列为未核实项。剩下的两条仍未核实。
+签名与符号名、用例数、与调和循环的联动、组合根的参数传递都已按代码核实,不再列为未核实项。剩下的两条仍未核实;场景二接通另有两条设计缺口 [计划中]。
 
 | 未核实项 | 影响 | 核实办法 |
 |---|---|---|
 | 真实桥接后端下的规划 | 只用罐头与启发式后端测过 | 用真实 `claude`、`codex` 各规划一次 |
 | mock 切到 real 之后的头几轮 | real 候选对非 real 基线无可比增益,提名会跳过 | 切换后观察提名标记的 `reason` |
+| 生成路指令在回写前 `scenario_ids` 为空 [计划中] | `validate_training_config` 现要求 interact 配置的 `scenario_ids` 非空且不重复(`src/mindtrainer/training_config.py`);`construct_directive` 写前校验,不变量 4 也要求指令能被读回,生成路指令过不了这条 | 施工时定下放行条件(指令带 `data_spec` 且 `scenario_ids` 为空时放宽),或让调度器先写占位 id,并补测试 |
+| 点名路下 SFT 阶段的数据来源 [计划中] | 点名路不带 `data_spec`,而 `sft_steps` 大于 0 时 `required_stages` 含 `sft`,指令需要一份可合成或已存在的 `sft` 清单 | 施工时读派发器对「无 `data_spec` 且缺 `sft` 清单」指令的处理;出路有两条:点名路也带 `data_spec`,或 interact 的 `sft_steps` 取 0 |
 
-明确不做:判定触发条件、构造 AgentRSI 指令、提名 agent_rsi 配方、为 `new` 构造 interact 指令、并行多轮在途、失败决策的自动恢复。
+明确不做:判定触发条件、构造 AgentRSI 指令、提名 agent_rsi 配方、为 `new` 构造 interact 指令、并行多轮在途、失败决策的自动恢复。场景二接通后,「为 `new` 构造 interact 指令」收窄为只在缺 `interact` 段时不做 [计划中]。
 
 ## 附 本文术语
 
@@ -647,3 +704,5 @@ build_recipe_candidate(store, run_id, *, config, repo_commit=None,
 | 提名标记 | `nomination_note` 产物,提名处理器的幂等键 |
 | 还没到 | 提名的前置条件尚未满足、以后会自己变好的情形,不写标记 |
 | 崩溃点 A、B、C | 规划处理器写入顺序中的三处中断位置,各有一条重入路径 |
+| interact 段 | `training_defaults.yaml` 的可选段,给 `new` 加 `interact` 提供角色位、轮数和情境人格来源 [计划中] |
+| 点名路、生成路 | 情境与人格的两种来源:配置点名树里已有的,或按种子生成 [计划中] |
