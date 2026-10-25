@@ -2,13 +2,19 @@
 import pytest
 
 from controlplane.config import write_config
-from controlplane.paths import failure_record_file, model_file, planner_decision_file, scheduler_config_file
+from controlplane.paths import (
+    failure_record_file,
+    model_file,
+    planner_decision_file,
+    scheduler_config_file,
+    training_defaults_file,
+)
 from controlplane.reconcile import Action
 from inference_bridge import BridgeError
 from trainplanner.backends import HeuristicBackend, ScriptedDecisionBackend
 from trainplanner.templates import install_default_template
 from trainscheduler import plan_handler as ph
-from trainscheduler.config import install_default_configs
+from trainscheduler.config import default_training_defaults_payload, install_default_configs
 from trainscheduler.plan_handler import decision_id, make_plan_handler, plan_task_id
 from ts_fixtures import (
     decision_json,
@@ -100,6 +106,51 @@ def test_a_domain_violation_is_fed_back_and_the_retry_succeeds(store):
     assert _decision(store).status == "executed"
     assert len(backend.calls) == 2
     assert "recipe 'recipe-run-404' does not exist" in backend.calls[1][0]
+
+
+def _allow_interact_with_section(store):
+    write_config(store, scheduler_config_file(), "scheduler-config", {"allow_interact": True}, "human")
+    payload = default_training_defaults_payload()
+    payload["interact"] = {
+        "trained_slot": "a",
+        "slots": [
+            {"slot_id": "a", "model_backend": "self_play"},
+            {"slot_id": "b", "model_backend": "frozen_reference", "model_ref": "zengen-v1"},
+        ],
+        "max_turns_per_episode": 4,
+        "scenario_ids": ["s1", "s2"],
+        "persona_ids": {"a": "p1", "b": "p2"},
+    }
+    write_config(store, training_defaults_file(), "training-defaults", payload, "human")
+
+
+def test_a_new_interact_violation_names_the_missing_section_and_the_retry_succeeds(store):
+    write_config(store, scheduler_config_file(), "scheduler-config", {"allow_interact": True}, "human")
+    backend = ScriptedDecisionBackend([decision_json(mode="interact"), decision_json()])
+    make_plan_handler(backend=backend)(store, _act())
+    assert _decision(store).status == "executed"
+    assert len(backend.calls) == 2
+    assert "interact section" in backend.calls[1][0]
+
+
+def test_a_new_interact_decision_is_accepted_and_resolved_from_the_defaults_section(store, monkeypatch):
+    _allow_interact_with_section(store)
+    seen = []
+
+    def record(store_, resolved, **kwargs):
+        seen.append((resolved, kwargs["new_run_id"]))
+        return DIRECTIVE.format(kwargs["new_run_id"])
+
+    # 指令构造对 interact 的放宽在后续任务里落地;这里只钉住处理器把 defaults 传进了校验与解析两处
+    monkeypatch.setattr(ph, "construct_directive", record)
+    backend = ScriptedDecisionBackend([decision_json(mode="interact")])
+    make_plan_handler(backend=backend)(store, _act())
+    assert len(backend.calls) == 1  # 校验一次通过,没有重采样
+    assert _decision(store).status == "executed"
+    ((resolved, run_id),) = seen
+    assert run_id == "run-002"
+    assert resolved.training_config["mode"] == "interact"
+    assert resolved.training_config["scenario_ids"] == ["s1", "s2"]
 
 
 def test_a_clone_decision_reuses_the_recipe(store):

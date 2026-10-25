@@ -9,7 +9,7 @@ from controlplane.models import MissingCheckpointRefError, latest_promoted_check
 from mindtrainer.data_spec import DataSpec
 from mindtrainer.training_config import InvalidTrainingConfigError, TrainingConfig, validate_training_config
 from trainplanner.decision import PlannerDecision
-from trainscheduler.config import SchedulerConfig, TrainingDefaults
+from trainscheduler.config import InteractDefaults, SchedulerConfig, TrainingDefaults
 from trainscheduler.errors import ResolveError
 from trainscheduler.recipes_port import RecipeNotFoundError, get_recipe
 
@@ -83,16 +83,24 @@ def _recipe_violation(store: GitStore, decision: PlannerDecision, config: Schedu
     return None, recipe
 
 
-def validate_decision(store: GitStore, decision: PlannerDecision, *, config: SchedulerConfig) -> str | None:
-    """领域有效性。返回第一条违规(非空字符串),全部合格返回 None。只读树。"""
+def validate_decision(
+    store: GitStore,
+    decision: PlannerDecision,
+    *,
+    config: SchedulerConfig,
+    defaults: TrainingDefaults | None = None,
+) -> str | None:
+    """领域有效性。返回第一条违规(非空字符串),全部合格返回 None。只读树。
+    new 加 interact 要 allow_interact 开着,且 defaults 带 interact 段;没传 defaults 等于没有该段。"""
     if decision.action == "new":
         if decision.mode == "interact":
             if not config.allow_interact:
                 return "mode 'interact' is not allowed (scheduler.allow_interact is false); use 'batch'"
-            return (
-                "a new interact round needs scenario_ids and bindings, which training_defaults "
-                "does not provide; use mode 'batch' or clone an interact recipe"
-            )
+            if defaults is None or defaults.interact is None:
+                return (
+                    "a new interact round needs the interact section in training_defaults.yaml, "
+                    "which is missing; use mode 'batch' or clone an interact recipe"
+                )
         return None
     reason, recipe = _recipe_violation(store, decision, config)
     if reason is not None:
@@ -109,6 +117,28 @@ def validate_decision(store: GitStore, decision: PlannerDecision, *, config: Sch
         except ResolveError as exc:
             return exc.reason
     return None
+
+
+def _interact_config(cfg: dict, section: InteractDefaults) -> tuple[dict, DataSpec | None]:
+    """以默认 batch 配置 cfg(调用方已深拷贝)为底,按 interact 段改写成 interact 配置,返回 (配置, data_spec)。
+
+    点名路:情境取自段,每个角色位的 persona_id 取自 persona_ids,sft_steps 强制为 0
+    (没有 data_spec 可合成 SFT 数据,也不做冷启动),data_spec 为 None。
+    生成路:scenario_ids 与 bindings 都留空,由派发器生成后回写;sft_steps 保持默认,data_spec 取自段。
+    角色位的值照段里写的搬过来,不替人改正:训练位必须是 self_play 且不带 model_ref,写错由展开后的校验报出。"""
+    cfg["mode"] = "interact"
+    cfg["trained_slot"] = section.trained_slot
+    cfg["max_turns_per_episode"] = section.max_turns_per_episode
+    if section.data_spec is not None:
+        cfg["scenario_ids"] = []
+        cfg["bindings"] = []
+        return cfg, section.data_spec
+    cfg["sft_steps"] = 0
+    cfg["scenario_ids"] = list(section.scenario_ids)
+    cfg["bindings"] = [
+        {"persona_id": section.persona_ids[slot["slot_id"]], **copy.deepcopy(slot)} for slot in section.slots
+    ]
+    return cfg, None
 
 
 def _promoted_base(store: GitStore) -> tuple[dict | None, str | None]:
@@ -128,23 +158,28 @@ def resolve_action(
     config: SchedulerConfig,
     defaults: TrainingDefaults,
 ) -> ResolvedAction:
-    """new:默认配置 + 最新已晋级基座(没有就用默认配置自带的初始基座)+ 默认 data_spec。
+    """new batch:默认配置 + 最新已晋级基座(没有就用默认配置自带的初始基座)+ 默认 data_spec。
+    new interact:默认配置为底,按 interact 段改写(见 _interact_config);基座规则同 batch。
     clone:配方的配置 + 扰动 + 最新已晋级基座;复用配方锚定的清单,不带 data_spec。
     replay:配方的配置原样,不做任何替换,不带 data_spec。
     确定性做不成抛 ResolveError。"""
-    violation = validate_decision(store, decision, config=config)
+    violation = validate_decision(store, decision, config=config, defaults=defaults)
     if violation is not None:
         raise ResolveError(violation)
     if decision.action == "new":
-        if decision.mode != "batch":
-            raise ResolveError(
-                f"new {decision.mode!r} rounds cannot be resolved: training_defaults only holds a batch config"
-            )
         cfg = copy.deepcopy(defaults.training_config)
+        data_spec = defaults.data_spec
+        if decision.mode == "interact":
+            cfg, data_spec = _interact_config(cfg, defaults.interact)
+        elif decision.mode != "batch":
+            raise ResolveError(f"new {decision.mode!r} rounds cannot be resolved: only batch and interact exist")
         base, model_id = _promoted_base(store)
         if base is not None:
             cfg["base_checkpoint_ref"] = base
-        return ResolvedAction(decision.target_dimension, "new", "", cfg, defaults.data_spec, model_id)
+        if decision.mode == "interact" and data_spec is None:
+            # 点名路的配置已完整,当场过严格校验;生成路的情境与绑定要等派发器回写,由指令构造的宽口径校验
+            check_training_config(cfg, "new interact")
+        return ResolvedAction(decision.target_dimension, "new", "", cfg, data_spec, model_id)
     recipe = get_recipe(store, decision.source_recipe_id)
     cfg = copy.deepcopy(recipe.payload["training_config"])
     model_id = None

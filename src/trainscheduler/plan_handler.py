@@ -192,7 +192,7 @@ def make_plan_handler(
             result = plan(
                 ctx, template.text, template.version, counted, run_id=run_id,
                 max_parse_retries=config.max_plan_attempts - 1,
-                validator=lambda d: validate_decision(store, d, config=config),
+                validator=lambda d: validate_decision(store, d, config=config, defaults=defaults),
             )
         except PlannerFailedError as exc:
             _fail(store, run_id, payload, exc.reason, attempts=exc.attempts)

@@ -44,9 +44,13 @@ def test_new_interact_is_refused_while_allow_interact_is_off(store):
     assert "allow_interact" in reason
 
 
-def test_new_interact_is_refused_even_when_allowed_because_defaults_have_no_bindings(store):
-    reason = validate_decision(store, _d(mode="interact"), config=SchedulerConfig(allow_interact=True))
-    assert "scenario_ids and bindings" in reason
+def test_new_interact_is_refused_when_allowed_but_defaults_have_no_interact_section(store):
+    allowed = SchedulerConfig(allow_interact=True)
+    for defaults in (None, DEFAULTS):
+        reason = validate_decision(store, _d(mode="interact"), config=allowed, defaults=defaults)
+        assert "interact section" in reason and "allow_interact" not in reason
+    # 没传 defaults 的老调用方式同样拒,不会因为缺参数而放行
+    assert "interact section" in validate_decision(store, _d(mode="interact"), config=allowed)
 
 
 def test_clone_of_an_effective_recipe_is_valid(store):
@@ -209,3 +213,158 @@ def test_validation_and_resolution_only_read(store):
     resolve_action(store, _d("clone", source="recipe-run-001"), config=CFG, defaults=DEFAULTS)
     validate_decision(store, _d("replay", source="recipe-run-404"), config=CFG)
     assert store._git("rev-parse", "HEAD") == head
+
+
+# ---- new + interact:按 training_defaults 的 interact 段放行与解析 ----
+
+ALLOW = SchedulerConfig(allow_interact=True)
+
+
+def _named_section():
+    return {
+        "trained_slot": "a",
+        "slots": [
+            {"slot_id": "a", "model_backend": "self_play"},
+            {"slot_id": "b", "model_backend": "frozen_reference", "model_ref": "zengen-v1"},
+        ],
+        "max_turns_per_episode": 4,
+        "scenario_ids": ["s1", "s2"],
+        "persona_ids": {"a": "p1", "b": "p2"},
+    }
+
+
+def _generated_section():
+    section = _named_section()
+    del section["scenario_ids"], section["persona_ids"]
+    section["data_spec"] = {"scenario_count": 2, "seed": 7, "purpose": "training", "stages": {"sft": {"group_size": 1}}}
+    return section
+
+
+def _defaults_with(section):
+    raw = default_training_defaults_payload()
+    raw["interact"] = section
+    return parse_training_defaults(raw)
+
+
+@pytest.fixture
+def named():
+    return _defaults_with(_named_section())
+
+
+@pytest.fixture
+def generated():
+    return _defaults_with(_generated_section())
+
+
+def test_new_interact_is_refused_without_the_section_when_resolving(store):
+    with pytest.raises(ResolveError, match="interact section"):
+        resolve_action(store, _d(mode="interact"), config=ALLOW, defaults=DEFAULTS)
+
+
+def test_new_interact_still_needs_allow_interact_even_with_the_section(store, named):
+    reason = validate_decision(store, _d(mode="interact"), config=CFG, defaults=named)
+    assert "allow_interact" in reason
+    with pytest.raises(ResolveError, match="allow_interact"):
+        resolve_action(store, _d(mode="interact"), config=CFG, defaults=named)
+
+
+def test_new_interact_is_valid_with_either_kind_of_section(store, named, generated):
+    assert validate_decision(store, _d(mode="interact"), config=ALLOW, defaults=named) is None
+    assert validate_decision(store, _d(mode="interact"), config=ALLOW, defaults=generated) is None
+
+
+def test_new_interact_resolves_the_named_path_from_the_section(store, named):
+    r = resolve_action(store, _d(mode="interact"), config=ALLOW, defaults=named)
+    cfg = r.training_config
+    assert (cfg["mode"], cfg["trained_slot"], cfg["max_turns_per_episode"]) == ("interact", "a", 4)
+    assert cfg["scenario_ids"] == ["s1", "s2"]
+    assert cfg["bindings"] == [
+        {"slot_id": "a", "persona_id": "p1", "model_backend": "self_play"},
+        {"slot_id": "b", "persona_id": "p2", "model_backend": "frozen_reference", "model_ref": "zengen-v1"},
+    ]
+    assert (r.action, r.recipe_ref, r.target_dimension, r.data_spec) == ("new", "", "tom", None)
+
+
+def test_named_path_forces_sft_steps_to_zero_and_keeps_the_other_defaults(store, named):
+    cfg = resolve_action(store, _d(mode="interact"), config=ALLOW, defaults=named).training_config
+    assert DEFAULT_TRAINING_CONFIG["sft_steps"] == 2 and cfg["sft_steps"] == 0
+    for key in ("grpo_steps", "group_size", "groups_per_step", "opd_coefficient", "reward", "teacher_model_ref"):
+        assert cfg[key] == DEFAULT_TRAINING_CONFIG[key]
+
+
+def test_a_named_path_config_passes_the_strict_validation(store, named):
+    cfg = resolve_action(store, _d(mode="interact"), config=ALLOW, defaults=named).training_config
+    assert validate_training_config(TrainingConfig.from_dict(cfg)) is None
+    assert cfg["bindings"][0]["model_backend"] == "self_play" and "model_ref" not in cfg["bindings"][0]
+
+
+def test_generated_path_leaves_scenarios_and_bindings_empty_and_carries_the_data_spec(store, generated):
+    r = resolve_action(store, _d(mode="interact"), config=ALLOW, defaults=generated)
+    cfg = r.training_config
+    assert (cfg["mode"], cfg["trained_slot"], cfg["max_turns_per_episode"]) == ("interact", "a", 4)
+    assert cfg["scenario_ids"] == [] and cfg["bindings"] == []
+    assert r.data_spec == generated.interact.data_spec and r.data_spec.scenario_count == 2
+
+
+def test_generated_path_keeps_the_default_sft_steps(store, generated):
+    cfg = resolve_action(store, _d(mode="interact"), config=ALLOW, defaults=generated).training_config
+    assert cfg["sft_steps"] == DEFAULT_TRAINING_CONFIG["sft_steps"] == 2
+
+
+def test_a_binding_carries_driver_only_when_the_slot_has_one(store):
+    section = _named_section()
+    section["slots"][1]["driver"] = "scripted"
+    cfg = resolve_action(store, _d(mode="interact"), config=ALLOW, defaults=_defaults_with(section)).training_config
+    assert "driver" not in cfg["bindings"][0]
+    assert cfg["bindings"][1]["driver"] == "scripted"
+
+
+def test_bindings_follow_the_slot_order_of_the_section(store):
+    section = _named_section()
+    section["slots"].reverse()
+    cfg = resolve_action(store, _d(mode="interact"), config=ALLOW, defaults=_defaults_with(section)).training_config
+    assert [b["slot_id"] for b in cfg["bindings"]] == ["b", "a"]
+    assert [b["persona_id"] for b in cfg["bindings"]] == ["p2", "p1"]
+
+
+@pytest.mark.parametrize("path", ["named", "generated"])
+def test_new_interact_takes_the_latest_promoted_checkpoint(store, request, path):
+    defaults = request.getfixturevalue(path)
+    write_model(store, 1, "run-001")
+    write_model(store, 2, "run-002")
+    r = resolve_action(store, _d(mode="interact"), config=ALLOW, defaults=defaults)
+    assert r.training_config["base_checkpoint_ref"] == ref("cand-run-002")
+    assert r.base_model_id == "zengen-v2"
+
+
+@pytest.mark.parametrize("path", ["named", "generated"])
+def test_new_interact_without_a_promoted_model_uses_the_initial_base(store, request, path):
+    defaults = request.getfixturevalue(path)
+    r = resolve_action(store, _d(mode="interact"), config=ALLOW, defaults=defaults)
+    assert r.training_config["base_checkpoint_ref"] == DEFAULT_TRAINING_CONFIG["base_checkpoint_ref"]
+    assert r.base_model_id is None
+
+
+@pytest.mark.parametrize("path", ["named", "generated"])
+def test_resolving_new_interact_does_not_alias_or_change_the_defaults(store, request, path):
+    defaults = request.getfixturevalue(path)
+    before = defaults.to_dict()
+    r = resolve_action(store, _d(mode="interact"), config=ALLOW, defaults=defaults)
+    r.training_config["scenario_ids"].append("x")
+    r.training_config["bindings"].append({"slot_id": "x"})
+    r.training_config["reward"]["components"].append("x")
+    for binding in r.training_config["bindings"][:-1]:
+        binding["persona_id"] = "changed"
+    assert defaults.to_dict() == before
+
+
+def test_a_new_batch_decision_is_unaffected_by_the_interact_section(store, named):
+    r = resolve_action(store, _d(), config=ALLOW, defaults=named)
+    assert r.training_config == DEFAULT_TRAINING_CONFIG and r.data_spec == named.data_spec
+
+
+def test_a_named_path_section_with_a_non_self_play_trained_slot_is_a_resolve_error(store):
+    section = _named_section()
+    section["slots"][0] = {"slot_id": "a", "model_backend": "frozen_reference", "model_ref": "zengen-v1"}
+    with pytest.raises(ResolveError, match="trained slot 'a' must be self_play"):
+        resolve_action(store, _d(mode="interact"), config=ALLOW, defaults=_defaults_with(section))
