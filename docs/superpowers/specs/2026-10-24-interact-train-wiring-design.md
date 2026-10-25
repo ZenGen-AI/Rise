@@ -134,14 +134,28 @@ interact 的 `sft` 阶段从清单读数据(`required_stages` 对两种模式都
 
 ### 5.3 生命周期(D7)
 
-一条 interact 指令派发时起服务,整轮训练在服务句柄的上下文里跑,退出即停、放租约。租约被占抛 `ComputeBusyError`,走延后通道;起服务失败抛 `ServeStartupError`,同样是 `DeferredError`。
+一条 interact 指令派发时起服务,整轮训练在服务句柄的上下文里跑,退出即停、放租约。租约被占抛 `ComputeBusyError`,走延后通道;起服务失败抛 `ServeStartupError`,同样是 `DeferredError`;连续延后超过上限抛 `DeferredExhaustedError`,它刻意不继承 `DeferredError`,守护进程会带原因退出,等外部监督者重启(`src/controlplane/daemon.py:60-66`)。
+
+服务上下文由**派发器**持有,在 `resume_or_run` 之前起。由此:租约被占不写训练记录、不耗 `resume_attempts`;校验、数据合成与清单检查都在进入服务之前,失败的指令不占租约。
 
 ### 5.4 超时
 
 - 单次角色后端调用:默认 15 秒(现为 60 秒,按罐头后端定得偏松)。
 - 客户端提交一轮的上限:必须大于"最慢一方一次调用 + 余量",默认保持 30 秒。
-- gRPC 流 deadline:按 `max_turns × 单轮上限` 算,不再是固定 15 秒。
+- gRPC 流 deadline:按 `max_turns × 单轮上限` 算,不再是固定 15 秒;这里的"单轮上限"指客户端提交一轮的上限(30 秒),不是后端单次调用上限。
 - 真机延迟未知,30 秒够不够要真机测,本稿标未核实。
+
+### 5.5 装配细节的裁决
+
+以下几条设计源没有明说,施工时按这里执行,免得实现各自发挥:
+
+| 项 | 裁决 | 理由 |
+|---|---|---|
+| 数据生产器 | `--interact` 一律注入 `TemplateDataProducer` | 生成路要靠它合成情境、人格与 SFT 数据 |
+| 端点来源 | `--interact` 允许与 `--endpoint` 同用;只有一个端点时自动选,多个时必须在 `endpoint` 或命令行点名 | 今天 `--endpoint` 只在 `--executor roll` 时有意义,`--interact` 也需要它 |
+| 外部 API 缺凭证 | 装配期退出码 2,不是派发期失败 | 与 `factory.bridges` 同一口径:凭证在装配期解析,缺就起不来 |
+| `policy` 与 `policy_factory` 同时给 | 装配期拒绝 | 两个来源说不清谁生效,宁可报错 |
+| 与 `--enable agent` 共用 `AgentRuntime` | 训练落盘钩子按会话登记表判断:只有训练登记的会话才落盘,部署会话仍由 MindAgent 自己的驱动器落盘 | 两个驱动方各有权威版本,不能混写 |
 
 ## 6. 装配(D8、D9)
 
