@@ -30,6 +30,7 @@ from mindtrainer.dispatch import make_mindtrainer_dispatcher
 
 if TYPE_CHECKING:  # factory.agent 拖进 grpc 与 mindagent,只在类型检查时导入
     from factory.agent import AgentRuntime
+    from factory.interact_policy import OpponentSwitch
 
 PLANNER_BACKENDS = ("bridge", "heuristic")
 EXECUTORS = ("mock", "roll")
@@ -133,24 +134,59 @@ class Assembly:
 INTERACT_TURN_TIMEOUT_S = 30.0  # 真模型说一句比罐头慢得多;默认的 5 秒是给罐头后端定的
 
 
-def _shared_runtime(store: GitStore, options: FactoryOptions, keys: frozenset[str]) -> AgentRuntime | None:
-    """`--interact` 或 `--enable agent` 时造那唯一的 AgentRuntime(进程内 loopback 实时服务端),否则返回 None。
+def _shared_runtime(
+    store: GitStore, options: FactoryOptions, keys: frozenset[str],
+) -> tuple[AgentRuntime | None, OpponentSwitch | None]:
+    """`--interact` 或 `--enable agent` 时造那唯一的 AgentRuntime(进程内 loopback 实时服务端),否则 (None, None)。
 
     两者同开就共用这一个,不起第二个服务端。对手罐头台词取自 agent.yaml;文件不在时给空元组,
     由 `agent` 开关的构造器照旧报"缺 agent.yaml"(--interact 单独用时,台词只是没有剧本的剧本驱动位的兜底)。
-    文件在但写坏了就在这里报 FactoryConfigError,而不是留到派发期。"""
+    文件在但写坏了就在这里报 FactoryConfigError,而不是留到派发期。
+
+    --interact 时运行时拿到的对手后端工厂是一个可切换的 OpponentSwitch:vLLM 对手要用会话里才有的 ServiceHandle,
+    所以运行时先带着空开关造好,策略上下文进入时装上真工厂、退出时卸下(见 factory.interact_policy)。
+    卸下的开关给的是运行时原来的罐头后端,所以共用运行时上的部署会话行为不变。"""
     if not options.interact and "start_agent_round" not in keys:
-        return None
+        return None, None
     from factory.agent import AGENT_CONFIG, AgentRuntime, read_agent_settings   # 惰性:拖进 grpc 与 mindagent
 
     lines = read_agent_settings(store)[1] if store.exists(AGENT_CONFIG) else ()
     if options.interact:
-        return AgentRuntime(store, lines, turn_timeout_s=INTERACT_TURN_TIMEOUT_S)
-    return AgentRuntime(store, lines)
+        from factory.interact_policy import OpponentSwitch
+
+        switch = OpponentSwitch(lines)
+        return AgentRuntime(store, lines, turn_timeout_s=INTERACT_TURN_TIMEOUT_S,
+                            opponent_backend_factory=switch), switch
+    return AgentRuntime(store, lines), None
+
+
+def _interact_wiring(
+    store: GitStore, options: FactoryOptions, runtime: AgentRuntime, switch: OpponentSwitch,
+    environ: Mapping[str, str],
+) -> dict:
+    """`--interact` 要交给派发器的东西:策略工厂,以及它所用端点的名字。
+
+    端点只选一次:点名的或唯一的那个。同一个端点既给 policy_context 起服务,也作为 policy_endpoint
+    写进 training_run.policy_backend,所以记录里的端点就是服务实际起在的端点。配置错一律 FactoryConfigError。"""
+    # 惰性导入:不走 --interact 的入口不该为此多载入 compute、grpc 与调度器配置
+    from factory.compute_config import build_compute_client, read_endpoints_config, read_host_map, select_endpoint
+    from factory.configio import preflight
+    from factory.interact_policy import make_policy_factory
+    from trainscheduler.config import load_training_defaults
+
+    endpoint = select_endpoint(read_endpoints_config(store), options.endpoint)
+    client = build_compute_client(endpoint, read_host_map(env=environ))
+    defaults = preflight("training_defaults.yaml", lambda: load_training_defaults(store))
+    policy_factory = make_policy_factory(
+        store=store, runtime=runtime, switch=switch, client=client, endpoint=endpoint,
+        opponent=defaults.opponent, env=environ,
+    )
+    return {"policy_factory": policy_factory, "policy_endpoint": endpoint.endpoint_id}
 
 
 def _dispatcher(options: FactoryOptions, runtime: AgentRuntime | None, **kwargs):
-    """--interact 时给派发器注入实时客户端(并一律带数据生产器,「按种子生成」一路要靠它合成)。"""
+    """--interact 时给派发器注入实时客户端(并一律带数据生产器,「按种子生成」一路要靠它合成)。
+    策略工厂与端点名由 _interact_wiring 经 kwargs 带进来。"""
     if options.interact:
         assert runtime is not None
         kwargs["client_factory"] = runtime.client_factory
@@ -285,22 +321,28 @@ def assemble(
     if not keys and not options.interact:
         # 与 mindtrainer.wire.run 逐字节相同的路径:不读配置、不注入别的
         return Assembly(make_mindtrainer_dispatcher(), {}, None, False)
+    environ = os.environ if env is None else env
     if not keys:
         # --interact 单独用:没有处理器和评估器,但有运行时要收尾
-        runtime = _shared_runtime(store, options, keys)
-        return Assembly(_dispatcher(options, runtime), {}, None, False, closers=(runtime.close,))
+        runtime, switch = _shared_runtime(store, options, keys)
+        try:
+            wiring = _interact_wiring(store, options, runtime, switch, environ)
+        except BaseException:
+            runtime.close()          # 还没起过服务端,关它只是把状态收干净
+            raise
+        return Assembly(_dispatcher(options, runtime, **wiring), {}, None, False, closers=(runtime.close,))
     table = default_builders() if builders is None else builders
     missing = sorted(keys - set(table))
     if missing:
         raise FactoryConfigError(f"no handler builder for {missing}")
     evaluator = build_mock_evaluator(store)
-    runtime = _shared_runtime(store, options, keys)
+    runtime, switch = _shared_runtime(store, options, keys)
     ctx = BuildContext(
         store=store,
         accept_mock_evidence=options.allow_mock_evidence,
         confirm_directives=options.confirm_directives,
         planner_backend=options.planner_backend,
-        env=dict(os.environ if env is None else env),
+        env=dict(environ),
         log_dir=None if log_dir is None else Path(log_dir),
         repo_commit=resolve_repo_commit(options.repo_commit),
         runtime=runtime,
@@ -309,6 +351,7 @@ def assemble(
         ctx.register_closer(runtime.close)         # 登记一次;构造器只取用
     try:
         handlers = {key: table[key](ctx) for key in sorted(keys)}
+        wiring = _interact_wiring(store, options, runtime, switch, environ) if options.interact else {}
     except BaseException:
         try:
             _close_all(ctx.closers)
@@ -316,7 +359,7 @@ def assemble(
             pass          # 正在传播的才是根因:收尾失败不能把它盖掉
         raise
     return Assembly(
-        dispatcher=_dispatcher(options, runtime, data_producer=TemplateDataProducer()),
+        dispatcher=_dispatcher(options, runtime, data_producer=TemplateDataProducer(), **wiring),
         handlers=handlers,
         evaluator=evaluator,
         accept_mock_evidence=options.allow_mock_evidence,
