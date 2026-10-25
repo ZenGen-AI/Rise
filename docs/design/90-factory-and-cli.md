@@ -695,7 +695,7 @@ factory 是最后一个工作包,前八个全部落地后才能施工。
 | 瞬态异常让进程退出 | 需要外部监督者,但没有任何工作包交付监督脚本、重启退避或崩溃计数;规划与轮次处理器在非桥接瞬态异常下没有重入次数上限,只有 MindTrainer 的续训次数有上限 | 调和循环无状态,重启从树续接 |
 | `logs` 看不到成功调用的桥接日志 | 只能看到失败记录登记的引用 | 直接看 `.rismforge/logs/<run>/` |
 | 默认诊断资产是一个一级维度、两道题的最小夹具 | 只证明流程,规划器只看到一个维度 | 换真实题库 |
-| 一条部署会话超过 15 秒即 `DEADLINE_EXCEEDED` | 轮次 `failed` | `AgentRuntime` 的 `interact_deadline_s` 目前只作构造参数,不在 `agent.yaml` 里 [计划中]。`--interact` 下 interact 流的 deadline 按 `max_turns_per_episode × 单轮上限` 算,不再是固定 15 秒 [计划中] |
+| 一条部署会话超过 15 秒即 `DEADLINE_EXCEEDED`;`--interact` 下流 deadline 改按 `max_turns × 30 秒` 算,提交上限由现传的 5 秒改回 30 秒以上 [计划中] | 轮次 `failed` | `AgentRuntime` 的 `interact_deadline_s` 目前只作构造参数,不在 `agent.yaml` 里 [计划中]。`--interact` 下 interact 流的 deadline 按 `max_turns_per_episode × 单轮上限` 算,不再是固定 15 秒 [计划中] |
 | TypeScript 的 `writeProduct` 无条件提交,读取不经迁移与 Schema 校验 | 两侧校验强度不同;空提交会抛错。提交已只带本文件 | 命令行只改状态字段;根治要两侧共用读写 [计划中] |
 
 | 未核实项 | 影响 | 核实办法 |

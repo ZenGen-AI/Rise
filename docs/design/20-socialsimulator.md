@@ -141,6 +141,7 @@ SocialSimulator 的仿真部分是工厂的"社会情境发生器":它把情境�
 | 等待 `CreateSession` | 10 秒 | `create_timeout_s` |
 | 等客户端提交一轮 | 30 秒 | `turn_timeout_s` |
 | 服务端后端单次调用 | 默认 60 秒;`--interact` 装配拟改传 15 秒,该默认值本身不变 [计划中] | `backend_timeout_s` |
+| 客户端提交一轮的上限 | 服务端默认 30 秒;组合根现在给 `AgentRuntime` 传 5 秒,`--interact` 下要改回 30 秒以上,否则真模型一轮就超时 [计划中] | `turn_timeout_s` |
 | 并发会话上限 | 16 | `max_workers`,与 `maximum_concurrent_rpcs` 对齐 |
 | keepalive 间隔与超时 | 30000 / 10000 毫秒 | `create_server` |
 

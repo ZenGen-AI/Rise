@@ -252,7 +252,7 @@ interact:
 | 情境数下限 | 情境数不得少于 `groups_per_step`(默认 2);`_validate_interact` 会拒绝,因为同一情境在一步里出现两次会让两批 rollout 并成一组(`src/mindtrainer/training_config.py:325-330`) |
 | 展开后仍过校验 | 展开成的 interact 训练配置要过 `validate_training_config`,与其他指令一致 |
 
-生成路的指令写出时 `training_config.scenario_ids` 为空,而 `validate_training_config` 要求它非空。所以指令构造改用一个宽口径:带 `data_spec`、`scenario_ids` 为空时放行,其余调用点仍用严格校验;派发器回写之后重新跑一次严格校验。宽口径只在调度器按 `new` 构造且带 `data_spec` 时成立 [计划中]。
+生成路的指令写出时 `training_config.scenario_ids` 为空,而 `validate_training_config` 要求它非空。所以指令构造改用一个宽口径:带 `data_spec`、`scenario_ids` 为空时放行,其余调用点仍用严格校验;派发器回写之后重新跑一次严格校验。宽口径只在调度器按 `new` 构造且带 `data_spec` 时成立 [计划中]。回写后 `config_hash` 覆盖情境 id、人格 id 与 `bindings`,这只保证配置层面可复现,不声称续训等价。
 
 MindTrainer 的派发器生成情境与人格后,把最终的情境 id 与带人格 id 的 `bindings` 回写一次。回写后 `config_hash` 覆盖这些 id。调度器自己不生成,也不回写。
 
@@ -596,7 +596,7 @@ build_recipe_candidate(store, run_id, *, config, repo_commit=None,
 | R21 | 装配上下文前丢掉错误分布里的空标签 `""`,不重新归一化 | 保留空标签 | `PlanningContext` 拒绝空键,保留会让全答对的候选卡在规划 | 分布和可以小于 1,规划器看不到二级维度的答对比例 [已落地] |
 | TS-1 | 先写 `pending` 决策带 `next_run_id`,再解析与写指令,最后置 `executed` | 先写指令后记决策 | 解析失败与崩溃走同一条重入路径,run id 不重复分配 | 失败决策可能带着已分配但没用的 run id |
 | TS-2 | `clone` 换上最新已晋级基座;`replay` 一字不换 | `clone` 沿用配方旧基座 | 克隆是"在当前最好的模型上再用一次";复现换了基座就不是复现 | `clone` 的战绩混合配方与基座两种贡献,`mean_gain` 偏乐观 |
-| TS-3 | `new` 只构造 batch,`new` 加 interact 判领域违规 | 凭空构造 interact | interact 要点名情境与绑定,默认配置没有;违规还能重采样 | 规划器开不了新的 interact 训练线;`interact` 段落地后收窄为缺段时才违规 [计划中] |
+| TS-3 | `new` 只构造 batch,`new` 加 interact 判领域违规 | 凭空构造 interact | interact 要点名情境与绑定,默认配置没有;违规还能重采样 | 规划器开不了新的 interact 训练线;`interact` 段落地后收窄为「缺段」或「`allow_interact` 关」两种违规 [计划中] |
 | TS-4 | 扰动键是点路径,首段必须是 `TrainingConfig` 字段;多段时首段只能是 `grpo_config` 或 `reward`;锚定身份的字段永不可扰动 | 任意键 | 设计只说"在白名单内";防止扰动改掉基座、清单、模式 | 合法的新扰动要先改白名单 |
 | TS-5 | 配置错与模板缺失不算 `SchedulerError`,原样上抛,决策保持原状 | 判决策 `failed` | 失败的规划不会自动恢复,配置写错是人改一下就好的事 | 配置写错时守护循环每个 tick 都抛同一异常并退出 [已落地] |
 | TS-6 | `max_plan_attempts` 是总尝试次数,传给 `plan()` 的是减一后的重试次数 | 配置写重试次数 | 人读配置不用做减法;失败记录的尝试数等于配置值 | 无 |
