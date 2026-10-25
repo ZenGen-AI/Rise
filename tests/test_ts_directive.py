@@ -146,7 +146,7 @@ def test_confirm_must_be_a_bool(store):
                             planner_decision_id="planner-run-001")
 
 
-# ---- new + interact:点名路不带 data_spec,生成路带 data_spec 且回写前情境与绑定为空 ----
+# ---- new + interact:点名路不带 data_spec,生成路带 data_spec 且回写前情境为空、绑定的人格为空串 ----
 
 def _bindings():
     return [{"slot_id": "a", "persona_id": "p1", "model_backend": "self_play"},

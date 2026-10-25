@@ -480,7 +480,7 @@ TypeScript 命令行:`rismforge <review|approve|reject|confirm|status> [id] [rea
 |---|---|---|
 | 闭环模式缺评估器配置、诊断资产、桥接角色、凭证或 `agent.yaml` | 启动即退出码 2,指出缺哪份文件 | 跑一次 `install-defaults` 或补文件,再启动 [已落地] |
 | 缺规划提示模板或调度配置 | 装配期就拦下:`--enable plan` 预检 `scheduler.yaml`、`training_defaults.yaml` 与提示模板,只开 `nominate` 时预检 `scheduler.yaml`;缺任一项即以退出码 2 结束,不会起守护进程 [已落地] | 先跑 `install-defaults`,再启动 |
-| `--interact` 缺 `interact` 段、`allow_interact` 未打开、点名的情境与人格对不上,或与 `--executor roll` 同用 [计划中] | 启动即退出码 2,指出缺哪一项 | 补 `training_defaults.yaml` 与 `scheduler.yaml`,或去掉 `--executor roll`,再启动 |
+| `--interact` 缺 `interact` 段、点名的情境与人格对不上,或与 `--executor roll` 同用 [计划中] | 启动即退出码 2,指出缺哪一项 | 补 `training_defaults.yaml` 与 `scheduler.yaml`,或去掉 `--executor roll`,再启动 |
 | `--enable plan` 开着、`allow_interact` 为真,但没传 `--interact` [计划中] | 启动即退出码 2,错误信息点名缺 `--interact`。不拦的话规划器可能写出 interact 指令,派发时必然判 `failed`,闭环停住 | 加 `--interact`,或把 `scheduler.yaml` 的 `allow_interact` 关掉,再启动 |
 | 缺凭证或凭证写进了树 | 退出码 2,信息只含变量名或键路径 | 设好环境变量,从树里删掉凭证 [已落地] |
 | 规划桥接失败 | 决策 `failed`,写 T3 失败记录,闭环停住(R18) | 人写新指令或手工重置 [已落地] |
@@ -617,7 +617,7 @@ factory 是最后一个工作包,前八个全部落地后才能施工。
 | 开关拼错、`reconcile` 缺 `--once` | 用法错误 | 退出码 2,一行错误 | 无,树里不写 [已落地] |
 | 缺配置、资产、桥接角色或凭证 | 装配错误,发生在启动前,不属于 T1 至 T3 | 退出码 2,`FactoryConfigError` | 无,树里不写 [已落地] |
 | `--interact` 与 `--executor roll` 同用 | 用法错误 | 退出码 2,一行错误,树里不写 | 无 [计划中] |
-| `--interact` 打开但缺 `interact` 段,或 `allow_interact` 未打开 | 装配错误,发生在启动前 | 退出码 2,`FactoryConfigError`,指出缺哪一项 | 无,树里不写 [计划中] |
+| `--interact` 打开但缺 `interact` 段 | 装配错误,发生在启动前 | 退出码 2,`FactoryConfigError`,指出缺哪一项 | 无,树里不写 [计划中] |
 | `--enable plan` 开着、`allow_interact` 为真,但没传 `--interact` | 装配错误,发生在启动前 | 同上,错误信息点名缺 `--interact` | 同上 |
 | 点名的情境 `purpose` 不是 `training` | 装配错误 | 同上 | 同上 |
 | 点名的情境与人格只写了一半 | 装配错误 | 同上 | 同上 |

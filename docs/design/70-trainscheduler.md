@@ -207,7 +207,7 @@ TrainScheduler 是决策执行器:它把 TrainPlanner 的结构化决策落成�
 | 实体 | 字段与含义 | 约束 |
 |---|---|---|
 | `SchedulerConfig` [已落地] | 十个键,见下表 | 冻结;`scheduler.yaml` 缺失取全部默认值 |
-| `TrainingDefaults` [已落地] | `training_config`:完整 batch 配置,不含 `stage_manifest_refs`;`data_spec`:合成规格;`interact`:可选的 interact 段 [计划中] | `training_defaults.yaml` 缺失抛 `SchedulerConfigError`;今天出现 `interact` 键会被当未知键拒绝(`src/trainscheduler/config.py:249`) |
+| `TrainingDefaults` [已落地] | `training_config`:完整 batch 配置,不含 `stage_manifest_refs`;`data_spec`:合成规格;`interact`:可选的 interact 段 [计划中] | `training_defaults.yaml` 缺失抛 `SchedulerConfigError`;`interact` 段与 `opponent` 段都会被解析,其余未知键仍被拒绝 |
 | `ResolvedAction` [已落地] | `target_dimension`、`action`、`recipe_ref`、`training_config`、`data_spec`、`base_model_id` | 冻结;只有 `new` 带 `data_spec`;`new` 的 `recipe_ref` 是空串 |
 | `NominationVerdict` [已落地] | `nominate`、`reason`、`gain`、`baseline_run_id`、`not_yet` | 冻结;`not_yet` 为真表示前置条件还没到 |
 

@@ -56,8 +56,8 @@ def _envelope(new_run_id: str, payload: dict, status: str, links: list[str]) -> 
 def check_directive(env: Envelope) -> None:
     """指令必须能被 MindTrainer 派发器读回并通过校验;带 data_spec 的指令,它必须够合成指令点名的阶段。
 
-    带 data_spec 的指令用宽口径:生成路的 interact 在这时 scenario_ids 与 bindings 还是空的,
-    要到派发时由合成出的数据回写,回写后派发器再按严格口径复检。不带 data_spec 的指令
+    带 data_spec 的指令用宽口径:生成路的 interact 在这时 scenario_ids 为空,bindings 已带完整的角色位布局,
+    但每条 persona_id 都是空串。情境与人格要到派发时由合成出的数据回写,回写后派发器再按严格口径复检。不带 data_spec 的指令
     (点名路、clone、replay、手写)一律走严格口径。"""
     try:
         cfg = load_config_from_directive(env)
