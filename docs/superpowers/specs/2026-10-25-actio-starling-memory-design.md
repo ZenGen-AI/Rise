@@ -137,15 +137,27 @@ class MemoryBackend(Protocol):
 
 ### 4.3 时机(M8)
 
+默认读写都开:
+
 - 每轮 `respond` 之前:`recall(holder=<本角色位 agent>, query=<对方最后一句>, limit=3)`。
 - 每轮之后:把本轮对方发言交给 `remember(holder=…, text=…, interlocutor=<对方 agent>)`。
-- `remember` 需要 LLM:由装配处注入,凭证只从环境变量读。抽取失败不挡训练:记一次失败、这一轮不留记忆,不抛到 `respond` 之外。
+- 抽取由 Starling 内部完成:写记忆只是调它的接口,本仓库不注入抽取器、不选抽取模型。用哪个模型由 Starling 自己的配置决定,与本仓库的凭证体系无关。
+- 抽取失败不挡训练:记一次失败、这一轮不留记忆,不抛到 `respond` 之外。Starling 的 `RememberResult` 带 `extraction_failed`、`failure_category`、`failure_detail`,直接据此记账。
 
 ### 4.4 落盘(M5)
 
-记忆库在树外,例如 `~/.rismforge/memory/<tenant>.db`,路径写进配置。为什么不在树里:它是原生 SQLite,有 WAL 与后台线程,每次写入都提交 git 会污染产物树,也让训练变成不可控的写者。
+记忆库**跟着智能体实例走**,位置由一个配置项给定,不写死:
 
-代价:记忆不可从产物树追溯。补偿就是 M6 的指纹。
+| 部署形态 | 实例在哪 | 记忆库在哪 |
+|---|---|---|
+| 现状(全部组件一台机器) | 开发机 | 开发机,如 `~/.rismforge/memory/<tenant>.db` |
+| 目标(模拟器在计算层) | 计算层 GPU 主机 | 同一台主机的一个固定目录 |
+
+不写死的原因:总览把 SocialSimulator 放在计算层,而现状是全部组件在开发机上。哪一侧运行实例,库就在哪一侧,否则每轮 `recall` 都要跨机往返,实时会话撑不住。
+
+为什么不在 git 树里:它是原生 SQLite,有 WAL 与后台线程,每次写入都提交 git 会污染产物树,也让训练变成不可控的写者。
+
+隔离不靠物理位置:即使模拟器与实例同机,模拟器也只经协议调用,不导入 Starling、不碰库文件。代价是记忆不可从产物树追溯,补偿就是 M6 的指纹。
 
 ## 5. 记忆指纹(M6、M7)
 
@@ -177,7 +189,7 @@ fp = agent.fingerprint()          # {"memory": "<sha256>", "skills": "<sha256>"}
 1. **LICENSE。** `ruijieguo/starling` 根目录没有 LICENSE 文件,README 仍写未选许可。你确认按 Apache 2.0 授权,需要在该仓库补 `LICENSE`(与 `NOTICE`,如有第三方代码),并把 README 的许可段落改掉。完成前,本仓库不能声明对它的依赖。
 2. **安装源。** 未上 PyPI。二选一:发布到 PyPI(最优),或本仓库的 `starling` extra 指向 git 地址/本地路径。
 3. **构建门槛。** 要 C++ 编译器、CMake ≥3.27、Ninja、SQLite ≥3.46。本机缺 cmake/ninja,CI 也要能编。写进 `docs/design` 的依赖一节。
-4. **`remember` 依赖 LLM。** 抽取出错、成本、凭证都要定;V1 建议默认关闭写记忆(只 recall),写记忆要显式打开。
+4. **写记忆依赖 Starling 内部的抽取模型。** 本仓库不注入抽取器,只用它的接口。因此:抽取模型选型、抽取成本与超时都在 Starling 的配置里,本仓库的凭证体系不涉及;`RememberResult.extraction_failed` 是唯一的失败信号,要据此留痕。
 
 ## 8. 失败与可观测
 
@@ -218,8 +230,16 @@ fp = agent.fingerprint()          # {"memory": "<sha256>", "skills": "<sha256>"}
 
 第 2 步可以不依赖 Starling 先做,它把 `actio` 与具体记忆实现解耦。
 
-## 11. 待你确认
+## 11. 已定与未核实
 
-1. **M5 的树外路径。** 记忆库放 `~/.rismforge/memory/<tenant>.db` 这样的本机路径,还是放到计算层主机上的一个固定目录?前者简单,后者更接近"记忆是 agent 的私有状态、不在开发机上"。
-2. **M8 的写记忆默认关不关。** 每轮 `remember` 会翻倍外部调用。建议 V1 默认只 recall,写记忆显式打开;你要不要一开始就全开?
-3. **M10 的门②形态。** 记忆提案的证据从"树里的条目文件"变成"Starling 里的一条陈述",`review` 时怎么展示最合适:显示提案原文,还是显示收录后从 Starling 读回的那条?
+已定:
+
+1. **记忆库位置(4.4)。** 跟着智能体实例走,由配置给路径;目标是计算层,现状是开发机。
+2. **写记忆(4.3)。** 默认读写都开。抽取用 Starling 内部的实现,本仓库只调接口。
+3. **门②证据(第 6 节)。** `review` 显示提案原文;收录后从 Starling 读回核对,审批前不写库。
+
+未核实:
+
+- Starling 的抽取默认超时与并发表现,决定每轮 `remember` 会不会拖慢会话。要真机测。
+- 共用单库、多 holder、每轮读写下,SQLite 的 WAL 增长与 `tick` 后台线程的负载。要压测。
+- 记忆指纹在 WAL 有未合并页时的稳定性:同一逻辑状态可能对应不同的文件字节。若不稳定,改成对逻辑内容哈希。
