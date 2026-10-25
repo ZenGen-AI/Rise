@@ -1,0 +1,226 @@
+"""对手位的驱动:选哪种驱动、把 model_ref 解析成适配器导出、外部 API 客户端。
+
+驱动三选一(RoleBinding.driver):
+- scripted:按剧本说话,不依赖任何模型(AgentRuntime._backends 里直接用 ScriptedBackend);
+- vllm:加载 model_ref 指向的适配器导出,经 vLLM 服务说话(后端由 AgentRuntime 的工厂给出);
+- external_api:POST 到 OpenAI 兼容的 /v1/chat/completions(本文件的 ExternalApiBackend)。
+
+本模块不碰凭证的来源:密钥由调用方传入,为空时在构造期抛 OpponentCredentialError,信息里只有环境变量名。
+任何异常信息、回溯都不含密钥值(见 ExternalApiBackend)。
+"""
+from __future__ import annotations
+
+import json
+import math
+import urllib.error
+import urllib.parse
+import urllib.request
+
+from controlplane.envelope import BigRef, InvalidBigRefError
+from controlplane.gitstore import UNREADABLE_PRODUCT_ERRORS, GitStore
+from controlplane.models import version_of_id
+from controlplane.paths import model_file
+from factory.sombench_runner import EXPORT_FORMAT
+from simulator.datamodel import OPPONENT_DRIVERS, Persona, RoleBinding, Scenario, TurnRecord
+
+# 回复体上限:一句对手发言用不了这么多,挡住对端发来没完没了的响应
+MAX_REPLY_BYTES = 1 << 20
+
+
+class ModelRefError(Exception):
+    """model_ref 解析不到可加载的适配器导出:id 形状不对、模型产物不在或读不出、checkpoint_ref 缺失或不合规、
+    或它不是适配器导出。都是确定性的,重试也不会变好。信息点名 model_ref。"""
+
+
+class OpponentCredentialError(Exception):
+    """外部对手 API 的密钥缺失或不可用。信息里只有环境变量名,绝不含密钥值。"""
+
+
+class OpponentApiError(Exception):
+    """外部对手 API 这一次没给出可用的发言:连不上、超时、非 200、回复不是约定的形状。信息里绝不含密钥值。"""
+
+
+# ---------------- 驱动选择 ----------------
+
+def driver_for(binding: RoleBinding) -> str:
+    """对手位用哪种驱动。训练位(self_play)永远不配对手驱动,传进来是调用方的错,抛 ValueError。
+    显式的 binding.driver 优先;没写就按 model_backend 取默认:frozen_reference 走 vllm,external_api 走外部 API。"""
+    if binding.model_backend == "self_play":
+        raise ValueError(
+            f"slot {binding.slot_id!r} is self_play (the trained slot), which never gets an opponent driver"
+        )
+    if binding.driver is not None:
+        if binding.driver not in OPPONENT_DRIVERS:
+            raise ValueError(
+                f"slot {binding.slot_id!r} driver must be one of {list(OPPONENT_DRIVERS)}, got {binding.driver!r}"
+            )
+        return binding.driver
+    if binding.model_backend == "frozen_reference":
+        return "vllm"
+    if binding.model_backend == "external_api":
+        return "external_api"
+    raise ValueError(
+        f"slot {binding.slot_id!r} has model_backend {binding.model_backend!r} and no driver; "
+        f"cannot pick one of {list(OPPONENT_DRIVERS)}"
+    )
+
+
+# ---------------- model_ref 解析 ----------------
+
+def resolve_model_ref(store: GitStore, model_ref: str) -> BigRef:
+    """`zengen-vN` -> 该模型产物的 checkpoint_ref,且必须是适配器导出(判法与 SomevalRunner 同口径:
+    fetch_hint 的 type 是 roll_ssh、format 是 EXPORT_FORMAT)。其余一律抛 ModelRefError。
+    OSError(磁盘、权限)是瞬态,原样上抛。"""
+    version = version_of_id(model_ref) if isinstance(model_ref, str) else None
+    # 要求规范写法:zengen-v01 会被正则放行成版本 1,却不是那个模型的 id
+    if version is None or model_ref != f"zengen-v{version}":
+        raise ModelRefError(f"model_ref {model_ref!r} is not a model id of the form zengen-vN")
+    rel = model_file(version)
+    if not store.exists(rel):
+        raise ModelRefError(f"model_ref {model_ref!r} has no model product in the tree ({rel})")
+    try:
+        envelope = store.read_product(rel)
+    except UNREADABLE_PRODUCT_ERRORS as exc:
+        raise ModelRefError(
+            f"model_ref {model_ref!r}: the model product is unreadable ({type(exc).__name__}: {exc})"
+        ) from exc
+    raw = envelope.payload.get("checkpoint_ref")
+    if not isinstance(raw, dict):
+        raise ModelRefError(f"model_ref {model_ref!r}: the model product has no usable checkpoint_ref")
+    try:
+        ref = BigRef.from_dict(raw)
+    except (InvalidBigRefError, KeyError) as exc:
+        # 手改进树的坏引用(I8)
+        raise ModelRefError(
+            f"model_ref {model_ref!r}: its checkpoint_ref is malformed ({type(exc).__name__}: {exc})"
+        ) from exc
+    hint = ref.fetch_hint or {}
+    if hint.get("type") != "roll_ssh" or hint.get("format") != EXPORT_FORMAT:
+        raise ModelRefError(
+            f"model_ref {model_ref!r}: its checkpoint is not an adapter export "
+            f"(needs fetch_hint type 'roll_ssh' and format {EXPORT_FORMAT!r})"
+        )
+    return ref
+
+
+# ---------------- 对话消息 ----------------
+
+def chat_messages(persona: Persona, scenario: Scenario, history: list[TurnRecord], speaker_slot: str) -> list[dict]:
+    """给聊天补全接口的消息:一条 system(人格与情境),历史里每个回合一条 user(前缀说话的角色位)。
+    只放话语,不放别人的内心独白与激活轨迹(那是评估材料,不是对手该看见的)。
+    历史为空(对手先开口)时补一条开场的 user,免得有的服务拒收没有 user 消息的请求。"""
+    role = next((r.description for r in scenario.role_slots if r.slot_id == speaker_slot), "")
+    lines = [f"你在一段社会情境对话里扮演角色位「{speaker_slot}」" + (f"({role})。" if role else "。")]
+    if scenario.background:
+        lines.append(f"情境背景:{scenario.background}")
+    if scenario.conflict:
+        lines.append(f"核心冲突:{scenario.conflict}")
+    if scenario.norms:
+        lines.append("需要遵守的规范:" + ";".join(scenario.norms))
+    traits = [
+        ("特质", "、".join(persona.traits)), ("动机", persona.motivation),
+        ("说话风格", persona.speech_style), ("价值观", "、".join(persona.values)),
+    ]
+    described = [f"{label}:{value}" for label, value in traits if value]
+    if described:
+        lines.append("你的人格——" + ";".join(described))
+    lines.append("只说出你这一轮要说的话,不要加角色名前缀,不要解释。")
+    messages = [{"role": "system", "content": "\n".join(lines)}]
+    messages += [{"role": "user", "content": f"{t.speaker_slot}:{t.utterance}"} for t in history]
+    if not history:
+        messages.append({"role": "user", "content": "对话刚开始,请你先开口。"})
+    return messages
+
+
+# ---------------- 外部 API 客户端 ----------------
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """不跟随重定向:urllib 会把 Authorization 头带到重定向的目的地,密钥会跑到另一台主机上。
+    返回 None 后 3xx 作为 HTTPError 抛出,由 ExternalApiBackend 报成非 200。"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+class ExternalApiBackend:
+    """ModelBackend:把对手位的发言交给 OpenAI 兼容的聊天补全接口。一次 respond 一次 POST,不重试
+    (重试与降级是调用方的事:服务端用 TimeoutBackend 限时,失败按角色位后端故障处理)。
+
+    密钥只在构造时校验、只放进 Authorization 头。校验不过抛 OpponentCredentialError(信息只含 api_key_env);
+    请求失败抛 OpponentApiError,信息只含状态码、主机、异常类型名,不含响应体,密钥出现也会被抹掉,
+    且切断异常链(from None),回溯里没有携带请求头的原异常。"""
+
+    def __init__(self, base_url: str, model: str, *, api_key: str, api_key_env: str, timeout_s: float) -> None:
+        parts = urllib.parse.urlsplit(base_url) if isinstance(base_url, str) else None
+        if parts is None or parts.scheme not in ("http", "https") or not parts.netloc:
+            raise ValueError(f"base_url must be an http(s) URL, got {base_url!r}")
+        if isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float)) or not (
+            math.isfinite(timeout_s) and timeout_s > 0
+        ):
+            raise ValueError(f"timeout_s must be a finite number > 0, got {timeout_s!r}")
+        if not isinstance(api_key, str) or not api_key.strip():
+            raise OpponentCredentialError(
+                f"the opponent API key is empty; set the environment variable {api_key_env}"
+            )
+        if not (api_key.isascii() and api_key.isprintable()):
+            # 换行或非 ASCII 的值放进请求头,http.client 抛的 ValueError 会带上整个头值
+            raise OpponentCredentialError(
+                f"the opponent API key in {api_key_env} has characters that cannot go into an HTTP header"
+            )
+        self._url = f"{base_url.rstrip('/')}/v1/chat/completions"
+        self._host = parts.netloc
+        self._model = model
+        self._api_key = api_key
+        self._timeout = float(timeout_s)
+
+    def respond(
+        self,
+        persona: Persona,
+        scenario: Scenario,
+        history: list[TurnRecord],
+        speaker_slot: str,
+    ) -> tuple[str, str | None]:
+        payload = {"model": self._model, "messages": chat_messages(persona, scenario, history, speaker_slot)}
+        request = urllib.request.Request(
+            self._url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"), method="POST",
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {self._api_key}"},
+        )
+        try:
+            with _OPENER.open(request, timeout=self._timeout) as response:
+                status = response.status
+                raw = response.read(MAX_REPLY_BYTES + 1)
+        except urllib.error.HTTPError as exc:
+            exc.close()
+            raise self._fail(f"HTTP {exc.code} from {self._host}") from None
+        except TimeoutError:
+            raise self._fail(f"request to {self._host} timed out after {self._timeout:g}s") from None
+        except urllib.error.URLError as exc:
+            if isinstance(exc.reason, TimeoutError):
+                raise self._fail(f"request to {self._host} timed out after {self._timeout:g}s") from None
+            raise self._fail(f"request to {self._host} failed ({type(exc.reason).__name__}: {exc.reason})") from None
+        except OSError as exc:  # 连接被重置、对端中途断开
+            raise self._fail(f"request to {self._host} failed ({type(exc).__name__})") from None
+        except Exception as exc:  # http.client.HTTPException 不是 OSError 的子类(状态行不合规、读到一半断开等)
+            raise self._fail(f"request to {self._host} failed ({type(exc).__name__})") from None
+        if status != 200:
+            raise self._fail(f"HTTP {status} from {self._host}")
+        if len(raw) > MAX_REPLY_BYTES:
+            raise self._fail(f"the reply from {self._host} is larger than {MAX_REPLY_BYTES} bytes")
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except ValueError:  # UnicodeDecodeError 与 JSONDecodeError 都是 ValueError
+            raise self._fail(f"the reply from {self._host} is not valid JSON") from None
+        try:
+            content = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError):
+            raise self._fail(f"the reply from {self._host} has no choices[0].message.content") from None
+        if not isinstance(content, str) or not content.strip():
+            raise self._fail(f"the reply from {self._host} has an empty or non-text choices[0].message.content")
+        return content, None
+
+    def _fail(self, message: str) -> OpponentApiError:
+        """所有失败走这一处,出口前抹掉密钥(原异常的文本理论上不该含,这里是第二道防线)。"""
+        return OpponentApiError(message.replace(self._api_key, "***"))

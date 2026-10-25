@@ -25,7 +25,7 @@ _sym_db = _symbol_database.Default()
 from google.protobuf import struct_pb2 as google_dot_protobuf_dot_struct__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n+simulator/realtime/proto/realtime_env.proto\x12\x12rismforge.realtime\x1a\x1cgoogle/protobuf/struct.proto\"t\n\x0cPersonaProto\x12\n\n\x02id\x18\x01 \x01(\t\x12\x0e\n\x06traits\x18\x02 \x03(\t\x12\x12\n\nmotivation\x18\x03 \x01(\t\x12\x14\n\x0cspeech_style\x18\x04 \x01(\t\x12\x0e\n\x06values\x18\x05 \x03(\t\x12\x0e\n\x06source\x18\x06 \x01(\t\"t\n\x10RoleBindingProto\x12\x0f\n\x07slot_id\x18\x01 \x01(\t\x12\x12\n\npersona_id\x18\x02 \x01(\t\x12\x15\n\rmodel_backend\x18\x03 \x01(\t\x12\x16\n\tmodel_ref\x18\x04 \x01(\tH\x00\x88\x01\x01\x42\x0c\n\n_model_ref\"u\n\x13RoleAssignmentProto\x12\x13\n\x0bscenario_id\x18\x01 \x01(\t\x12\x36\n\x08\x62indings\x18\x02 \x03(\x0b\x32$.rismforge.realtime.RoleBindingProto\x12\x11\n\tmax_turns\x18\x03 \x01(\x05\"\xc9\x01\n\x0fTurnRecordProto\x12\x12\n\nturn_index\x18\x01 \x01(\x05\x12\x14\n\x0cspeaker_slot\x18\x02 \x01(\t\x12\x11\n\tutterance\x18\x03 \x01(\t\x12\x1a\n\rinner_thought\x18\x04 \x01(\tH\x00\x88\x01\x01\x12\x36\n\x10\x61\x63tivation_trace\x18\x05 \x01(\x0b\x32\x17.google.protobuf.StructH\x01\x88\x01\x01\x42\x10\n\x0e_inner_thoughtB\x13\n\x11_activation_trace\"\xa9\x02\n\rCreateSession\x12\x13\n\x0bscenario_id\x18\x01 \x01(\t\x12@\n\x0frole_assignment\x18\x02 \x01(\x0b\x32\'.rismforge.realtime.RoleAssignmentProto\x12\x41\n\x08personas\x18\x03 \x03(\x0b\x32/.rismforge.realtime.CreateSession.PersonasEntry\x12\x0f\n\x07purpose\x18\x04 \x01(\t\x12\x1a\n\x12\x63lient_driven_slot\x18\x05 \x01(\t\x1aQ\n\rPersonasEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12/\n\x05value\x18\x02 \x01(\x0b\x32 .rismforge.realtime.PersonaProto:\x02\x38\x01\"\"\n\x0cSessionReady\x12\x12\n\nsession_id\x18\x01 \x01(\t\"\x9a\x01\n\nSubmitTurn\x12\x11\n\tutterance\x18\x01 \x01(\t\x12\x1a\n\rinner_thought\x18\x02 \x01(\tH\x00\x88\x01\x01\x12\x36\n\x10\x61\x63tivation_trace\x18\x03 \x01(\x0b\x32\x17.google.protobuf.StructH\x01\x88\x01\x01\x42\x10\n\x0e_inner_thoughtB\x13\n\x11_activation_trace\"?\n\nTurnUpdate\x12\x31\n\x04turn\x18\x01 \x01(\x0b\x32#.rismforge.realtime.TurnRecordProto\"`\n\nEndSession\x12\x0e\n\x06reason\x18\x01 \x01(\t\x12\x12\n\nepisode_id\x18\x02 \x01(\t\x12\x1b\n\x0e\x66\x61ilure_detail\x18\x03 \x01(\tH\x00\x88\x01\x01\x42\x11\n\x0f_failure_detail\"\xc5\x01\n\rClientMessage\x12;\n\x0e\x63reate_session\x18\x01 \x01(\x0b\x32!.rismforge.realtime.CreateSessionH\x00\x12\x35\n\x0bsubmit_turn\x18\x02 \x01(\x0b\x32\x1e.rismforge.realtime.SubmitTurnH\x00\x12\x35\n\x0b\x65nd_session\x18\x03 \x01(\x0b\x32\x1e.rismforge.realtime.EndSessionH\x00\x42\t\n\x07payload\"\xc3\x01\n\rServerMessage\x12\x39\n\rsession_ready\x18\x01 \x01(\x0b\x32 .rismforge.realtime.SessionReadyH\x00\x12\x35\n\x0bturn_update\x18\x02 \x01(\x0b\x32\x1e.rismforge.realtime.TurnUpdateH\x00\x12\x35\n\x0b\x65nd_session\x18\x03 \x01(\x0b\x32\x1e.rismforge.realtime.EndSessionH\x00\x42\t\n\x07payload2j\n\x12\x45nvironmentService\x12T\n\x08Interact\x12!.rismforge.realtime.ClientMessage\x1a!.rismforge.realtime.ServerMessage(\x01\x30\x01\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n+simulator/realtime/proto/realtime_env.proto\x12\x12rismforge.realtime\x1a\x1cgoogle/protobuf/struct.proto\"t\n\x0cPersonaProto\x12\n\n\x02id\x18\x01 \x01(\t\x12\x0e\n\x06traits\x18\x02 \x03(\t\x12\x12\n\nmotivation\x18\x03 \x01(\t\x12\x14\n\x0cspeech_style\x18\x04 \x01(\t\x12\x0e\n\x06values\x18\x05 \x03(\t\x12\x0e\n\x06source\x18\x06 \x01(\t\"\x94\x01\n\x10RoleBindingProto\x12\x0f\n\x07slot_id\x18\x01 \x01(\t\x12\x12\n\npersona_id\x18\x02 \x01(\t\x12\x15\n\rmodel_backend\x18\x03 \x01(\t\x12\x16\n\tmodel_ref\x18\x04 \x01(\tH\x00\x88\x01\x01\x12\x13\n\x06\x64river\x18\x05 \x01(\tH\x01\x88\x01\x01\x42\x0c\n\n_model_refB\t\n\x07_driver\"u\n\x13RoleAssignmentProto\x12\x13\n\x0bscenario_id\x18\x01 \x01(\t\x12\x36\n\x08\x62indings\x18\x02 \x03(\x0b\x32$.rismforge.realtime.RoleBindingProto\x12\x11\n\tmax_turns\x18\x03 \x01(\x05\"\xc9\x01\n\x0fTurnRecordProto\x12\x12\n\nturn_index\x18\x01 \x01(\x05\x12\x14\n\x0cspeaker_slot\x18\x02 \x01(\t\x12\x11\n\tutterance\x18\x03 \x01(\t\x12\x1a\n\rinner_thought\x18\x04 \x01(\tH\x00\x88\x01\x01\x12\x36\n\x10\x61\x63tivation_trace\x18\x05 \x01(\x0b\x32\x17.google.protobuf.StructH\x01\x88\x01\x01\x42\x10\n\x0e_inner_thoughtB\x13\n\x11_activation_trace\"\xa9\x02\n\rCreateSession\x12\x13\n\x0bscenario_id\x18\x01 \x01(\t\x12@\n\x0frole_assignment\x18\x02 \x01(\x0b\x32\'.rismforge.realtime.RoleAssignmentProto\x12\x41\n\x08personas\x18\x03 \x03(\x0b\x32/.rismforge.realtime.CreateSession.PersonasEntry\x12\x0f\n\x07purpose\x18\x04 \x01(\t\x12\x1a\n\x12\x63lient_driven_slot\x18\x05 \x01(\t\x1aQ\n\rPersonasEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12/\n\x05value\x18\x02 \x01(\x0b\x32 .rismforge.realtime.PersonaProto:\x02\x38\x01\"\"\n\x0cSessionReady\x12\x12\n\nsession_id\x18\x01 \x01(\t\"\x9a\x01\n\nSubmitTurn\x12\x11\n\tutterance\x18\x01 \x01(\t\x12\x1a\n\rinner_thought\x18\x02 \x01(\tH\x00\x88\x01\x01\x12\x36\n\x10\x61\x63tivation_trace\x18\x03 \x01(\x0b\x32\x17.google.protobuf.StructH\x01\x88\x01\x01\x42\x10\n\x0e_inner_thoughtB\x13\n\x11_activation_trace\"?\n\nTurnUpdate\x12\x31\n\x04turn\x18\x01 \x01(\x0b\x32#.rismforge.realtime.TurnRecordProto\"`\n\nEndSession\x12\x0e\n\x06reason\x18\x01 \x01(\t\x12\x12\n\nepisode_id\x18\x02 \x01(\t\x12\x1b\n\x0e\x66\x61ilure_detail\x18\x03 \x01(\tH\x00\x88\x01\x01\x42\x11\n\x0f_failure_detail\"\xc5\x01\n\rClientMessage\x12;\n\x0e\x63reate_session\x18\x01 \x01(\x0b\x32!.rismforge.realtime.CreateSessionH\x00\x12\x35\n\x0bsubmit_turn\x18\x02 \x01(\x0b\x32\x1e.rismforge.realtime.SubmitTurnH\x00\x12\x35\n\x0b\x65nd_session\x18\x03 \x01(\x0b\x32\x1e.rismforge.realtime.EndSessionH\x00\x42\t\n\x07payload\"\xc3\x01\n\rServerMessage\x12\x39\n\rsession_ready\x18\x01 \x01(\x0b\x32 .rismforge.realtime.SessionReadyH\x00\x12\x35\n\x0bturn_update\x18\x02 \x01(\x0b\x32\x1e.rismforge.realtime.TurnUpdateH\x00\x12\x35\n\x0b\x65nd_session\x18\x03 \x01(\x0b\x32\x1e.rismforge.realtime.EndSessionH\x00\x42\t\n\x07payload2j\n\x12\x45nvironmentService\x12T\n\x08Interact\x12!.rismforge.realtime.ClientMessage\x1a!.rismforge.realtime.ServerMessage(\x01\x30\x01\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -36,28 +36,28 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_CREATESESSION_PERSONASENTRY']._serialized_options = b'8\001'
   _globals['_PERSONAPROTO']._serialized_start=97
   _globals['_PERSONAPROTO']._serialized_end=213
-  _globals['_ROLEBINDINGPROTO']._serialized_start=215
-  _globals['_ROLEBINDINGPROTO']._serialized_end=331
-  _globals['_ROLEASSIGNMENTPROTO']._serialized_start=333
-  _globals['_ROLEASSIGNMENTPROTO']._serialized_end=450
-  _globals['_TURNRECORDPROTO']._serialized_start=453
-  _globals['_TURNRECORDPROTO']._serialized_end=654
-  _globals['_CREATESESSION']._serialized_start=657
-  _globals['_CREATESESSION']._serialized_end=954
-  _globals['_CREATESESSION_PERSONASENTRY']._serialized_start=873
-  _globals['_CREATESESSION_PERSONASENTRY']._serialized_end=954
-  _globals['_SESSIONREADY']._serialized_start=956
-  _globals['_SESSIONREADY']._serialized_end=990
-  _globals['_SUBMITTURN']._serialized_start=993
-  _globals['_SUBMITTURN']._serialized_end=1147
-  _globals['_TURNUPDATE']._serialized_start=1149
-  _globals['_TURNUPDATE']._serialized_end=1212
-  _globals['_ENDSESSION']._serialized_start=1214
-  _globals['_ENDSESSION']._serialized_end=1310
-  _globals['_CLIENTMESSAGE']._serialized_start=1313
-  _globals['_CLIENTMESSAGE']._serialized_end=1510
-  _globals['_SERVERMESSAGE']._serialized_start=1513
-  _globals['_SERVERMESSAGE']._serialized_end=1708
-  _globals['_ENVIRONMENTSERVICE']._serialized_start=1710
-  _globals['_ENVIRONMENTSERVICE']._serialized_end=1816
+  _globals['_ROLEBINDINGPROTO']._serialized_start=216
+  _globals['_ROLEBINDINGPROTO']._serialized_end=364
+  _globals['_ROLEASSIGNMENTPROTO']._serialized_start=366
+  _globals['_ROLEASSIGNMENTPROTO']._serialized_end=483
+  _globals['_TURNRECORDPROTO']._serialized_start=486
+  _globals['_TURNRECORDPROTO']._serialized_end=687
+  _globals['_CREATESESSION']._serialized_start=690
+  _globals['_CREATESESSION']._serialized_end=987
+  _globals['_CREATESESSION_PERSONASENTRY']._serialized_start=906
+  _globals['_CREATESESSION_PERSONASENTRY']._serialized_end=987
+  _globals['_SESSIONREADY']._serialized_start=989
+  _globals['_SESSIONREADY']._serialized_end=1023
+  _globals['_SUBMITTURN']._serialized_start=1026
+  _globals['_SUBMITTURN']._serialized_end=1180
+  _globals['_TURNUPDATE']._serialized_start=1182
+  _globals['_TURNUPDATE']._serialized_end=1245
+  _globals['_ENDSESSION']._serialized_start=1247
+  _globals['_ENDSESSION']._serialized_end=1343
+  _globals['_CLIENTMESSAGE']._serialized_start=1346
+  _globals['_CLIENTMESSAGE']._serialized_end=1543
+  _globals['_SERVERMESSAGE']._serialized_start=1546
+  _globals['_SERVERMESSAGE']._serialized_end=1741
+  _globals['_ENVIRONMENTSERVICE']._serialized_start=1743
+  _globals['_ENVIRONMENTSERVICE']._serialized_end=1849
 # @@protoc_insertion_point(module_scope)

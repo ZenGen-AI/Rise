@@ -9,6 +9,7 @@ agent.yaml 是组合根自己的配置信封(control-plane/config/agent.yaml),�
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from dataclasses import fields
 
 import grpc
@@ -17,9 +18,10 @@ from controlplane.gitstore import GitStore
 from controlplane.paths import CONTROL_PLANE_ROOT
 from factory.configio import describe, key_names, read_tree_config
 from factory.errors import FactoryConfigError
+from factory.opponents import driver_for
 from mindagent.config import AgentConfig
-from simulator.backends import ScriptedBackend
-from simulator.datamodel import RoleBinding
+from simulator.backends import ModelBackend, ScriptedBackend
+from simulator.datamodel import RoleBinding, Scenario
 from simulator.realtime.client import EnvironmentServiceClient
 from simulator.realtime.proto import realtime_env_pb2_grpc as pb2_grpc
 from simulator.realtime.server import create_server
@@ -102,24 +104,53 @@ class DeadlineStub:
 
 class AgentRuntime:
     """进程内的 loopback 实时服务端,第一次 client_factory() 时才启动;close() 关通道、停服务端并等它停完。
-    对手位一律用 ScriptedBackend 说 opponent_lines;情境从树里读(scenario_resolver)。
-    每条 Interact 流带 interact_deadline_s 的 deadline(DeadlineStub);stub_factory 只为测试注入。"""
+    对手位的后端按各自绑定的驱动分派(见 _backends);情境从树里读(scenario_resolver)。
+    每条 Interact 流带 interact_deadline_s 的 deadline(DeadlineStub);stub_factory 只为测试注入。
+
+    opponent_backend_factory(binding, scenario) 给 vllm 与 external_api 驱动的对手位造后端,没传(None)时
+    这两种也和过去一样用 ScriptedBackend 说 opponent_lines:MindAgent 部署会话的绑定多是 frozen_reference,
+    没有真模型可加载,行为必须原样不变。"""
 
     def __init__(self, store: GitStore, opponent_lines: tuple[str, ...], *, turn_timeout_s: float = 5.0,
                  interact_deadline_s: float = INTERACT_DEADLINE_S,
-                 stub_factory=pb2_grpc.EnvironmentServiceStub) -> None:
+                 stub_factory=pb2_grpc.EnvironmentServiceStub,
+                 opponent_backend_factory: Callable[[RoleBinding, Scenario], ModelBackend] | None = None) -> None:
         self._store = store
         self._lines = list(opponent_lines)
         self._timeout = turn_timeout_s
         self._deadline = interact_deadline_s
         self._stub_factory = stub_factory
+        self._opponent_backend_factory = opponent_backend_factory
         self._server = None
         # (客户端, 通道) 成对记下:会话结束的客户端,通道在下一次发客户端时关掉(见 client_factory)
         self._channels: list = []
         self._lock = threading.Lock()
 
+    def _driver_of(self, binding: RoleBinding) -> str | None:
+        """没传工厂时,只有显式写了 scripted 的绑定才改变行为,其余一律不判驱动、给原来的罐头后端:
+        agent.yaml 不校验 model_backend 的取值,driver_for 对 self_play 与未知后端名会抛 ValueError,
+        而过去的 _backends 从不看绑定。传了工厂就是训练路,绑定已过 validate_training_config,照实判。"""
+        if self._opponent_backend_factory is None and binding.driver != "scripted":
+            return None
+        return driver_for(binding)
+
     def _backends(self, scenario, assignment, personas, client_slot):
-        return {s: ScriptedBackend({s: list(self._lines)}) for s in assignment.slot_ids() - {client_slot}}
+        """每个非客户端角色位一个全新的后端(服务端要求每次调用返回新实例,游标不能跨会话共享)。
+        scripted 驱动:ScriptedBackend(loop=True),台词取情境剧本里该角色位的一份,没有或为空取全局台词;
+        其余驱动:有工厂就交给工厂,没有就是原来的 ScriptedBackend(不循环,全局台词)。"""
+        backends = {}
+        for binding in assignment.bindings:
+            slot = binding.slot_id
+            if slot == client_slot:
+                continue
+            if self._driver_of(binding) == "scripted":
+                lines = scenario.opponent_script.get(slot) or self._lines
+                backends[slot] = ScriptedBackend({slot: list(lines)}, loop=True)
+            elif self._opponent_backend_factory is not None:
+                backends[slot] = self._opponent_backend_factory(binding, scenario)
+            else:
+                backends[slot] = ScriptedBackend({slot: list(self._lines)})
+        return backends
 
     def client_factory(self) -> EnvironmentServiceClient:
         with self._lock:

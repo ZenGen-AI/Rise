@@ -26,6 +26,8 @@ def role_binding_to_proto(b: RoleBinding) -> pb2.RoleBindingProto:
     )
     if b.model_ref is not None:
         proto.model_ref = b.model_ref
+    if b.driver is not None:
+        proto.driver = b.driver
     return proto
 
 
@@ -33,6 +35,7 @@ def role_binding_from_proto(proto: pb2.RoleBindingProto) -> RoleBinding:
     return RoleBinding(
         slot_id=proto.slot_id, persona_id=proto.persona_id, model_backend=proto.model_backend,
         model_ref=proto.model_ref if proto.HasField("model_ref") else None,
+        driver=proto.driver if proto.HasField("driver") else None,
     )
 
 

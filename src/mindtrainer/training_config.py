@@ -8,7 +8,7 @@ import math
 from dataclasses import dataclass, field
 
 from controlplane.envelope import SHA256_HEX, BigRef, Envelope, InvalidBigRefError
-from simulator.datamodel import RoleBinding
+from simulator.datamodel import OPPONENT_DRIVERS, RoleBinding
 
 MODES = ("batch", "interact")
 STAGES = ("sft", "grpo_opd")
@@ -235,6 +235,8 @@ def _check_bindings(bindings) -> str | None:
                 return f"bindings[{i}].{name} must be a str, got {type(value).__name__}"
         if b.model_ref is not None and not isinstance(b.model_ref, str):
             return f"bindings[{i}].model_ref must be a str or None, got {type(b.model_ref).__name__}"
+        if b.driver is not None and not isinstance(b.driver, str):
+            return f"bindings[{i}].driver must be a str or None, got {type(b.driver).__name__}"
     return None
 
 
@@ -337,6 +339,16 @@ def _validate_interact(cfg: TrainingConfig) -> str | None:
         if not b.persona_id:
             # 空串是生成路指令在回写前的占位;走到严格口径还空着,说明人格没配上,read_persona("") 也读不出来
             return f"bindings[{i}].persona_id must be non-empty"
+        if b.driver is None:
+            continue
+        # driver 只管对手位怎么说话;写在训练位上没有意思,多半是填错了角色位
+        if b.slot_id == cfg.trained_slot:
+            return f"bindings[{i}].driver must be None on the trained slot {b.slot_id!r}, got {b.driver!r}"
+        if b.driver not in OPPONENT_DRIVERS:
+            return f"bindings[{i}].driver must be one of {list(OPPONENT_DRIVERS)}, got {b.driver!r}"
+        if b.driver == "vllm" and not b.model_ref:
+            # vllm 要按 model_ref 找到要加载的适配器导出;scripted 与 external_api 不靠它加载
+            return f"bindings[{i}].driver 'vllm' needs a non-empty model_ref"
     slots = [b.slot_id for b in cfg.bindings]
     duplicated = sorted({s for s in slots if slots.count(s) > 1})
     if duplicated:

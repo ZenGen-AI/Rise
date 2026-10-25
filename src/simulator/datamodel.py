@@ -97,6 +97,11 @@ class Scenario:
         )
 
 
+# 对手位驱动的合法取值。mindtrainer 的配置校验、factory 的驱动分派引用这一份;
+# trainscheduler 不得导入 simulator,在 trainscheduler.config 里有一份带注释的拷贝,改这里要一起改。
+OPPONENT_DRIVERS = ("vllm", "external_api", "scripted")
+
+
 @dataclass
 class RoleBinding:
     """把一个抽象角色位绑定到具体 Persona + 具体模型后端（§2.2 关键接口约定）。
@@ -108,6 +113,10 @@ class RoleBinding:
     # 具体模型制品引用(如 "zengen-v1")。frozen_reference / external_api 必填,
     # self_play 必须为 None。None 时不进 to_dict,既有 Episode 的序列化与哈希保持不变。
     model_ref: str | None = None
+    # 对手位的驱动:"vllm" | "external_api" | "scripted"。None 表示按 model_backend 取默认
+    # (frozen_reference 走 vllm,external_api 走外部 API);训练位不得带。None 时不进 to_dict,
+    # 既有 Episode 的序列化与哈希保持不变。
+    driver: str | None = None
 
     def to_dict(self) -> dict:
         d = {
@@ -117,6 +126,8 @@ class RoleBinding:
         }
         if self.model_ref is not None:
             d["model_ref"] = self.model_ref
+        if self.driver is not None:
+            d["driver"] = self.driver
         return d
 
     @classmethod
@@ -126,6 +137,7 @@ class RoleBinding:
             persona_id=d["persona_id"],
             model_backend=d["model_backend"],
             model_ref=d.get("model_ref"),
+            driver=d.get("driver"),
         )
 
 

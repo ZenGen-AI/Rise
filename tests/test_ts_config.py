@@ -296,6 +296,8 @@ def _to_generated(raw):
     (lambda s: s["interact"]["slots"][1].pop("model_backend"), "slots\\[1\\] is missing key"),
     (lambda s: s["interact"]["slots"][1].update(model_ref=3), "slots\\[1\\].model_ref must be a str"),
     (lambda s: s["interact"]["slots"].__setitem__(1, "b"), "slots\\[1\\] must be a mapping"),
+    (lambda s: s["interact"]["slots"][1].update(driver="magic"), "slots\\[1\\].driver must be one of"),
+    (lambda s: s["interact"]["slots"][1].update(driver="VLLM"), "slots\\[1\\].driver must be one of"),
     # max_turns_per_episode
     (lambda s: s["interact"].update(max_turns_per_episode=0), "max_turns_per_episode must be >= 1"),
     (lambda s: s["interact"].update(max_turns_per_episode=True), "max_turns_per_episode must be an int"),
@@ -350,6 +352,13 @@ def test_interact_parses_slot_fields_and_optional_driver():
         {"slot_id": "b", "model_backend": "frozen_reference", "model_ref": "zengen-v1", "driver": "scripted"},
     )
     assert d.interact.persona_ids == {"a": "p1", "b": "p2"}
+
+
+@pytest.mark.parametrize("driver", ["vllm", "external_api", "scripted"])
+def test_interact_accepts_each_of_the_three_drivers(driver):
+    raw = _defaults_with_interact()
+    raw["interact"]["slots"][1]["driver"] = driver
+    assert parse_training_defaults(raw).interact.slots[1]["driver"] == driver
 
 
 def test_a_file_without_the_new_sections_is_unchanged():

@@ -22,6 +22,9 @@ message RoleBindingProto {
   // 具体模型制品引用(如 "zengen-v1"):让调用方显式指定"这个角色位是哪个冻结模型"
   // (§2.2 关键接口约定)。optional 以区分"未指定"与空串;self_play 不得携带。
   optional string model_ref = 4;
+  // 对手位的驱动("vllm" | "external_api" | "scripted"):服务端按它给该角色位挂后端。
+  // optional 以区分"未指定,按 model_backend 取默认"与空串;训练位不得携带。
+  optional string driver = 5;
 }
 
 // 角色分配(镜像 simulator.datamodel.RoleAssignment)

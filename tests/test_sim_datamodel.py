@@ -78,6 +78,16 @@ def test_role_binding_round_trip():
     assert RoleBinding.from_dict(d) == b
 
 
+def test_role_binding_driver_is_optional_and_round_trips():
+    plain = RoleBinding(slot_id="b", persona_id="p", model_backend="frozen_reference", model_ref="zengen-v1")
+    assert plain.driver is None
+    assert "driver" not in plain.to_dict()  # 空时不进字典,既有 Episode 的序列化与哈希不变
+    assert RoleBinding.from_dict(plain.to_dict()) == plain
+    driven = RoleBinding("b", "p", "frozen_reference", model_ref="zengen-v1", driver="scripted")
+    assert driven.to_dict()["driver"] == "scripted"
+    assert RoleBinding.from_dict(driven.to_dict()) == driven
+
+
 def test_role_assignment_round_trip_and_slot_ids():
     ra = RoleAssignment(
         scenario_id="scen-001",

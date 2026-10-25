@@ -281,6 +281,9 @@ _INTERACT_OPTIONAL = ("scenario_ids", "persona_ids", "data_spec")
 _SLOT_REQUIRED = ("slot_id", "model_backend")
 _SLOT_OPTIONAL = ("model_ref", "driver")
 _OPPONENT_KEYS = ("base_url", "model", "api_key_env")
+# trainscheduler 不得导入 simulator,所以这里复制一份;取值与 simulator.datamodel.OPPONENT_DRIVERS(RoleBinding.driver)
+# 一致,改那里要一起改。这里只拦明显的拼写错,是否与 model_backend、model_ref 相容仍由展开后的 validate_training_config 判。
+_SLOT_DRIVERS = ("vllm", "external_api", "scripted")
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
@@ -307,8 +310,12 @@ def _parse_interact_slots(raw: object, label: str) -> tuple[dict, ...]:
         if unknown:
             raise SchedulerConfigError(f"{here} has unknown key(s) {unknown}")
         for key in item:
-            # 取值是否合法(后端名、model_ref 是否必填、driver 的取值)留给展开后的 validate_training_config
+            # 取值是否合法(后端名、model_ref 是否必填)留给展开后的 validate_training_config;driver 的取值下面就拦
             _nonempty_str(item[key], f"{here}.{key}")
+        if "driver" in item and item["driver"] not in _SLOT_DRIVERS:
+            raise SchedulerConfigError(
+                f"{here}.driver must be one of {list(_SLOT_DRIVERS)}, got {item['driver']!r}"
+            )
         slots.append(dict(item))
     ids = [s["slot_id"] for s in slots]
     duplicated = sorted({s for s in ids if ids.count(s) > 1})

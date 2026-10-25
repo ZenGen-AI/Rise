@@ -74,8 +74,8 @@ def _prepare_interact(
     写入顺序:情境与人格先落树,指令最后回写。回写前崩溃,重入时 world_for_interact 生成同样的 id 与
     同样的内容,重写是空操作(GitStore 对相同内容不提交),随后回写。
     直接改指令里的原始字典,而不是 TrainingConfig.to_dict():调度器写进 binding 的、TrainingConfig
-    还不认的键(driver)要原样留下。确定性做不成判 failed(T2);瞬态错误(OSError 等)原样上抛,
-    指令保持 pending。"""
+    不认的键要原样留下(driver 现在是 RoleBinding 的字段,往返不丢,但这条规矩对以后新增的键仍然成立)。
+    确定性做不成判 failed(T2);瞬态错误(OSError 等)原样上抛,指令保持 pending。"""
     if not is_pending_interact(cfg):
         return cfg
     try:

@@ -382,7 +382,7 @@ WRITE_BACK = "mindtrainer: write back interact scenarios"
 
 def _interact_cfg(run_id=RUN, **kw):
     """生成路 interact 指令在回写前的形状:scenario_ids 为空,每个绑定 persona_id 为空串。
-    对手绑定带 driver,用来确认回写不丢调度器写进去的、现行 RoleBinding 还不认的键。"""
+    对手绑定带 driver,用来确认回写不丢调度器写进去的键(driver 现在是 RoleBinding 的字段,回写走原始字典,仍要原样留下)。"""
     base = dict(
         mode="interact", trained_slot="a", sft_steps=0, grpo_steps=2, groups_per_step=2,
         group_size=2, scenario_ids=[], max_turns_per_episode=4, stage_manifest_refs={},

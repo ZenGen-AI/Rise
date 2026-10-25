@@ -134,3 +134,19 @@ def test_mutating_history_cannot_corrupt_the_episode():
     )
     episode = run_episode(scenario, assignment, _personas(), {"a": Vandal(), "b": Vandal()}, "ep-v")
     assert [t.utterance for t in episode.turns] == ["ok"] * 4
+
+
+# ---------------- driver:codec ----------------
+
+def test_codec_preserves_unset_vs_set_driver():
+    """driver 要跟着 CreateSession 过 gRPC:AgentRuntime._backends 在服务端按反序列化出的绑定选驱动,
+    codec 丢了它,scripted 驱动在真实链路上就悄悄退回默认。"""
+    plain = RoleBinding("b", "pb", "frozen_reference", model_ref="zengen-v1")
+    proto = role_binding_to_proto(plain)
+    assert proto.HasField("driver") is False
+    assert role_binding_from_proto(proto) == plain
+
+    driven = RoleBinding("b", "pb", "frozen_reference", model_ref="zengen-v1", driver="scripted")
+    proto = role_binding_to_proto(driven)
+    assert proto.HasField("driver") is True and proto.driver == "scripted"
+    assert role_binding_from_proto(proto) == driven

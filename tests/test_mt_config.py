@@ -134,6 +134,17 @@ INVALID = [
     ("opp_no_ref", lambda: _interact(bindings=[_trained(), RoleBinding("b", "pb", "frozen_reference")]), "needs a non-empty model_ref"),
     ("opp_empty_ref", lambda: _interact(bindings=[_trained(), RoleBinding("b", "pb", "frozen_reference", model_ref="")]), "needs a non-empty model_ref"),
     ("opp_unknown_backend", lambda: _interact(bindings=[_trained(), RoleBinding("b", "pb", "magic", model_ref="x")]), "frozen_reference or external_api"),
+    # 对手驱动
+    ("driver_unknown", lambda: _interact(bindings=[_trained(), RoleBinding("b", "pb", "frozen_reference", model_ref="x", driver="magic")]),
+     "bindings[1].driver must be one of"),
+    ("driver_empty", lambda: _interact(bindings=[_trained(), RoleBinding("b", "pb", "frozen_reference", model_ref="x", driver="")]),
+     "bindings[1].driver must be one of"),
+    ("driver_not_a_str", lambda: _interact(bindings=[_trained(), RoleBinding("b", "pb", "frozen_reference", model_ref="x", driver=3)]),
+     "bindings[1].driver must be a str or None"),
+    ("driver_vllm_without_ref", lambda: _interact(bindings=[_trained(), RoleBinding("b", "pb", "external_api", driver="vllm")]),
+     "bindings[1].driver"),
+    ("trained_has_driver", lambda: _interact(bindings=[RoleBinding("a", "pa", "self_play", driver="scripted"), _opponent()]),
+     "bindings[0].driver"),
     # 奖励
     ("no_components", lambda: _interact(reward=_reward(components=[], outcome_rules={})), "reward.components must be non-empty and unique"),
     ("dup_components", lambda: _interact(reward=_reward(components=["goal", "goal"])), "reward.components must be non-empty and unique"),
@@ -156,6 +167,21 @@ def test_invalid_config_is_rejected_with_the_specific_reason(build, needle):
     reason = validate_training_config(build())
     assert reason is not None, "应当被拒绝"
     assert needle in reason, reason
+
+
+@pytest.mark.parametrize("backend, driver", [
+    ("frozen_reference", "vllm"), ("frozen_reference", "scripted"), ("frozen_reference", "external_api"),
+    ("external_api", "external_api"), ("external_api", "scripted"), ("external_api", None),
+])
+def test_every_allowed_driver_passes(backend, driver):
+    opponent = RoleBinding("b", "pb", backend, model_ref="zengen-v1", driver=driver)
+    assert validate_training_config(_interact(bindings=[_trained(), opponent])) is None
+
+
+def test_a_scripted_driver_does_not_need_a_model_ref_beyond_the_existing_rule():
+    # scripted 与任何 model_backend 并存;model_ref 仍是对手位的统一要求(追查对手是谁),这里不放宽
+    opponent = RoleBinding("b", "pb", "frozen_reference", driver="scripted")
+    assert "needs a non-empty model_ref" in validate_training_config(_interact(bindings=[_trained(), opponent]))
 
 
 def test_judge_fields_are_not_required_for_outcome_split():
@@ -396,6 +422,16 @@ def test_load_config_from_directive_reads_the_training_config_key():
     cfg = _interact()
     env = _directive({"target_dimension": "tom", "recipe_ref": "", "training_config": cfg.to_dict()})
     assert load_config_from_directive(env) == cfg
+
+
+def test_a_binding_driver_survives_the_directive_round_trip():
+    cfg = _interact(bindings=[_trained(), RoleBinding("b", "pb", "frozen_reference", model_ref="zengen-v1", driver="scripted")])
+    d = cfg.to_dict()
+    assert d["bindings"][1]["driver"] == "scripted" and "driver" not in d["bindings"][0]
+    env = _directive({"target_dimension": "tom", "recipe_ref": "", "training_config": d})
+    loaded = load_config_from_directive(env)
+    assert [b.driver for b in loaded.bindings] == [None, "scripted"]
+    assert loaded == cfg and validate_training_config(loaded) is None
 
 
 def test_directive_without_training_config_is_rejected():

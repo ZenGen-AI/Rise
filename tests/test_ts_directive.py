@@ -348,7 +348,7 @@ def test_a_named_path_directive_with_an_empty_persona_id_is_refused(store):
 
 
 def test_a_generated_path_directive_keeps_the_whole_slot_layout_including_driver_in_its_payload(store):
-    """派发器要靠指令里的 bindings 重建角色位布局;driver 不是 RoleBinding 的字段,只在原始载荷里。"""
+    """派发器要靠指令里的 bindings 重建角色位布局;driver 要原样写进指令载荷(RoleBinding 也认它)。"""
     section = _interact_section("generated")
     section["slots"][1]["driver"] = "scripted"
     raw = default_training_defaults_payload()
