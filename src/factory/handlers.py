@@ -81,8 +81,11 @@ def _has_bridge_role(store: GitStore, role: str) -> bool:
 
 def _agent(ctx) -> Handler:
     config, lines = read_agent_settings(ctx.store)
-    runtime = AgentRuntime(ctx.store, lines)
-    ctx.register_closer(runtime.close)
+    runtime = ctx.runtime
+    if runtime is None:
+        runtime = AgentRuntime(ctx.store, lines)
+        ctx.register_closer(runtime.close)
+    # ctx.runtime 非空时是 assemble 造的共用运行时(--interact 与 agent 开关同开),它的收尾已登记过
     bridge = ctx.bridge("agent") if _has_bridge_role(ctx.store, "agent") else None
     return make_start_round_handler(
         config=config,

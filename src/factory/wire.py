@@ -14,6 +14,7 @@ import subprocess
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from controlplane.daemon import Dispatcher, Evaluator, Handler, reconcile_once, run_daemon
 from controlplane.gitstore import GitStore
@@ -26,6 +27,9 @@ from factory.switches import handler_keys
 from inference_bridge import CliBridge
 from mindtrainer.data_producer import TemplateDataProducer
 from mindtrainer.dispatch import make_mindtrainer_dispatcher
+
+if TYPE_CHECKING:  # factory.agent 拖进 grpc 与 mindagent,只在类型检查时导入
+    from factory.agent import AgentRuntime
 
 PLANNER_BACKENDS = ("bridge", "heuristic")
 EXECUTORS = ("mock", "roll")
@@ -74,6 +78,9 @@ class BuildContext:
     log_dir: Path | None
     repo_commit: str | None = None
     closers: list = field(default_factory=list)
+    # --interact 或 --enable agent 时由 assemble 造的那一个运行时;其余情形是 None。
+    # 它的收尾函数由 assemble 登记一次,构造器只取用,不再登记。
+    runtime: AgentRuntime | None = None
 
     def bridge(self, role: str) -> CliBridge:
         return build_bridge(self.store, role, env=self.env, log_dir=self.log_dir)
@@ -121,6 +128,34 @@ class Assembly:
     @property
     def closed_loop(self) -> bool:
         return bool(self.handlers)
+
+
+INTERACT_TURN_TIMEOUT_S = 30.0  # 真模型说一句比罐头慢得多;默认的 5 秒是给罐头后端定的
+
+
+def _shared_runtime(store: GitStore, options: FactoryOptions, keys: frozenset[str]) -> AgentRuntime | None:
+    """`--interact` 或 `--enable agent` 时造那唯一的 AgentRuntime(进程内 loopback 实时服务端),否则返回 None。
+
+    两者同开就共用这一个,不起第二个服务端。对手罐头台词取自 agent.yaml;文件不在时给空元组,
+    由 `agent` 开关的构造器照旧报"缺 agent.yaml"(--interact 单独用时,台词只是没有剧本的剧本驱动位的兜底)。
+    文件在但写坏了就在这里报 FactoryConfigError,而不是留到派发期。"""
+    if not options.interact and "start_agent_round" not in keys:
+        return None
+    from factory.agent import AGENT_CONFIG, AgentRuntime, read_agent_settings   # 惰性:拖进 grpc 与 mindagent
+
+    lines = read_agent_settings(store)[1] if store.exists(AGENT_CONFIG) else ()
+    if options.interact:
+        return AgentRuntime(store, lines, turn_timeout_s=INTERACT_TURN_TIMEOUT_S)
+    return AgentRuntime(store, lines)
+
+
+def _dispatcher(options: FactoryOptions, runtime: AgentRuntime | None, **kwargs):
+    """--interact 时给派发器注入实时客户端(并一律带数据生产器,「按种子生成」一路要靠它合成)。"""
+    if options.interact:
+        assert runtime is not None
+        kwargs["client_factory"] = runtime.client_factory
+        kwargs.setdefault("data_producer", TemplateDataProducer())
+    return make_mindtrainer_dispatcher(**kwargs)
 
 
 def default_builders() -> Mapping[str, HandlerBuilder]:
@@ -247,14 +282,19 @@ def assemble(
                 "holds the reconcile loop for hours"
             )
         return _assemble_roll(store, options, env=env)
-    if not keys:
+    if not keys and not options.interact:
         # 与 mindtrainer.wire.run 逐字节相同的路径:不读配置、不注入别的
         return Assembly(make_mindtrainer_dispatcher(), {}, None, False)
+    if not keys:
+        # --interact 单独用:没有处理器和评估器,但有运行时要收尾
+        runtime = _shared_runtime(store, options, keys)
+        return Assembly(_dispatcher(options, runtime), {}, None, False, closers=(runtime.close,))
     table = default_builders() if builders is None else builders
     missing = sorted(keys - set(table))
     if missing:
         raise FactoryConfigError(f"no handler builder for {missing}")
     evaluator = build_mock_evaluator(store)
+    runtime = _shared_runtime(store, options, keys)
     ctx = BuildContext(
         store=store,
         accept_mock_evidence=options.allow_mock_evidence,
@@ -263,7 +303,10 @@ def assemble(
         env=dict(os.environ if env is None else env),
         log_dir=None if log_dir is None else Path(log_dir),
         repo_commit=resolve_repo_commit(options.repo_commit),
+        runtime=runtime,
     )
+    if runtime is not None:
+        ctx.register_closer(runtime.close)         # 登记一次;构造器只取用
     try:
         handlers = {key: table[key](ctx) for key in sorted(keys)}
     except BaseException:
@@ -273,7 +316,7 @@ def assemble(
             pass          # 正在传播的才是根因:收尾失败不能把它盖掉
         raise
     return Assembly(
-        dispatcher=make_mindtrainer_dispatcher(data_producer=TemplateDataProducer()),
+        dispatcher=_dispatcher(options, runtime, data_producer=TemplateDataProducer()),
         handlers=handlers,
         evaluator=evaluator,
         accept_mock_evidence=options.allow_mock_evidence,
@@ -293,16 +336,16 @@ def run(
 ) -> None:
     store = GitStore(repo_root)
     a = assemble(store, options, env=env, log_dir=log_dir, builders=builders)
-    if not a.closed_loop:
-        run_daemon(store, interval_s, max_ticks=max_ticks, dispatcher=a.dispatcher, evaluator=a.evaluator)
-        return
     try:
+        if not a.closed_loop:
+            run_daemon(store, interval_s, max_ticks=max_ticks, dispatcher=a.dispatcher, evaluator=a.evaluator)
+            return
         run_daemon(
             store, interval_s, max_ticks=max_ticks, dispatcher=a.dispatcher,
             handlers=a.handlers, evaluator=a.evaluator, accept_mock_evidence=a.accept_mock_evidence,
         )
     finally:
-        a.close()
+        a.close()          # --interact 单独用时没有处理器,但运行时仍要收尾
 
 
 def reconcile_one_tick(
@@ -318,13 +361,13 @@ def reconcile_one_tick(
     # 锁在装配之前取:装配失败(退出码 2)时树里同样不写任何东西,with 会释放锁。
     with acquire_repo_lock(repo_root):
         a = assemble(store, options, env=env, log_dir=log_dir, builders=builders)
-        if not a.closed_loop:
-            # --evaluator someval 不开闭环,但评估器必须交给调和循环,否则 request_diagnostic 走占位桩
-            return reconcile_once(store, dispatcher=a.dispatcher, evaluator=a.evaluator)
         try:
+            if not a.closed_loop:
+                # --evaluator someval 不开闭环,但评估器必须交给调和循环,否则 request_diagnostic 走占位桩
+                return reconcile_once(store, dispatcher=a.dispatcher, evaluator=a.evaluator)
             return reconcile_once(
                 store, dispatcher=a.dispatcher, handlers=a.handlers, evaluator=a.evaluator,
                 accept_mock_evidence=a.accept_mock_evidence,
             )
         finally:
-            a.close()
+            a.close()          # --interact 单独用时没有处理器,但运行时仍要收尾
