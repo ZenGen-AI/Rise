@@ -427,7 +427,8 @@ def test_serve_job_lists_every_adapter_and_sets_max_loras():
     cfg = VllmServeConfig(model_path="/m", adapters=(("trained", "/a"), ("opponent", "/b")), remote_port=8000)
     argv = list(build_serve_job(cfg).argv)
     assert argv[argv.index("--max-loras") + 1] == "2"
-    assert argv[argv.index("--lora-modules") + 1] == "trained=/a,opponent=/b"
+    i = argv.index("--lora-modules")
+    assert argv[i + 1:i + 3] == ["trained=/a", "opponent=/b"]  # 一个开关后跟多个独立的 name=path 项
 
 def test_serve_job_without_adapters_does_not_enable_lora():
     cfg = VllmServeConfig(model_path="/m", adapters=(), remote_port=8000)
@@ -444,9 +445,9 @@ Expected: FAIL,`TypeError: unexpected keyword argument 'adapters'`
 
 - [ ] **Step 3: 实现**
 
-`VllmServeConfig` 用 `adapters` 列表替换 `adapter_name`/`adapter_path`,`__post_init__` 校验每个名字符合 `_ADAPTER_NAME`、路径合法且不为基座名、名字不重复。`build_serve_job` 按列表生成 `--max-loras <n>` 与 `--lora-modules a=/p,b=/q`;空列表时不加 `--enable-lora`、`--max-loras`、`--lora-modules`。现有 `SomevalRunner` 的调用点改成 `adapters=((ADAPTER, path),)`。
+`VllmServeConfig` 用 `adapters` 列表替换 `adapter_name`/`adapter_path`,`__post_init__` 校验每个名字符合 `_ADAPTER_NAME`、路径合法且不为基座名、名字不重复。`build_serve_job` 按列表生成 `--max-loras <n>` 与 `--lora-modules a=/p b=/q`(vLLM 的 `--lora-modules` 是 `nargs='+'`,一个开关后跟多个独立的 `name=path` 项,不是逗号拼接);空列表时不加 `--enable-lora`、`--max-loras`、`--lora-modules`。现有 `SomevalRunner` 的调用点改成 `adapters=((ADAPTER, path),)`。
 
-`make_mindtrainer_dispatcher` 加 `policy_factory`;两者同时给时 `ValueError`。派发 interact 指令时用 `policy_factory(run_id, cfg.base_checkpoint_ref)` 现构造策略,旧 `policy=` 路径不变。
+`make_mindtrainer_dispatcher` 加 `policy_factory: Callable[[str, TrainingConfig], AbstractContextManager[ModelBackend]]`;两者同时给时 `ValueError`。派发 interact 指令时用 `with (nullcontext(policy) if policy is not None else policy_factory(run_id, cfg)) as pol:` 包住 `_interact_sources(...)` 与 `resume_or_run(...)`,且这个 `with` 在分类异常的 `try` 之内:进入时抛的延后异常照常上抛、指令保持 pending,此时训练记录一个字节都没写;进入时抛的确定性错误照常判 `failed`。返回上下文而不是后端,是因为训练位只在推理服务运行期间可用、会话登记也跨同一段,两件事要在同一次进出里做。旧 `policy=` 路径用 `nullcontext` 包一层,语义不变。
 
 `factory/vllm_policy.py` 提供 `policy_context(client, endpoint, adapters, *, serve=real_serve)`:返回上下文管理器,进入时调 `serve(...)` 起服务并给出 `VllmPolicy`(`respond` 向本地隧道端口 POST `/v1/chat/completions`,`model` 填适配器名或 `BASE_MODEL_NAME`),退出时停服务放租约。`serve` 可注入,照 `src/factory/sombench_runner.py:84` 的先例,测试里传一个本地假服务。
 
