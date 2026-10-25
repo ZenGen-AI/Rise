@@ -5,13 +5,15 @@
 
 - scheduler.yaml 的键都可省略,省略的取默认值;文件不在时整份取默认值。
 - training_defaults.yaml 两个键(training_config、data_spec)都必填;文件不在抛 SchedulerConfigError。
+  另有两个可选段 interact(interact 训练线的角色位、轮数、情境人格来源)与 opponent(外部对手的端点),
+  缺省时为 None,文件与没有这两段时完全相同。
 """
 from __future__ import annotations
 
 import copy
 import math
 import re
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 
 from controlplane.config import read_config, write_config
 from controlplane.gitstore import GitStore
@@ -222,31 +224,194 @@ DEFAULT_DATA_SPEC: dict = {
 }
 
 _DEFAULTS_KEYS = ("training_config", "data_spec")
+# 可选段:缺省为 None,to_dict 也不写出,所以没有它们的文件逐字节不变
+_DEFAULTS_OPTIONAL_KEYS = ("interact", "opponent")
 # 每轮各自的值,不能写进默认配置:清单 id 由 construct_directive 按新 run id 写
 _PER_RUN_KEYS = ("stage_manifest_refs",)
+
+
+@dataclass(frozen=True)
+class InteractDefaults:
+    """interact 段的解析结果。来源二选一:点名路给 scenario_ids 与 persona_ids,生成路给 data_spec;
+    另一路在这里是空(scenario_ids 为空元组、persona_ids 为空映射、data_spec 为 None)。"""
+
+    trained_slot: str
+    slots: tuple[dict, ...]  # 每项取自 slot_id、model_backend,可带 model_ref、driver;不含 persona_id
+    max_turns_per_episode: int
+    scenario_ids: tuple[str, ...] = ()
+    persona_ids: dict[str, str] = field(default_factory=dict)  # 角色位 id -> 人格 id
+    data_spec: DataSpec | None = None
+
+    def to_dict(self) -> dict:
+        out: dict = {
+            "trained_slot": self.trained_slot,
+            "slots": [dict(s) for s in self.slots],
+            "max_turns_per_episode": self.max_turns_per_episode,
+        }
+        if self.data_spec is not None:
+            out["data_spec"] = self.data_spec.to_dict()
+        else:
+            out["scenario_ids"] = list(self.scenario_ids)
+            out["persona_ids"] = dict(self.persona_ids)
+        return out
 
 
 @dataclass(frozen=True)
 class TrainingDefaults:
     training_config: dict  # TrainingConfig.to_dict() 的形状,不含 stage_manifest_refs
     data_spec: DataSpec
+    interact: InteractDefaults | None = None  # 可选段;缺省 None
+    opponent: dict | None = None  # {base_url, model, api_key_env};只存环境变量名,不存密钥
 
     def to_dict(self) -> dict:
-        return {"training_config": copy.deepcopy(self.training_config), "data_spec": self.data_spec.to_dict()}
+        out: dict = {"training_config": copy.deepcopy(self.training_config), "data_spec": self.data_spec.to_dict()}
+        if self.interact is not None:
+            out["interact"] = self.interact.to_dict()
+        if self.opponent is not None:
+            out["opponent"] = copy.deepcopy(self.opponent)
+        return out
 
 
 def _placeholder_refs(cfg: TrainingConfig) -> dict[str, str]:
     return {stage: f"dsm-run-000-{stage}" for stage in required_stages(cfg)}
 
 
+_INTERACT_REQUIRED = ("trained_slot", "slots", "max_turns_per_episode")
+_INTERACT_OPTIONAL = ("scenario_ids", "persona_ids", "data_spec")
+_SLOT_REQUIRED = ("slot_id", "model_backend")
+_SLOT_OPTIONAL = ("model_ref", "driver")
+_OPPONENT_KEYS = ("base_url", "model", "api_key_env")
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _nonempty_str(value: object, label: str) -> str:
+    if not isinstance(value, str):
+        raise SchedulerConfigError(f"{label} must be a str, got {type(value).__name__}")
+    if not value.strip():
+        raise SchedulerConfigError(f"{label} must be non-empty")
+    return value
+
+
+def _parse_interact_slots(raw: object, label: str) -> tuple[dict, ...]:
+    if not isinstance(raw, list) or not raw:
+        raise SchedulerConfigError(f"{label} must be a non-empty list")
+    slots: list[dict] = []
+    for i, item in enumerate(raw):
+        here = f"{label}[{i}]"
+        if not isinstance(item, dict):
+            raise SchedulerConfigError(f"{here} must be a mapping, got {type(item).__name__}")
+        missing = [k for k in _SLOT_REQUIRED if k not in item]
+        unknown = sorted(repr(k) for k in item if k not in _SLOT_REQUIRED + _SLOT_OPTIONAL)
+        if missing:
+            raise SchedulerConfigError(f"{here} is missing key(s) {missing}")
+        if unknown:
+            raise SchedulerConfigError(f"{here} has unknown key(s) {unknown}")
+        for key in item:
+            # 取值是否合法(后端名、model_ref 是否必填、driver 的取值)留给展开后的 validate_training_config
+            _nonempty_str(item[key], f"{here}.{key}")
+        slots.append(dict(item))
+    ids = [s["slot_id"] for s in slots]
+    duplicated = sorted({s for s in ids if ids.count(s) > 1})
+    if duplicated:
+        raise SchedulerConfigError(f"{label} has duplicate slot_id(s) {duplicated}")
+    return tuple(slots)
+
+
+def _parse_interact(raw: object, groups_per_step: int) -> InteractDefaults:
+    """interact 段的严格解析。只看形状与自洽,不读树:点名的 id 在不在树里由装配期检查。"""
+    label = "training_defaults.interact"
+    if not isinstance(raw, dict):
+        raise SchedulerConfigError(f"{label} must be a mapping, got {type(raw).__name__}")
+    missing = [k for k in _INTERACT_REQUIRED if k not in raw]
+    unknown = sorted(repr(k) for k in raw if k not in _INTERACT_REQUIRED + _INTERACT_OPTIONAL)
+    if missing or unknown:
+        raise SchedulerConfigError(f"{label}: missing key(s) {missing}, unknown key(s) {unknown}")
+    # 来源:先判成对,再判二选一。顺序决定"只写了一半"报哪条
+    has_ids, has_personas, has_spec = "scenario_ids" in raw, "persona_ids" in raw, "data_spec" in raw
+    if has_ids != has_personas:
+        raise SchedulerConfigError(f"{label}: scenario_ids and persona_ids must be written together")
+    if has_ids == has_spec:
+        raise SchedulerConfigError(
+            f"{label}: exactly one of (scenario_ids with persona_ids) or data_spec must be given"
+        )
+    slots = _parse_interact_slots(raw["slots"], f"{label}.slots")
+    slot_ids = {s["slot_id"] for s in slots}
+    trained_slot = _nonempty_str(raw["trained_slot"], f"{label}.trained_slot")
+    if trained_slot not in slot_ids:
+        raise SchedulerConfigError(
+            f"{label}.trained_slot {trained_slot!r} is not among slots {sorted(slot_ids)}"
+        )
+    turns = raw["max_turns_per_episode"]
+    if isinstance(turns, bool) or not isinstance(turns, int):
+        raise SchedulerConfigError(f"{label}.max_turns_per_episode must be an int, got {type(turns).__name__}")
+    if turns < 1:
+        raise SchedulerConfigError(f"{label}.max_turns_per_episode must be >= 1, got {turns}")
+
+    if has_spec:
+        try:
+            spec = parse_data_spec(raw["data_spec"])
+        except InvalidDataSpecError as exc:
+            raise SchedulerConfigError(f"{label}.{exc}") from exc
+        # 一步抽 groups_per_step 个不同情境;少于它,同一情境在一步里出现两次,两批 rollout 会并成一组
+        if spec.scenario_count < groups_per_step:
+            raise SchedulerConfigError(
+                f"{label}.data_spec.scenario_count {spec.scenario_count} must be at least "
+                f"groups_per_step {groups_per_step} (one scenario per group)"
+            )
+        return InteractDefaults(trained_slot, slots, turns, data_spec=spec)
+
+    ids = raw["scenario_ids"]
+    if not isinstance(ids, list) or not ids:
+        raise SchedulerConfigError(f"{label}.scenario_ids must be a non-empty list")
+    for i, sid in enumerate(ids):
+        _nonempty_str(sid, f"{label}.scenario_ids[{i}]")
+    if len(set(ids)) != len(ids):
+        raise SchedulerConfigError(
+            f"{label}.scenario_ids has duplicate entries {sorted({s for s in ids if ids.count(s) > 1})}"
+        )
+    personas = raw["persona_ids"]
+    if not isinstance(personas, dict):
+        raise SchedulerConfigError(f"{label}.persona_ids must be a mapping, got {type(personas).__name__}")
+    if set(personas) != slot_ids:
+        raise SchedulerConfigError(
+            f"{label}.persona_ids must name the same slots as slots: "
+            f"persona_ids has {sorted(map(repr, personas))}, slots has {sorted(slot_ids)}"
+        )
+    for slot, pid in personas.items():
+        _nonempty_str(pid, f"{label}.persona_ids[{slot!r}]")
+    if len(ids) < groups_per_step:
+        raise SchedulerConfigError(
+            f"{label}.scenario_ids has {len(ids)} entries, must be at least "
+            f"groups_per_step {groups_per_step} (one scenario per group)"
+        )
+    return InteractDefaults(trained_slot, slots, turns, scenario_ids=tuple(ids), persona_ids=dict(personas))
+
+
+def _parse_opponent(raw: object) -> dict:
+    """外部对手的端点。api_key_env 只存环境变量名;值写成了密钥时报错不回显它。"""
+    label = "training_defaults.opponent"
+    if not isinstance(raw, dict):
+        raise SchedulerConfigError(f"{label} must be a mapping, got {type(raw).__name__}")
+    missing = [k for k in _OPPONENT_KEYS if k not in raw]
+    unknown = sorted(repr(k) for k in raw if k not in _OPPONENT_KEYS)
+    if missing or unknown:
+        raise SchedulerConfigError(f"{label}: missing key(s) {missing}, unknown key(s) {unknown}")
+    out = {k: _nonempty_str(raw[k], f"{label}.{k}") for k in _OPPONENT_KEYS}
+    if not _ENV_NAME.fullmatch(out["api_key_env"]):
+        raise SchedulerConfigError(
+            f"{label}.api_key_env must be an environment variable name (letters, digits, underscore)"
+        )
+    return out
+
+
 def parse_training_defaults(raw: object) -> TrainingDefaults:
     """严格解析。training_config 必须能被 TrainingConfig.from_dict 读出,补上占位清单 id 后过
     validate_training_config,且 data_spec 与它交叉校验通过:默认配置本身就跑不通的话,
-    每一条 new 指令都会失败。"""
+    每一条 new 指令都会失败。可选的 interact 与 opponent 段缺省为 None,出现时同样严格解析。"""
     if not isinstance(raw, dict):
         raise SchedulerConfigError(f"training defaults must be a mapping, got {type(raw).__name__}")
     missing = [k for k in _DEFAULTS_KEYS if k not in raw]
-    unknown = sorted(repr(k) for k in raw if k not in _DEFAULTS_KEYS)
+    unknown = sorted(repr(k) for k in raw if k not in _DEFAULTS_KEYS + _DEFAULTS_OPTIONAL_KEYS)
     if missing or unknown:
         raise SchedulerConfigError(
             f"training defaults: missing key(s) {missing}, unknown key(s) {unknown}"
@@ -292,7 +457,11 @@ def parse_training_defaults(raw: object) -> TrainingDefaults:
     reason = check_data_spec_against_config(spec, probe, required_stages(probe))
     if reason is not None:
         raise SchedulerConfigError(f"training_defaults: {reason}")
-    return TrainingDefaults(training_config=copy.deepcopy(cfg_raw), data_spec=spec)
+    interact = _parse_interact(raw["interact"], probe.groups_per_step) if "interact" in raw else None
+    opponent = _parse_opponent(raw["opponent"]) if "opponent" in raw else None
+    return TrainingDefaults(
+        training_config=copy.deepcopy(cfg_raw), data_spec=spec, interact=interact, opponent=opponent
+    )
 
 
 def load_training_defaults(store: GitStore) -> TrainingDefaults:

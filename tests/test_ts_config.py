@@ -204,3 +204,247 @@ def test_the_defaults_dict_is_not_mutated_by_callers():
     payload = default_training_defaults_payload()
     payload["training_config"]["reward"]["components"].append("x")
     assert DEFAULT_TRAINING_CONFIG == before
+
+
+# ---- interact 与 opponent 段(都可选;缺省时文件与今天逐字节相同) ----
+
+
+def _defaults_with_interact():
+    """点名路的 interact 段:两个角色位,两个情境,人格按角色位给。每次返回新的深拷贝。"""
+    raw = default_training_defaults_payload()
+    raw["interact"] = {
+        "trained_slot": "a",
+        "slots": [
+            {"slot_id": "a", "model_backend": "self_play"},
+            {"slot_id": "b", "model_backend": "frozen_reference", "model_ref": "zengen-v1"},
+        ],
+        "max_turns_per_episode": 4,
+        "scenario_ids": ["s1", "s2"],
+        "persona_ids": {"a": "p1", "b": "p2"},
+    }
+    return raw
+
+
+def _opponent():
+    return {"base_url": "https://api.example.com", "model": "opp-1", "api_key_env": "FORGE_OPP_KEY"}
+
+
+def test_interact_section_parses_two_sources_and_rejects_halves():
+    full = {"training_config": copy.deepcopy(DEFAULT_TRAINING_CONFIG),
+            "data_spec": copy.deepcopy(DEFAULT_DATA_SPEC),
+            "interact": {"trained_slot": "a",
+                         "slots": [{"slot_id": "a", "model_backend": "self_play"},
+                                   {"slot_id": "b", "model_backend": "frozen_reference", "model_ref": "zengen-v1"}],
+                         "max_turns_per_episode": 4,
+                         "scenario_ids": ["s1", "s2"], "persona_ids": {"a": "p1", "b": "p2"}}}
+    d = parse_training_defaults(full)
+    assert d.interact.scenario_ids == ("s1", "s2") and d.interact.data_spec is None
+
+    generated = copy.deepcopy(full)
+    del generated["interact"]["scenario_ids"]
+    del generated["interact"]["persona_ids"]
+    generated["interact"]["data_spec"] = {"scenario_count": 2, "seed": 0, "purpose": "training",
+                                          "stages": {"sft": {"group_size": 1}}}
+    assert parse_training_defaults(generated).interact.data_spec.scenario_count == 2
+
+
+@pytest.mark.parametrize("mutate, reason", [
+    (lambda s: s["interact"].pop("persona_ids"), "persona_ids"),
+    (lambda s: s["interact"].update(persona_ids={"a": "p1"}), "same slots"),
+    (lambda s: s["interact"].update(scenario_ids=["s1"]), "at least"),
+    (lambda s: s["interact"].update(unknown=1), "unknown"),
+])
+def test_interact_section_is_strictly_parsed(mutate, reason):
+    raw = _defaults_with_interact()
+    mutate(raw)
+    with pytest.raises(SchedulerConfigError, match=reason):
+        parse_training_defaults(raw)
+
+
+def _to_generated(raw):
+    section = raw["interact"]
+    del section["scenario_ids"], section["persona_ids"]
+    section["data_spec"] = {"scenario_count": 2, "seed": 0, "purpose": "training",
+                            "stages": {"sft": {"group_size": 1}}}
+    return raw
+
+
+@pytest.mark.parametrize("mutate, reason", [
+    # 来源二选一:同时写、都缺都抛
+    (lambda s: s["interact"].update(data_spec={"scenario_count": 2, "seed": 0, "purpose": "training",
+                                               "stages": {"sft": {"group_size": 1}}}),
+     "exactly one of"),
+    (lambda s: (s["interact"].pop("scenario_ids"), s["interact"].pop("persona_ids")), "exactly one of"),
+    # 成对:只写一半
+    (lambda s: s["interact"].pop("scenario_ids"), "written together"),
+    (lambda s: s["interact"].pop("persona_ids"), "written together"),
+    # 必填键
+    (lambda s: s["interact"].pop("trained_slot"), "missing key"),
+    (lambda s: s["interact"].pop("slots"), "missing key"),
+    (lambda s: s["interact"].pop("max_turns_per_episode"), "missing key"),
+    # 段本身
+    (lambda s: s.update(interact=[]), "interact must be a mapping"),
+    (lambda s: s.update(interact=None), "interact must be a mapping"),
+    # trained_slot 与 slots
+    (lambda s: s["interact"].update(trained_slot="z"), "trained_slot 'z' is not among"),
+    (lambda s: s["interact"].update(trained_slot=""), "trained_slot must be non-empty"),
+    (lambda s: s["interact"].update(slots=[]), "slots must be a non-empty list"),
+    (lambda s: s["interact"].update(slots="a"), "slots must be a non-empty list"),
+    (lambda s: s["interact"]["slots"].append({"slot_id": "a", "model_backend": "self_play"}),
+     "duplicate slot_id"),
+    (lambda s: s["interact"]["slots"][1].update(extra=1), "slots\\[1\\] has unknown key"),
+    (lambda s: s["interact"]["slots"][1].pop("model_backend"), "slots\\[1\\] is missing key"),
+    (lambda s: s["interact"]["slots"][1].update(model_ref=3), "slots\\[1\\].model_ref must be a str"),
+    (lambda s: s["interact"]["slots"].__setitem__(1, "b"), "slots\\[1\\] must be a mapping"),
+    # max_turns_per_episode
+    (lambda s: s["interact"].update(max_turns_per_episode=0), "max_turns_per_episode must be >= 1"),
+    (lambda s: s["interact"].update(max_turns_per_episode=True), "max_turns_per_episode must be an int"),
+    (lambda s: s["interact"].update(max_turns_per_episode="4"), "max_turns_per_episode must be an int"),
+    # scenario_ids
+    (lambda s: s["interact"].update(scenario_ids=[]), "scenario_ids must be a non-empty list"),
+    (lambda s: s["interact"].update(scenario_ids=["s1", "s1"]), "scenario_ids has duplicate"),
+    (lambda s: s["interact"].update(scenario_ids=["s1", 2]), "scenario_ids\\[1\\] must be a str"),
+    (lambda s: s["interact"].update(scenario_ids="s1"), "scenario_ids must be a non-empty list"),
+    # persona_ids
+    (lambda s: s["interact"].update(persona_ids=["p1", "p2"]), "persona_ids must be a mapping"),
+    (lambda s: s["interact"].update(persona_ids={"a": "p1", "b": ""}), "persona_ids\\['b'\\] must be non-empty"),
+    (lambda s: s["interact"].update(persona_ids={"a": "p1", "b": "p2", "c": "p3"}), "same slots"),
+])
+def test_interact_section_rejects_each_malformed_shape(mutate, reason):
+    raw = _defaults_with_interact()
+    mutate(raw)
+    with pytest.raises(SchedulerConfigError, match=reason):
+        parse_training_defaults(raw)
+
+
+@pytest.mark.parametrize("mutate, reason", [
+    (lambda s: s["interact"]["data_spec"].update(scenario_count="2"),
+     "training_defaults.interact.data_spec.scenario_count must be an int"),
+    (lambda s: s["interact"]["data_spec"].update(scenario_count=1), "at least"),  # groups_per_step 是 2
+    (lambda s: s["interact"]["data_spec"].update(extra=1), "interact.data_spec"),
+    (lambda s: s["interact"].update(data_spec=[]), "interact.data_spec must be a dict"),
+])
+def test_interact_generated_path_checks_the_data_spec(mutate, reason):
+    raw = _to_generated(_defaults_with_interact())
+    mutate(raw)
+    with pytest.raises(SchedulerConfigError, match=reason):
+        parse_training_defaults(raw)
+
+
+def test_interact_scenario_floor_follows_groups_per_step():
+    raw = _defaults_with_interact()
+    raw["training_config"]["groups_per_step"] = 3
+    with pytest.raises(SchedulerConfigError, match="at least groups_per_step 3"):
+        parse_training_defaults(raw)
+    raw["interact"]["scenario_ids"] = ["s1", "s2", "s3"]
+    assert parse_training_defaults(raw).interact.scenario_ids == ("s1", "s2", "s3")
+
+
+def test_interact_parses_slot_fields_and_optional_driver():
+    raw = _defaults_with_interact()
+    raw["interact"]["slots"][1]["driver"] = "scripted"
+    d = parse_training_defaults(raw)
+    assert d.interact.trained_slot == "a" and d.interact.max_turns_per_episode == 4
+    assert d.interact.slots == (
+        {"slot_id": "a", "model_backend": "self_play"},
+        {"slot_id": "b", "model_backend": "frozen_reference", "model_ref": "zengen-v1", "driver": "scripted"},
+    )
+    assert d.interact.persona_ids == {"a": "p1", "b": "p2"}
+
+
+def test_a_file_without_the_new_sections_is_unchanged():
+    d = parse_training_defaults(default_training_defaults_payload())
+    assert d.interact is None and d.opponent is None
+    assert d.to_dict() == default_training_defaults_payload()
+    assert set(d.to_dict()) == {"training_config", "data_spec"}
+    assert set(default_training_defaults_payload()) == {"training_config", "data_spec"}
+
+
+def test_interact_and_opponent_round_trip_through_to_dict():
+    raw = _defaults_with_interact()
+    raw["opponent"] = _opponent()
+    d = parse_training_defaults(raw)
+    assert d.to_dict() == raw
+    assert parse_training_defaults(d.to_dict()) == d
+
+    generated = _to_generated(_defaults_with_interact())
+    g = parse_training_defaults(generated)
+    assert g.to_dict() == generated
+    assert parse_training_defaults(g.to_dict()) == g
+
+
+def test_interact_does_not_alias_the_input_or_the_output():
+    raw = _defaults_with_interact()
+    raw["opponent"] = _opponent()
+    d = parse_training_defaults(raw)
+    raw["interact"]["slots"][0]["slot_id"] = "zzz"
+    raw["interact"]["scenario_ids"].append("s9")
+    raw["interact"]["persona_ids"]["a"] = "zzz"
+    raw["opponent"]["model"] = "zzz"
+    assert d.interact.slots[0]["slot_id"] == "a"
+    assert d.interact.scenario_ids == ("s1", "s2")
+    assert d.interact.persona_ids["a"] == "p1"
+    assert d.opponent["model"] == "opp-1"
+    out = d.to_dict()
+    out["interact"]["slots"][0]["slot_id"] = "zzz"
+    out["opponent"]["model"] = "zzz"
+    assert d.interact.slots[0]["slot_id"] == "a" and d.opponent["model"] == "opp-1"
+
+
+def test_the_interact_dataclass_is_frozen():
+    d = parse_training_defaults(_defaults_with_interact())
+    with pytest.raises(Exception):
+        d.interact.trained_slot = "b"  # type: ignore[misc]
+    with pytest.raises(Exception):
+        d.opponent = {}  # type: ignore[misc]
+
+
+def test_opponent_section_parses_alone():
+    raw = default_training_defaults_payload()
+    raw["opponent"] = _opponent()
+    d = parse_training_defaults(raw)
+    assert d.opponent == _opponent() and d.interact is None
+
+
+@pytest.mark.parametrize("mutate, reason", [
+    (lambda o: o.pop("base_url"), "missing key"),
+    (lambda o: o.pop("api_key_env"), "missing key"),
+    (lambda o: o.update(extra=1), "unknown key"),
+    (lambda o: o.update(model=3), "opponent.model must be a str"),
+    (lambda o: o.update(base_url=""), "opponent.base_url must be non-empty"),
+    (lambda o: o.update(api_key_env=""), "opponent.api_key_env must be non-empty"),
+    (lambda o: o.update(api_key_env="not a name"), "opponent.api_key_env must be an environment variable name"),
+    (lambda o: o.update(api_key_env="FORGE_OPP_KEY\n"), "opponent.api_key_env must be an environment variable name"),
+    (lambda o: o.update(api_key_env="1KEY"), "opponent.api_key_env must be an environment variable name"),
+])
+def test_opponent_section_is_strictly_parsed(mutate, reason):
+    raw = default_training_defaults_payload()
+    raw["opponent"] = _opponent()
+    mutate(raw["opponent"])
+    with pytest.raises(SchedulerConfigError, match=reason):
+        parse_training_defaults(raw)
+
+
+@pytest.mark.parametrize("bad", [None, [], "FORGE_OPP_KEY"])
+def test_opponent_section_must_be_a_mapping(bad):
+    raw = default_training_defaults_payload()
+    raw["opponent"] = bad
+    with pytest.raises(SchedulerConfigError, match="opponent must be a mapping"):
+        parse_training_defaults(raw)
+
+
+def test_a_rejected_api_key_env_never_echoes_its_value():
+    # api_key_env 只该存变量名;写成密钥本身时,报错不能把它原样吐出来
+    raw = default_training_defaults_payload()
+    raw["opponent"] = {**_opponent(), "api_key_env": "sk-live-0123456789abcdef"}
+    with pytest.raises(SchedulerConfigError) as info:
+        parse_training_defaults(raw)
+    assert "sk-live" not in str(info.value)
+
+
+def test_install_still_writes_a_defaults_file_without_the_new_sections(tmp_path):
+    store = make_store(tmp_path)
+    install_default_configs(store)
+    assert set(read_config(store, training_defaults_file())) == {"training_config", "data_spec"}
+    d = load_training_defaults(store)
+    assert d.interact is None and d.opponent is None
