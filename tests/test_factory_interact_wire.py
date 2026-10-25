@@ -142,6 +142,8 @@ def defaults_repo(tmp_path):
 
     store = closed_loop_repo(str(tmp_path / "cp"), run_id=None)
     write_endpoints(store, "gpu-1")
+    write_config(store, training_defaults_file(), "training-defaults", _interact_defaults(), "test: defaults")
+    _seed_world(store)
     return store
 
 
@@ -250,7 +252,7 @@ from compute.vllm_service import BASE_MODEL_NAME
 from controlplane.config import write_config
 from controlplane.daemon import DirectiveFailedError, reconcile_once
 from controlplane.envelope import BigRef, Envelope, OwnerRef
-from controlplane.paths import episodes_dir, model_file, run_dir, training_defaults_file
+from controlplane.paths import episodes_dir, model_file, run_dir, scheduler_config_file, training_defaults_file
 from factory.agent import AgentRuntime
 from factory.interact_policy import OpponentSwitch, make_policy_factory
 from factory.opponents import EXPORT_FORMAT
@@ -367,10 +369,10 @@ def _interact_defaults(**opponent):
     return payload
 
 
-def _seed_world(store):
-    for sid in ("t1", "t2"):
-        write_scenario(store, Scenario(sid, "bg", [RoleSlot("a", "a"), RoleSlot("b", "b")], "c", ["n"], "training"))
-    for pid in ("pa", "pb"):
+def _seed_world(store, *, scenarios=("t1", "t2"), personas=("pa", "pb"), purpose="training"):
+    for sid in scenarios:
+        write_scenario(store, Scenario(sid, "bg", [RoleSlot("a", "a"), RoleSlot("b", "b")], "c", ["n"], purpose))
+    for pid in personas:
         write_persona(store, Persona(pid, ["t"], "m", "s", ["v"]))
 
 
@@ -664,3 +666,234 @@ def test_an_external_opponent_without_an_opponent_section_fails_the_directive(wo
     with pytest.raises(DirectiveFailedError, match="opponent"):
         with factory(RUN, _cfg(bindings=bindings)):
             pytest.fail("the body must not run")
+
+
+# ---------------- Part 4:装配期拒绝项(设计 90 §6.1 的十一条) ----------------
+# 每条:退出码 2、一行 `factory: error: ...` 点名缺什么、树里不写东西(没有新提交)。
+
+import subprocess
+
+from factory_fixtures import tree_files
+from trainscheduler.config import DEFAULT_SCHEDULER_CONFIG
+
+
+def _git(store, *args) -> str:
+    return subprocess.run(["git", "-C", str(store.repo_root), *args], capture_output=True, text=True,
+                          check=True).stdout
+
+
+def _configured(tmp_path, mutate=None, *, seed=None, endpoints=True):
+    """装好默认资产的仓库,training_defaults.yaml 写成合法的点名路 interact 配置,再由 mutate 改坏一处。"""
+    from factory_fixtures import closed_loop_repo
+
+    store = closed_loop_repo(str(tmp_path / "cp"), run_id=None)
+    if endpoints:
+        write_endpoints(store, "gpu-1")
+    payload = _interact_defaults()
+    if mutate is not None:
+        mutate(payload)
+    write_config(store, training_defaults_file(), "training-defaults", payload, "test: defaults")
+    _seed_world(store, **(seed or {}))
+    return store
+
+
+def _refused(store, tmp_path, capsys, fragment, *argv, env=None):
+    """跑 `factory reconcile --once --interact`,断言被拒:退出码 2、标准错误恰好一行、含 fragment、树没动。"""
+    from factory.cli import main
+
+    head, status, files = _git(store, "rev-parse", "HEAD"), _git(store, "status", "--porcelain",
+                                                                  "--untracked-files=all"), tree_files(store)
+    code = main(["reconcile", str(store.repo_root), "--once", *(argv or ("--interact",))],
+                env=hosts_env(tmp_path) if env is None else env)
+    err = capsys.readouterr().err
+    assert code == 2, err
+    assert err.startswith("factory: error: ") and len(err.strip().splitlines()) == 1, err
+    assert fragment in err, err
+    assert (_git(store, "rev-parse", "HEAD"), _git(store, "status", "--porcelain", "--untracked-files=all"),
+            tree_files(store)) == (head, status, files)
+    return err
+
+
+def test_a_valid_interact_configuration_is_accepted(tmp_path):
+    store = _configured(tmp_path)
+    asm = assemble(store, FactoryOptions(interact=True), env=hosts_env(tmp_path))
+    asm.close()
+
+
+def test_item_2_a_missing_interact_section_is_refused(tmp_path, capsys):
+    store = _configured(tmp_path, lambda p: p.pop("interact"))
+    _refused(store, tmp_path, capsys, "interact section")
+
+
+def test_item_2_a_missing_training_defaults_file_is_refused_by_name(tmp_path, capsys):
+    from factory_fixtures import closed_loop_repo
+
+    store = closed_loop_repo(str(tmp_path / "bare"), run_id=None)
+    (store.repo_root / training_defaults_file()).unlink()
+    subprocess.run(["git", "-C", str(store.repo_root), "commit", "-qam", "test: drop defaults"], check=True)
+    write_endpoints(store, "gpu-1")
+    _refused(store, tmp_path, capsys, "training_defaults.yaml")
+
+
+def test_item_3_and_9_an_external_api_opponent_needs_its_key_variable(tmp_path, capsys):
+    def external(p):
+        p["interact"]["slots"][1] = {"slot_id": "b", "model_backend": "external_api", "model_ref": "gpt-x"}
+        p["opponent"] = {"base_url": "https://api.example.com", "model": "m", "api_key_env": OPP_KEY_ENV}
+
+    store = _configured(tmp_path, external)
+    err = _refused(store, tmp_path, capsys, OPP_KEY_ENV)                         # 环境里没有这个变量
+    assert "sk-" not in err
+    _refused(store, tmp_path, capsys, OPP_KEY_ENV, env=hosts_env(tmp_path) | {OPP_KEY_ENV: "   "})   # 空白也算没有
+
+
+def test_item_3_and_9_the_key_value_never_reaches_the_error(tmp_path, capsys):
+    def external(p):
+        p["interact"]["slots"][1] = {"slot_id": "b", "model_backend": "external_api", "model_ref": "gpt-x"}
+        p["opponent"] = {"base_url": "https://user:hunter2@api.example.com", "model": "m",
+                         "api_key_env": OPP_KEY_ENV}
+
+    store = _configured(tmp_path, external)
+    err = _refused(store, tmp_path, capsys, "base_url",
+                   env=hosts_env(tmp_path) | {OPP_KEY_ENV: OPP_KEY})
+    # 信息里的 "(user:password@)" 是写死的提示,不是配置里的取值;配置里的 userinfo 与地址都不能出现
+    assert "hunter2" not in err and "user:hunter2" not in err and OPP_KEY not in err
+    assert "api.example.com" not in err
+
+
+def test_item_3_and_9_an_external_slot_without_an_opponent_section_is_refused(tmp_path, capsys):
+    def external(p):
+        p["interact"]["slots"][1] = {"slot_id": "b", "model_backend": "external_api", "model_ref": "gpt-x"}
+
+    store = _configured(tmp_path, external)
+    _refused(store, tmp_path, capsys, "opponent section")
+
+
+def test_item_3_and_9_the_key_variable_present_lets_assembly_through(tmp_path):
+    def external(p):
+        p["interact"]["slots"][1] = {"slot_id": "b", "model_backend": "external_api", "model_ref": "gpt-x"}
+        p["opponent"] = {"base_url": "https://api.example.com", "model": "m", "api_key_env": OPP_KEY_ENV}
+
+    store = _configured(tmp_path, external)
+    assemble(store, FactoryOptions(interact=True), env=hosts_env(tmp_path) | {OPP_KEY_ENV: OPP_KEY}).close()
+
+
+def test_a_userinfo_base_url_is_refused_even_when_no_slot_uses_it(tmp_path, capsys):
+    def with_userinfo(p):
+        p["opponent"] = {"base_url": "https://user:hunter2@api.example.com", "model": "m",
+                         "api_key_env": OPP_KEY_ENV}
+
+    store = _configured(tmp_path, with_userinfo)
+    err = _refused(store, tmp_path, capsys, "base_url")
+    assert "hunter2" not in err and "api.example.com" not in err
+
+
+def test_item_4_scenarios_without_personas_are_refused(tmp_path, capsys):
+    store = _configured(tmp_path, lambda p: p["interact"].pop("persona_ids"))
+    _refused(store, tmp_path, capsys, "together")
+
+
+def test_item_4_personas_without_scenarios_are_refused(tmp_path, capsys):
+    store = _configured(tmp_path, lambda p: p["interact"].pop("scenario_ids"))
+    _refused(store, tmp_path, capsys, "together")
+
+
+def test_item_5_a_named_scenario_that_is_not_in_the_tree_is_refused(tmp_path, capsys):
+    store = _configured(tmp_path, seed={"scenarios": ("t1",)})
+    err = _refused(store, tmp_path, capsys, "t2")
+    assert "scenario" in err
+
+
+def test_item_5_a_named_persona_that_is_not_in_the_tree_is_refused(tmp_path, capsys):
+    store = _configured(tmp_path, seed={"personas": ("pa",)})
+    err = _refused(store, tmp_path, capsys, "pb")
+    assert "persona" in err
+
+
+def test_item_6_a_deployment_scenario_cannot_be_trained_on(tmp_path, capsys):
+    store = _configured(tmp_path, seed={"purpose": "deployment_simulation"})
+    err = _refused(store, tmp_path, capsys, "deployment_simulation")
+    assert "t1" in err and "t2" in err
+
+
+def test_item_6_the_scenarios_install_defaults_writes_are_deployment_scenarios(tmp_path, capsys):
+    def named_defaults(p):
+        p["interact"]["scenario_ids"] = ["factory-deploy-s1", "factory-deploy-s2"]
+        p["interact"]["persona_ids"] = {"a": "factory-agent-persona", "b": "factory-user-persona"}
+
+    store = _configured(tmp_path, named_defaults)
+    _refused(store, tmp_path, capsys, "factory-deploy-s1")
+
+
+def test_item_7_the_named_path_does_not_take_sft_steps(tmp_path, capsys):
+    def with_sft(p):
+        p["training_config"]["sft_steps"] = 2
+
+    store = _configured(tmp_path, with_sft)
+    err = _refused(store, tmp_path, capsys, "sft_steps")
+    assert "data_spec" in err
+
+
+def test_item_7_does_not_apply_to_the_generated_path(tmp_path):
+    def generated(p):
+        p["training_config"]["sft_steps"] = 2
+        p["interact"].pop("scenario_ids")
+        p["interact"].pop("persona_ids")
+        p["interact"]["data_spec"] = {"scenario_count": 4, "seed": 0, "purpose": "training",
+                                      "stages": {"sft": {"group_size": 1}, "grpo_opd": {"group_size": 2}}}
+
+    store = _configured(tmp_path, generated)
+    assemble(store, FactoryOptions(interact=True), env=hosts_env(tmp_path)).close()
+
+
+def test_item_8_fewer_scenarios_than_groups_per_step_is_refused(tmp_path, capsys):
+    def one_scenario(p):
+        p["interact"]["scenario_ids"] = ["t1"]
+
+    store = _configured(tmp_path, one_scenario)
+    _refused(store, tmp_path, capsys, "groups_per_step")
+
+
+def test_the_config_checks_come_before_the_endpoint_checks(tmp_path, capsys):
+    """没有端点配置也没有主机映射,但 interact 段缺了:报的是缺段,而不是缺端点。"""
+    store = _configured(tmp_path, lambda p: p.pop("interact"), endpoints=False)
+    _refused(store, tmp_path, capsys, "interact section", env={})
+
+
+def test_item_10_is_not_reachable_from_the_cli():
+    """策略与策略工厂同给,派发器自己抛 ValueError;组合根从不给具体的 policy,所以装配期没有这一条可检查。"""
+    from mindtrainer.dispatch import make_mindtrainer_dispatcher
+
+    with pytest.raises(ValueError, match="either policy or policy_factory"):
+        make_mindtrainer_dispatcher(policy=object(), policy_factory=lambda run_id, cfg: None)
+
+
+# ---- 第 11 条:没传 --interact 时 ----
+
+def _allow_interact(store, value=True):
+    write_config(store, scheduler_config_file(), "scheduler-config",
+                 {**DEFAULT_SCHEDULER_CONFIG.to_dict(), "allow_interact": value}, "test: scheduler")
+
+
+def test_item_11_plan_with_allow_interact_but_no_interact_flag_is_refused(tmp_path, capsys):
+    store = _configured(tmp_path)
+    _allow_interact(store)
+    err = _refused(store, tmp_path, capsys, "--interact", "--enable", "plan", "--planner-backend", "heuristic")
+    assert "allow_interact" in err                                       # 说明二选一:加 --interact,或关掉 allow_interact
+
+
+def test_item_11_does_not_fire_when_allow_interact_is_off(tmp_path):
+    store = _configured(tmp_path)
+    assemble(store, FactoryOptions(switches=("plan",), planner_backend="heuristic"), env={}).close()
+
+
+def test_item_11_does_not_fire_without_the_plan_switch(tmp_path):
+    store = _configured(tmp_path)
+    _allow_interact(store)
+    assemble(store, FactoryOptions(switches=("track",)), env={}).close()
+
+
+def test_item_11_is_satisfied_by_passing_interact(tmp_path):
+    store = _configured(tmp_path)
+    _allow_interact(store)
+    assemble(store, FactoryOptions(switches=("plan",), planner_backend="heuristic", interact=True),
+             env=hosts_env(tmp_path)).close()

@@ -170,13 +170,12 @@ def _interact_wiring(
     写进 training_run.policy_backend,所以记录里的端点就是服务实际起在的端点。配置错一律 FactoryConfigError。"""
     # 惰性导入:不走 --interact 的入口不该为此多载入 compute、grpc 与调度器配置
     from factory.compute_config import build_compute_client, read_endpoints_config, read_host_map, select_endpoint
-    from factory.configio import preflight
+    from factory.interact_checks import check_interact_config
     from factory.interact_policy import make_policy_factory
-    from trainscheduler.config import load_training_defaults
 
+    defaults = check_interact_config(store, environ)          # 设计 90 拒绝项 2 到 9,先于端点与主机映射
     endpoint = select_endpoint(read_endpoints_config(store), options.endpoint)
     client = build_compute_client(endpoint, read_host_map(env=environ))
-    defaults = preflight("training_defaults.yaml", lambda: load_training_defaults(store))
     policy_factory = make_policy_factory(
         store=store, runtime=runtime, switch=switch, client=client, endpoint=endpoint,
         opponent=defaults.opponent, env=environ,
@@ -318,6 +317,10 @@ def assemble(
                 "holds the reconcile loop for hours"
             )
         return _assemble_roll(store, options, env=env)
+    if "plan_next_round" in keys and not options.interact:
+        from factory.interact_checks import check_plan_needs_interact
+
+        check_plan_needs_interact(store)          # 设计 90 拒绝项 11
     if not keys and not options.interact:
         # 与 mindtrainer.wire.run 逐字节相同的路径:不读配置、不注入别的
         return Assembly(make_mindtrainer_dispatcher(), {}, None, False)
