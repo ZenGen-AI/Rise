@@ -40,6 +40,24 @@ def test_scripted_backend_is_deterministic_per_slot():
     assert ub == "B1"
 
 
+def test_scripted_backend_keeps_the_last_line_when_loop_is_off():
+    backend = ScriptedBackend({"b": ["一"]})
+    assert backend.respond(_persona(), _scenario(), [], "b")[0] == "一"
+    assert backend.respond(_persona(), _scenario(), [], "b")[0] == "(无更多发言)"
+
+
+def test_scripted_backend_wraps_around_when_loop_is_on():
+    backend = ScriptedBackend({"b": ["一", "二"]}, loop=True)
+    said = [backend.respond(_persona(), _scenario(), [], "b")[0] for _ in range(5)]
+    assert said == ["一", "二", "一", "二", "一"]
+
+
+def test_scripted_backend_loop_with_an_empty_queue_still_closes():
+    # 空队列即使 loop 也没有可循环的内容，不能越界
+    backend = ScriptedBackend({"b": []}, loop=True)
+    assert backend.respond(_persona(), _scenario(), [], "b")[0] == "(无更多发言)"
+
+
 def test_template_generation_backend_deterministic_by_seed():
     be = TemplateGenerationBackend()
     p1 = be.make_persona(seed=7)

@@ -34,10 +34,12 @@ class ScriptedBackend:
     """ModelBackend 的 V1 确定性实现：按 slot_id 预置罐头话语队列，
     每次 respond 出队下一句。用于脱离真实 LLM 的 fixture 测试（§2.4）。"""
 
-    def __init__(self, scripted: dict[str, list[str]]) -> None:
+    def __init__(self, scripted: dict[str, list[str]], *, loop: bool = False) -> None:
         # 复制成可变游标，不改动调用方传入的列表
         self._queues: dict[str, list[str]] = {k: list(v) for k, v in scripted.items()}
         self._cursor: dict[str, int] = {k: 0 for k in self._queues}
+        # loop 为真时剧本用尽后从头再来；为假时给出收场白（V1 原行为）
+        self._loop = loop
 
     def respond(
         self,
@@ -51,6 +53,9 @@ class ScriptedBackend:
         if idx < len(queue):
             self._cursor[speaker_slot] = idx + 1
             return queue[idx], None
+        if self._loop and queue:
+            self._cursor[speaker_slot] = 1
+            return queue[0], None
         return "(无更多发言)", None
 
 

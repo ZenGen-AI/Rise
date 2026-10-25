@@ -54,6 +54,19 @@ def test_scenario_default_source_is_auto():
     assert s.source == "auto"
 
 
+def test_opponent_script_is_optional_and_survives_a_round_trip():
+    plain = Scenario(id="s", background="", role_slots=[], conflict="", norms=[], purpose="training")
+    assert plain.to_dict() == {  # 旧形状逐字节不变
+        "id": "s", "background": "", "role_slots": [], "conflict": "", "norms": [],
+        "purpose": "training", "source": "auto",
+    }
+    scripted = Scenario(id="s", background="", role_slots=[], conflict="", norms=[],
+                        purpose="training", opponent_script={"b": ["一", "二"]})
+    assert scripted.to_dict()["opponent_script"] == {"b": ["一", "二"]}
+    assert Scenario.from_dict(scripted.to_dict()).opponent_script == {"b": ["一", "二"]}
+    assert Scenario.from_dict(plain.to_dict()).opponent_script == {}
+
+
 def test_role_binding_round_trip():
     b = RoleBinding(slot_id="persuader", persona_id="pers-001", model_backend="self_play")
     d = b.to_dict()

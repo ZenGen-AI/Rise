@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -62,9 +62,12 @@ class Scenario:
     norms: list[str]
     purpose: str  # "training" | "deployment_simulation"
     source: str = "auto"  # "auto" | "external"
+    # 对手剧本：slot_id -> 预置发言序列。默认空 dict，空时不进 to_dict，
+    # 既有 Scenario 的序列化保持不变。
+    opponent_script: dict[str, list[str]] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "id": self.id,
             "background": self.background,
             "role_slots": [r.to_dict() for r in self.role_slots],
@@ -73,6 +76,9 @@ class Scenario:
             "purpose": self.purpose,
             "source": self.source,
         }
+        if self.opponent_script:
+            d["opponent_script"] = {k: list(v) for k, v in self.opponent_script.items()}
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "Scenario":
@@ -84,6 +90,10 @@ class Scenario:
             norms=list(d["norms"]),
             purpose=d["purpose"],
             source=d.get("source", "auto"),
+            # 深拷贝，避免与反序列化来源共享列表
+            opponent_script={
+                str(k): list(v) for k, v in d.get("opponent_script", {}).items()
+            },
         )
 
 
