@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import http.client
 import json
 import math
 import urllib.error
@@ -22,7 +23,9 @@ from controlplane.models import version_of_id
 from controlplane.paths import model_file
 from factory.sombench_runner import EXPORT_FORMAT
 from simulator.datamodel import OPPONENT_DRIVERS, Persona, RoleBinding, Scenario, TurnRecord
-from simulator.realtime.backend_timeout import RoleBackendRejectedError, RoleBackendTimeoutError
+from simulator.realtime.backend_timeout import (
+    RoleBackendRejectedError, RoleBackendTimeoutError, RoleBackendUnavailableError,
+)
 
 # 回复体上限:一句对手发言用不了这么多,挡住对端发来没完没了的响应
 MAX_REPLY_BYTES = 1 << 20
@@ -58,6 +61,16 @@ class OpponentRejectedError(OpponentApiError, RoleBackendRejectedError):
     (T2,轨迹源不重跑、编排器把训练记录写 failed),而不是被通用异常分支吞成 role_backend_failure;
     仍是 OpponentApiError,所以训练位策略撞上时,策略上下文照旧把它译成延后(理由见 interact_policy)。
     429、5xx、回复形状不对不是它。信息里绝不含密钥值。"""
+
+
+class OpponentUnavailableError(OpponentApiError, RoleBackendUnavailableError):
+    """对手 API(外部 API 或站内 vLLM,共用 post_chat)暂时不可用:429、5xx、连不上(非超时)、连接中途被断开、
+    状态行不合规。过一会儿可能就好,是 T1。
+
+    同时是两样东西,各有用处:是 RoleBackendUnavailableError,所以服务端驱动把对手位的这类失败归
+    role_backend_unavailable(轨迹源按 max_retries_per_episode 整条重跑),而不是被通用异常分支吞成
+    role_backend_failure(不重跑);仍是 OpponentApiError,所以训练位策略撞上时,策略上下文照旧把它译成延后。
+    超时、明确拒绝、回复形状不对不是它。信息里绝不含密钥值。"""
 
 
 # ---------------- 驱动选择 ----------------
@@ -194,15 +207,20 @@ def post_chat(
     外部 API 与 vLLM 服务共用这一处:不重试(重试与降级是调用方的事),不跟随重定向,回复体有上限。
     失败一律抛 OpponentApiError,信息只含状态码、host_label、异常类型名,不含响应体;密钥若出现在
     信息里会被抹掉,且切断异常链(from None),回溯里没有携带请求头的原异常。子类按失败的性质分:
-    超时 OpponentTimeoutError(T1);对端明确拒绝 OpponentRejectedError(4xx,429 除外;T2);其余是普通的 OpponentApiError。
+    超时 OpponentTimeoutError(T1);暂时不可用 OpponentUnavailableError(429、5xx、连不上、中途断开;T1);
+    对端明确拒绝 OpponentRejectedError(4xx,429 除外;T2);回复不是约定的形状(及其余非 200)是普通的 OpponentApiError。
     host_label 是写进错误信息的"对端是谁"(外部 API 用 host:port,vLLM 用服务名)。"""
     require_http_url(base_url)
     timeout = require_timeout(timeout_s)
 
     def fail_status(code: int) -> OpponentApiError:
-        """非 200 的状态码:4xx(429 除外)是对端明确拒绝,其余照旧是普通的 OpponentApiError。"""
-        rejected = 400 <= code < 500 and code != 429
-        return fail(f"HTTP {code} from {host_label}", OpponentRejectedError if rejected else OpponentApiError)
+        """非 200 的状态码。4xx(429 除外)是对端明确拒绝(T2);429 与 5xx 是暂时不可用(T1);
+        其余(1xx、2xx 不是 200、3xx 重定向)我们读不懂,是普通的 OpponentApiError。"""
+        if 400 <= code < 500 and code != 429:
+            return fail(f"HTTP {code} from {host_label}", OpponentRejectedError)
+        if code == 429 or 500 <= code < 600:
+            return fail(f"HTTP {code} from {host_label}", OpponentUnavailableError)
+        return fail(f"HTTP {code} from {host_label}")
 
     def fail(message: str, error: type[OpponentApiError] = OpponentApiError) -> OpponentApiError:
         """所有失败走这一处,出口前抹掉密钥(原异常的文本理论上不该含,这里是第二道防线)。"""
@@ -218,6 +236,7 @@ def post_chat(
         with _OPENER.open(request, timeout=timeout) as response:
             status = response.status
             raw = response.read(MAX_REPLY_BYTES + 1)
+            declared = response.getheader("Content-Length")
     except urllib.error.HTTPError as exc:
         exc.close()
         raise fail_status(exc.code) from None
@@ -226,13 +245,20 @@ def post_chat(
     except urllib.error.URLError as exc:
         if isinstance(exc.reason, TimeoutError):
             raise fail(f"request to {host_label} timed out after {timeout:g}s", OpponentTimeoutError) from None
-        raise fail(f"request to {host_label} failed ({type(exc.reason).__name__}: {exc.reason})") from None
+        raise fail(
+            f"request to {host_label} failed ({type(exc.reason).__name__}: {exc.reason})", OpponentUnavailableError,
+        ) from None
     except OSError as exc:  # 连接被重置、对端中途断开
-        raise fail(f"request to {host_label} failed ({type(exc).__name__})") from None
-    except Exception as exc:  # http.client.HTTPException 不是 OSError 的子类(状态行不合规、读到一半断开等)
+        raise fail(f"request to {host_label} failed ({type(exc).__name__})", OpponentUnavailableError) from None
+    except http.client.HTTPException as exc:  # 不是 OSError 的子类:状态行不合规、读到一半断开等,对端的毛病
+        raise fail(f"request to {host_label} failed ({type(exc).__name__})", OpponentUnavailableError) from None
+    except Exception as exc:  # 认不出来的异常:不冒充暂时不可用(会被按条重跑),归普通的 OpponentApiError
         raise fail(f"request to {host_label} failed ({type(exc).__name__})") from None
     if status != 200:
         raise fail_status(status)
+    if declared is not None and declared.isdigit() and len(raw) <= MAX_REPLY_BYTES and len(raw) < int(declared):
+        # read(amt) 遇到比 Content-Length 短的体不抛 IncompleteRead,只是少给:对端中途断开,不是回复形状不对
+        raise fail(f"the reply from {host_label} was cut off before its declared length", OpponentUnavailableError)
     if len(raw) > MAX_REPLY_BYTES:
         raise fail(f"the reply from {host_label} is larger than {MAX_REPLY_BYTES} bytes")
     try:

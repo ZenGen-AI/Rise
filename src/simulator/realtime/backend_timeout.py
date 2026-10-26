@@ -19,6 +19,13 @@ class RoleBackendRejectedError(Exception):
     所以保守地不重跑；这一个则能确定，轨迹源不重跑，编排器把训练记录写成 failed。"""
 
 
+class RoleBackendUnavailableError(Exception):
+    """服务端角色后端（外部 API）的对端暂时不可用：限流（429）、对端自己的毛病（5xx）、连不上、中途断开。
+    过一会儿可能就好，是 T1。驱动把它归 role_backend_unavailable，轨迹源据此按条重跑。
+    与 role_backend_failure 分开：后者在服务端同时覆盖"后端抛了说不清的异常"和"工厂/解析器故障"，
+    轨迹源分不出 T1 与 T2，所以保守地不重跑；这一个则能确定是瞬态。"""
+
+
 class TimeoutBackend:
     """给任意 ModelBackend 套一层调用期限：每次 respond() 在一个 daemon 线程里
     执行被包装的后端，超过 timeout_s 未返回即抛 RoleBackendTimeoutError。

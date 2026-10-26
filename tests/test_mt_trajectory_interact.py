@@ -339,11 +339,13 @@ def test_a_goal_reached_episode_is_accepted_like_max_turns(store):
     [
         ({"end_reason": "timeout"}, "timeout"),
         ({"end_reason": "role_backend_timeout"}, "role_backend_timeout"),
+        ({"end_reason": "role_backend_unavailable"}, "role_backend_unavailable"),
         ({"end_reason": "persistence_failed"}, "persistence_failed"),
         ({"create_error": _Unavailable()}, "transport_unavailable"),
         ({"submit_error": _Unavailable()}, "transport_unavailable"),
     ],
-    ids=["timeout", "role_backend_timeout", "persistence_failed", "unavailable_on_create", "unavailable_on_submit"],
+    ids=["timeout", "role_backend_timeout", "role_backend_unavailable", "persistence_failed",
+         "unavailable_on_create", "unavailable_on_submit"],
 )
 def test_a_transient_failure_is_retried_and_recorded_and_the_half_episode_is_not_kept(store, plan, reason):
     factory = _FakeFactory(plan)

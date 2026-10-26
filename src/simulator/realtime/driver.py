@@ -9,7 +9,9 @@ from simulator.datamodel import Episode, Persona, Scenario, RoleAssignment, Turn
 from simulator.backends import ModelBackend
 from simulator.runner import run_episode
 from simulator.realtime.backend import ClientDrivenBackend, SessionEndRequested, TurnTimeoutError
-from simulator.realtime.backend_timeout import RoleBackendRejectedError, RoleBackendTimeoutError
+from simulator.realtime.backend_timeout import (
+    RoleBackendRejectedError, RoleBackendTimeoutError, RoleBackendUnavailableError,
+)
 from simulator.realtime.session import SessionState, assert_transition
 
 
@@ -18,7 +20,7 @@ class DriverEvent:
     """SessionDriver 经 outbox 转发给 gRPC 主循环的事件。
     kind="turn" → payload: TurnRecord；kind="closed" → payload: Episode；
     kind="failed" → payload: str（终止原因，如 "timeout"/"role_backend_failure"/
-    "role_backend_timeout"/"role_backend_rejected"/"client_disconnected"）。"""
+    "role_backend_timeout"/"role_backend_unavailable"/"role_backend_rejected"/"client_disconnected"）。"""
 
     kind: str
     payload: Any
@@ -141,6 +143,12 @@ class SessionDriver:
             assert_transition(self.state, SessionState.FAILED)
             self.state = SessionState.FAILED
             self._outbox.put(DriverEvent(kind="failed", payload="role_backend_timeout"))
+            return
+        except RoleBackendUnavailableError:
+            # 对端暂时不可用（429、5xx、连不上，T1）：与超时同理，调用方可以按条重跑。
+            assert_transition(self.state, SessionState.FAILED)
+            self.state = SessionState.FAILED
+            self._outbox.put(DriverEvent(kind="failed", payload="role_backend_unavailable"))
             return
         except RoleBackendRejectedError:
             # 对端明确拒绝（4xx，T2）：重试无益。单独的终止原因，让轨迹源与编排器能确定它是确定性的，

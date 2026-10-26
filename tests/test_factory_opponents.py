@@ -19,6 +19,7 @@ from factory.opponents import (
     OpponentCredentialError,
     OpponentRejectedError,
     OpponentTimeoutError,
+    OpponentUnavailableError,
     chat_messages,
     driver_for,
     post_chat,
@@ -26,7 +27,9 @@ from factory.opponents import (
 )
 from factory.sombench_runner import EXPORT_FORMAT
 from simulator.datamodel import Persona, RoleBinding, RoleSlot, Scenario, TurnRecord
-from simulator.realtime.backend_timeout import RoleBackendRejectedError, RoleBackendTimeoutError
+from simulator.realtime.backend_timeout import (
+    RoleBackendRejectedError, RoleBackendTimeoutError, RoleBackendUnavailableError,
+)
 
 SECRET = "sk-opponent-must-not-leak"
 
@@ -369,6 +372,72 @@ def test_post_chat_rejection_scrubs_the_key_from_a_label_that_carries_it(stub):
     assert SECRET not in str(info.value) and "***" in str(info.value)
 
 
+@pytest.mark.parametrize("status", [429, 500, 502, 503, 504])
+def test_429_and_5xx_are_the_peer_being_temporarily_unavailable(stub, status):
+    """限流与对端自己的毛病,过一会儿可能就好:OpponentUnavailableError(T1,轨迹源按条重跑)。
+    仍是 OpponentApiError(训练位撞上时译成延后);既不是超时也不是拒绝。"""
+    stub.script.append((status, json.dumps({"error": f"bad key {SECRET}"}).encode()))
+    with pytest.raises(OpponentUnavailableError, match=str(status)) as info:
+        _respond(_backend(stub.url))
+    assert isinstance(info.value, OpponentApiError) and isinstance(info.value, RoleBackendUnavailableError)
+    assert not isinstance(info.value, (OpponentTimeoutError, OpponentRejectedError))
+    rendered = "".join(traceback.format_exception(info.value))
+    assert SECRET not in str(info.value) and SECRET not in rendered
+    assert info.value.__cause__ is None and info.value.__suppress_context__
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404])
+def test_a_rejection_is_not_unavailable(stub, status):
+    stub.script.append((status, b"x"))
+    with pytest.raises(OpponentRejectedError) as info:
+        _respond(_backend(stub.url))
+    assert not isinstance(info.value, (OpponentUnavailableError, RoleBackendUnavailableError))
+
+
+def _raw_peer(payload: bytes) -> str:
+    """只会原样吐 payload 然后关连接的 TCP 服务:造 http.server 造不出来的对端毛病(状态行不合规、读到一半断开)。"""
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+
+    def serve():
+        conn, _ = srv.accept()
+        with conn:
+            conn.settimeout(2.0)
+            try:
+                conn.recv(65536)
+                conn.sendall(payload)
+            except OSError:
+                pass
+        srv.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    return f"http://127.0.0.1:{port}"
+
+
+@pytest.mark.parametrize("payload", [
+    b"garbage that is not a status line\r\n\r\n",                          # http.client.BadStatusLine
+    b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nshort",                 # 读到一半断开:IncompleteRead
+    b"",                                                                   # 对端收了请求就关连接:RemoteDisconnected
+], ids=["bad-status-line", "cut-mid-body", "closed-without-reply"])
+def test_a_peer_that_breaks_the_connection_midway_is_unavailable(payload):
+    url = _raw_peer(payload)
+    with pytest.raises(OpponentUnavailableError) as info:
+        _respond(_backend(url))
+    assert isinstance(info.value, RoleBackendUnavailableError)
+    assert SECRET not in str(info.value) and SECRET not in "".join(traceback.format_exception(info.value))
+
+
+@pytest.mark.parametrize("script", [(204, b""), (302, b"", {"Location": "http://127.0.0.1:1/"})])
+def test_a_2xx_that_is_not_200_or_a_redirect_is_neither_unavailable_nor_rejected(stub, script):
+    """既不是明确拒绝也不是暂时不可用:对端的回答我们读不懂,归普通的 OpponentApiError(role_backend_failure)。"""
+    stub.script.append(script)
+    with pytest.raises(OpponentApiError) as info:
+        _respond(_backend(stub.url))
+    assert not isinstance(info.value, (OpponentUnavailableError, OpponentRejectedError, OpponentTimeoutError))
+
+
 def test_a_2xx_that_is_not_200_is_an_api_error(stub):
     stub.script.append((204, b""))
     with pytest.raises(OpponentApiError, match="204"):
@@ -399,10 +468,12 @@ def test_a_redirect_is_not_followed_so_the_key_cannot_travel_to_another_place(st
     b'{"choices": "x"}',
 ])
 def test_a_malformed_reply_is_an_api_error(stub, body):
+    """回复不是约定的形状:普通的 OpponentApiError(role_backend_failure),不是暂时不可用,也不是拒绝。"""
     stub.script.append((200, body))
     with pytest.raises(OpponentApiError) as info:
         _respond(_backend(stub.url))
     assert SECRET not in str(info.value)
+    assert not isinstance(info.value, (OpponentUnavailableError, OpponentRejectedError, OpponentTimeoutError))
 
 
 def test_a_slow_server_times_out_as_an_api_error(stub):
@@ -434,19 +505,20 @@ def test_post_chat_timeout_scrubs_the_key_from_a_label_that_carries_it(stub):
 
 @pytest.mark.parametrize("script", [(500, b"x"), (429, b"slow down"), (200, b"not json")])
 def test_a_non_200_or_a_malformed_reply_is_not_a_timeout(stub, script):
-    """非 200 不归超时:它走 role_backend_failure,轨迹源不按条重跑(分不出 T1 与 T2)。"""
+    """非 200 与形状不对都不归超时:超时才是 role_backend_timeout。"""
     stub.script.append(script)
     with pytest.raises(OpponentApiError) as info:
         _respond(_backend(stub.url))
     assert not isinstance(info.value, (OpponentTimeoutError, RoleBackendTimeoutError))
 
 
-def test_a_refused_connection_is_an_api_error():
+def test_a_refused_connection_is_unavailable():
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
-    with pytest.raises(OpponentApiError) as info:
+    with pytest.raises(OpponentUnavailableError) as info:
         _respond(_backend(f"http://127.0.0.1:{port}"))
+    assert isinstance(info.value, OpponentApiError) and isinstance(info.value, RoleBackendUnavailableError)
     assert SECRET not in str(info.value)
 
 

@@ -301,6 +301,7 @@ def test_create_session_gets_the_deployment_purpose_the_agent_slot_and_a_fresh_a
 @pytest.mark.parametrize("plan,reason", [
     ({"end_reason": "timeout"}, "timeout"),
     ({"end_reason": "role_backend_timeout"}, "role_backend_timeout"),
+    ({"end_reason": "role_backend_unavailable"}, "role_backend_unavailable"),
     ({"end_reason": "persistence_failed"}, "persistence_failed"),
     ({"create_error": _Unavailable()}, "transport_unavailable"),
 ])

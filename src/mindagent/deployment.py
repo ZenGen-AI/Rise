@@ -18,9 +18,11 @@ from simulator.realtime.client import EnvironmentServiceClient, SessionRejectedE
 from simulator.store_adapter import read_episode, read_scenario, write_episode
 
 PURPOSE = "deployment_simulation"
-# 与 mindtrainer.trajectory_source 同一套判定(本包不导入 mindtrainer):
+# 与 mindtrainer.trajectory_source 同一套判定(本包不导入 mindtrainer;tests/test_interact_parity.py 钉住瞬态集合相等):
 ACCEPTED_REASONS = frozenset({"max_turns", "goal_reached"})
-TRANSIENT_REASONS = frozenset({"timeout", "role_backend_timeout", "persistence_failed"})
+TRANSIENT_REASONS = frozenset({
+    "timeout", "role_backend_timeout", "role_backend_unavailable", "persistence_failed",
+})
 
 
 class DeploymentFailedError(Exception):
@@ -132,8 +134,8 @@ def run_deployment_episodes(
     (含重入时复用的)。每条 episode 落在 runs/<run_id>/episodes/deploy-<model>-<scenario>-<k>.yaml。
 
     - 已落盘且可复用(见 _reusable)的 episode 不重跑。
-    - T1(timeout、role_backend_timeout、传输层 UNAVAILABLE)整条重跑,上限 max_retries_per_episode;
-      其余失败不重跑。两者都以 DeploymentFailedError 结束,已成功的 episode 留在树里供重入复用。
+    - T1(timeout、role_backend_timeout、role_backend_unavailable、persistence_failed、传输层 UNAVAILABLE)
+      整条重跑,上限 max_retries_per_episode;其余失败(含 role_backend_rejected)不重跑。两者都以 DeploymentFailedError 结束,已成功的 episode 留在树里供重入复用。
     - 实例自己的异常:会话先 abort(服务端不落盘),原异常原样上抛,不重试、不包装。
     """
     agent_slot = agent_slot_of(bindings)

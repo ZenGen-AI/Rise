@@ -45,7 +45,14 @@ class EnvironmentServiceClient:
     注意 closed 在 create_session 返回时就可能已为 True（例如客户端后说而
     max_turns=1），先检查再提交。传输层出错（服务端宕机、连接被取消）时
     方法抛出 grpc.RpcError / RuntimeError，此时客户端已置为 closed 并释放
-    请求流，不会泄漏后台线程。"""
+    请求流，不会泄漏后台线程。
+
+    重建出的 Episode.terminated_reason 就是服务端 EndSession.reason。正常结束：max_turns、goal_reached、
+    client_terminated。失败的几种里，调用方要分 T1（整条重跑有望成功）与 T2（重跑无益）：
+    T1 是 timeout、role_backend_timeout、role_backend_unavailable（对手 API 限流、5xx、连不上）、
+    persistence_failed；T2 是 invalid_session、role_backend_rejected（对手 API 明确拒绝，4xx 且非 429）；
+    role_backend_failure 分不出 T1 与 T2（后端抛了说不清的异常，或工厂/解析器出错），调用方保守地不重跑；
+    client_disconnected 是客户端自己断开。"""
 
     def __init__(self, stub) -> None:
         self._stub = stub
@@ -167,7 +174,7 @@ class EnvironmentServiceClient:
         return self._await_client_turn()
 
     def drain_until_end(self) -> Episode:
-        """不主动提交，持续拉取直到会话自然终止（超时/后端失败/max_turns）。"""
+        """不主动提交，持续拉取直到会话自然终止（超时/后端失败/对手拒绝或不可用/max_turns）。"""
         while not self._closed:
             self._pump_one()
         return self._build_episode(self._last_reason)

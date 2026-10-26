@@ -14,9 +14,11 @@ from controlplane.paths import model_file
 from factory.interact_policy import _is_adapter_export as policy_is_adapter_export
 from factory.opponents import ModelRefError, driver_for, resolve_model_ref
 from factory.sombench_runner import EXPORT_FORMAT as RUNNER_EXPORT_FORMAT
+from mindagent.deployment import TRANSIENT_REASONS as DEPLOYMENT_TRANSIENT_REASONS
 from mindtrainer.dispatch import _DEFAULT_OPPONENT_DRIVER
 from mindtrainer.dispatch import _is_adapter_export as dispatch_is_adapter_export
 from mindtrainer.roll_converter import EXPORT_FORMAT as CONVERTER_EXPORT_FORMAT
+from mindtrainer.trajectory_source import _TRANSIENT_REASONS as TRAJECTORY_TRANSIENT_REASONS
 from simulator.datamodel import OPPONENT_DRIVERS, RoleBinding
 from trainscheduler.config import _SLOT_DRIVERS
 
@@ -87,3 +89,8 @@ def test_the_three_adapter_export_predicates_agree(store, hint, expected):
 
 def test_the_converter_and_the_runner_name_the_export_format_the_same():
     assert CONVERTER_EXPORT_FORMAT == RUNNER_EXPORT_FORMAT
+
+
+def test_the_deployment_copy_of_the_transient_reasons_equals_the_trajectory_sources():
+    """mindagent 不导入 mindtrainer,瞬态终止原因集合各写一份:一边加了另一边没加,部署与训练对同一个原因就会判得不一样。"""
+    assert DEPLOYMENT_TRANSIENT_REASONS == TRAJECTORY_TRANSIENT_REASONS

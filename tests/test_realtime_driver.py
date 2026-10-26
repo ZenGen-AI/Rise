@@ -2,7 +2,7 @@ from simulator.datamodel import (
     Scenario, RoleSlot, Persona, RoleBinding, RoleAssignment,
 )
 from simulator.backends import ScriptedBackend
-from simulator.realtime.backend_timeout import RoleBackendRejectedError
+from simulator.realtime.backend_timeout import RoleBackendRejectedError, RoleBackendUnavailableError
 from simulator.realtime.driver import SessionDriver, DriverEvent
 from simulator.realtime.session import SessionState
 
@@ -107,6 +107,26 @@ def test_driver_role_backend_rejection_transitions_to_failed_with_its_own_reason
     assert driver.poll_event(timeout_s=2.0).kind == "turn"
     ev = driver.poll_event(timeout_s=2.0)
     assert (ev.kind, ev.payload) == ("failed", "role_backend_rejected")
+    assert driver.state == SessionState.FAILED
+
+
+def test_driver_role_backend_unavailable_transitions_to_failed_with_its_own_reason():
+    """对端暂时不可用(429、5xx、连不上)是 T1:单独的终止原因,轨迹源据此按条重跑。"""
+    class UnavailableBackend:
+        def respond(self, persona, scenario, history, speaker_slot):
+            raise RoleBackendUnavailableError("the peer is down")
+
+    scenario, assignment, personas = _fixture(max_turns=2)
+    driver = SessionDriver(
+        scenario, assignment, personas,
+        server_backends={"b": UnavailableBackend()},
+        client_driven_slot="a", episode_id="ep-3u", turn_timeout_s=2.0,
+    )
+    driver.start()
+    driver.submit_turn("candidate turn 1", None)
+    assert driver.poll_event(timeout_s=2.0).kind == "turn"
+    ev = driver.poll_event(timeout_s=2.0)
+    assert (ev.kind, ev.payload) == ("failed", "role_backend_unavailable")
     assert driver.state == SessionState.FAILED
 
 

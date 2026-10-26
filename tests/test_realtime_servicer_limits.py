@@ -247,12 +247,13 @@ def test_slow_server_backend_ends_session_with_role_backend_timeout(start_server
 class _SlowChatServer:
     """本机 OpenAI 兼容桩:收到请求后先睡 delay_s 再回一句,用来逼外部 API 对手的单次调用超时。"""
 
-    def __init__(self, delay_s, status=200):
+    def __init__(self, delay_s, status=200, body=None):
         import json
         import threading
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-        body = json.dumps({"choices": [{"message": {"role": "assistant", "content": "late"}}]}).encode()
+        if body is None:
+            body = json.dumps({"choices": [{"message": {"role": "assistant", "content": "late"}}]}).encode()
 
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):  # noqa: N802
@@ -285,8 +286,8 @@ def slow_chat(monkeypatch):
     monkeypatch.setenv("no_proxy", "127.0.0.1")
     made = []
 
-    def _make(delay_s, status=200):
-        server = _SlowChatServer(delay_s, status)
+    def _make(delay_s, status=200, body=None):
+        server = _SlowChatServer(delay_s, status, body)
         made.append(server)
         return server
 
@@ -324,13 +325,55 @@ def test_an_external_api_opponent_that_times_out_ends_the_session_as_role_backen
     assert "sk-test-not-a-secret" not in end.end_session.failure_detail
 
 
-def test_an_external_api_opponent_answering_500_ends_the_session_as_role_backend_failure(
+@pytest.mark.parametrize("status", [429, 500, 503])
+def test_an_external_api_opponent_answering_429_or_5xx_ends_the_session_as_role_backend_unavailable(
+        start_server, slow_chat, status):
+    """429 与 5xx 是对端暂时不可用(T1):轨迹源据此按条重跑;不是 role_backend_failure(那个不重跑)。"""
+    server = slow_chat(0.0, status=status)
+    end = _external_opponent_session(start_server, server.base_url, opponent_timeout_s=5.0)
+    assert end.WhichOneof("payload") == "end_session"
+    assert end.end_session.reason == "role_backend_unavailable", end.end_session
+    assert "sk-test-not-a-secret" not in end.end_session.failure_detail
+
+
+def test_an_external_api_opponent_that_cannot_be_reached_ends_the_session_as_role_backend_unavailable(
+        start_server):
+    import socket
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    end = _external_opponent_session(start_server, f"http://127.0.0.1:{port}", opponent_timeout_s=5.0)
+    assert end.WhichOneof("payload") == "end_session"
+    assert end.end_session.reason == "role_backend_unavailable", end.end_session
+
+
+def test_an_external_api_opponent_with_a_malformed_reply_still_ends_the_session_as_role_backend_failure(
         start_server, slow_chat):
-    """非 200 不改:仍是 role_backend_failure,协议上分不出 T1 与 T2,轨迹源不按条重跑。"""
-    server = slow_chat(0.0, status=500)
+    """回复不是约定的形状,分不出 T1 与 T2:仍是 role_backend_failure,轨迹源不按条重跑。"""
+    server = slow_chat(0.0, body=b"not json at all")
     end = _external_opponent_session(start_server, server.base_url, opponent_timeout_s=5.0)
     assert end.WhichOneof("payload") == "end_session"
     assert end.end_session.reason == "role_backend_failure", end.end_session
+
+
+def test_a_backend_that_raises_role_backend_unavailable_ends_the_session_as_role_backend_unavailable(start_server):
+    from simulator.realtime.backend_timeout import RoleBackendUnavailableError
+
+    class DownBackend:
+        def respond(self, persona, scenario, history, speaker_slot):
+            raise RoleBackendUnavailableError("HTTP 503 from the peer")
+
+    address = start_server(factory=lambda *_: {"b": DownBackend()}, backend_timeout_s=10.0)
+    stream = _Stream(address)
+    stream.send(_create_msg(max_turns=4))
+    assert stream.recv().WhichOneof("payload") == "session_ready"
+    stream.send(pb2.ClientMessage(submit_turn=pb2.SubmitTurn(utterance="cand-0")))
+    assert stream.recv().WhichOneof("payload") == "turn_update"
+    end = stream.recv()
+    assert end.WhichOneof("payload") == "end_session"
+    assert end.end_session.reason == "role_backend_unavailable", end.end_session
+    stream.close()
 
 
 def test_a_backend_that_raises_role_backend_rejected_ends_the_session_as_role_backend_rejected(start_server):

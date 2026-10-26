@@ -792,7 +792,8 @@ def _external_opponent_binding():
 
 def test_an_opponent_that_cannot_be_reached_defers_the_directive_instead_of_killing_the_daemon(
         world, tmp_path, stub, fake_serve):
-    """对手的 HTTP 失败 -> 服务端判 role_backend_failure -> 轨迹源抛 RolloutFailedError。过去它一路逃出调和循环。"""
+    """对手连不上 -> 服务端判 role_backend_unavailable -> 轨迹源按条重跑用尽后抛 RolloutFailedError。
+    过去它一路逃出调和循环。"""
     write_config(world, training_defaults_file(), "training-defaults",
                  _interact_defaults(base_url=_closed_port_url(), model="ext-model", api_key_env=OPP_KEY_ENV),
                  "test: unreachable opponent")
@@ -888,21 +889,38 @@ def test_an_external_opponent_that_times_out_once_is_retried_and_the_directive_e
     assert server.count > expected
 
 
-def test_an_external_opponent_answering_500_defers_the_directive_with_role_backend_failure(
+def test_an_external_opponent_that_answers_503_once_is_retried_and_the_directive_executes(
+        world, tmp_path, stub, fake_serve, external_api):
+    """对手位外部 API 第一次回 503 -> 服务端 role_backend_unavailable(T1) -> 轨迹源整条重跑 -> 第二次正常。
+    指令照常 executed,episode 数是预期的那几条(失败的半截 episode 不进树)。"""
+    server = external_api([(503, 0.0)])                        # 只有第一次 503,之后都正常
+    _use_external_opponent(world, server)
+    book = _ticks(world, tmp_path, **{OPP_KEY_ENV: OPP_KEY})
+    assert _read(world, "directive").status == "executed"
+    assert _read(world, "training_run").status == "executed"
+    assert book.streak(DISPATCH_KEY) == 0
+    expected = 1 * 1 * 2                                       # grpo_steps * groups_per_step * group_size
+    assert _wait_until(lambda: len(_episode_ids(world)) >= expected)
+    assert len(_episode_ids(world)) == expected
+    assert server.count > expected                             # 那次 503 确实发生过,且被重跑补上了
+
+
+def test_an_external_opponent_that_keeps_answering_503_defers_the_directive_once_the_retries_run_out(
         world, tmp_path, stub, fake_serve, external_api, caplog):
-    """非 200 不重跑单条(协议上分不出 T1 与 T2):RolloutFailedError -> RolloutDeferredError,
-    指令保持 pending 退避,延后原因点名 role_backend_failure。续训次数耗尽后升 T3(见上面那条)。"""
+    """先按条重跑(max_retries_per_episode 默认 2,共 3 次尝试),用尽后 RolloutFailedError -> RolloutDeferredError,
+    指令保持 pending 退避,延后原因点名 role_backend_unavailable。续训次数耗尽后升 T3(见下面那条)。"""
     import logging
 
-    server = external_api([(500, 0.0)] * 50)
+    server = external_api([(503, 0.0)] * 50)
     _use_external_opponent(world, server)
     with caplog.at_level(logging.WARNING, logger="controlplane.daemon"):
         book = _ticks(world, tmp_path, **{OPP_KEY_ENV: OPP_KEY})
     assert _read(world, "directive").status == "pending"
     assert _read(world, "training_run").status == "pending"
     assert book.streak(DISPATCH_KEY) == 1
-    assert "RolloutDeferredError" in caplog.text and "role_backend_failure" in caplog.text
+    assert "RolloutDeferredError" in caplog.text and "role_backend_unavailable" in caplog.text
     assert OPP_KEY not in caplog.text and server.base_url not in caplog.text
+    assert server.count == 3                                   # 同一条 rollout 打了 1 + 2 次重跑,才放弃
 
 
 def test_an_external_opponent_answering_404_fails_the_directive_with_role_backend_rejected(
@@ -969,6 +987,7 @@ def _failed_rollout(reason: str, detail: str = "") -> RolloutFailedError:
 @pytest.mark.parametrize("raised, expected", [
     (_failed_rollout("role_backend_failure", "http://10.9.8.7:8000 refused"), "RolloutFailedError: role_backend_failure"),
     (_failed_rollout("timeout"), "RolloutFailedError: timeout"),
+    (_failed_rollout("role_backend_unavailable", "HTTP 503 from 10.9.8.7:8000"), "RolloutFailedError: role_backend_unavailable"),
     (_failed_rollout("persistence_failed"), "RolloutFailedError: persistence_failed"),
     (OpponentApiError("HTTP 500 from 10.9.8.7:8000"), "OpponentApiError"),
 ])
