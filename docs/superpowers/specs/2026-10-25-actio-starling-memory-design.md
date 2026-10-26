@@ -140,7 +140,7 @@ class MemoryBackend(Protocol):
     def remember(self, event: MemoryEvent) -> RememberOutcome: ...
     def embed_pending(self) -> int: ...          # 只做嵌入,返回条数
     def digest(self) -> str: ...                 # 逻辑摘要,sha256 十六进制
-    def close(self) -> None: ...
+    def close(self) -> None: ...                 # 先放弃本实例留下的 pending 事件,再关库
 ```
 
 | 类型 | 字段 | 说明 |
@@ -150,7 +150,7 @@ class MemoryBackend(Protocol):
 | `MemoryEventConflict` | 异常 | 同 `key` 已存在且文本不同时抛出 |
 | `RememberOutcome` | `stored`、`failed`、`category` | `category` 取 Starling 的 `failure_category`（S13） |
 
-一个端口实例只属于一个智能体，所以签名里没有 holder。
+一个端口实例只属于一个智能体，所以签名里没有 holder。`pending` 事件的放弃不进端口签名：`close()` 先对本实例写过、仍在 `pending` 的 key 逐个 `abandon_event`，再关库。训练副本随后被删，放不放弃都一样；部署库靠它满足"episode 结束后库里没有它的 `pending` 行"。门② 不经 Actio 实例，直接调 Starling 的 `remember_event` 与 `abandon_event`。
 
 | 实现 | 文件 | 用途 |
 |---|---|---|
@@ -166,7 +166,7 @@ class MemoryBackend(Protocol):
 | 字段 | `memories: tuple[MemoryEntry, ...]` | `memory: MemoryBackend`、`replay_read_only: bool`（只给 MindAgent 的验证重放用，训练路永远为假） |
 | `decide` | `retrieve(self.memories, q, limit)` | `self.memory.recall(q, limit=self.memory_limit)` |
 | `respond` 之后 | 无 | 对新近的对方发言逐条 `remember`，再 `embed_pending`；`replay_read_only` 为真时跳过 |
-| `instantiate` | `memories=` | `memory=`、`replay_read_only=`；保留 `memories=` 作为 `TupleMemory` 的简写 |
+| `instantiate` | `memories=` | `memory=`、`replay_read_only=`、`episode_id=`（逻辑 episode id，事件 key 的前缀；可写端口不给就抛 `ValueError`）；保留 `memories=` 作为 `TupleMemory` 的简写，与 `memory=` 恰好给一个 |
 | `close` | 无 | 转发给 `memory.close()` |
 
 `render_guidance` 改收 `list[MemoryHit]`，记忆行写成 `[memory:<id>] <text>`。
@@ -178,6 +178,7 @@ class MemoryBackend(Protocol):
 - **事件身份**：`key` 是 `<逻辑 episode id>#<turn_index>`，`text` 是 `<说话方人格 id>：<utterance>`。逻辑 episode id 由客户端定（F21）：训练是 `{run}-{stage}-{scenario}-r{k}`，部署是 `deploy-{model}-{scenario}-{k}`，重试不变；它经 `CreateSession` 新增的 `episode_id` 字段传给服务端，服务端落盘的 episode 也用它当 id。`key` 作为前缀写进 Starling 的文本：`[<key>] <text>`，所以不同 episode 的同一句话是不同事件；同 key 的重写由 `events` 表拦下，不再调 `remember`。
 - **时钟**：`now` 由 `seq` 推出：`2026-01-01T00:00:00Z` 加 `seq` 秒。`seq` 存在 `events` 表所在的同一个 SQLite 库里，与写事件同一事务递增；训练副本从 0 起，部署库跨轮次单调。
 - **自己的话**：不写。它已在对话历史里。
+- **episode 内重试**：`remember` 的抽取失败在同一次 `respond` 里不重试；同一 episode 的下一次 `respond` 会把上次失败的那几句连同新发言一起再交给 `remember_event`（同 key 同文本，`pending` 行被推进）。episode 结束时 `close()` 放弃仍未推进的。
 - **抽取失败**：`RememberOutcome.failed` 为真时这一轮不留该条记忆，实例计数加一，不抛到 `respond` 之外；计数在激活轨迹里（第 4.6 节）。事件行只在抽取成功后才变成 `committed`（第 8 节 `remember_event`），所以失败的事件下次重试还会再抽一次，不会被当成幂等丢掉。训练副本用完即弃，不会带着 `pending` 事件行进下一条 rollout。部署库里的 `pending` 行各有主人：对话事件的主人是产生它的 episode，门② 事件的主人是提案；谁写的谁处理，没有"开始前统一补齐"。对话事件在 episode 内重试一次就算（重试仍失败则留 `pending`，计数进轨迹），episode 结束时对自己留下的 `pending` 行调 `abandon_event`；所以部署 episode 结束后库里没有它的 `pending` 行，起点快照也不会带着别人的 `pending` 行。
 - **`recall`、`remember`、`embed_pending` 抛异常**：包成 `MemoryFailureError` 上抛，由调用方按第 9 节分类。
 
@@ -203,7 +204,7 @@ class MemoryBackend(Protocol):
 
 ### 4.6 激活轨迹
 
-轨迹模式升到 `actio.trace.v2`，在八个键之外加 `memory`：`{"digest_before": sha, "remembered": "n", "extraction_failed": "n"}`。两个计数是十进制字符串，与 `library_version` 同一规矩（F20），经 `Struct` 往返不失真。校验：v2 的键集合是九个，`memory` 的三个值都是非空字符串，计数必须是 ASCII 十进制。消费方（分析器、`_reusable`）对 v1 与 v2 都接受；`memory_hits` 的校验不变。抽取失败的计数因此随 episode 落盘，不需要 `Episode` 加元数据（F16）。
+轨迹模式升到 `actio.trace.v2`，在八个键之外加 `memory`：`{"digest_before": sha, "remembered": "n", "extraction_failed": "n"}`。`digest_before` 是这一轮 recall 之前的摘要；两个计数是本实例构造以来的累计值。凡是带记忆端口构造的实例都产出 v2（包括 `memories=` 简写构造的替身）；v1 只剩旧的落盘 episode。两个计数是十进制字符串，与 `library_version` 同一规矩（F20），经 `Struct` 往返不失真。校验：v2 的键集合是九个，`memory` 的三个值都是非空字符串，计数必须是 ASCII 十进制。消费方（分析器、`_reusable`）对 v1 与 v2 都接受；`memory_hits` 的校验不变。抽取失败的计数因此随 episode 落盘，不需要 `Episode` 加元数据（F16）。
 
 ## 5. 记忆库的位置与配置
 
