@@ -528,7 +528,7 @@ vLLM 服务按指令起停,不常驻。一条 interact 指令派发时起服务,
 | 整条 gRPC 流的 deadline | 固定 15 秒(`src/factory/agent.py` 的 `INTERACT_DEADLINE_S`) | 每条指令按 `max_turns_per_episode × 30 秒` 算,指令结束后还原 [已落地] |
 | 创建会话 | 10 秒(`create_timeout_s`) | 不变 |
 
-单次后端调用超时归 `role_backend_timeout`,是 T1,整条重跑,至多 `1 + max_retries_per_episode` 次。真机延迟没有数据,30 秒是否够用列入本文的未核实项。第 5.1 至 5.3 节的签名、参数形状与默认值已按代码核实;5.4 里单次后端调用改传 15 秒尚未实现,该数值取自设计,施工时可能微调。
+单次后端调用超时归 `role_backend_timeout`,是 T1,整条重跑,至多 `1 + max_retries_per_episode` 次。对手 API 回 429、5xx 或连不上归 `role_backend_unavailable`,同样是 T1、同样重跑;回其余 4xx 归 `role_backend_rejected`,是 T2,不重跑、训练记录写 `failed`;回复形状不对仍归 `role_backend_failure`,不重跑、记录保持 `pending` [已落地]。真机延迟没有数据,30 秒是否够用列入本文的未核实项。第 5.1 至 5.3 节的签名、参数形状与默认值已按代码核实;5.4 里单次后端调用改传 15 秒尚未实现,该数值取自设计,施工时可能微调。
 
 ## 6. 关键流程
 
@@ -689,7 +689,7 @@ interact 的生成路多一条「生成、写树、回写、复校」的链路 [
 | MT-8 | 从未存点的 pending 记录判 restart,不判 T3 | 一律 T3 | 什么都没丢,从头跑等价于新运行 | 一条在第一次存点前反复崩溃的指令,靠 `resume_attempts` 上限挡住 |
 | MT-9 | `resume_attempts` 先加一并落盘,再加载权重 | 训练成功后再计数 | load 本身反复失败也会触顶升级 | 无 |
 | MT-10 | 曲线摘要只在存点时快照 | 每步写入 | 续训后摘要与一次跑完相同,不重复计入 | 崩溃前多跑的步在摘要里看不到 |
-| MT-11 | `role_backend_failure` 不重试 | 按 T1 重试 | 服务端用它同时表示后端确定性异常和工厂故障,分不出 T1 与 T2 | 真正的瞬态后端故障也会让本次 collect 失败 |
+| MT-11 | `role_backend_failure` 不重试 | 按 T1 重试 | 服务端用它同时表示后端抛说不清的异常和工厂故障,分不出 T1 与 T2。对手 API 的 429、5xx、连不上已单列为 `role_backend_unavailable`(T1,重跑),4xx 单列为 `role_backend_rejected`(T2,写 `failed`) | 剩下的真瞬态后端故障(如后端抛的非对手 API 异常)仍会让本次 collect 失败 |
 | MT-12 | judge 与被训模型相同或互为前缀时构造即拒绝 | 只在诊断侧防自评 | 训练会被直接优化去讨好自己的 judge | 前缀匹配不是真正的血缘判断,漏判与误判都有 |
 | MT-13 | `allow_resume` 与 `max_resume_attempts` 计入 `config_hash` | 只哈希影响训练产物的字段 | 原设计未记录理由,代码表现为整份配置一起哈希 | 两项一旦改动,同一个 run 判"配置变了",无法续训,只能重跑;要支持放宽后续训,须把它们移出 `config_hash` |
 | MT-14 | SFT 只以训练位的 `utterance` 为目标,不训练 `inner_thought` | 同时训练内心推理 | 原设计未记录理由,是实现者的选择 | 被训模型学不到内心推理 |
@@ -728,9 +728,10 @@ interact 的生成路多一条「生成、写树、回写、复校」的链路 [
 | 远端作业非零退出 `RemoteJobFailedError` | 延后 | 同上;它是真失败,计入 `resume_attempts`,耗尽后升级为 T3 | 训练记录 `resume_attempts` |
 | 远端作业成功但指标解析不出 `MetricsMissingError` | T1 | 记录保持 `pending`,计入 `resume_attempts`;重试时作业命中已成功退出的那次尝试,只重新解析,不重训 | 训练记录 `resume_attempts` |
 | 执行器崩溃、转换器故障、读清单时 `OSError` | T1 | 原样上抛,记录与指令保持 `pending`,下一次派发续训 | 训练记录的存点进度 |
-| interact 的 `timeout`、`role_backend_timeout`、`persistence_failed`、传输层 UNAVAILABLE | T1 | 原地重跑,至多 `1 + max_retries_per_episode` 次;耗尽后上抛,记录保持 `pending`(经 `--interact` 入口时的去向见下方「真推理的 rollout 失败」一行) | `curve_summary["failed_rollout_attempts"]` |
-| interact 的 `role_backend_failure` 等其余原因 | T1 | 不重试,上抛,记录保持 `pending`,由续训上限兜底(经 `--interact` 入口时的去向见下一行) | 同上 |
-| 经 `--interact` 入口时,真推理的 rollout 失败:上两行里上抛的 `RolloutFailedError`(`invalid_session` 除外),以及对手后端的 `OpponentApiError` [已落地] | 延后 | 策略上下文把它们译成 `RolloutDeferredError`(`DeferredError` 的子类):指令保持 `pending`,守护进程按退避重试而不退出;原因只写异常类名与 reason 码,不带异常文字(文字里可能有远端地址)。每次重派耗一次 `resume_attempts`,到 `max_resume_attempts` 由 `decide_resume` 升级为 T3,所以一直失败的 run 最终是 T3,不会无限退避。`invalid_session` 不在此列,仍是上面的 T2 | 守护进程结构化日志;终局时指令 `failure.category = T3` |
+| interact 的 `timeout`、`role_backend_timeout`、`role_backend_unavailable`(对手 API 回 429、5xx,或连不上)、`persistence_failed`、传输层 UNAVAILABLE | T1 | 原地重跑,至多 `1 + max_retries_per_episode` 次;耗尽后上抛,记录保持 `pending`(经 `--interact` 入口时的去向见下方「真推理的 rollout 失败」一行) | `curve_summary["failed_rollout_attempts"]` |
+| interact 的 `role_backend_rejected`(对手 API 回 4xx,429 除外) [已落地] | T2 | 不重试,记录写 `failed`(category T2)并重抛,当轮把指令判 `failed`;与 `invalid_session` 同属编排器的 `_DETERMINISTIC_ROLLOUT_REASONS` | 训练记录 `failure`;指令 `payload["failure"]` |
+| interact 的 `role_backend_failure` 等其余原因(含对手 API 的回复形状不对) | T1 | 不重试,上抛,记录保持 `pending`,由续训上限兜底(经 `--interact` 入口时的去向见下一行) | 同上 |
+| 经 `--interact` 入口时,真推理的 rollout 失败:上几行里上抛的 `RolloutFailedError`(`invalid_session` 与 `role_backend_rejected` 除外),以及训练位策略自己撞上的 `OpponentApiError` [已落地] | 延后 | 策略上下文把它们译成 `RolloutDeferredError`(`DeferredError` 的子类):指令保持 `pending`,守护进程按退避重试而不退出;原因只写异常类名与 reason 码,不带异常文字(文字里可能有远端地址)。每次重派耗一次 `resume_attempts`,到 `max_resume_attempts` 由 `decide_resume` 升级为 T3,所以一直失败的 run 最终是 T3,不会无限退避。`invalid_session` 与 `role_backend_rejected` 不在此列,仍是上面的 T2。训练位策略自己抛的 `OpponentRejectedError` 也在此列而不是 T2:训练位是本 run 自己起的 vLLM,4xx 多半是服务配置坏了,但这和起服务时的瞬态失败区分不开,先按延后处理 | 守护进程结构化日志;终局时指令 `failure.category = T3` |
 
 T1 的上抛异常会让 `run_daemon` 退出,需要外部监督者重启。重启后同一条指令再次派发,`resume_attempts` 上限保证它最终升级为 T3,不会无限空转。`DeferredError` 的子类不在此列:守护进程接住它们,进程不退出;同一动作连续延后超过上限才带原因退出(CP-14)。经 `--interact` 入口的真推理 rollout 失败属于这一类例外:策略上下文已把它译成延后类,见上表。
 

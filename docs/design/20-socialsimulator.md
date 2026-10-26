@@ -3,7 +3,7 @@
 | 项 | 内容 |
 |---|---|
 | 一句话 | 生成情境与人格,驱动多角色多轮交互产出 Episode,批量产出带哈希清单的数据集,并以 gRPC 实时环境服务支撑交互式训练与部署经验采集 |
-| 状态 | 部分落地:数据模型、运行器、批量数据集、实时环境服务、激活轨迹打通,以及场景二接通所需的 interact 情境与人格两路来源、对手位三种驱动、`Scenario` 的可选字段 `opponent_script` [已落地];外部强模型生成后端、按目标维度生成情境与人格、episode 分片存储 [推迟];外部 API 对手超时归 `role_backend_timeout`、非 200 的处理口径 [已落地];场景二接通里服务端后端单次调用超时改传 15 秒 [计划中] |
+| 状态 | 部分落地:数据模型、运行器、批量数据集、实时环境服务、激活轨迹打通,以及场景二接通所需的 interact 情境与人格两路来源、对手位三种驱动、`Scenario` 的可选字段 `opponent_script` [已落地];外部强模型生成后端、按目标维度生成情境与人格、episode 分片存储 [推迟];外部 API 对手超时归 `role_backend_timeout`、非 200 按 4xx、429 与 5xx 与连不上、形状不对三类分流,分别归 `role_backend_rejected`、`role_backend_unavailable`、`role_backend_failure` [已落地];场景二接通里服务端后端单次调用超时改传 15 秒 [计划中] |
 | 所在层 | 计算层 |
 | 代码位置 | `src/simulator`(诊断评测在 `src/diagnostic`,本文不展开) |
 | 基线提交 | `b826440`(2026-10-21) |
@@ -325,7 +325,9 @@ manifest_hash: <64 位十六进制>   # 对排序后的 episode_refs 规范化 J
 | `client_terminated` | CLOSED | 客户端发 `EndSession` | 正常 |
 | `timeout` | FAILED | 客户端 30 秒未提交 | T1 |
 | `role_backend_timeout` | FAILED | 服务端后端 60 秒未返回 | T1 |
-| `role_backend_failure` | FAILED 或创建被拒 | 后端抛异常,或工厂、解析器故障 | T1 或 T2,协议上不区分 |
+| `role_backend_unavailable` | FAILED | 对手 API 暂时不可用:429、5xx、连不上、连接中途断开 | T1 [已落地] |
+| `role_backend_rejected` | FAILED | 对手 API 明确拒绝:4xx,429 除外 | T2 [已落地] |
+| `role_backend_failure` | FAILED 或创建被拒 | 后端抛其余异常(含对手 API 的回复形状不对),或工厂、解析器故障 | T1 或 T2,协议上不区分 |
 | `client_disconnected` | FAILED | 请求流结束而未发 `EndSession` | T1 |
 | `persistence_failed` | CLOSED,但树里没有 episode | 运行器正常结束,落盘钩子抛异常 | T1 [已落地] |
 | `invalid_session` | 创建被拒 | 校验失败、协议违规、10 秒未创建 | T2 |
@@ -492,7 +494,9 @@ class EnvironmentServiceClient:
 | 工厂或解析器抛非 `LookupError` 异常 | 不启动驱动器 | `SessionRejectedError`,`role_backend_failure` | 调用方决定是否重试 |
 | 客户端 30 秒未提交 | FAILED,不落盘 | `EndSession(timeout)` | MindTrainer 整条重跑,有上限 |
 | 对手后端 60 秒未返回 | FAILED,底层线程跑完后结果丢弃 | `EndSession(role_backend_timeout)` | 整条重跑,有上限 |
-| 对手后端抛异常 | FAILED | `EndSession(role_backend_failure)` | MindTrainer 不重试,抛 `RolloutFailedError` |
+| 对手 API 回 429、5xx,或连不上、连接中途断开 | FAILED | `EndSession(role_backend_unavailable)` | 整条重跑,有上限;用尽后抛 `RolloutFailedError` |
+| 对手 API 回其余 4xx | FAILED | `EndSession(role_backend_rejected)` | 不重跑,抛 `RolloutFailedError`;MindTrainer 把训练记录写 `failed` |
+| 对手后端抛其余异常(含回复形状不对) | FAILED | `EndSession(role_backend_failure)` | MindTrainer 不重试,抛 `RolloutFailedError` |
 | 客户端断连或 `abort()` | `request_abort`,FAILED | 无 | 不落盘;半截 episode 不污染数据 |
 | 策略自身抛异常 | 同断连 | 异常原样上抛 | 客户端先 `abort()`,不发 `EndSession` |
 | 落盘钩子抛异常 | 记日志,推 `EndSession(persistence_failed)`,不给 `episode_id`,原因写进 `failure_detail` | 不是正常收尾,MindTrainer 与 MindAgent 都按瞬态失败整条重跑,不收下这条 episode | 有上限的重跑;重跑都失败时上抛,排查落盘 [已落地] |
@@ -583,7 +587,7 @@ interact 会话前的准备 [已落地]。下表是派发器与组合根在起�
 | 创建请求校验失败、协议违规 | T2 | `EndSession(invalid_session)` | `failure_detail` 写明原因 |
 | 工厂或解析器故障 | T1 或 T2,协议上不区分 | `EndSession(role_backend_failure)` | 服务端日志 `logger.exception` |
 | 客户端提交超时、对手后端超时 | T1 | FAILED | `EndSession` 的 `reason` |
-| 对手后端抛异常 | T1 或 T2,协议上不区分 | FAILED | `EndSession(role_backend_failure)` |
+| 对手后端抛其余异常 | T1 或 T2,协议上不区分 | FAILED | `EndSession(role_backend_failure)` |
 | 客户端断连 | T1 | FAILED,不落盘 | 无 |
 | 第 N+1 个并发会话 | T1 | gRPC `RESOURCE_EXHAUSTED` | 客户端看到传输错误 |
 | T1 重试耗尽 | 仍是 T1 | MindTrainer 抛 `RolloutFailedError`,训练记录与指令保持 `pending` | 无失败记录;下一次派发续训,续训次数耗尽后才升级为 T3 |
@@ -592,7 +596,9 @@ interact 会话前的准备 [已落地]。下表是派发器与组合根在起�
 | 生成路合成情境或人格失败 [已落地] | T2 | 指令 `failed`,不留半套情境与人格 | 失败记录 |
 | 回写 `training_config` 失败 [已落地] | T1 | 上抛,指令仍 `pending`;重跑内容相同不提交 | 无 |
 | 外部 API 对手单次调用超时 [已落地] | T1 | `post_chat` 的两处超时分支抛 `OpponentTimeoutError`(`src/factory/opponents.py`),它同时是 `OpponentApiError` 与 `RoleBackendTimeoutError`;驱动在通用异常之前先接后者,归 `role_backend_timeout`,轨迹源按 `max_retries_per_episode` 整条重跑,有上限。站内 vLLM 对手与外部 API 共用 `post_chat`,一并归到这里。训练位策略超时时它仍是 `OpponentApiError`,策略上下文照旧译成延后 | `EndSession` 的 `reason` |
-| 外部 API 对手返回非 200 [已落地] | T1 或 T2,协议上不区分 | 不改代码,用测试钉住:后端抛 `OpponentApiError`,归 `role_backend_failure`;轨迹源不按条重跑(`role_backend_failure` 不在它的瞬态集合里),抛 `RolloutFailedError`,策略上下文译成 `RolloutDeferredError`,指令保持 `pending` 按退避重试;续训次数到 `max_resume_attempts` 后升 T3。代价:限流之类的瞬态 5xx 也走这条,整次训练重来而不是单条重跑 | `EndSession(role_backend_failure)` |
+| 外部 API 对手返回 4xx(429 除外),如 400、401、403、404 [已落地] | T2 | `post_chat` 抛 `OpponentRejectedError`(`src/factory/opponents.py`),它同时是 `OpponentApiError` 与 `RoleBackendRejectedError`;驱动在通用异常之前先接后者,归 `role_backend_rejected`。轨迹源不重跑(它不在瞬态集合里),抛 `RolloutFailedError`;编排器把训练记录写 `failed`(category T2),策略上下文原样放行,派发器把指令判 `failed`(T2),不进延后通道。部署同样不重跑。训练位策略自己撞上时它仍是 `OpponentApiError`,策略上下文译成延后:训练位是本 run 自己起的 vLLM,4xx 多半是服务配置坏了,但这和起服务的瞬态失败区分不开,先按延后处理 | `EndSession(role_backend_rejected)` |
+| 外部 API 对手返回 429 或 5xx,连不上(非超时),连接中途断开 [已落地] | T1 | `post_chat` 抛 `OpponentUnavailableError`,它同时是 `OpponentApiError` 与 `RoleBackendUnavailableError`;驱动先接后者,归 `role_backend_unavailable`,轨迹源按 `max_retries_per_episode` 整条重跑,有上限(与超时同路)。重跑用尽后抛 `RolloutFailedError`,策略上下文译成 `RolloutDeferredError`,指令保持 `pending` 按退避重试;续训次数到 `max_resume_attempts` 后升 T3 | `EndSession(role_backend_unavailable)` |
+| 外部 API 对手的回复不是约定的形状:非 JSON、缺字段、超长,或 3xx、204 之类读不懂的状态码 [已落地] | T1 或 T2,协议上不区分 | `post_chat` 抛普通的 `OpponentApiError`,归 `role_backend_failure`;轨迹源不按条重跑(`role_backend_failure` 不在它的瞬态集合里),抛 `RolloutFailedError`,策略上下文译成 `RolloutDeferredError`,指令保持 `pending` 按退避重试;续训次数到 `max_resume_attempts` 后升 T3 | `EndSession(role_backend_failure)` |
 | 外部 API 对手缺凭证 [已落地] | 配置错误,装配期 | 不进会话:factory 的 `--interact` 装配期解析凭证,缺则退出码 2,异常只报环境变量名 | 一行 `factory: error: ...` |
 
 只读观测手段。
@@ -617,7 +623,7 @@ interact 会话前的准备 [已落地]。下表是派发器与组合根在起�
 | 跨包 | 骨架桩、MindTrainer interact 轨迹源 | 同上 |
 | 单元 | `Scenario.opponent_script` 的读写兼容、按序消耗与循环 [已落地] | 无 |
 | 单元 | 点名与生成两路来源:互斥、成对、`purpose` 校验、生成后回写、重跑逐字节相同 [已落地] | 临时仓库 |
-| 回环集成 | 三类对手驱动各一条;外部 API 客户端的成功、超时、非 200、缺凭证只报变量名;真实服务端对着慢桩收尾为 `role_backend_timeout`、对着 500 桩收尾为 `role_backend_failure` [已落地] | 端口 0 的本机服务端,本地 HTTP 替身 |
+| 回环集成 | 三类对手驱动各一条;外部 API 客户端的成功、超时、4xx、429 与 5xx 与连不上、形状不对、缺凭证只报变量名;真实服务端对着慢桩收尾为 `role_backend_timeout`、对着 404 桩收尾为 `role_backend_rejected`、对着 429 与 5xx 桩及关着的端口收尾为 `role_backend_unavailable`、对着坏回复桩收尾为 `role_backend_failure` [已落地] | 端口 0 的本机服务端,本地 HTTP 替身 |
 
 | 测试文件 | 用例数 | 状态 |
 |---|---|---|
@@ -653,7 +659,7 @@ interact 会话前的准备 [已落地]。下表是派发器与组合根在起�
 
 ## 10. 现状、局限与未核实项
 
-结论:批量与实时两条路径、激活轨迹都已落地并有测试;外部生成后端与按目标维度生成是空白;场景二接通需要的两路来源与对手三驱动也已落地并有测试;外部 API 对手的单次调用超时已归 `role_backend_timeout`(整条重跑),非 200 的处理链已有测试钉住 [已落地];后端单次调用超时改传 15 秒仍是 [计划中]。
+结论:批量与实时两条路径、激活轨迹都已落地并有测试;外部生成后端与按目标维度生成是空白;场景二接通需要的两路来源与对手三驱动也已落地并有测试;外部 API 对手的单次调用超时已归 `role_backend_timeout`(整条重跑),非 200 分三类:4xx 归 `role_backend_rejected`(T2,不重跑)、429 与 5xx 与连不上归 `role_backend_unavailable`(T1,按条重跑)、形状不对归 `role_backend_failure`,处理链都有测试钉住 [已落地];后端单次调用超时改传 15 秒仍是 [计划中]。
 
 | 能力 | 状态 | 说明 |
 |---|---|---|
@@ -673,7 +679,7 @@ interact 会话前的准备 [已落地]。下表是派发器与组合根在起�
 |---|---|---|
 | 模板池各只有 3 项,按种子取模 | 情境与人格多样性极低 | V1 只为流程跑通 |
 | 发言严格按 bindings 轮转 | 不能表达插话、沉默、多方抢话 | 场景设计时按轮转建模 |
-| `role_backend_failure` 不区分 T1 与 T2 | 调用方只能保守不重试 | 看服务端日志判断 |
+| `role_backend_failure` 不区分 T1 与 T2 | 调用方只能保守不重试;对手 API 的 4xx 与 429、5xx、连不上已分出去,剩下的是后端抛说不清的异常、回复形状不对、工厂或解析器故障 | 看服务端日志判断 |
 | 失败会话不落盘 | 事后无法复盘失败对话 | 客户端可在 `abort` 前自行保存 |
 | 产物的 `created_at` 是写死的常量 | 不能据此判断真实生成时间 | 以 git 提交时间为准 |
 | 每条 episode 一次 git 提交 | 本机实测一次写入约 40 毫秒,单阶段 1024 条约 40 秒且阻塞循环;万条级数据集要数小时并撑大仓库 | V1 保持并如实写明;接真实训练之前改成分片文件加引用,清单引用分片 [推迟] |
@@ -689,7 +695,7 @@ interact 会话前的准备 [已落地]。下表是派发器与组合根在起�
 | 客户端重建与服务端落盘的 Episode 是否逐字节一致 | 对账 | 比较两边 `episode_digest` |
 | 驱动选择的配置键 [已落地] | `model_backend` 只有三个合法值,没有「固定对话」 | 已定:角色位加可选 `driver`(`vllm` / `external_api` / `scripted`),缺省按 `model_backend` 推;`scripted` 必须显式写,且可与 `frozen_reference` 并存,此时 `model_ref` 只作身份标签 |
 | 固定对话循环的实现位置 [已落地] | 循环是新行为,现有用法依赖「(无更多发言)」 | 已定:`ScriptedBackend` 加默认关闭的 `loop` 参数,只有本次装配处传 `loop=True` |
-| 外部 API 对手的速率上限与成本 [计划中] | 限流表现为超时时,`role_backend_timeout` 的按条重跑次数会耗尽;表现为 429 或 5xx 时走 `role_backend_failure`,整条训练延后、续训次数耗尽后升 T3 | 按实际供应商压测 |
+| 外部 API 对手的速率上限与成本 [计划中] | 限流表现为超时时,`role_backend_timeout` 的按条重跑次数会耗尽;表现为 429 或 5xx 时走 `role_backend_unavailable`,同样按条重跑,次数耗尽后整条训练延后、续训次数耗尽后升 T3。重跑是立即重发、没有退避,限流持续时几次重跑会连续撞上同一道限流 | 按实际供应商压测 |
 | 站内 vLLM 同时服务训练位与对手位时的单次延迟 [计划中] | 能否稳在 `backend_timeout_s` 内 | 真机测两个 LoRA 并发的延迟 |
 
 明确不做的事:SocialSimulator 不决定"是否启动会话",那是 ControlPlane 的决策;不写训练奖励;不做诊断打分;不在实时服务内部持久化。

@@ -310,7 +310,7 @@ checkpoint 等大体量内容不进 git,只存引用 `{uri, sha256, size_bytes, 
 
 三条硬规则。其一,调用方必须显式指定每个角色位由哪个模型后端驱动,SocialSimulator 内部不写死。其二,角色只读自己的内心推理与激活轨迹,对手的这两项在历史里被抹掉,否则对手能偷看被训模型的独白;完整记录仍落盘。其三,会话之间不共享任何可变状态。
 
-终止原因共九种:`max_turns`、`goal_reached`、`client_terminated`、`role_backend_failure`、`role_backend_timeout`、`timeout`、`invalid_session`、`client_disconnected`、`persistence_failed`。`persistence_failed` 表示会话跑完了但落盘钩子失败,客户端按瞬态失败整条重跑,不收下这条 episode [已落地]。其中 `goal_reached` 只出现在批量路径,实时会话的停止判定只看客户端是否请求结束。服务端默认值:单会话最多 200 轮,等待创建 10 秒,客户端提交一轮最多等 30 秒,后端单次调用最多 60 秒。
+终止原因共十一种:`max_turns`、`goal_reached`、`client_terminated`、`role_backend_failure`、`role_backend_timeout`、`role_backend_unavailable`、`role_backend_rejected`、`timeout`、`invalid_session`、`client_disconnected`、`persistence_failed`。`persistence_failed` 表示会话跑完了但落盘钩子失败,客户端按瞬态失败整条重跑,不收下这条 episode [已落地]。`role_backend_unavailable` 表示对手 API 暂时不可用(429、5xx、连不上),是 T1,客户端整条重跑;`role_backend_rejected` 表示对手 API 明确拒绝(4xx,429 除外),是 T2,不重跑,训练记录写 `failed` [已落地]。其中 `goal_reached` 只出现在批量路径,实时会话的停止判定只看客户端是否请求结束。服务端默认值:单会话最多 200 轮,等待创建 10 秒,客户端提交一轮最多等 30 秒,后端单次调用最多 60 秒。
 
 ### 4.6 失败分类
 
