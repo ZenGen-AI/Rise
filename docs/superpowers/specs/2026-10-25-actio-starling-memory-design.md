@@ -1,6 +1,6 @@
 # 设计二：每个角色位都是带记忆的智能体，记忆用 Starling
 
-状态：修订稿第六版，待审阅。日期：2026-10-26（第一稿 2026-10-25）。
+状态：修订稿第七版，待审阅。日期：2026-10-26（第一稿 2026-10-25）。
 基线：rise `705236c`，Starling `48e9f3b`（`ruijieguo/starling` main，公开仓库，Apache-2.0）。
 权威文档集是 `docs/design/`。本稿审定后并入 00、20、30、40、50、90 六篇，然后写施工计划。
 
@@ -178,7 +178,7 @@ class MemoryBackend(Protocol):
 - **事件身份**：`key` 是 `<逻辑 episode id>#<turn_index>`，`text` 是 `<说话方人格 id>：<utterance>`。逻辑 episode id 由客户端定（F21）：训练是 `{run}-{stage}-{scenario}-r{k}`，部署是 `deploy-{model}-{scenario}-{k}`，重试不变；它经 `CreateSession` 新增的 `episode_id` 字段传给服务端，服务端落盘的 episode 也用它当 id。`key` 作为前缀写进 Starling 的文本：`[<key>] <text>`，所以不同 episode 的同一句话是不同事件；同 key 的重写由 `events` 表拦下，不再调 `remember`。
 - **时钟**：`now` 由 `seq` 推出：`2026-01-01T00:00:00Z` 加 `seq` 秒。`seq` 存在 `events` 表所在的同一个 SQLite 库里，与写事件同一事务递增；训练副本从 0 起，部署库跨轮次单调。
 - **自己的话**：不写。它已在对话历史里。
-- **抽取失败**：`RememberOutcome.failed` 为真时这一轮不留该条记忆，实例计数加一，不抛到 `respond` 之外；计数在激活轨迹里（第 4.6 节）。事件行只在抽取成功后才变成 `committed`（第 8 节 `remember_event`），所以失败的事件下次重试还会再抽一次，不会被当成幂等丢掉。训练副本用完即弃，不会带着 `pending` 事件行进下一条 rollout；部署库在 episode 开始前先把 `pending` 事件行补齐再拍起点快照。
+- **抽取失败**：`RememberOutcome.failed` 为真时这一轮不留该条记忆，实例计数加一，不抛到 `respond` 之外；计数在激活轨迹里（第 4.6 节）。事件行只在抽取成功后才变成 `committed`（第 8 节 `remember_event`），所以失败的事件下次重试还会再抽一次，不会被当成幂等丢掉。训练副本用完即弃，不会带着 `pending` 事件行进下一条 rollout。部署库里的 `pending` 行各有主人：对话事件的主人是产生它的 episode，门② 事件的主人是提案；谁写的谁处理，没有"开始前统一补齐"。对话事件在 episode 内重试一次就算（重试仍失败则留 `pending`，计数进轨迹），episode 结束时对自己留下的 `pending` 行调 `abandon_event`；所以部署 episode 结束后库里没有它的 `pending` 行，起点快照也不会带着别人的 `pending` 行。
 - **`recall`、`remember`、`embed_pending` 抛异常**：包成 `MemoryFailureError` 上抛，由调用方按第 9 节分类。
 
 ### 4.4 渲染（S6）
@@ -197,7 +197,7 @@ class MemoryBackend(Protocol):
 
 | 进摘要 | 不进摘要 |
 |---|---|
-| `statements`、`statement_vectors`、`events` 三张表的全部列，减去排除清单 | 排除清单：`id`、`stmt_id`、`created_at`、`updated_at`、`last_accessed`、`access_count`、`last_replayed`、`replay_count`、`last_replay_batch_id`、`retry_count`、`last_attempt_at`、`embedded_at`、`inferred_at`；`supersedes_id`、`derived_from_json` 里的 UUID 换成被指向行的内容 id；其他所有表 |
+| `statements`、`statement_vectors`、`events` 三张表的全部列，减去排除清单；`events` 里 `abandoned` 行只计 `key` 与 `state` | 排除清单：`id`、`stmt_id`、`created_at`、`updated_at`、`last_accessed`、`access_count`、`last_replayed`、`replay_count`、`last_replay_batch_id`、`retry_count`、`last_attempt_at`、`embedded_at`、`inferred_at`；`supersedes_id`、`derived_from_json` 里的 UUID 换成被指向行的内容 id；其他所有表 |
 
 按排除清单而不是包含清单：加列默认进摘要，漏掉只会让摘要过敏感，不会让它漏变化。`activation` 进摘要（S18：重排器用它）。所有引用语句 UUID 的列（`supersedes_id`、`derived_from_json`、`events.statement_ids_json`、`statement_vectors.stmt_id` 的归属）在规范化时一律换成被指向语句的内容 id；指向不存在的语句时换成固定串 `missing`。每行按列名排序后规范化成 JSON，行之间按内容 id 排序，整体算 sha256。空库的摘要是固定值。向量进摘要是因为同一个模型名在外部端点上不保证给出同一向量。`TupleMemory.digest()` 对条目 `to_dict()` 去掉 `id` 后的排序列表加事件表算同样形状的 sha256。
 
@@ -385,9 +385,10 @@ class SessionResources:
 | `Memory.digest() -> str` | 第 4.5 节的逻辑摘要，覆盖语句行、向量行与事件表 |
 | `Memory.backup_to(path)` | `VACUUM INTO` 加 `PRAGMA integrity_check`，得到自洽的单文件副本 |
 | `Memory.close()` | 关闭 SQLite 连接并等待自己的工作线程退出 |
-| `Memory.remember_event(key, text, *, interlocutor) -> RememberResult` | 三段：① 短事务读 `events` 表（新迁移，列：`key`、`text_sha256`、`engram_ref`、`statement_ids_json`、`seq`、`state`），同 key 同文本且 `state="committed"` 直接返回 `outcome="idempotent"` 且 `statement_ids` 取事件行里存的那一批，不抽取；同 key 不同文本抛 `EventConflict`；新 key 则在同一事务里写一行 `state="pending"` 的事件行（只有 `key`、`text_sha256`、`seq`，`seq` 此时就加一）；② 事务之外调 `remember`（抽取走网络，S17）；③ 抽取成功后短事务把该行改成 `committed` 并填 `engram_ref` 与 `statement_ids`。抽取失败或 ③ 之前崩溃，事件行留在 `pending`：下次同 key 同文本再调时，先按 `engram_ref` 查 Starling 的 engram 表（`remember` 返回的 `engram_ref` 由文本决定，S7），已有语句就直接补成 `committed` 并返回那批 id，没有就再抽一次。不存在"语句在库里却没有收据"的终态。与裸 `remember` 的 `idempotent`（`statement_ids` 为空，S19）不同：事件表就是为了把这批 id 存下来 |
+| `Memory.remember_event(key, text, *, interlocutor) -> RememberResult` | 三段：① 短事务读 `events` 表（新迁移，列：`key`、`text`、`interlocutor`、`text_sha256`、`engram_ref`、`statement_ids_json`、`seq`、`state`），同 key 同文本且 `state="committed"` 直接返回 `outcome="idempotent"` 且 `statement_ids` 取事件行里存的那一批，不抽取；同 key 不同文本抛 `EventConflict`；新 key 则在同一事务里写一行 `state="pending"` 的事件行（含原文与 `interlocutor`，`seq` 此时就加一）；② 事务之外调 `remember`（抽取走网络，S17）；③ 抽取成功后短事务把该行改成 `committed` 并填 `engram_ref` 与 `statement_ids`。抽取失败或 ③ 之前崩溃，事件行留在 `pending`，并把这次的 `failure_category` 记在行里。同 key 同文本再调 `remember_event` 时：先按 `engram_ref` 查 Starling 的 engram 表（`remember` 返回的 `engram_ref` 由文本决定，S7），已有语句就直接补成 `committed` 并返回那批 id，没有就用行里存的原文再抽一次。**没有自动恢复**：`pending` 行只在调用方再次对同一 key 调 `remember_event` 时才推进。不存在"语句在库里却没有收据"的终态。与裸 `remember` 的 `idempotent`（`statement_ids` 为空，S19）不同：事件表就是为了把这批 id 存下来 |
 | `Memory.next_seq() -> int` | 读 `events` 表的当前 `seq` |
-| `Memory.pending_events() -> list[str]` | `state="pending"` 的 key 列表；部署 episode 开始前若非空，逐个按上面的恢复规则补齐 |
+| `Memory.pending_events() -> list[PendingEvent]` | `state="pending"` 的行（`key`、`text`、`interlocutor`、`seq`、`failure_category`），只读，供调用方决定重试还是放弃 |
+| `Memory.abandon_event(key) -> None` | 把 `pending` 行改成 `abandoned`（终态，不进摘要的内容部分，只进事件计数）；`committed` 行不许放弃，抛 `EventConflict`。放弃的 key 再 `remember_event` 同样抛 `EventConflict` |
 
 合入后本仓库的 `pyproject.toml` 增加 `memory = ["starling-memory @ git+https://github.com/ruijieguo/starling@<合并提交>"]`。推送分支与开 PR 前先征得用户同意。
 
@@ -401,7 +402,7 @@ class SessionResources:
 | episode 复用 | `_reusable` 除库版本外，还要求首个智能体轮次的 `digest_before` 等于 `episode_digests[episode_id]` 里该人格的摘要，且该摘要等于部署库当前摘要（即它之后没有别的 episode 写过）；三者不全等就重跑 |
 | 验证重放 | 每个人格从部署库 `backup_to` 到 `snapshots/<round_id>/verify-<persona_id>.db`，基线与候选各开一份快照副本，`replay_read_only=True` |
 | 门② `kind: memory` | 收录时对该人格的部署库调 `remember_event(key="<proposal_id>#<k>")`。事件行与语句同库、同一段提交，所以"写成功但收据没落树"的重入不会二次抽取：重入时再调一次，得到 `idempotent` 与事件行里存的同一批语句 id。语句 id 写进提案载荷的 `admitted_statements` 只作证据，不作幂等依据；真正的收据在 Starling 的事件表里 |
-| 门② 失败 | `remember_event` 返回 `failed`（抽取失败）时写一条 T2 失败记录，提案改为 `rejected` 并带原因；审核类状态机增加 `approved → rejected` 这一条边（F23），只许收录处理器走。`remember_event` 抛异常（库打不开、③ 写失败）时不改提案状态，只写失败记录，留在 `approved` 让下一个 tick 重入：重入按 `pending` 事件行的恢复规则补收据，不会二次抽取，也不会留下没有收据的语句 |
+| 门② 失败 | `remember_event` 返回 `failed`（抽取失败）时：先对该 key 调 `abandon_event`（事件行进终态 `abandoned`，以后不会被任何路径推进），再写一条 T2 失败记录，提案改为 `rejected` 并带原因；审核类状态机增加 `approved → rejected` 这一条边（F23），只许收录处理器走。`remember_event` 抛异常（库打不开、③ 写失败）时不改提案状态、不放弃事件，只写失败记录，留在 `approved` 让下一个 tick 重入：重入再调同 key 的 `remember_event`，按 `pending` 行的恢复规则补收据，不会二次抽取，也不会留下没有收据的语句。被拒的提案不会复活：它的事件行已是 `abandoned` |
 | 人格归属 | 记忆提案的 `definition` 增加必填 `persona_id`，指明写进哪个人格的库 |
 | 旧数据 | `memory_library/` 必须为空（第 0 节），`load_library` 不再读它 |
 
@@ -454,7 +455,9 @@ class SessionResources:
 | 集成 | `role_memory_failure` 让指令判 `failed` 而不是延后；`role_memory_unavailable` 按条重跑 | 抛异常的假端口 |
 | 单元 | interact 配置缺 `memory` 时 `validate_training_config` 给出原因；batch 配置带 `memory` 同样拒绝 | 无 |
 | 单元 | 内容 id：同一语句在两个库里得到同一个 `mem-` id；改任一进摘要的列即变 | 真 Starling 或替身 |
-| 单元 | `remember_event`：抽取失败事件行留 `pending`，重试会再抽；同 key 同文本返回 `idempotent` 且 `statement_ids` 与首次相同；同 key 异文本抛 `EventConflict`；语句已落库但 ③ 没写成（模拟崩溃）时重调不再抽取、补成 `committed` 并返回同一批 id；`pending_events` 列出未补齐的 key | 真 Starling（PR 内） |
+| 单元 | `remember_event`：抽取失败事件行留 `pending` 且存原文，重调用原文再抽；同 key 同文本返回 `idempotent` 且 `statement_ids` 与首次相同；同 key 异文本抛 `EventConflict`；语句已落库但 ③ 没写成（模拟崩溃）时重调不再抽取、补成 `committed` 并返回同一批 id；`pending_events` 列出带原文的未完成行；`abandon_event` 后同 key 再调抛 `EventConflict`，`committed` 行不许放弃 | 真 Starling（PR 内） |
+| 单元 | 门②：抽取失败后提案 `rejected` 且事件 `abandoned`，之后任何路径都不会把它写进记忆；③ 写失败后提案留 `approved`，重入补收据不二次抽取 | 替身端口 |
+| 集成 | 部署 episode 结束后库里没有它的 `pending` 行；下一条 episode 的起点快照里没有别人的 `pending` 行 | 真 Starling 或替身 |
 | 单元 | 摘要对 `events.statement_ids_json` 里的 UUID 不敏感：同一逻辑记忆换一批 UUID，摘要不变 | 真 Starling |
 | 单元 | 失败映射：每个 `failure_category` 与每类异常都有确定的 `transient` 值 | 假 Starling |
 | 集成 | 准入在一把锁里：并发 `CreateSession` 不突破上限；同一 `episode_id` 第二个会话被拒 | loopback 服务端 |
