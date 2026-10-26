@@ -249,7 +249,7 @@ SocialSimulator 的仿真部分是工厂的"社会情境发生器":它把情境�
 
 `opponent_script` 可选字段 [已落地]。它给对手位一串固定台词,形如 `{b: ["台词一", "台词二"]}`,键是角色位。台词按序消耗,用完后从头循环。`ScriptedBackend` 默认用完台词后返回固定文本“(无更多发言)”(`src/simulator/backends.py`),不循环;循环由默认关闭的 `loop=True` 开启,只有 `AgentRuntime` 的固定对话驱动传它。
 
-读写兼容:`to_dict` 只在字段非空时写这个键,`from_dict` 用 `d.get` 读;条件写入的先例是 `RoleBinding.model_ref`(`src/simulator/datamodel.py:98-100`),而 `source` 是无条件写入的,不属同类。旧产物读得出,既有情境的序列化与哈希不变。默认配置不写它,所以默认仍用全局台词。字段形状取自设计,施工时可能微调。
+读写兼容:`to_dict` 只在字段非空时写这个键,`from_dict` 用 `d.get` 读;条件写入的先例是 `RoleBinding.model_ref`(`src/simulator/datamodel.py:98-100`),而 `source` 是无条件写入的,不属同类。旧产物读得出,既有情境的序列化与哈希不变。默认配置不写它,所以默认仍用全局台词。字段形状以 `Scenario.to_dict` 与 `Scenario.from_dict` 为准。
 
 interact 的情境与人格来源 [已落地]。场景二的情境与人格有两路来源,一次配置只走一路,不混用。混用会产出无法追溯的混合语料。
 

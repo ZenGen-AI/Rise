@@ -182,7 +182,7 @@ def resolve_action(
         if base is not None:
             cfg["base_checkpoint_ref"] = base
         if decision.mode == "interact" and data_spec is None:
-            # 点名路的配置已完整,当场过严格校验;生成路的情境与绑定要等派发器回写,由指令构造的宽口径校验
+            # 点名路的配置已完整,当场过严格校验;生成路的 scenario_ids 与每条 persona_id 要等派发器回写,由指令构造的宽口径校验
             check_training_config(cfg, "new interact")
         return ResolvedAction(decision.target_dimension, "new", "", cfg, data_spec, model_id)
     recipe = get_recipe(store, decision.source_recipe_id)

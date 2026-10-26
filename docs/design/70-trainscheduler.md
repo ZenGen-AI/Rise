@@ -226,7 +226,7 @@ TrainScheduler 是决策执行器:它把 TrainPlanner 的结构化决策落成�
 
 `training_defaults.yaml` 的默认值 [已落地]:被训角色位是 `zengen`,`sft_steps`、`grpo_steps`、`groups_per_step`、`group_size` 都是 2,`sft_batch_size` 与 `checkpoint_every_steps` 是 1,允许续训,`opd_coefficient` 是 0.1,学习率 1.0e-5,奖励是单分量 `goal` 的 `outcome_split`(关键词 `agreed`、`同意`)。初始基座与教师是 `file:///compute/checkpoints/` 下的占位引用,哈希为 64 个 0。这份默认配置里 `mode` 必须是 `batch`,且不得写 `stage_manifest_refs`,清单 id 每轮由指令构造按新 run id 写。默认 `data_spec` 是 4 个情境、种子 0、用途 `training`,`sft` 组大小 1,`grpo_opd` 组大小 2。`sft` 取 1,是因为默认 rollout 下同组奇数序号的样本是无内容的中性话,组大小大于 1 会让一半 SFT 数据没有信息 [已落地]。
 
-`training_defaults.yaml` 的可选 `interact` 段 [已落地]。段里写 interact 训练线的角色位、轮数和情境人格来源。段缺时文件与今天完全相同。形状取自设计,施工时可能微调。
+`training_defaults.yaml` 的可选 `interact` 段 [已落地]。段里写 interact 训练线的角色位、轮数和情境人格来源。段缺时文件与今天完全相同。形状如下,由 `parse_training_defaults` 严格解析。
 
 ```yaml
 interact:

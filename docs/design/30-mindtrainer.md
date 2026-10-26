@@ -528,7 +528,7 @@ vLLM 服务按指令起停,不常驻。一条 interact 指令派发时起服务,
 | 整条 gRPC 流的 deadline | 固定 15 秒(`src/factory/agent.py` 的 `INTERACT_DEADLINE_S`) | 每条指令按 `max_turns_per_episode × 30 秒` 算,指令结束后还原 [已落地] |
 | 创建会话 | 10 秒(`create_timeout_s`) | 不变 |
 
-单次后端调用超时归 `role_backend_timeout`,是 T1,整条重跑,至多 `1 + max_retries_per_episode` 次。真机延迟没有数据,30 秒是否够用列入本文的未核实项。第 5.1 至 5.4 节的签名、参数形状与默认值取自设计,施工时可能微调。
+单次后端调用超时归 `role_backend_timeout`,是 T1,整条重跑,至多 `1 + max_retries_per_episode` 次。真机延迟没有数据,30 秒是否够用列入本文的未核实项。第 5.1 至 5.3 节的签名、参数形状与默认值已按代码核实;5.4 里单次后端调用改传 15 秒尚未实现,该数值取自设计,施工时可能微调。
 
 ## 6. 关键流程
 
@@ -797,7 +797,7 @@ interact 的 `config_hash` 覆盖配置层的东西 [已落地]:情境 id、人�
 | 调和循环接线 | [已落地] | `scripts/run_controlplane.py` 用 mock 执行器与转换器 |
 | 数据合成接线 | [已落地] | 工作包 2 |
 | ROLL LoRA SFT 真实执行器、适配器导出转换器、阶段协议 | [已落地] | 远端计算层 `compute` 是它们的前置,已先于执行器与转换器落地;已在真实主机上各跑通一次,多段与续训、端到端调和循环仍待验证 |
-| interact 在真实入口跑通:策略工厂、一个 vLLM 进程挂最多两个 LoRA、按指令起停、超时口径、`policy_backend` 记录 | [已落地] | 真推理加 mock 训练;证明推理链路与奖励管线对真实发言成立,不证明模型变好 |
+| interact 在真实入口跑通:策略工厂、一个 vLLM 进程挂最多两个 LoRA、按指令起停、超时口径、`policy_backend` 记录 | [已落地] | 真推理加 mock 训练;目前用本机 HTTP 替身代替 vLLM 验证了推理链路的接线与发言落盘,奖励管线未对真实发言验证,真机没跑过,不证明模型变好 |
 | 真实 GRPO 加 OPD 训练、适配器合并回完整权重 | [推迟] | |
 
 | 已知局限 | 影响 | 缓解 |
