@@ -14,6 +14,8 @@ MODES = ("batch", "interact")
 STAGES = ("sft", "grpo_opd")
 ATTRIBUTIONS = ("outcome_split", "judge")
 COMBINATIONS = ("sum", "product")
+# interact 里非训练位允许的 model_backend(训练位只能是 self_play)。校验、测试里的对照表都引用这一份
+OPPONENT_MODEL_BACKENDS = ("frozen_reference", "external_api")
 
 
 class InvalidTrainingConfigError(ValueError):
@@ -366,10 +368,10 @@ def _validate_interact(cfg: TrainingConfig) -> str | None:
             continue
         if b.model_backend == "self_play":
             return f"non-trained slot {b.slot_id!r} must not be self_play"
-        if b.model_backend not in ("frozen_reference", "external_api"):
+        if b.model_backend not in OPPONENT_MODEL_BACKENDS:
             return (
                 f"non-trained slot {b.slot_id!r} model_backend must be "
-                f"frozen_reference or external_api, got {b.model_backend!r}"
+                f"{' or '.join(OPPONENT_MODEL_BACKENDS)}, got {b.model_backend!r}"
             )
         if not b.model_ref:
             # 事后追查 reward hacking 要靠它:不记对手是谁,就无法判断是不是练偏了

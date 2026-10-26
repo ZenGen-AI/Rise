@@ -18,6 +18,7 @@ from mindagent.deployment import TRANSIENT_REASONS as DEPLOYMENT_TRANSIENT_REASO
 from mindtrainer.dispatch import _DEFAULT_OPPONENT_DRIVER
 from mindtrainer.dispatch import _is_adapter_export as dispatch_is_adapter_export
 from mindtrainer.roll_converter import EXPORT_FORMAT as CONVERTER_EXPORT_FORMAT
+from mindtrainer.training_config import OPPONENT_MODEL_BACKENDS
 from mindtrainer.trajectory_source import _TRANSIENT_REASONS as TRAJECTORY_TRANSIENT_REASONS
 from simulator.datamodel import OPPONENT_DRIVERS, RoleBinding
 from trainscheduler.config import _SLOT_DRIVERS
@@ -35,15 +36,24 @@ def test_the_dispatchers_default_driver_agrees_with_driver_for(backend):
 
 
 def test_the_dispatchers_default_table_covers_exactly_the_backends_driver_for_can_default():
-    """driver_for 对哪些 model_backend 能不靠显式 driver 取默认,派发器的表就列哪些,多一个少一个都不行。"""
+    """driver_for 对哪些 model_backend 能不靠显式 driver 取默认,派发器的表就列哪些,多一个少一个都不行。
+    候选从 validate_training_config 放行的非训练位取值(OPPONENT_MODEL_BACKENDS)推出来,另加训练位 self_play
+    与一个不存在的名字作反例:放行名单多了新取值,这里自动把它纳入,而不是漏测。"""
     defaultable = set()
-    for backend in ("self_play", "frozen_reference", "external_api", "scripted_user", "magic"):
+    for backend in (*OPPONENT_MODEL_BACKENDS, "self_play", "no-such-backend"):
         try:
             driver_for(RoleBinding("b", "pb", backend, model_ref=None if backend == "self_play" else "x"))
         except ValueError:
             continue
         defaultable.add(backend)
     assert defaultable == set(_DEFAULT_OPPONENT_DRIVER)
+
+
+def test_every_backend_the_training_config_allows_for_an_opponent_has_a_default_driver():
+    """配置校验放行的对手位 model_backend,没写 driver 时 driver_for 都得有默认可取:放行了却取不到默认驱动,
+    指令就会在派发时才因为 driver_for 抛 ValueError 而失败。"""
+    for backend in OPPONENT_MODEL_BACKENDS:
+        assert driver_for(RoleBinding("b", "pb", backend, model_ref="x")) in OPPONENT_DRIVERS
 
 
 # 适配器导出的判法:fetch_hint 的 type 是 roll_ssh 且 format 是 EXPORT_FORMAT。只看其一都不算。

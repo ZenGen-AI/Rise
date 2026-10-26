@@ -23,7 +23,7 @@ import yaml
 
 from compute.errors import ComputeError
 from compute.service import ServiceHandle, serve as real_serve
-from compute.tunnel import SshTunnel, http_probe
+from compute.tunnel import http_probe, tunnel_factory_for
 from compute.sizing import weights_gib_from_index
 from compute.vllm_service import VllmServeConfig, build_serve_job
 from controlplane.deferred import DeferredError
@@ -183,10 +183,7 @@ class SomevalRunner:
         )
         factory = self.tunnel_factory
         if factory is None:
-            alias = getattr(self.client, "alias", None)
-            if not alias:
-                raise ComputeError("the compute client does not expose its ssh alias for the tunnel")
-            factory = lambda: SshTunnel(alias, remote_port=cfg.remote_port)  # noqa: E731
+            factory = tunnel_factory_for(self.client, cfg.remote_port)
         with self.serve(
             self.client, cfg, build_job=self.build_job, tunnel_factory=factory, probe=self.probe,
             startup_timeout_s=SERVE_TIMEOUT_S, poll_s=POLL_SECONDS,

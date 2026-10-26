@@ -469,7 +469,7 @@ def test_a_registered_session_is_written_to_its_runs_directory(store):
         episode = _play_session(runtime, "s-int")
         assert _stored_episode_ids(store, "run-int") == [episode.id]
         assert read_episode(store, "run-int", episode.id).scenario_id == "s-int"
-        assert runtime.episode_write_failures == []
+        assert list(runtime.episode_write_failures) == []
     finally:
         runtime.close()
 
@@ -483,7 +483,7 @@ def test_an_unregistered_session_is_not_written_so_deployment_keeps_its_own_driv
         assert _stored_episode_ids(store, "run-int") == []
         assert not any(store.list_products(f"control-plane/runs/{d}/episodes")
                        for d in ("run-int", "s-deploy", "run-deploy"))
-        assert runtime.episode_write_failures == []
+        assert list(runtime.episode_write_failures) == []
     finally:
         runtime.close()
 
@@ -541,6 +541,47 @@ def test_a_failing_write_is_recorded_and_surfaces_to_the_client_as_persistence_f
         assert end.reason == "persistence_failed" and end.episode_id == ""
         # (c) run 目录里什么都没有
         assert _stored_episode_ids(store, "run-int") == []
+    finally:
+        runtime.close()
+
+
+def test_the_write_failure_list_is_bounded_and_keeps_the_latest(store, monkeypatch):
+    """守护进程长跑时每次落盘失败追加一条;不设上限就是慢性泄漏。只留最近的 100 条。"""
+    import factory.agent as agent_mod
+    from types import SimpleNamespace
+
+    def boom(store_, run_id, episode):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(agent_mod, "write_episode", boom)
+    runtime = AgentRuntime(store, ("hi",))
+    try:
+        runtime.register_session("s-int", "run-int")
+        for i in range(150):
+            with pytest.raises(OSError):
+                runtime._on_session_closed(SimpleNamespace(scenario_id="s-int", id=f"ep-{i}"))
+        kept = list(runtime.episode_write_failures)
+        assert len(kept) == 100
+        assert "ep-149" in kept[-1] and "ep-50" in kept[0]          # 丢的是最早的 50 条
+        assert all("OSError" in line and "disk full" not in line for line in kept)
+    finally:
+        runtime.close()
+
+
+def test_reading_the_deadline_does_not_take_the_runtime_lock(store):
+    """getter 只读一个 float(原子),不取锁:锁不可重入,持锁的代码一旦碰到 getter 就是自死锁。
+    在另一个线程里读,主线程持着锁;getter 若取锁,线程会一直挂着,join 超时。"""
+    import threading
+
+    runtime = AgentRuntime(store, ("hi",), interact_deadline_s=7.0)
+    seen = []
+    try:
+        with runtime._lock:
+            reader = threading.Thread(target=lambda: seen.append(runtime.interact_deadline_s), daemon=True)
+            reader.start()
+            reader.join(timeout=2.0)
+            assert not reader.is_alive(), "reading interact_deadline_s blocked on the runtime lock"
+        assert seen == [7.0]
     finally:
         runtime.close()
 

@@ -476,6 +476,25 @@ def test_a_malformed_reply_is_an_api_error(stub, body):
     assert not isinstance(info.value, (OpponentUnavailableError, OpponentRejectedError, OpponentTimeoutError))
 
 
+def test_a_deeply_nested_json_reply_is_an_api_error_not_a_recursion_error(stub):
+    """json.loads 对嵌套过深的体抛 RecursionError(不是 ValueError):对端发来 `[[[[...`,调用方拿到的必须还是
+    OpponentApiError,回复形状不对一类(role_backend_failure),而不是一个逃出 except 的 RecursionError。"""
+    stub.script.append((200, b"[" * 200_000))
+    with pytest.raises(OpponentApiError) as info:
+        _respond(_backend(stub.url))
+    assert not isinstance(info.value, (OpponentUnavailableError, OpponentRejectedError, OpponentTimeoutError))
+    assert SECRET not in str(info.value)
+
+
+def test_a_content_length_of_non_ascii_digits_is_an_api_error_not_a_value_error():
+    """http.client 把头字节按 Latin-1 解码,0xB2 到 0xB3 与 0xB9 变成 `²³¹`,str.isdigit() 对它们为真而 int() 不认。
+    长度校验要先判 isascii():这种头不是合法长度,应当被忽略,调用方拿到的仍是 OpponentApiError 一族,而不是 ValueError。"""
+    url = _raw_peer(b"HTTP/1.1 200 OK\r\nContent-Length: \xb2\r\n\r\nxx")
+    with pytest.raises(OpponentApiError) as info:
+        _respond(_backend(url))
+    assert SECRET not in str(info.value)
+
+
 def test_a_slow_server_times_out_as_an_api_error(stub):
     stub.script.append((*_ok(), {}, 1.0))
     started = time.monotonic()

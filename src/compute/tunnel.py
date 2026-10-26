@@ -11,10 +11,13 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from compute.errors import ComputeError
 from compute.transport import _ALIAS
+
+if TYPE_CHECKING:
+    from compute.client import ComputeClient
 
 
 def free_local_port() -> int:
@@ -123,3 +126,15 @@ class SshTunnel:
         except (subprocess.TimeoutExpired, TimeoutError):
             proc.kill()
             proc.wait(timeout=self._close_grace)
+
+
+def tunnel_factory_for(client: ComputeClient, remote_port: int) -> Callable[[], SshTunnel]:
+    """从计算客户端取 ssh 别名,造"每次调用开一条到 remote_port 的隧道"的工厂。
+
+    推理服务的隧道用的是客户端传输层的同一个别名(ComputeClient.alias);别名只在传输层与本机映射里,不进 git 树。
+    客户端不带别名(没有这个属性、为 None 或为空)时立刻抛 ComputeError:此时还没占租约、没起任何东西。
+    起服务(vllm_policy.policy_context)与评测(sombench_runner)共用这一处。"""
+    alias = getattr(client, "alias", None)
+    if not alias:
+        raise ComputeError("the compute client does not expose its ssh alias for the tunnel")
+    return lambda: SshTunnel(alias, remote_port=remote_port)

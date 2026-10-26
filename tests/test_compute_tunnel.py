@@ -4,11 +4,12 @@ from __future__ import annotations
 import socket
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from types import SimpleNamespace
 
 import pytest
 
 from compute.errors import ComputeError
-from compute.tunnel import SshTunnel, free_local_port, http_probe
+from compute.tunnel import SshTunnel, free_local_port, http_probe, tunnel_factory_for
 
 
 @pytest.fixture
@@ -156,3 +157,19 @@ def test_a_malformed_alias_is_refused_before_anything_is_spawned(alias):
     with pytest.raises(ComputeError):
         SshTunnel(alias, remote_port=18081, spawn=lambda argv: spawned.append(argv))
     assert spawned == []
+
+
+# ---------------- tunnel_factory_for:从客户端取别名造隧道 ----------------
+
+def test_tunnel_factory_for_builds_an_ssh_tunnel_from_the_clients_alias_and_the_given_port():
+    factory = tunnel_factory_for(SimpleNamespace(alias="gpu-181"), 18081)
+    tunnel = factory()
+    assert isinstance(tunnel, SshTunnel) and factory() is not tunnel          # 每次调用一个新隧道
+    argv = tunnel.argv()
+    assert argv[-1] == "gpu-181" and "127.0.0.1:0:127.0.0.1:18081" in argv
+
+
+@pytest.mark.parametrize("client", [SimpleNamespace(), SimpleNamespace(alias=None), SimpleNamespace(alias="")])
+def test_tunnel_factory_for_refuses_a_client_that_hides_its_alias_before_anything_is_opened(client):
+    with pytest.raises(ComputeError, match="alias"):
+        tunnel_factory_for(client, 18081)

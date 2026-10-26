@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections import deque
 from collections.abc import Callable
 from dataclasses import fields
 
@@ -90,6 +91,7 @@ def read_agent_settings(store: GitStore) -> tuple[AgentConfig, tuple[str, ...]]:
 
 
 INTERACT_DEADLINE_S = 15.0
+MAX_WRITE_FAILURES_KEPT = 100         # episode_write_failures 只留最近这么多条:守护进程长跑,不能无限增长
 
 
 class DeadlineStub:
@@ -116,7 +118,7 @@ class AgentRuntime:
 
     会话登记(register_session / unregister_session):--interact 与 MindAgent 部署共用这一个服务端。登记表按情境 id
     记该会话属于哪个 run;落盘钩子只写登记过的会话,把 episode 写进对应 run。没登记的(部署会话)钩子不碰,
-    仍由 MindAgent 驱动器自己落盘,两边的 episode 不混写、不重复写。落盘失败先把描述记进 episode_write_failures(只含类名与 id),
+    仍由 MindAgent 驱动器自己落盘,两边的 episode 不混写、不重复写。落盘失败先把描述记进 episode_write_failures(只含类名与 id,有上限的 deque,只留最近 100 条),
     再把原异常抛回 servicer:servicer 据此给客户端报 persistence_failed、不给 episode_id,轨迹源把它当瞬时失败重跑。"""
 
     def __init__(self, store: GitStore, opponent_lines: tuple[str, ...], *, turn_timeout_s: float = 5.0,
@@ -134,7 +136,8 @@ class AgentRuntime:
         self._channels: list = []
         self._lock = threading.Lock()
         self._sessions: dict[str, str] = {}              # 情境 id -> run id,只有训练登记过的会话落盘
-        self.episode_write_failures: list[str] = []      # 每条一句描述,只含类名与 id,不含异常文字
+        # 每条一句描述,只含类名与 id,不含异常文字;只留最近 MAX_WRITE_FAILURES_KEPT 条(最早的先丢)
+        self.episode_write_failures: deque[str] = deque(maxlen=MAX_WRITE_FAILURES_KEPT)
 
     @property
     def opponent_lines(self) -> tuple[str, ...]:
@@ -144,8 +147,9 @@ class AgentRuntime:
 
     @property
     def interact_deadline_s(self) -> float:
-        with self._lock:
-            return self._deadline
+        """不取锁:读一个 float 是原子的,而 `_lock` 不可重入,持锁的代码一旦碰到这个 getter 就是自死锁
+        (client_factory 持锁读 `_deadline` 是直接读字段,正是这个原因)。setter 仍持锁,与别的状态变更串行。"""
+        return self._deadline
 
     @interact_deadline_s.setter
     def interact_deadline_s(self, value: float) -> None:

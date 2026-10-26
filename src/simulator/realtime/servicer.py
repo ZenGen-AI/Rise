@@ -338,7 +338,9 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
                         end_msg = pb2.ServerMessage(
                             end_session=pb2.EndSession(
                                 reason="persistence_failed", episode_id="",
-                                failure_detail=f"{type(exc).__name__}: {exc}"[:300],
+                                # 只放类名:异常文字可能带远端地址或凭证,而 failure_detail 会被客户端转述进
+                                # RolloutFailedError 与指令的失败原因。细节在上面 logger.exception 的服务端日志里。
+                                failure_detail=type(exc).__name__[:300],
                             )
                         )
                 yield end_msg

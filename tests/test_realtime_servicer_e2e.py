@@ -292,7 +292,9 @@ def test_persistence_hook_exception_does_not_break_stream():
     # 而树里没有它。改报 persistence_failed,episode_id 置空,原因写进 failure_detail。
     assert end_msg.end_session.reason == "persistence_failed"
     assert end_msg.end_session.episode_id == ""
-    assert "simulated persistence failure" in end_msg.end_session.failure_detail
+    # failure_detail 只放异常类名:异常文字(这里是 "simulated persistence failure")可能带远端地址或凭证
+    assert "RuntimeError" in end_msg.end_session.failure_detail
+    assert "simulated persistence failure" not in end_msg.end_session.failure_detail
     q.put(None)
     channel.close()
     server.stop(0)

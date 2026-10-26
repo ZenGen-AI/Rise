@@ -256,14 +256,17 @@ def post_chat(
         raise fail(f"request to {host_label} failed ({type(exc).__name__})") from None
     if status != 200:
         raise fail_status(status)
-    if declared is not None and declared.isdigit() and len(raw) <= MAX_REPLY_BYTES and len(raw) < int(declared):
+    # isascii():http.client 把头字节按 Latin-1 解码,0xB2/0xB3/0xB9 变成 ²³¹,str.isdigit() 对它们为真而 int() 不认
+    if (declared is not None and declared.isascii() and declared.isdigit()
+            and len(raw) <= MAX_REPLY_BYTES and len(raw) < int(declared)):
         # read(amt) 遇到比 Content-Length 短的体不抛 IncompleteRead,只是少给:对端中途断开,不是回复形状不对
         raise fail(f"the reply from {host_label} was cut off before its declared length", OpponentUnavailableError)
     if len(raw) > MAX_REPLY_BYTES:
         raise fail(f"the reply from {host_label} is larger than {MAX_REPLY_BYTES} bytes")
     try:
         data = json.loads(raw.decode("utf-8"))
-    except ValueError:  # UnicodeDecodeError 与 JSONDecodeError 都是 ValueError
+    except (ValueError, RecursionError):
+        # UnicodeDecodeError 与 JSONDecodeError 都是 ValueError;嵌套过深的体让 json 抛 RecursionError(不是 ValueError)
         raise fail(f"the reply from {host_label} is not valid JSON") from None
     try:
         content = data["choices"][0]["message"]["content"]

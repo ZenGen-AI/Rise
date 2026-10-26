@@ -746,6 +746,26 @@ def test_a_missing_opponent_key_names_only_the_variable(world, tmp_path, stub):
     assert OPP_KEY_ENV in str(caught.value) and serve.calls == []    # 凭证缺失在占租约之前就判了
 
 
+def test_the_external_opponent_gets_the_timeout_that_make_policy_factory_was_given(world, tmp_path, stub):
+    """opponent_timeout_s 同时管站内 vLLM 对手与外部 API 对手;外部对手的 HTTP 上限不能偷偷取模块常量。"""
+    import factory.interact_policy as ip
+
+    opponent = {"base_url": stub.base_url, "model": "ext-model", "api_key_env": OPP_KEY_ENV}
+    runtime = AgentRuntime(world, ("hi",))
+    switch = OpponentSwitch(("hi",))
+    endpoint = ComputeEndpoint(**{**ENDPOINT, "launch_prefix": (), "endpoint_id": "gpu-1"})
+    write_config(world, training_defaults_file(), "training-defaults", _interact_defaults(**opponent), "test: opponent")
+    factory = make_policy_factory(
+        store=world, runtime=runtime, switch=switch, client=SimpleNamespace(alias="gpu-181", endpoint=endpoint),
+        endpoint=endpoint, env={OPP_KEY_ENV: OPP_KEY}, serve=FakeServe(stub.base_url), opponent_timeout_s=0.7)
+    bindings = [RoleBinding("a", "pa", "self_play"),
+                _opponent_binding(model_ref="gpt-x", driver="external_api", backend="external_api")]
+    scenario = Scenario("t1", "bg", [RoleSlot("a", "a"), RoleSlot("b", "b")], "c", ["n"], "training")
+    with factory(RUN, _cfg(bindings=bindings)):
+        backend = switch(bindings[1], scenario)
+        assert backend._timeout == 0.7 != ip.OPPONENT_TIMEOUT_S
+
+
 def test_an_external_opponent_without_an_opponent_section_fails_the_directive(world, tmp_path, stub):
     _, _, factory, _ = _unit(world, tmp_path, stub, opponent=None)
     bindings = [RoleBinding("a", "pa", "self_play"),
@@ -850,12 +870,17 @@ class ScriptedChatStub:
 
 @pytest.fixture
 def external_api(monkeypatch):
-    """造一个外部 API 桩,并把对手的单次 HTTP 上限从 25 秒收到 0.3 秒,让超时用例几百毫秒就走完。"""
+    """造一个外部 API 桩,并把对手的单次 HTTP 上限从 25 秒收到 0.3 秒,让超时用例几百毫秒就走完。
+
+    超时经 make_policy_factory 已有的 opponent_timeout_s 参数注入,不去改模块常量 OPPONENT_TIMEOUT_S。
+    这些用例走的是装配入口(assemble 不暴露这个参数),所以夹具在装配取用它的地方(`factory.interact_policy`
+    模块里的 make_policy_factory)套一层,只补上这一个关键字参数。"""
     import factory.interact_policy as ip
 
     monkeypatch.setenv("NO_PROXY", "127.0.0.1")
     monkeypatch.setenv("no_proxy", "127.0.0.1")
-    monkeypatch.setattr(ip, "OPPONENT_TIMEOUT_S", 0.3)
+    real_make = ip.make_policy_factory
+    monkeypatch.setattr(ip, "make_policy_factory", lambda **kw: real_make(**kw, opponent_timeout_s=0.3))
     made: list[ScriptedChatStub] = []
 
     def _make(script):

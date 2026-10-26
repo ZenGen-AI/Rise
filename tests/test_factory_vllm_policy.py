@@ -193,7 +193,7 @@ def test_the_default_tunnel_goes_through_the_clients_ssh_alias_and_the_serve_por
         def __init__(self, alias, *, remote_port):
             opened.append((alias, remote_port))
 
-    monkeypatch.setattr("factory.vllm_policy.SshTunnel", RecordingTunnel)   # 不起真的 ssh
+    monkeypatch.setattr("compute.tunnel.SshTunnel", RecordingTunnel)   # 不起真的 ssh(工厂在 compute.tunnel 里造隧道)
     serve = FakeServe("http://127.0.0.1:1")
     with _context(serve, client=_client("gpu-7")):
         pass

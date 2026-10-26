@@ -14,9 +14,11 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 
+from compute.client import ComputeClient
+from compute.endpoint import ComputeEndpoint
 from compute.errors import ComputeError
 from compute.service import ServiceHandle, serve as real_serve
-from compute.tunnel import SshTunnel, http_probe
+from compute.tunnel import http_probe, tunnel_factory_for
 from compute.vllm_service import BASE_MODEL_NAME, VllmServeConfig, build_serve_job
 from factory.opponents import ModelRefError, chat_messages, post_chat, require_timeout
 from simulator.backends import ModelBackend
@@ -59,8 +61,8 @@ class VllmPolicy:
 
 @contextmanager
 def policy_context(
-    client: object,
-    endpoint: object,
+    client: ComputeClient,
+    endpoint: ComputeEndpoint,
     adapters: Sequence[tuple[str, str]],
     *,
     serve_port: int,
@@ -83,12 +85,7 @@ def policy_context(
     served = [name for name, _ in cfg.adapters]
     if trained_adapter is not None and trained_adapter not in served:
         raise ComputeError(f"trained_adapter {trained_adapter!r} is not among the served adapters {served}")
-    factory = tunnel_factory
-    if factory is None:
-        alias = getattr(client, "alias", None)
-        if not alias:
-            raise ComputeError("the compute client does not expose its ssh alias for the tunnel")
-        factory = lambda: SshTunnel(alias, remote_port=cfg.remote_port)  # noqa: E731
+    factory = tunnel_factory if tunnel_factory is not None else tunnel_factory_for(client, cfg.remote_port)
     with serve(client, cfg, build_job=build_job, tunnel_factory=factory, probe=probe) as handle:
         yield VllmPolicy(
             handle, BASE_MODEL_NAME if trained_adapter is None else trained_adapter, timeout_s=timeout_s,

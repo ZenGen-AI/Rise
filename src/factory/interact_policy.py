@@ -303,7 +303,7 @@ def make_policy_factory(
         except ModelRefError as exc:
             raise _failed(run_id, exc) from exc
         try:
-            external = _external_backend(run_id, cfg, store, env, OPPONENT_TIMEOUT_S)   # 调用时才取模块里的名字(测试夹具替换它)
+            external = _external_backend(run_id, cfg, store, env, opponent_timeout_s)
         except OpponentCredentialError as exc:
             raise _failed(run_id, exc) from exc          # 文字里只有环境变量名
         try:
@@ -325,7 +325,7 @@ def make_policy_factory(
                 registered: list[str] = []
                 previous: float | None = None
                 try:
-                    # 先登记再放行第一个会话。注意不要在持有 runtime._lock 时碰 interact_deadline_s(同一把非重入锁)
+                    # 先登记再放行第一个会话。不要在持有 runtime._lock 时给 interact_deadline_s 赋值(setter 取同一把非重入锁;getter 不取)
                     previous = runtime.interact_deadline_s
                     for sid in cfg.scenario_ids:
                         runtime.register_session(sid, run_id)
@@ -343,7 +343,7 @@ def make_policy_factory(
                     except OpponentApiError as exc:
                         # 含训练位策略自己抛的 OpponentRejectedError。训练位是本 run 自己起的 vLLM,4xx 多半意味着
                         # 服务配置坏了(适配器名不对之类),重试无益;但这一点和起服务时的瞬态失败区分不开,
-                        # 所以先按现状译成延后(重试有界,最终升 T3)。已记进 Concerns。
+                        # 所以先按现状译成延后(重试有界,最终升 T3)。这一点记在设计 30 的失败分类表里(「训练位策略自己抛的 OpponentRejectedError」)。
                         raise _rollout_deferral(exc) from None
                 finally:
                     for sid in registered:
