@@ -398,8 +398,10 @@ class SessionResources:
 |---|---|
 | 部署记忆 | 每个绑定人格一个 `deploy/<persona_id>.db`，跨轮次持久；`seq` 与事件表在库内。轮次开始时对每个绑定人格拿 `deploy/<persona_id>.lock` 的独占文件锁，轮次结束释放；拿不到锁的轮次判 `AgentRoundFailedError`（M20） |
 | 轮次产物 | `agent_round` 载荷增加 `memory_runtime` 与 `episode_digests: {episode_id: {persona_id: 起点摘要}}`，每条 episode 开始前写回一次（轮次产物本来就逐步回写） |
-| episode 起点与重试 | 每条部署 episode 开始前：把该人格的部署库 `backup_to` 到 `snapshots/<round_id>/<episode_id>-<persona_id>.db` 作起点，记摘要进 `episode_digests` 与首个智能体轮次的轨迹 `memory.digest_before`。该 episode 的任一次尝试失败要重试时，先用起点副本覆盖部署库再重试（M18）；成功后删起点副本。回滚安全靠 M20：轮次独占人格库、episode 顺序跑（F24），覆盖时没有别的写者 |
-| episode 复用 | `_reusable` 除库版本外，还要求首个智能体轮次的 `digest_before` 等于 `episode_digests[episode_id]` 里该人格的摘要，且该摘要等于部署库当前摘要（即它之后没有别的 episode 写过）；三者不全等就重跑 |
+| episode 起点与重试 | 每条部署 episode 开始前：把该人格的部署库 `backup_to` 到 `snapshots/<round_id>/<episode_id>-<persona_id>.db` 作起点，记摘要进 `episode_digests` 与首个智能体轮次的轨迹 `memory.digest_before`。该 episode 的任一次尝试失败要重试时，先用起点副本覆盖部署库再重试（M18）。成功时先落盘 episode，再删起点副本；**删起点副本是这条 episode 的提交点**。回滚安全靠 M20：轮次独占人格库、episode 顺序跑（F24），覆盖时没有别的写者 |
+| 崩溃后重入 | 轮次重入时按 episode 顺序检查：某条 episode 的起点副本还在，说明它在途时进程崩溃（不论 episode 文件有没有落盘），先用起点副本覆盖部署库、核对摘要等于 `episode_digests` 里记的值，再重跑这条 episode，不重新备份起点。起点副本不在而 episode 文件在，说明它已提交 |
+| episode 复用 | `_reusable` 除库版本外，还要求：该 episode 的起点副本不在（已提交），且首个智能体轮次的 `digest_before` 等于 `episode_digests[episode_id]` 里该人格的摘要。不比较部署库当前摘要：已提交的 episode 写过记忆，库摘要本来就变了 |
+| 覆盖失败 | 用起点副本覆盖部署库失败（文件系统错误、摘要对不上）时轮次判 `AgentRoundFailedError`，T3；部署库与起点副本都保留，等人处理 |
 | 验证重放 | 每个人格从部署库 `backup_to` 到 `snapshots/<round_id>/verify-<persona_id>.db`，基线与候选各开一份快照副本，`replay_read_only=True` |
 | 门② `kind: memory` | 收录时对该人格的部署库调 `remember_event(key="<proposal_id>#<k>")`。事件行与语句同库、同一段提交，所以"写成功但收据没落树"的重入不会二次抽取：重入时再调一次，得到 `idempotent` 与事件行里存的同一批语句 id。语句 id 写进提案载荷的 `admitted_statements` 只作证据，不作幂等依据；真正的收据在 Starling 的事件表里 |
 | 门② 失败 | `remember_event` 返回 `failed`（抽取失败）时：先对该 key 调 `abandon_event`（事件行进终态 `abandoned`，以后不会被任何路径推进），再写一条 T2 失败记录，提案改为 `rejected` 并带原因；审核类状态机增加 `approved → rejected` 这一条边（F23），只许收录处理器走。`remember_event` 抛异常（库打不开、③ 写失败）时不改提案状态、不放弃事件，只写失败记录，留在 `approved` 让下一个 tick 重入：重入再调同 key 的 `remember_event`，按 `pending` 行的恢复规则补收据，不会二次抽取，也不会留下没有收据的语句。被拒的提案不会复活：它的事件行已是 `abandoned` |
@@ -450,6 +452,7 @@ class SessionResources:
 | 集成 | 服务端会话终态（正常、超时、断开）都走 quiesce、join、close；副本被删 | loopback 服务端 |
 | 集成 | 滞留数达上限时 `CreateSession` 被拒为 `role_backend_unavailable`；滞留线程退出后名额释放 | loopback 服务端、可解除阻塞的假后端 |
 | 集成 | 部署 episode 重试：第二次尝试前部署库被回滚到起点，摘要相同 | 真 Starling 或替身 |
+| 集成 | 部署崩溃重入：episode 中途崩溃（起点副本在）重入时先覆盖再重跑；episode 已落盘但起点副本没删时同样重跑；已提交的 episode 被复用、不重跑 | 故障注入、替身端口 |
 | 集成 | 同组两条 rollout 从同一起点出发，会话结束副本被删；`session_id` 出现在目录名里 | loopback 服务端、替身端口 |
 | 集成 | 起点摘要与运行时身份进 `config_hash`；续训时种子或模型变了升 T3；落地前写下的 pending interact run 在派发器判 T2，原因点名缺 `memory` | 临时仓库 |
 | 集成 | `role_memory_failure` 让指令判 `failed` 而不是延后；`role_memory_unavailable` 按条重跑 | 抛异常的假端口 |
