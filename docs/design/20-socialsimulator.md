@@ -689,7 +689,7 @@ interact 会话前的准备 [已落地]。下表是派发器与组合根在起�
 | 客户端重建与服务端落盘的 Episode 是否逐字节一致 | 对账 | 比较两边 `episode_digest` |
 | 驱动选择的配置键 [已落地] | `model_backend` 只有三个合法值,没有「固定对话」 | 已定:角色位加可选 `driver`(`vllm` / `external_api` / `scripted`),缺省按 `model_backend` 推;`scripted` 必须显式写,且可与 `frozen_reference` 并存,此时 `model_ref` 只作身份标签 |
 | 固定对话循环的实现位置 [已落地] | 循环是新行为,现有用法依赖「(无更多发言)」 | 已定:`ScriptedBackend` 加默认关闭的 `loop` 参数,只有本次装配处传 `loop=True` |
-| 外部 API 对手的速率上限与成本 [计划中] | 限流时 `role_backend_timeout` 的重跑次数会耗尽 | 按实际供应商压测 |
+| 外部 API 对手的速率上限与成本 [计划中] | 限流表现为超时时,`role_backend_timeout` 的按条重跑次数会耗尽;表现为 429 或 5xx 时走 `role_backend_failure`,整条训练延后、续训次数耗尽后升 T3 | 按实际供应商压测 |
 | 站内 vLLM 同时服务训练位与对手位时的单次延迟 [计划中] | 能否稳在 `backend_timeout_s` 内 | 真机测两个 LoRA 并发的延迟 |
 
 明确不做的事:SocialSimulator 不决定"是否启动会话",那是 ControlPlane 的决策;不写训练奖励;不做诊断打分;不在实时服务内部持久化。

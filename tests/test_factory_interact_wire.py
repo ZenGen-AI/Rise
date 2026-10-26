@@ -252,7 +252,9 @@ from compute.vllm_service import BASE_MODEL_NAME
 from controlplane.config import write_config
 from controlplane.daemon import DirectiveFailedError, reconcile_once
 from controlplane.envelope import BigRef, Envelope, OwnerRef
-from controlplane.paths import episodes_dir, model_file, run_dir, scheduler_config_file, training_defaults_file
+from controlplane.paths import (
+    candidate_checkpoint_file, episodes_dir, model_file, run_dir, scheduler_config_file, training_defaults_file,
+)
 from factory.agent import AgentRuntime
 from factory.interact_policy import OpponentSwitch, make_policy_factory
 from factory.opponents import EXPORT_FORMAT
@@ -574,7 +576,8 @@ def test_a_service_that_will_not_stop_after_a_finished_training_fails_the_direct
     reason = directive.payload["failure"]["reason"]
     assert "serve-job-a1" in reason and "stop" in reason and "manually" in reason
     assert _read(world, "training_run").status == "executed"          # 训练本身是成功的
-    assert world.exists(f"{run_dir(RUN)}/training_run.yaml")
+    assert world.read_product(candidate_checkpoint_file(RUN)).status == "pending_review"   # 候选已落树
+    assert "already failed" not in reason                             # 训练没失败,不该补那半句
 
 
 @pytest.mark.parametrize("error", [ComputeError("adapters must be a tuple"), HelperError("bad_request", "no such path")])
@@ -639,6 +642,9 @@ def test_a_stop_error_after_a_training_exception_still_unregisters_restores_and_
             assert runtime._sessions == {"t1": RUN, "t2": RUN}
             raise RuntimeError("boom")
     assert "serve-job-a1" in str(caught.value) and caught.value.category == "T2"
+    # 被顶掉的训练异常只留类名,不带它的文字
+    assert "the training had already failed: RuntimeError" in str(caught.value)
+    assert "boom" not in str(caught.value)
     assert runtime._sessions == {} and runtime.interact_deadline_s == before
     assert serve.trace == ["enter", "exit"]
     from simulator.backends import ScriptedBackend
@@ -877,7 +883,9 @@ def test_an_external_opponent_that_times_out_once_is_retried_and_the_directive_e
     expected = 1 * 1 * 2                                       # grpo_steps * groups_per_step * group_size
     assert _wait_until(lambda: len(_episode_ids(world)) >= expected)
     assert len(_episode_ids(world)) == expected
-    assert server.count > expected                             # 比正常多一次:那次超时的调用
+    # 判别点是上面的 executed:按旧的归类(超时算 role_backend_failure)这条指令会停在 pending。
+    # 这里只确认那次超时的调用确实发生过,不据此推断重跑了几次。
+    assert server.count > expected
 
 
 def test_an_external_opponent_answering_500_defers_the_directive_with_role_backend_failure(

@@ -94,10 +94,15 @@ def _failed(run_id: str, exc: BaseException) -> DirectiveFailedError:
 
 
 def _stuck_service(run_id: str, exc: ServeStopError) -> DirectiveFailedError:
-    """作业停不下来:T2。文字里只有作业 id(见 compute.service),没有密钥与远端地址。"""
+    """作业停不下来:T2。文字里只有作业 id(见 compute.service),没有密钥与远端地址。
+
+    训练体先抛了错、退出时又停不下来,前一个异常会被顶掉:只把它的类名补进原因,不带它的文字
+    (文字里可能有远端地址),让人知道这条 run 本身也没跑完。"""
+    displaced = exc.__context__
+    note = f" (the training had already failed: {type(displaced).__name__})" if displaced is not None else ""
     return DirectiveFailedError(
         f"directive {run_id}: the vLLM service could not be stopped ({exc}); stop that job on the compute host "
-        "manually, because it is still holding GPU memory and the lease"
+        f"manually, because it is still holding GPU memory and the lease{note}"
     )
 
 
