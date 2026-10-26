@@ -283,6 +283,7 @@ def test_a_factory_supplies_the_non_scripted_drivers_and_never_the_scripted_ones
         return ScriptedBackend({binding.slot_id: [f"来自工厂-{binding.slot_id}"]})
 
     runtime = AgentRuntime(store, ("全局",), opponent_backend_factory=factory)
+    runtime.register_session("s1", "run-1")             # 工厂只服务训练登记过的会话(Ruling 28)
     bindings = [RoleBinding("a", "p", "self_play"),
                 RoleBinding("b", "p", "frozen_reference", model_ref="zengen-v1"),
                 RoleBinding("c", "p", "external_api", model_ref="gpt-x"),
@@ -300,6 +301,7 @@ def test_a_factory_error_surfaces_instead_of_being_swallowed(store):
         raise RuntimeError("model not served")
 
     runtime = AgentRuntime(store, ("全局",), opponent_backend_factory=factory)
+    runtime.register_session("s1", "run-1")
     assignment = _assignment(RoleBinding("a", "p", "self_play"), RoleBinding("b", "p", "frozen_reference", model_ref="m"))
     with pytest.raises(RuntimeError, match="model not served"):
         runtime._backends(_scenario_with(), assignment, {}, "a")
@@ -317,6 +319,96 @@ def test_without_a_factory_the_legacy_path_does_not_judge_the_binding_at_all(sto
     assert set(backends) == {"b", "c"}
     for slot in ("b", "c"):
         assert _says(backends[slot], slot, 3) == ["全局甲", "全局乙", "(无更多发言)"]
+
+
+def _never_called(binding, scenario):
+    raise AssertionError(f"the opponent factory must not be asked about slot {binding.slot_id!r}")
+
+
+@pytest.mark.parametrize("backend", ["self_play", "scripted_user", "magic"])
+def test_with_the_factory_set_an_unregistered_session_never_judges_its_bindings(store, backend):
+    """Ruling 28:--interact 下运行时的工厂一直是 OpponentSwitch,部署会话(没登记)仍按 Ruling 15 不判绑定:
+    agent.yaml 不校验 model_backend,self_play 或未知后端名的非客户端位不能让部署轮次整轮失败。"""
+    from simulator.datamodel import RoleBinding
+    runtime = AgentRuntime(store, ("全局甲", "全局乙"), opponent_backend_factory=_never_called)
+    bindings = [RoleBinding("a", "p", "self_play"),
+                RoleBinding("b", "p", backend, model_ref=None if backend == "self_play" else "x")]
+    backends = runtime._backends(_scenario_with({"b": ["剧本"]}), _assignment(*bindings), {}, "a")
+    assert set(backends) == {"b"} and isinstance(backends["b"], ScriptedBackend)
+    assert _says(backends["b"], "b", 3) == ["全局甲", "全局乙", "(无更多发言)"]     # 不循环,剧本也不生效
+
+
+def test_with_the_factory_set_an_unregistered_scripted_binding_still_loops_its_script(store):
+    from simulator.datamodel import RoleBinding
+    runtime = AgentRuntime(store, ("全局",), opponent_backend_factory=_never_called)
+    opponent = RoleBinding("b", "p", "frozen_reference", model_ref="zengen-v1", driver="scripted")
+    backends = runtime._backends(_scenario_with({"b": ["一", "二"]}),
+                                 _assignment(RoleBinding("a", "p", "self_play"), opponent), {}, "a")
+    assert _says(backends["b"], "b", 5) == ["一", "二", "一", "二", "一"]
+
+
+@pytest.mark.parametrize("backend", ["self_play", "magic"])
+def test_with_the_factory_set_an_unregistered_explicit_scripted_driver_is_not_judged_either(store, backend):
+    """显式 scripted 给循环的剧本后端,但不经 driver_for:它对 self_play 与未知后端名会抛。"""
+    from simulator.datamodel import RoleBinding
+    runtime = AgentRuntime(store, ("全局",), opponent_backend_factory=_never_called)
+    opponent = RoleBinding("b", "p", backend, model_ref=None if backend == "self_play" else "x", driver="scripted")
+    backends = runtime._backends(_scenario_with({"b": ["一", "二"]}),
+                                 _assignment(RoleBinding("a", "p", "self_play"), opponent), {}, "a")
+    assert _says(backends["b"], "b", 3) == ["一", "二", "一"]
+
+
+@pytest.mark.parametrize("backend, driver", [("self_play", None), ("magic", None), ("frozen_reference", "magic")])
+def test_a_registered_session_with_an_invalid_driver_still_fails(store, backend, driver):
+    from simulator.datamodel import RoleBinding
+    runtime = AgentRuntime(store, ("全局",), opponent_backend_factory=_never_called)
+    runtime.register_session("s1", "run-1")
+    bad = RoleBinding("b", "p", backend, model_ref=None if backend == "self_play" else "x", driver=driver)
+    with pytest.raises(ValueError, match="slot 'b'"):
+        runtime._backends(_scenario_with(), _assignment(RoleBinding("a", "p", "self_play"), bad), {}, "a")
+
+
+def _open_and_finish(runtime, scenario_id, bindings):
+    """经运行时的 loopback 服务端跑完一条两轮会话;会话开不了时 create_session 抛 SessionRejectedError。"""
+    from simulator.datamodel import Persona, RoleAssignment, RoleSlot, Scenario
+    from simulator.store_adapter import write_scenario
+    write_scenario(runtime._store, Scenario(scenario_id, "bg", [RoleSlot("b", "b"), RoleSlot("a", "a")],
+                                            "c", ["n"], "training"))
+    personas = {pid: Persona(pid, ["t"], "m", "s", ["v"]) for pid in ("pa", "pb")}
+    client = runtime.client_factory()
+    client.create_session(scenario_id=scenario_id, role_assignment=RoleAssignment(scenario_id, bindings, 2),
+                          personas=personas, purpose="training", client_driven_slot="a")
+    while not client.closed:
+        client.submit_turn("嗯")
+    return client.drain_until_end()
+
+
+def test_a_deployment_round_with_a_self_play_opponent_slot_opens_and_finishes_under_the_switch(store):
+    """真实 loopback + 真的 OpponentSwitch(没装工厂时它给罐头后端):部署会话的 self_play 对手位照常开得起来。"""
+    from factory.interact_policy import OpponentSwitch
+    from simulator.datamodel import RoleBinding
+    runtime = AgentRuntime(store, ("罐头",), opponent_backend_factory=OpponentSwitch(("罐头",)))
+    try:
+        episode = _open_and_finish(runtime, "s-deploy", [RoleBinding("a", "pa", "self_play"),
+                                                         RoleBinding("b", "pb", "self_play")])
+    finally:
+        runtime.close()
+    assert episode.terminated_reason == "max_turns"
+
+
+def test_a_registered_session_with_an_invalid_driver_is_still_refused_by_the_server(store):
+    from factory.interact_policy import OpponentSwitch
+    from simulator.datamodel import RoleBinding
+    from simulator.realtime.client import SessionRejectedError
+    runtime = AgentRuntime(store, ("罐头",), opponent_backend_factory=OpponentSwitch(("罐头",)))
+    runtime.register_session("s-train", "run-1")
+    try:
+        with pytest.raises(SessionRejectedError) as caught:
+            _open_and_finish(runtime, "s-train", [RoleBinding("a", "pa", "self_play"),
+                                                  RoleBinding("b", "pb", "self_play")])
+    finally:
+        runtime.close()
+    assert caught.value.reason == "role_backend_failure"
 
 
 def test_a_scripted_driver_survives_the_grpc_hop_and_loops_the_scenario_script(store):

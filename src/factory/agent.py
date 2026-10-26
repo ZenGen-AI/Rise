@@ -110,9 +110,9 @@ class AgentRuntime:
     对手位的后端按各自绑定的驱动分派(见 _backends);情境从树里读(scenario_resolver)。
     每条 Interact 流带 interact_deadline_s 的 deadline(DeadlineStub);stub_factory 只为测试注入。
 
-    opponent_backend_factory(binding, scenario) 给 vllm 与 external_api 驱动的对手位造后端,没传(None)时
-    这两种也和过去一样用 ScriptedBackend 说 opponent_lines:MindAgent 部署会话的绑定多是 frozen_reference,
-    没有真模型可加载,行为必须原样不变。
+    opponent_backend_factory(binding, scenario) 给 vllm 与 external_api 驱动的对手位造后端,只服务登记给训练 run 的会话;
+    没传(None)或会话没登记(MindAgent 部署会话)时,这两种也和过去一样用 ScriptedBackend 说 opponent_lines:
+    部署会话的绑定多是 frozen_reference,没有真模型可加载,行为必须原样不变。
 
     会话登记(register_session / unregister_session):--interact 与 MindAgent 部署共用这一个服务端。登记表按情境 id
     记该会话属于哪个 run;落盘钩子只写登记过的会话,把 episode 写进对应 run。没登记的(部署会话)钩子不碰,
@@ -178,27 +178,36 @@ class AgentRuntime:
             # 原样抛原异常,不包新类型;servicer 自己记日志并吞下,不会传出线程池。
             raise
 
-    def _driver_of(self, binding: RoleBinding) -> str | None:
-        """没传工厂时,只有显式写了 scripted 的绑定才改变行为,其余一律不判驱动、给原来的罐头后端:
-        agent.yaml 不校验 model_backend 的取值,driver_for 对 self_play 与未知后端名会抛 ValueError,
-        而过去的 _backends 从不看绑定。传了工厂就是训练路,绑定已过 validate_training_config,照实判。"""
-        if self._opponent_backend_factory is None and binding.driver != "scripted":
-            return None
-        return driver_for(binding)
+    @staticmethod
+    def _driver_of(binding: RoleBinding, *, judged: bool) -> str | None:
+        """judged 为真是训练路:绑定已过 validate_training_config,照实用 driver_for 判。
+        不判绑定时一律不调 driver_for(Ruling 15):agent.yaml 不校验 model_backend 的取值,driver_for 对 self_play
+        与未知后端名会抛 ValueError,而过去的 _backends 从不看绑定。只有显式写了 scripted 的绑定改变行为。"""
+        if judged:
+            return driver_for(binding)
+        return "scripted" if binding.driver == "scripted" else None
 
     def _backends(self, scenario, assignment, personas, client_slot):
         """每个非客户端角色位一个全新的后端(服务端要求每次调用返回新实例,游标不能跨会话共享)。
+        严格判驱动只用于"传了工厂、且该情境 id 登记给了某个训练 run"的会话(Ruling 28):--interact 下运行时的工厂
+        一直是 OpponentSwitch,部署会话(没登记)若也被判,agent.yaml 里 self_play 或未知 model_backend 的非客户端位
+        会让每一轮部署都失败。训练路:
         scripted 驱动:ScriptedBackend(loop=True),台词取情境剧本里该角色位的一份,没有或为空取全局台词;
-        其余驱动:有工厂就交给工厂,没有就是原来的 ScriptedBackend(不循环,全局台词)。"""
+        其余驱动:交给工厂。
+        其余会话(没传工厂,或没登记):显式 scripted 同上,别的一律是原来的 ScriptedBackend(不循环,全局台词),
+        不碰工厂、不调 driver_for。"""
+        with self._lock:
+            registered = scenario.id in self._sessions       # 持锁只读登记表,判驱动与造后端都在锁外
+        judged = registered and self._opponent_backend_factory is not None
         backends = {}
         for binding in assignment.bindings:
             slot = binding.slot_id
             if slot == client_slot:
                 continue
-            if self._driver_of(binding) == "scripted":
+            if self._driver_of(binding, judged=judged) == "scripted":
                 lines = scenario.opponent_script.get(slot) or self._lines
                 backends[slot] = ScriptedBackend({slot: list(lines)}, loop=True)
-            elif self._opponent_backend_factory is not None:
+            elif judged:
                 backends[slot] = self._opponent_backend_factory(binding, scenario)
             else:
                 backends[slot] = ScriptedBackend({slot: list(self._lines)})
