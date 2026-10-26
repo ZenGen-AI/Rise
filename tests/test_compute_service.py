@@ -343,3 +343,11 @@ def _run_sized(client):
                tunnel_factory=lambda: FakeTunnel(client.calls), probe=lambda u, k: True,
                startup_timeout_s=60.0, poll_s=5.0, clock=clock, sleep=clock.sleep):
         pass
+
+
+def test_the_repr_of_a_service_handle_does_not_carry_the_api_key():
+    """ServiceHandle 会进日志与 pytest 的失败回显;密钥只给 post_chat 用,repr 里不能有。"""
+    key = "sk-handle-secret-0123456789"
+    handle = ServiceHandle("serve-job-a1", "http://127.0.0.1:18081", key, ("base",))
+    assert key not in repr(handle) and key not in str(handle)
+    assert "serve-job-a1" in repr(handle) and handle.api_key == key       # 字段本身照常可读

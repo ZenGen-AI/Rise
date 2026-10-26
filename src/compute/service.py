@@ -14,7 +14,7 @@ import secrets
 import time
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from compute.client import JobSpec
@@ -29,7 +29,7 @@ MAX_ATTEMPTS = 8  # 同一份配置下的尝试序号上限;满了说明旧的�
 class ServiceHandle:
     job_id: str
     base_url: str          # 本机侧的隧道地址,形如 http://127.0.0.1:<端口>
-    api_key: str           # 只对这一次启动有效
+    api_key: str = field(repr=False)   # 只对这一次启动有效;不进 repr,免得带进日志与失败回显
     model_names: tuple[str, ...]
 
 

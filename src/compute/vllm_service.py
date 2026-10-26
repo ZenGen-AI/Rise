@@ -61,7 +61,6 @@ class VllmServeConfig:
                 or not 0 < self.gpu_memory_utilization <= 1):
             raise ComputeError("gpu_memory_utilization must be in (0, 1]")
 
-
     def _check_adapters(self) -> None:
         adapters = self.adapters
         if not isinstance(adapters, tuple):
