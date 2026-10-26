@@ -216,9 +216,10 @@ class MemoryBackend(Protocol):
 | `root` | 是 | 记忆库根目录，绝对路径，在仓库外 |
 | `extraction_base_url`、`extraction_model` | 是 | 抽取用的 OpenAI 兼容端点与模型 |
 | `embedding_base_url`、`embedding_model`、`embedding_dim` | 是 | 嵌入用的端点、模型与维度 |
-| `timeout_ms` | 否 | 抽取与嵌入的单次上限，默认 8000 |
+| `timeout_ms` | 否 | 抽取与嵌入的单次上限，默认 4000 |
+| `max_retries` | 否 | 抽取与嵌入的重试次数，默认 0 |
 
-配置里不放密钥。启动时检查 `OPENAI_API_KEY` 非空，报错只写变量名。配置不存在时训练路与部署路都用替身，并在启动日志里写 `memory backend: stand-in`。
+配置里不放密钥。启动时检查 `OPENAI_API_KEY` 非空，报错只写变量名。“配置不存在”只指环境变量 `RISMFORGE_MEMORY_CONFIG` 未设置：这时训练路与部署路都用替身，并在启动日志里写 `memory backend: stand-in`。变量设置了而文件不在、权限不是 0600、在仓库内、缺键或多键，一律装配期退出码 2，与评测配置同一做法。
 
 ### 5.2 记忆运行时身份
 
@@ -246,6 +247,8 @@ class MemoryBackend(Protocol):
 ```
 
 库文件名用人格 id，因为人格才是个体。同一个人格在两个角色位同时出现时，两个位各开一份副本，互不可见。
+
+一个记忆根目录只属于一个控制面仓库：根目录下的 `.owner` 文件记该仓库的绝对路径，首次使用时写入；装配期读到的路径与当前仓库不同就退出码 2。否则两个仓库共用一个根目录时，部署记忆会混写，启动清扫会删掉对方在途会话的副本。
 
 ### 5.4 部署形态
 
@@ -289,7 +292,7 @@ class SessionResources:
 - `TimeoutBackend` 改为登记在途线程：`respond` 开始时加入 `SessionResources` 的在途集合，结束时移出；超时只是调用方放弃等待，线程本身仍在集合里。
 - 驱动器进入终态（`CLOSED` 或 `FAILED`，含断开）后，由 servicer 在流结束的 `finally` 里按顺序调 `quiesce`、`join(timeout_s=60)`、`close`。
 - `join` 超时：**不 close、不删**。资源对象移交给运行时的滞留表（`AgentRuntime.lingering`），并继续占住一个会话名额：servicer 的准入检查“活动会话数加滞留数小于 `max_workers`”不过就拒绝 `CreateSession`，终止原因 `role_backend_unavailable`（T1，客户端按条重跑）。滞留表每 60 秒重试一次 `join(0)`，成功后 close 并删目录。
-- 清扫：守护进程启动时删掉 `runs/` 下所有目录（启动时没有活动会话、也没有滞留线程）；运行中只删滞留表 join 成功的目录，不扫目录。
+- 清扫：`run` 与 `reconcile` 取到仓库排他锁之后、构造实时服务端之前，删掉 `runs/` 下所有目录。此时本进程还没有会话，别的进程被仓库锁挡在外面，根目录又只属于这个仓库（5.3 节），所以没有在途副本会被误删。运行中只删滞留表 join 成功的目录，不扫目录。
 - 在途集合的操作持一把锁；`join` 不持锁等待。
 
 ### 6.3 并发上限
@@ -413,6 +416,7 @@ class SessionResources:
 | 失败点 | 分类 | 处理 |
 |---|---|---|
 | 配置要求 Starling 但未安装 | 配置错误 | 装配期退出码 2，信息说明 `pip install '.[memory]'` |
+| 记忆根目录的 `.owner` 指向别的仓库 | 配置错误 | 装配期退出码 2，信息写两个路径 |
 | `OPENAI_API_KEY` 为空 | 配置错误 | 装配期退出码 2，只写变量名 |
 | `memory_library/` 非空 | 配置错误 | 装配期退出码 2，要求人工处理 |
 | 起点库或种子打不开、迁移失败、摘要算不出 | T2 | 指令 `failed`，原因只报类名 |
