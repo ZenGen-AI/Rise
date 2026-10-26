@@ -504,7 +504,7 @@ class SessionResources:
 
 | 接口 | 变更 | 步 |
 |---|---|---|
-| `actio.instance.instantiate` | `memories=` 之外加 `memory=`、`replay_read_only=` | 1 |
+| `actio.instance.instantiate` | `memories=` 之外加 `memory=`、`replay_read_only=`、`episode_id=`；`ActioInstance.close()` | 1 |
 | `actio.trace` | 新增 `actio.trace.v2`，`validate_trace` 接受 v1 与 v2 | 1 |
 | `CreateSession` proto | 新增可选 `episode_id` | 2 |
 | `BackendsFactory` | `(SessionInfo) -> SessionResources` | 2 |
