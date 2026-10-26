@@ -588,9 +588,9 @@ interact 的生成路多一条「生成、写树、回写、复校」的链路 [
 
 | 环节 | 做什么 | 理由与判错的代价 |
 |---|---|---|
-| 指令写出 | `training_config` 里 `scenario_ids` 与 `bindings` 都为空,只带 `data_spec`。写指令前的 `check_directive` 靠一个只给它用的宽口径放行:带 `data_spec`、两者都为空时视为「待生成」 | 严格的 `validate_training_config` 要求 `scenario_ids` 非空且唯一,`RoleBinding.persona_id` 又是必填,照今天的规则这条指令根本写不出来。派发器与训练入口照旧用严格口径。宽口径只在调度器按 `new` 构造、且带 `data_spec` 时成立;人写的指令没有 `data_spec`,必须自带 `scenario_ids`。宽口径若被别的入口用到,空的 `scenario_ids` 会绕过校验 |
+| 指令写出 | `training_config` 里 `scenario_ids` 为空,`bindings` 带完整的角色位布局但每条 `persona_id` 都是空串,另带 `data_spec`。写指令前的 `check_directive` 靠一个只给它用的宽口径放行:带 `data_spec`、`scenario_ids` 为空且 `persona_id` 全空时视为「待生成」 | 严格的 `validate_training_config` 要求 `scenario_ids` 非空且唯一,`RoleBinding.persona_id` 又是必填,照严格口径这条指令根本写不出来。派发器与训练入口照旧用严格口径。宽口径只在调度器按 `new` 构造、且带 `data_spec` 时成立;人写的指令没有 `data_spec`,必须自带 `scenario_ids`。宽口径若被别的入口用到,空的 `scenario_ids` 会绕过校验 |
 | 生成并写树 | 派发器调数据生产器,按 `data_spec` 的 `seed` 生成 `scenario_count` 个情境、每个角色位一个人格,写进产物树的 `scenarios/` 与 `personas/` | 情境 id 与人格 id 到这一步才存在 |
-| 回写 | 把情境 id 与带人格 id 的 `bindings` 回写进指令的 `training_config`,只在 `scenario_ids` 为空时写一次 | 此后 `config_hash` 覆盖它们,续训与复现都按这一份;写多次会让同一条指令的哈希前后不同 |
+| 回写 | 把情境 id 与各角色位的人格 id 回写进指令的 `training_config`(`scenario_ids` 填入,每条 `bindings` 的 `persona_id` 填入,`driver` 等其余键原样保留),只在待回写时写一次 | 此后 `config_hash` 覆盖它们,续训与复现都按这一份;写多次会让同一条指令的哈希前后不同 |
 | 复校 | 回写后立刻跑严格的 `validate_training_config`;不合法判 T2,指令 `failed` | 此时情境与人格都已就位,再不合法就是数据错,重试不会变好 |
 
 第 2 步的判定规则如下,先命中者生效。
