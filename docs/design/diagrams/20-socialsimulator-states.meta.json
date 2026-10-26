@@ -1,5 +1,5 @@
 {
  "title": "实时会话状态机",
- "desc": "创建请求校验通过才建驱动器,随即进入 ACTIVE;校验或依赖失败时不建会话,直接以 EndSession 拒绝。运行器返回后进入 COMPLETING 再到 CLOSED 并落盘;超时、后端失败、断连转入 FAILED,不落盘。",
- "describe": "**节点**\n\n- 流已连接:等待 CreateSession\n- CREATED\n- ACTIVE\n- COMPLETING\n- CLOSED\n- 创建被拒(无会话):invalid_session / role_backend_failure\n- FAILED\n\n**连线**\n\n- 流已连接 → CREATED:校验通过\n- CREATED → ACTIVE:start()\n- ACTIVE → COMPLETING:运行器返回\n- COMPLETING → CLOSED:推 EndSession\n- 流已连接 → 创建被拒(无会话):校验或依赖失败 · 10 秒未创建\n- CREATED → FAILED:迁移表允许\n- ACTIVE → FAILED:超时 · 后端失败 · 断连\n- COMPLETING → FAILED:收尾时已有中止原因"
+ "desc": "创建请求校验通过才建驱动器,随即进入 ACTIVE;校验、准入或依赖失败时不建会话,直接以 EndSession 拒绝。运行器返回后进入 COMPLETING 再到 CLOSED 并落盘;超时、后端失败、记忆失败、断连转入 FAILED,不落盘。CLOSED 与 FAILED 之后,服务端按 quiesce、join、close 的顺序收尾会话资源。",
+ "describe": "**节点**\n\n- 流已连接:等待 CreateSession\n- CREATED\n- ACTIVE\n- COMPLETING\n- CLOSED\n- 创建被拒(无会话):invalid_session / role_backend_unavailable / role_backend_failure\n- FAILED\n- 终态收尾:quiesce → join → close\n\n**连线**\n\n- 流已连接 → CREATED:校验通过\n- CREATED → ACTIVE:start()\n- ACTIVE → COMPLETING:运行器返回\n- COMPLETING → CLOSED:推 EndSession\n- 流已连接 → 创建被拒(无会话):校验 · 准入 · 依赖失败 · 10 秒未创建\n- CREATED → FAILED:迁移表允许\n- ACTIVE → FAILED:超时 · 后端失败 · 记忆失败 · 断连\n- COMPLETING → FAILED:收尾时已有中止原因\n- CLOSED → 终态收尾:进入终态\n- FAILED → 终态收尾:进入终态"
 }
