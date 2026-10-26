@@ -244,6 +244,95 @@ def test_slow_server_backend_ends_session_with_role_backend_timeout(start_server
     stream.close()
 
 
+class _SlowChatServer:
+    """本机 OpenAI 兼容桩:收到请求后先睡 delay_s 再回一句,用来逼外部 API 对手的单次调用超时。"""
+
+    def __init__(self, delay_s, status=200):
+        import json
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        body = json.dumps({"choices": [{"message": {"role": "assistant", "content": "late"}}]}).encode()
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802
+                self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                time.sleep(delay_s)
+                try:
+                    self.send_response(status)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                except OSError:
+                    pass          # 客户端已超时离开
+
+            def log_message(self, *args):
+                pass
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._server.daemon_threads = True
+        self.base_url = f"http://127.0.0.1:{self._server.server_address[1]}"
+        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+
+    def close(self):
+        self._server.shutdown()
+        self._server.server_close()
+
+
+@pytest.fixture
+def slow_chat(monkeypatch):
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1")          # 本机若配了代理,别让桩的请求绕出去
+    monkeypatch.setenv("no_proxy", "127.0.0.1")
+    made = []
+
+    def _make(delay_s, status=200):
+        server = _SlowChatServer(delay_s, status)
+        made.append(server)
+        return server
+
+    yield _make
+    for server in made:
+        server.close()
+
+
+def _external_opponent_session(start_server, base_url, *, opponent_timeout_s):
+    """真实服务端 + 真实 ExternalApiBackend(对手位 b)。服务端每回合限时放宽,让对手自己的 HTTP 上限先到。"""
+    from factory.opponents import ExternalApiBackend
+
+    def factory(scenario, assignment, personas, client_driven_slot):
+        return {"b": ExternalApiBackend(base_url, "ext-model", api_key="sk-test-not-a-secret",
+                                        api_key_env="OPP_API_KEY", timeout_s=opponent_timeout_s)}
+
+    address = start_server(factory=factory, backend_timeout_s=10.0)
+    stream = _Stream(address)
+    stream.send(_create_msg(max_turns=4))
+    assert stream.recv().WhichOneof("payload") == "session_ready"
+    stream.send(pb2.ClientMessage(submit_turn=pb2.SubmitTurn(utterance="cand-0")))
+    assert stream.recv().WhichOneof("payload") == "turn_update"          # 客户端自己那一轮
+    end = stream.recv()
+    stream.close()
+    return end
+
+
+def test_an_external_api_opponent_that_times_out_ends_the_session_as_role_backend_timeout(
+        start_server, slow_chat):
+    """对手位的外部 API 超时是 T1(瞬态),轨迹源据此整条重跑;不能被通用异常分支吞成 role_backend_failure。"""
+    server = slow_chat(1.5)
+    end = _external_opponent_session(start_server, server.base_url, opponent_timeout_s=0.2)
+    assert end.WhichOneof("payload") == "end_session"
+    assert end.end_session.reason == "role_backend_timeout", end.end_session
+    assert "sk-test-not-a-secret" not in end.end_session.failure_detail
+
+
+def test_an_external_api_opponent_answering_500_ends_the_session_as_role_backend_failure(
+        start_server, slow_chat):
+    """非 200 不改:仍是 role_backend_failure,协议上分不出 T1 与 T2,轨迹源不按条重跑。"""
+    server = slow_chat(0.0, status=500)
+    end = _external_opponent_session(start_server, server.base_url, opponent_timeout_s=5.0)
+    assert end.WhichOneof("payload") == "end_session"
+    assert end.end_session.reason == "role_backend_failure", end.end_session
+
+
 def test_concurrent_rpc_limit_rejects_extra_session(start_server):
     address = start_server(max_workers=1)
     first = _Stream(address)

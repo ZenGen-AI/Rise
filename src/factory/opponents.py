@@ -22,6 +22,7 @@ from controlplane.models import version_of_id
 from controlplane.paths import model_file
 from factory.sombench_runner import EXPORT_FORMAT
 from simulator.datamodel import OPPONENT_DRIVERS, Persona, RoleBinding, Scenario, TurnRecord
+from simulator.realtime.backend_timeout import RoleBackendTimeoutError
 
 # 回复体上限:一句对手发言用不了这么多,挡住对端发来没完没了的响应
 MAX_REPLY_BYTES = 1 << 20
@@ -38,6 +39,15 @@ class OpponentCredentialError(Exception):
 
 class OpponentApiError(Exception):
     """外部对手 API 这一次没给出可用的发言:连不上、超时、非 200、回复不是约定的形状。信息里绝不含密钥值。"""
+
+
+class OpponentTimeoutError(OpponentApiError, RoleBackendTimeoutError):
+    """对手 API(外部 API 或站内 vLLM,共用 post_chat)的这一次调用超时。
+
+    同时是两样东西,各有用处:是 RoleBackendTimeoutError,所以服务端驱动把对手位的超时归 role_backend_timeout
+    (T1,轨迹源按 max_retries_per_episode 整条重跑),而不是被通用异常分支吞成 role_backend_failure;
+    仍是 OpponentApiError,所以训练位策略超时时,策略上下文照旧把它译成延后。
+    非 200 与形状不对的回复不是它:那些仍是普通的 OpponentApiError。信息里绝不含密钥值。"""
 
 
 # ---------------- 驱动选择 ----------------
@@ -172,15 +182,15 @@ def post_chat(
     """向 OpenAI 兼容的 `<base_url>/v1/chat/completions` POST 一次,返回 choices[0].message.content。
 
     外部 API 与 vLLM 服务共用这一处:不重试(重试与降级是调用方的事),不跟随重定向,回复体有上限。
-    失败一律抛 OpponentApiError,信息只含状态码、host_label、异常类型名,不含响应体;密钥若出现在
+    失败一律抛 OpponentApiError(超时是它的子类 OpponentTimeoutError),信息只含状态码、host_label、异常类型名,不含响应体;密钥若出现在
     信息里会被抹掉,且切断异常链(from None),回溯里没有携带请求头的原异常。
     host_label 是写进错误信息的"对端是谁"(外部 API 用 host:port,vLLM 用服务名)。"""
     require_http_url(base_url)
     timeout = require_timeout(timeout_s)
 
-    def fail(message: str) -> OpponentApiError:
+    def fail(message: str, error: type[OpponentApiError] = OpponentApiError) -> OpponentApiError:
         """所有失败走这一处,出口前抹掉密钥(原异常的文本理论上不该含,这里是第二道防线)。"""
-        return OpponentApiError(message.replace(api_key, "***") if api_key else message)
+        return error(message.replace(api_key, "***") if api_key else message)
 
     payload = {"model": model, "messages": messages}
     request = urllib.request.Request(
@@ -196,10 +206,10 @@ def post_chat(
         exc.close()
         raise fail(f"HTTP {exc.code} from {host_label}") from None
     except TimeoutError:
-        raise fail(f"request to {host_label} timed out after {timeout:g}s") from None
+        raise fail(f"request to {host_label} timed out after {timeout:g}s", OpponentTimeoutError) from None
     except urllib.error.URLError as exc:
         if isinstance(exc.reason, TimeoutError):
-            raise fail(f"request to {host_label} timed out after {timeout:g}s") from None
+            raise fail(f"request to {host_label} timed out after {timeout:g}s", OpponentTimeoutError) from None
         raise fail(f"request to {host_label} failed ({type(exc.reason).__name__}: {exc.reason})") from None
     except OSError as exc:  # 连接被重置、对端中途断开
         raise fail(f"request to {host_label} failed ({type(exc).__name__})") from None

@@ -3,7 +3,7 @@
 | 项 | 内容 |
 |---|---|
 | 一句话 | 生成情境与人格,驱动多角色多轮交互产出 Episode,批量产出带哈希清单的数据集,并以 gRPC 实时环境服务支撑交互式训练与部署经验采集 |
-| 状态 | 部分落地:数据模型、运行器、批量数据集、实时环境服务、激活轨迹打通,以及场景二接通所需的 interact 情境与人格两路来源、对手位三种驱动、`Scenario` 的可选字段 `opponent_script` [已落地];外部强模型生成后端、按目标维度生成情境与人格、episode 分片存储 [推迟];场景二接通里服务端后端单次调用超时改传 15 秒、外部 API 对手超时与非 200 的重跑口径 [计划中] |
+| 状态 | 部分落地:数据模型、运行器、批量数据集、实时环境服务、激活轨迹打通,以及场景二接通所需的 interact 情境与人格两路来源、对手位三种驱动、`Scenario` 的可选字段 `opponent_script` [已落地];外部强模型生成后端、按目标维度生成情境与人格、episode 分片存储 [推迟];外部 API 对手超时归 `role_backend_timeout`、非 200 的处理口径 [已落地];场景二接通里服务端后端单次调用超时改传 15 秒 [计划中] |
 | 所在层 | 计算层 |
 | 代码位置 | `src/simulator`(诊断评测在 `src/diagnostic`,本文不展开) |
 | 基线提交 | `b826440`(2026-10-21) |
@@ -591,8 +591,8 @@ interact 会话前的准备 [已落地]。下表是派发器与组合根在起�
 | 对手 `model_ref` 解析不到,或不是适配器导出 [已落地] | T2 | 指令 `failed`,不退回脚本台词 | 失败原因点名这条引用 |
 | 生成路合成情境或人格失败 [已落地] | T2 | 指令 `failed`,不留半套情境与人格 | 失败记录 |
 | 回写 `training_config` 失败 [已落地] | T1 | 上抛,指令仍 `pending`;重跑内容相同不提交 | 无 |
-| 外部 API 对手单次调用超时 [计划中] | T1 | 套 `TimeoutBackend`,归 `role_backend_timeout`,整条重跑,有上限 | `EndSession` 的 `reason` |
-| 外部 API 对手返回非 200 [计划中] | T1 或 T2,协议上不区分 | 后端抛异常,归 `role_backend_failure`;整条重跑,有上限 | `EndSession(role_backend_failure)` |
+| 外部 API 对手单次调用超时 [已落地] | T1 | `post_chat` 的两处超时分支抛 `OpponentTimeoutError`(`src/factory/opponents.py`),它同时是 `OpponentApiError` 与 `RoleBackendTimeoutError`;驱动在通用异常之前先接后者,归 `role_backend_timeout`,轨迹源按 `max_retries_per_episode` 整条重跑,有上限。站内 vLLM 对手与外部 API 共用 `post_chat`,一并归到这里。训练位策略超时时它仍是 `OpponentApiError`,策略上下文照旧译成延后 | `EndSession` 的 `reason` |
+| 外部 API 对手返回非 200 [已落地] | T1 或 T2,协议上不区分 | 不改代码,用测试钉住:后端抛 `OpponentApiError`,归 `role_backend_failure`;轨迹源不按条重跑(`role_backend_failure` 不在它的瞬态集合里),抛 `RolloutFailedError`,策略上下文译成 `RolloutDeferredError`,指令保持 `pending` 按退避重试;续训次数到 `max_resume_attempts` 后升 T3。代价:限流之类的瞬态 5xx 也走这条,整次训练重来而不是单条重跑 | `EndSession(role_backend_failure)` |
 | 外部 API 对手缺凭证 [已落地] | 配置错误,装配期 | 不进会话:factory 的 `--interact` 装配期解析凭证,缺则退出码 2,异常只报环境变量名 | 一行 `factory: error: ...` |
 
 只读观测手段。
@@ -617,7 +617,7 @@ interact 会话前的准备 [已落地]。下表是派发器与组合根在起�
 | 跨包 | 骨架桩、MindTrainer interact 轨迹源 | 同上 |
 | 单元 | `Scenario.opponent_script` 的读写兼容、按序消耗与循环 [已落地] | 无 |
 | 单元 | 点名与生成两路来源:互斥、成对、`purpose` 校验、生成后回写、重跑逐字节相同 [已落地] | 临时仓库 |
-| 回环集成 | 三类对手驱动各一条;外部 API 客户端的成功、超时、非 200、缺凭证只报变量名 [已落地] | 端口 0 的本机服务端,本地 HTTP 替身 |
+| 回环集成 | 三类对手驱动各一条;外部 API 客户端的成功、超时、非 200、缺凭证只报变量名;真实服务端对着慢桩收尾为 `role_backend_timeout`、对着 500 桩收尾为 `role_backend_failure` [已落地] | 端口 0 的本机服务端,本地 HTTP 替身 |
 
 | 测试文件 | 用例数 | 状态 |
 |---|---|---|
@@ -639,7 +639,7 @@ interact 会话前的准备 [已落地]。下表是派发器与组合根在起�
 | `tests/test_realtime_runner_on_turn.py` | 5 | [已落地] |
 | `tests/test_realtime_driver.py` | 6 | [已落地] |
 | `tests/test_realtime_servicer_e2e.py` | 7 | [已落地] |
-| `tests/test_realtime_servicer_limits.py` | 16 | [已落地] |
+| `tests/test_realtime_servicer_limits.py` | 18 | [已落地] |
 | `tests/test_realtime_client.py` | 2 | [已落地] |
 | `tests/test_realtime_client_order.py` | 5 | [已落地] |
 | `tests/test_realtime_client_abort.py` | 7 | [已落地] |
@@ -653,7 +653,7 @@ interact 会话前的准备 [已落地]。下表是派发器与组合根在起�
 
 ## 10. 现状、局限与未核实项
 
-结论:批量与实时两条路径、激活轨迹都已落地并有测试;外部生成后端与按目标维度生成是空白;场景二接通需要的两路来源与对手三驱动也已落地并有测试;后端单次调用超时改传 15 秒、外部 API 对手超时与非 200 的重跑口径仍是 [计划中]。
+结论:批量与实时两条路径、激活轨迹都已落地并有测试;外部生成后端与按目标维度生成是空白;场景二接通需要的两路来源与对手三驱动也已落地并有测试;外部 API 对手的单次调用超时已归 `role_backend_timeout`(整条重跑),非 200 的处理链已有测试钉住 [已落地];后端单次调用超时改传 15 秒仍是 [计划中]。
 
 | 能力 | 状态 | 说明 |
 |---|---|---|

@@ -17,6 +17,7 @@ from factory.opponents import (
     ModelRefError,
     OpponentApiError,
     OpponentCredentialError,
+    OpponentTimeoutError,
     chat_messages,
     driver_for,
     post_chat,
@@ -24,6 +25,7 @@ from factory.opponents import (
 )
 from factory.sombench_runner import EXPORT_FORMAT
 from simulator.datamodel import Persona, RoleBinding, RoleSlot, Scenario, TurnRecord
+from simulator.realtime.backend_timeout import RoleBackendTimeoutError
 
 SECRET = "sk-opponent-must-not-leak"
 
@@ -371,6 +373,34 @@ def test_a_slow_server_times_out_as_an_api_error(stub):
     with pytest.raises(OpponentApiError, match="timed out") as info:
         _respond(_backend(stub.url, timeout_s=0.2))
     assert time.monotonic() - started < 0.9 and SECRET not in str(info.value)
+
+
+def test_a_slow_server_raises_the_timeout_error_that_is_both_an_api_error_and_a_role_backend_timeout(stub):
+    """服务端驱动按 RoleBackendTimeoutError 归 role_backend_timeout(T1,整条重跑);
+    策略上下文按 OpponentApiError 把训练位的超时译成延后。一个类要同时是两者。"""
+    stub.script.append((*_ok(), {}, 1.0))
+    with pytest.raises(OpponentTimeoutError, match="timed out") as info:
+        _respond(_backend(stub.url, timeout_s=0.2))
+    assert isinstance(info.value, OpponentApiError) and isinstance(info.value, RoleBackendTimeoutError)
+    rendered = "".join(traceback.format_exception(info.value))
+    assert SECRET not in str(info.value) and SECRET not in rendered
+    assert info.value.__cause__ is None and info.value.__suppress_context__
+
+
+def test_post_chat_timeout_scrubs_the_key_from_a_label_that_carries_it(stub):
+    stub.script.append((*_ok(), {}, 1.0))
+    with pytest.raises(OpponentTimeoutError) as info:
+        post_chat(stub.url, "m1", SECRET, _msgs(), timeout_s=0.2, host_label=f"host-{SECRET}")
+    assert SECRET not in str(info.value) and "***" in str(info.value)
+
+
+@pytest.mark.parametrize("script", [(500, b"x"), (429, b"slow down"), (200, b"not json")])
+def test_a_non_200_or_a_malformed_reply_is_not_a_timeout(stub, script):
+    """非 200 不归超时:它走 role_backend_failure,轨迹源不按条重跑(分不出 T1 与 T2)。"""
+    stub.script.append(script)
+    with pytest.raises(OpponentApiError) as info:
+        _respond(_backend(stub.url))
+    assert not isinstance(info.value, (OpponentTimeoutError, RoleBackendTimeoutError))
 
 
 def test_a_refused_connection_is_an_api_error():

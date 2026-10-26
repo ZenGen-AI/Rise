@@ -798,6 +798,105 @@ def test_an_opponent_that_cannot_be_reached_defers_the_directive_instead_of_kill
     assert fake_serve.trace == ["enter", "exit"]                      # 服务照常停了、租约照常放了
 
 
+class ScriptedChatStub:
+    """外部 API 对手的本机桩:按到达顺序取 script 里的下一项((状态码, 延迟秒数)),用完后回 200。
+    正常回复循环用 CYCLE,所以训练位与对手位的发言口径与 ChatStub 一致。"""
+
+    def __init__(self, script) -> None:
+        self.script = list(script)
+        self.count = 0
+        self._lock = threading.Lock()
+        stub = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802
+                self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                with stub._lock:
+                    stub.count += 1
+                    status, delay = stub.script.pop(0) if stub.script else (200, 0.0)
+                time.sleep(delay)
+                raw = json.dumps({"choices": [{"message": {"role": "assistant", "content": "好的"}}]}).encode()
+                try:
+                    self.send_response(status)
+                    self.send_header("Content-Length", str(len(raw)))
+                    self.end_headers()
+                    self.wfile.write(raw)
+                except OSError:
+                    pass          # 客户端已超时离开
+
+            def log_message(self, *args):
+                pass
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._server.daemon_threads = True
+        self.base_url = f"http://127.0.0.1:{self._server.server_address[1]}"
+        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+
+    def close(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+
+
+@pytest.fixture
+def external_api(monkeypatch):
+    """造一个外部 API 桩,并把对手的单次 HTTP 上限从 25 秒收到 0.3 秒,让超时用例几百毫秒就走完。"""
+    import factory.interact_policy as ip
+
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+    monkeypatch.setenv("no_proxy", "127.0.0.1")
+    monkeypatch.setattr(ip, "OPPONENT_TIMEOUT_S", 0.3)
+    made: list[ScriptedChatStub] = []
+
+    def _make(script):
+        server = ScriptedChatStub(script)
+        made.append(server)
+        return server
+
+    yield _make
+    for server in made:
+        server.close()
+
+
+def _use_external_opponent(world, server) -> None:
+    write_config(world, training_defaults_file(), "training-defaults",
+                 _interact_defaults(base_url=server.base_url, model="ext-model", api_key_env=OPP_KEY_ENV),
+                 "test: scripted external opponent")
+    _write_directive(world, bindings=_external_opponent_binding())
+
+
+def test_an_external_opponent_that_times_out_once_is_retried_and_the_directive_executes(
+        world, tmp_path, stub, fake_serve, external_api):
+    """对手位外部 API 第一次调用超时 -> 服务端 role_backend_timeout(T1) -> 轨迹源整条重跑 -> 第二次正常。
+    指令照常 executed,episode 数是预期的那几条(超时的半截 episode 不进树)。"""
+    server = external_api([(200, 5.0)])                       # 第一次回应拖得比 0.3 秒上限久,之后都正常
+    _use_external_opponent(world, server)
+    book = _ticks(world, tmp_path, **{OPP_KEY_ENV: OPP_KEY})
+    assert _read(world, "directive").status == "executed"
+    assert _read(world, "training_run").status == "executed"
+    assert book.streak(DISPATCH_KEY) == 0
+    expected = 1 * 1 * 2                                       # grpo_steps * groups_per_step * group_size
+    assert _wait_until(lambda: len(_episode_ids(world)) >= expected)
+    assert len(_episode_ids(world)) == expected
+    assert server.count > expected                             # 比正常多一次:那次超时的调用
+
+
+def test_an_external_opponent_answering_500_defers_the_directive_with_role_backend_failure(
+        world, tmp_path, stub, fake_serve, external_api, caplog):
+    """非 200 不重跑单条(协议上分不出 T1 与 T2):RolloutFailedError -> RolloutDeferredError,
+    指令保持 pending 退避,延后原因点名 role_backend_failure。续训次数耗尽后升 T3(见上面那条)。"""
+    import logging
+
+    server = external_api([(500, 0.0)] * 50)
+    _use_external_opponent(world, server)
+    with caplog.at_level(logging.WARNING, logger="controlplane.daemon"):
+        book = _ticks(world, tmp_path, **{OPP_KEY_ENV: OPP_KEY})
+    assert _read(world, "directive").status == "pending"
+    assert _read(world, "training_run").status == "pending"
+    assert book.streak(DISPATCH_KEY) == 1
+    assert "RolloutDeferredError" in caplog.text and "role_backend_failure" in caplog.text
+    assert OPP_KEY not in caplog.text and server.base_url not in caplog.text
+
+
 def test_a_policy_that_cannot_reach_its_service_defers_the_directive(world, tmp_path, stub, monkeypatch):
     """训练位自己的 respond 抛 OpponentApiError(轨迹源不包装策略异常),同样不该逃出去。"""
     import factory.interact_policy as ip
