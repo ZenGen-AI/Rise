@@ -279,6 +279,8 @@ class MemoryBackend(Protocol):
 
 服务端每条会话一个 `SessionResources`，由后端工厂返回并交给驱动器：
 
+这三个类型在新模块 `simulator/realtime/resources.py`：`SessionInfo`、`SessionResources`、`SessionClosingError`。
+
 ```python
 class SessionResources:
     backends: dict[str, ModelBackend]      # 角色位 -> 已套 TimeoutBackend 的后端
@@ -291,7 +293,7 @@ class SessionResources:
 - 准入：`CreateSession` 的处理在运行时的一把锁里做完三件事：检查“活动数加滞留数小于 `max_workers`”且 `episode_id` 没有活动会话，登记会话，然后才调工厂（M19）。工厂在锁外跑，失败时在同一把锁里撤销登记。
 - `TimeoutBackend` 改为登记在途线程：`respond` 开始时加入 `SessionResources` 的在途集合，结束时移出；超时只是调用方放弃等待，线程本身仍在集合里。
 - 驱动器进入终态（`CLOSED` 或 `FAILED`，含断开）后，由 servicer 在流结束的 `finally` 里按顺序调 `quiesce`、`join(timeout_s=60)`、`close`。
-- `join` 超时：**不 close、不删**。资源对象移交给运行时的滞留表（`AgentRuntime.lingering`），并继续占住一个会话名额：servicer 的准入检查“活动会话数加滞留数小于 `max_workers`”不过就拒绝 `CreateSession`，终止原因 `role_backend_unavailable`（T1，客户端按条重跑）。滞留表每 60 秒重试一次 `join(0)`，成功后 close 并删目录。
+- `join` 超时：**不 close、不删**。资源对象移交给 servicer 的滞留表（`EnvironmentServicer` 持有，准入检查就在 servicer 里做，回环服务端不经组合根就能测），并继续占住一个会话名额：servicer 的准入检查“活动会话数加滞留数小于 `max_workers`”不过就拒绝 `CreateSession`，终止原因 `role_backend_unavailable`（T1，客户端按条重跑）。滞留表每 60 秒重试一次 `join(0)`，成功后 close 并删目录。
 - 清扫：`run` 与 `reconcile` 取到仓库排他锁之后、构造实时服务端之前，删掉 `runs/` 下所有目录。此时本进程还没有会话，别的进程被仓库锁挡在外面，根目录又只属于这个仓库（5.3 节），所以没有在途副本会被误删。运行中只删滞留表 join 成功的目录，不扫目录。
 - 在途集合的操作持一把锁；`join` 不持锁等待。
 
@@ -304,14 +306,15 @@ class SessionResources:
 | 预算 | 现值 | 改后 |
 |---|---|---|
 | 客户端每轮等待（流 deadline 按轮折算） | 30 秒 | 90 秒 |
+| 服务端等客户端提交一轮（`turn_timeout_s`，`--interact` 传入） | 30 秒 | 90 秒 |
 | 服务端后端调用上限 | 60 秒 | 60 秒 |
 | 对手 HTTP 上限 | 25 秒 | 25 秒 |
 | 记忆单次调用上限（抽取、嵌入各一次） | 无 | 8 秒 |
 | 训练位策略 HTTP 上限 | 120 秒 | 60 秒 |
 
-一轮对手发言的最坏耗时是 recall（本地）加 HTTP 25 秒加 remember 8 秒加嵌入 8 秒，约 41 秒，低于服务端 60 秒；训练位一轮的最坏耗时是 HTTP 60 秒加记忆 16 秒，低于 90 秒。
+一轮对手发言的最坏耗时是 recall（本地）加 HTTP 25 秒加 remember 8 秒加嵌入 8 秒，约 41 秒，低于服务端 60 秒；训练位一轮的最坏耗时是 HTTP 60 秒加记忆 16 秒，约 76 秒，低于服务端等提交的 90 秒。两个 90 秒方向相反、互不嵌套：服务端等的是客户端的一次提交，客户端等的是相邻两条服务端消息之间的间隔，每条对手发言都是一条消息，所以一轮里有几个对手都不叠加。
 
-现在客户端只有整条流的 deadline（F22），没有逐轮限时。改法：客户端收消息的 `_next_msg` 加逐轮等待上限 90 秒（在接收线程里用带超时的队列取消息），超时视作 `timeout`（T1，按条重跑）并 abort 会话；整条流的 deadline 仍按 `max_turns × 90` 折算当兜底。
+现在客户端只有整条流的 deadline（F22），没有逐轮限时。改法：客户端收消息的 `_next_msg` 加等待上限 90 秒，计的是相邻两条服务端消息之间的间隔（在接收线程里用带超时的队列取消息），超时视作 `timeout`（T1，按条重跑）并 abort 会话；整条流的 deadline 仍按 `max_turns × 90` 折算当兜底。
 
 记忆的 8 秒是**一轮里记忆调用的总预算**，不是单次 HTTP 上限：Starling 的 `timeout_ms` 配 4000、`max_retries` 配 0（两者进运行时身份），一轮至多一次抽取加一次嵌入批次；对方一轮只说一句，所以 `remember` 一次、`embed_pending` 嵌入一批（S16），不处理积压。训练副本每轮都嵌入、从不积压；部署库若有积压（上次失败留下的），在 episode 开始前先嵌完再开始，这段时间不计入任何一轮。SQLite 的 `busy_timeout` 是 5 秒，但每个库只有一个写者（M4、M20），不会等锁。
 
@@ -424,6 +427,13 @@ class SessionResources:
 | 对手位 `MemoryFailureError`，`transient` 为真 | `role_memory_unavailable`，T1 | 驱动器新增分支；轨迹源与部署按条重跑（加进两边的瞬态集合） |
 | 对手位 `MemoryFailureError`，`transient` 为假 | `role_memory_failure`，T2 | 驱动器新增分支；轨迹源不重跑；策略上下文把它加进确定性集合，指令判 `failed` |
 
+跨层传递：`simulator` 与 `mindtrainer` 都不导入 `actio`，所以它们不认 `actio.MemoryFailureError`。接缝与现有的对手 API 异常同一做法：
+
+- `simulator/realtime/backend_timeout.py` 新增两个基类 `RoleMemoryUnavailableError`（瞬态）与 `RoleMemoryFailureError`（确定性），驱动器按它们分出两个终止原因。
+- 组合根造的每个 Actio 实例（训练位与对手位）外面套一层转换后端：接住 `actio.MemoryFailureError`，按 `transient` 改抛 `factory` 里继承了上面两个基类之一的异常。`actio` 的依赖不变。
+- 训练位的轨迹源接的是同样两个 `simulator` 基类，所以 `mindtrainer` 也不需要导入 `actio`。
+- MindAgent 自己造部署实例、本来就导入 `actio`，直接接 `actio.MemoryFailureError`；对手位的记忆失败经 `EndSession` 的终止原因字符串到达，按字符串分类。
+
 `MemoryFailureError.transient` 由适配器按穷举映射给出（M21）：
 
 | 来源 | `transient` |
@@ -435,7 +445,7 @@ class SessionResources:
 | 训练位 `MemoryFailureError`，瞬态类别 | 按条重跑 | 轨迹源在 `_attempt` 里接住，译成瞬态 `_AttemptFailed`，会话 abort |
 | 训练位 `MemoryFailureError`，其余 | 策略异常，T2 | 会话 abort；策略上下文译成 `DirectiveFailedError`，不延后 |
 | 抽取失败（`failed` 为真） | 不分类 | 计数进轨迹；这一轮不留记忆 |
-| 准入时活动加滞留会话数达上限 | `role_backend_unavailable`，T1 | 客户端按条重跑；日志每分钟报滞留数 |
+| 准入时活动加滞留会话数达上限 | `role_backend_unavailable`，T1 | 客户端按条重跑；日志每分钟报滞留数。现有两个客户端（`trajectory_source.py:253-254`、`deployment.py:93-94`）对创建被拒一律判不可重跑，要改成按终止原因查各自的瞬态集合，否则这条 T1 实际不会重跑 |
 | `join` 超时 | 不分类 | 资源进滞留表，不关不删，占一个会话名额（6.2 节） |
 | 副本删除失败 | 不分类 | 记日志；清扫兜底 |
 
@@ -501,7 +511,11 @@ class SessionResources:
 | `TimeoutBackend` | 构造时收 `SessionResources`，登记在途线程 | 2 |
 | `EnvironmentServicer` | 准入检查、终态收尾、滞留表 | 2 |
 | `SessionDriver` | 新增 `role_memory_unavailable`、`role_memory_failure` 分支 | 2 |
-| `EnvironmentServiceClient` | 逐轮等待上限 | 2 |
+| `EnvironmentServiceClient` | 相邻消息等待上限 | 2 |
+| `simulator.realtime.resources` | 新模块：`SessionInfo`、`SessionResources`、`SessionClosingError` | 2 |
+| `simulator.realtime.backend_timeout` | 新增 `RoleMemoryUnavailableError`、`RoleMemoryFailureError` 两个基类 | 2 |
+| `factory` 的 interact 装配 | `turn_timeout_s` 改传 90 秒；每个 Actio 实例外套记忆异常转换后端 | 3 |
+| `InteractTrajectorySource`、`mindagent.deployment` | 创建被拒按终止原因查瞬态集合，不再一律不可重跑 | 3、7 |
 | `VllmPolicy`、`ExternalApiBackend` | 新增 `respond_guided` | 2 |
 | `InteractTrajectorySource` | `policy` 改为 `policy_for_rollout`；三元组上行 | 3 |
 | `make_policy_factory` | 返回 `policy_for_rollout` 工厂 | 3 |
