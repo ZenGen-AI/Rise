@@ -340,6 +340,7 @@ def make_mindtrainer_dispatcher(
             if client_factory is None or (policy is None and policy_factory is None):
                 raise DirectiveFailedError(
                     f"directive {run_id}: interact mode needs a client_factory and a policy or policy_factory"
+                    "; start factory run or factory reconcile with --interact to run interact directives"
                 )
             _synthesize_missing(store, run_id, cfg, directive, data_producer)
             # 清单缺失在进策略上下文(起 vLLM、占租约)之前就判

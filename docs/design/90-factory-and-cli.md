@@ -453,7 +453,7 @@ TypeScript 命令行:`rismforge <review|approve|reject|confirm|status> [id] [rea
 | 落盘钩子 | 会话结束时由服务端的 `on_session_closed` 把 episode 写进产物树。轨迹源不写 episode,只在 metadata 里记 id |
 | 对手位 | 组合根按角色位选驱动:固定对话、站内 vLLM 上的对手模型、外部 OpenAI 兼容 API。模拟器本身只认后端协议 |
 | 运行时复用 | 已因 `--enable agent` 构造了 `AgentRuntime` 就复用同一个,不起第二个服务端;运行时登记收尾函数,与处理器同一机制逆序收尾。共用的影响面不止落盘钩子:训练登记表按会话记录该会话属于哪个 run,落盘钩子只处理训练登记过的会话,把 episode 写进对应 run;部署会话没有训练登记,仍由 MindAgent 驱动器自己落盘,两边的 episode 不混写。判错的代价是部署 episode 被误写进 interact 的数据,或同一条 episode 被两边各写一次 [已落地] |
-| 不打开时 | 不注入这两样,interact 指令仍判 `failed`(T2)。设计要原因点名 `--interact`,还没做 [计划中],现在的原因文字是 `interact mode needs a client_factory and a policy or policy_factory`。`--enable agent` 构造过运行时也不改变这一点 |
+| 不打开时 [已落地] | 不注入这两样,interact 指令仍判 `failed`(T2),原因点名 `--interact`:`interact mode needs a client_factory and a policy or policy_factory; start factory run or factory reconcile with --interact to run interact directives`。这个无参派发器与冻结入口用的是同一个,两边写出的文字相同。`--enable agent` 构造过运行时也不改变这一点 |
 | 与 `--evaluator someval` | `someval` 要求 `--executor roll`,而 `--interact` 与 `--executor roll` 互斥,所以两者无法同用 |
 
 装配期的十一条拒绝项。前十条在 `--interact` 打开时检查(第 10 条除外,见表),第 11 条在没传 `--interact` 时检查。检查全部在第一个 tick 之前,出错都是退出码 2、一行错误、树里不写东西:
@@ -622,7 +622,7 @@ factory 是最后一个工作包,前八个全部落地后才能施工。
 | 点名的情境 `purpose` 不是 `training` | 装配错误 | 同上 | 同上 |
 | 点名的情境与人格只写了一半 | 装配错误 | 同上 | 同上 |
 | 点名的情境或人格不在树里 | 装配错误 | 同上 | 同上 |
-| 没传 `--interact` 却有 interact 指令 | T2 | 指令判 `failed`,原因点名 `--interact` 还没做,现在的原因是 `interact mode needs a client_factory and a policy or policy_factory` | 指令 `payload["failure"]` [计划中] |
+| 没传 `--interact` 却有 interact 指令 | T2 | 指令判 `failed`,原因点名 `--interact`:`interact mode needs a client_factory and a policy or policy_factory; start factory run or factory reconcile with --interact to run interact directives` | 指令 `payload["failure"]` [已落地] |
 | 规划桥接失败 | T3 | 决策 `failed`,不写新指令(R18) | 决策与失败记录,带桥接日志的 `log_refs` [已落地] |
 | 轮次产物读不出 | T3 | 轮次处理器重写为 `failed`,循环继续(R19) | 轮次产物与失败记录 [已落地] |
 | 轮次中途瞬态异常或被杀 | T1 | 轮次留在 `pending`,守护进程退出;重启后的 tick 复用已落盘的 episode 续上(R19) | 已落盘的 episode [已落地] |
@@ -664,7 +664,7 @@ factory 是最后一个工作包,前八个全部落地后才能施工。
 | 处理器构造 | 六个构造器、证据开关单一来源、Interact 流超时 | 罐头后端 | `tests/test_factory_handlers.py` | 18 [已落地] |
 | 端到端 | 完整闭环、R5、规划等配方入库门、R18、R19、MindAgent 链 | `HeuristicBackend`、罐头后端 | `tests/test_factory_e2e_loop.py` | 10 [已落地] |
 | 跨工作包 | 共享用例表、分层规则、run 编号数值序 | 无 | `tests/test_factory_cross_plan.py`、`tests/test_factory_run_order.py` | 31、3 [已落地] |
-| `--interact` 装配 | 十一条拒绝项:第 3、9 条合用一组测试,第 10 条没有装配测试(钉住的是派发器的 `ValueError`),其余八条各有测试;打开后派发器带上实时客户端与策略工厂;真推理的 rollout 失败走延后通道、一直失败升 T3;不打开时 interact 指令的失败原因点名开关还没做 [计划中] | 假 serve、本机 HTTP 桩 | `tests/test_factory_interact_wire.py` | 67 [已落地] |
+| `--interact` 装配 | 十一条拒绝项:第 3、9 条合用一组测试,第 10 条没有装配测试(钉住的是派发器的 `ValueError`),其余八条各有测试;打开后派发器带上实时客户端与策略工厂;真推理的 rollout 失败走延后通道、一直失败升 T3;不打开时 interact 指令的失败原因点名开关;收尾时服务停不下来判 T2 | 假 serve、本机 HTTP 桩 | `tests/test_factory_interact_wire.py` | 72 [已落地] |
 | `--interact` 端到端 | `factory reconcile --once --interact` 走到候选 `pending_review`,episode 都在产物树里 | 假 vLLM(本地 HTTP 回固定文本)、mock 执行器 | `tests/test_factory_interact_e2e.py` | 2 [已落地] |
 
 上表的 pytest 用例数由 `pytest --collect-only -q` 逐个文件实测,按参数化展开计;TypeScript 的两个数按测试文件的 `it(` 计,未跑 vitest 收集。工作包 9 另有一个前置核对脚本 `scripts/check_factory_assumptions.py`:它逐行核对各包的符号名与签名,本次运行有 20 行 `OK`、1 行 `MISMATCH`,缺的是 `SchedulerConfig` 上新增的 `strategy_experience` 字段。
@@ -684,7 +684,7 @@ factory 是最后一个工作包,前八个全部落地后才能施工。
 | 完整闭环与跨工作包核对 | [已落地] | 任务 108 至 109;端到端只用 mock 证据、`HeuristicBackend` 与罐头后端 |
 | 真实 ROLL LoRA SFT(经远端计算层) | [已落地] | 由 `--executor roll` 装配,暂不能与 `--enable` 同用;真机只跑通单段两步 |
 | 真实 SoMEval 与 `import-sombench` | [已落地] | 由 `--evaluator someval` 装配,必须同时给 `--executor roll`;真机只验证到预测阶段 |
-| `--interact`:interact 指令在真实入口跑通 | [已落地] | 真推理加 mock 训练,与 `--executor roll` 互斥;装配期十一条拒绝项。不打开时 interact 指令的失败原因点名该开关还没做 [计划中] |
+| `--interact`:interact 指令在真实入口跑通 | [已落地] | 真推理加 mock 训练,与 `--executor roll` 互斥;装配期十一条拒绝项。不打开时 interact 指令的失败原因点名该开关 [已落地] |
 | 真实 GRPO 加 OPD 训练与真实 judge | [推迟] | 仍用 mock |
 
 | 局限 | 影响 | 缓解 |

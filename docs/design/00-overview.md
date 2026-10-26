@@ -451,7 +451,7 @@ checkpoint 等大体量内容不进 git,只存引用 `{uri, sha256, size_bytes, 
 
 今天走得到哪:`factory run` 与 `factory reconcile` 加 `--interact` 后,interact 指令能从真实入口走到候选 `pending_review`,episode 落进该 run 的目录;端到端测试 `tests/test_factory_interact_e2e.py` 用本机 HTTP 替身代替 vLLM,真机没跑过。不带 `--interact` 的入口(含 `scripts/run_controlplane.py`)不提供实时客户端与策略,interact 指令判 `failed` 并写明原因。调度侧 `allow_interact` 默认关;打开且 `training_defaults.yaml` 写了 `interact` 段后,规划的 `new` 也能写出 interact 指令,缺段仍判违规,clone 已有的 interact 配方一直可行。真实 judge 归因 [推迟],入口里 judge 模式的指令判 `failed`。服务端经 `on_session_closed` 交出 episode,`--interact` 下由 `AgentRuntime` 的落盘钩子写进对应 run。已知风险:对手固定时,被训模型可能学到专门对付这个对手的套路,诊断基准与配方战绩回看是延迟发现手段。
 
-接通的内容 [已落地]:装配开关 `--interact` 与 `--executor roll` 互斥。训练位由加载了本轮基座的真实模型经远端计算层上的 vLLM 说话,对手位有三种驱动:固定对话(角色位写 `driver: scripted` 时)、远端 vLLM 上的对手模型、外部 OpenAI 兼容 API,默认驱动按 `model_backend` 取。训练仍由 mock 执行器完成,要证明的是真模型能进实时会话、发言能落盘、奖励管线对真实发言成立,不是模型因此变好;目前只用本机 HTTP 替身代替 vLLM 验证了接线与落盘,真机没跑过,奖励管线没对真实发言验证。训练记录的 `policy_backend` 块如实写明谁在说话。还没做的 [计划中]:不开 `--interact` 时 interact 指令的失败原因文字点名该开关(现在的原因是 `interact mode needs a client_factory and a policy or policy_factory`);真机上的单轮延迟与两个 LoRA 的开销未测,见风险表第 21、22 项。
+接通的内容 [已落地]:装配开关 `--interact` 与 `--executor roll` 互斥。训练位由加载了本轮基座的真实模型经远端计算层上的 vLLM 说话,对手位有三种驱动:固定对话(角色位写 `driver: scripted` 时)、远端 vLLM 上的对手模型、外部 OpenAI 兼容 API,默认驱动按 `model_backend` 取。训练仍由 mock 执行器完成,要证明的是真模型能进实时会话、发言能落盘、奖励管线对真实发言成立,不是模型因此变好;目前只用本机 HTTP 替身代替 vLLM 验证了接线与落盘,真机没跑过,奖励管线没对真实发言验证。训练记录的 `policy_backend` 块如实写明谁在说话。不开 `--interact` 时 interact 指令的失败原因文字点名该开关 [已落地](原因是 `interact mode needs a client_factory and a policy or policy_factory; start factory run or factory reconcile with --interact to run interact directives`);还没做的 [计划中]:真机上的单轮延迟与两个 LoRA 的开销未测,见风险表第 21、22 项。
 
 **场景三:不动参数的智能体演化。技能与记忆增量**
 

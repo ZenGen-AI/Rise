@@ -476,7 +476,7 @@ policy_factory: Callable[[str, TrainingConfig], AbstractContextManager[ModelBack
 | 工厂拿不到的 | `resolve_action` 算出的 `base_model_id` 不进指令载荷;需要时由引用反查模型产物 |
 | 旧参数 | 只给 `policy=` 时行为与加这个参数之前相同;两者同给是调用方的错,构造时 `ValueError` |
 | 实现方 | 组合根(`src/factory/interact_policy.py`)构造并注入;`mindtrainer` 只认这个可调用对象 |
-| 都没注入 | interact 指令判 `failed`(T2),原因是 `interact mode needs a client_factory and a policy or policy_factory`;原因文字点名 `--interact` 还没做 [计划中] |
+| 都没注入 [已落地] | interact 指令判 `failed`(T2),原因是 `interact mode needs a client_factory and a policy or policy_factory; start factory run or factory reconcile with --interact to run interact directives`:原文之后追加一句点名 `--interact`,告诉操作者该用哪个开关重启。冻结入口(`mindtrainer.wire`)与 factory 不带 `--interact` 的路径用的是同一个无参派发器,两边写出的文字相同,逐字节相同的保证(G1)不受影响 |
 
 ### 5.2 一个 vLLM 进程,最多两个 LoRA [已落地]
 
@@ -573,7 +573,7 @@ vLLM 服务按指令起停,不常驻。一条 interact 指令派发时起服务,
 
 | 步 | 谁 | 做什么 | 写什么 |
 |---|---|---|---|
-| 1 | 派发器 | 读并校验配置,构造归因后端;interact 检查 `client_factory` 与 `policy`;batch 检查清单在场且 id 对得上。interact 改为 `policy` 与 `policy_factory` 至少给一个,都没有则判 `failed`;原因文字现在是 `interact mode needs a client_factory and a policy or policy_factory`,尚未点名 `--interact` [计划中] | 失败时不写记录,指令判 `failed` |
+| 1 | 派发器 | 读并校验配置,构造归因后端;interact 检查 `client_factory` 与 `policy`;batch 检查清单在场且 id 对得上。interact 改为 `policy` 与 `policy_factory` 至少给一个,都没有则判 `failed`;原因文字是 `interact mode needs a client_factory and a policy or policy_factory; start factory run or factory reconcile with --interact to run interact directives`,点名了 `--interact` [已落地] | 失败时不写记录,指令判 `failed` |
 | 1a | 派发器 | 缺清单且指令带 `data_spec` 时先合成,插在客户端检查之后、读清单之前:先严格解析 `data_spec`(带了就解析,即便清单都在场),再检查不合成的其余阶段的清单在场,再交叉校验,最后调生产器。interact 指令只合成 `sft`。已在场的清单不重做 | 失败时不写记录,指令判 `failed` |
 | 1b | 派发器 | interact:`policy_factory` 按 run id 与训练配置构造策略,起 vLLM 服务并进入它的上下文,第 2 到 8 步都在其中;租约被占或起服务失败抛 `DeferredError` [已落地] | 失败时不写记录 |
 | 2 | 编排器 | 读训练记录;已有记录时先比对存点的后端类型(不一致抛 `NeedsHumanError`,即便记录已是 `executed`),再交给 `decide_resume`;`noop` 直接返回,`escalate` 抛 `NeedsHumanError` | 无 |

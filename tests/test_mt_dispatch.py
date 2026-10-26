@@ -771,7 +771,9 @@ def test_interact_with_neither_a_policy_nor_a_factory_fails_with_the_new_message
     reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(client_factory=env.client_factory))
     env_d = store.read_product(f"{run_dir(RUN)}/directive.yaml")
     assert env_d.status == "failed" and env_d.payload["failure"]["category"] == "T2"
-    assert "interact mode needs a client_factory and a policy or policy_factory" in env_d.payload["failure"]["reason"]
+    reason = env_d.payload["failure"]["reason"]
+    assert "interact mode needs a client_factory and a policy or policy_factory" in reason
+    assert "--interact" in reason          # 原因点名开关,操作者不用去翻代码
 
 
 def test_a_policy_factory_without_a_client_factory_still_fails_the_directive(store):

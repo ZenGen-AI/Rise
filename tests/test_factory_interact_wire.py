@@ -547,6 +547,18 @@ def test_a_deferred_error_leaves_the_directive_pending(world, tmp_path, fake_ser
     assert not world.exists(f"{run_dir(RUN)}/training_run.yaml")
 
 
+def test_without_the_interact_switch_an_interact_directive_fails_and_names_the_switch(world, tmp_path, fake_serve):
+    """不带 --interact 时装配出的是无参派发器(与冻结入口同一个),interact 指令判 failed(T2),
+    原因点名开关;没起过服务。"""
+    _write_directive(world)
+    _run(world, tmp_path, FactoryOptions())
+    directive = _read(world, "directive")
+    assert directive.status == "failed" and directive.payload["failure"]["category"] == "T2"
+    reason = directive.payload["failure"]["reason"]
+    assert "--interact" in reason and "factory run" in reason and "factory reconcile" in reason
+    assert fake_serve.calls == []
+
+
 STUCK = "job serve-job-a1 is still running after stop; the GPU lease was kept"
 
 
