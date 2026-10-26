@@ -21,7 +21,6 @@ from pathlib import Path
 
 import yaml
 
-from compute.errors import ComputeError
 from compute.service import ServiceHandle, serve as real_serve
 from compute.tunnel import http_probe, tunnel_factory_for
 from compute.sizing import weights_gib_from_index

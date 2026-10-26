@@ -495,6 +495,15 @@ def test_a_content_length_of_non_ascii_digits_is_an_api_error_not_a_value_error(
     assert SECRET not in str(info.value)
 
 
+def test_a_content_length_too_long_for_int_is_an_api_error_not_a_value_error():
+    """全是 ASCII 数字但超过 int() 的位数上限(CPython 默认 4300 位):int() 抛 ValueError。
+    http.client 允许 64 KiB 的头行,所以对端发得出来;调用方拿到的仍应是 OpponentApiError 一族。"""
+    url = _raw_peer(b"HTTP/1.1 200 OK\r\nContent-Length: " + b"9" * 5000 + b"\r\n\r\nxx")
+    with pytest.raises(OpponentApiError) as info:
+        _respond(_backend(url))
+    assert SECRET not in str(info.value)
+
+
 def test_a_slow_server_times_out_as_an_api_error(stub):
     stub.script.append((*_ok(), {}, 1.0))
     started = time.monotonic()

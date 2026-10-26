@@ -256,9 +256,11 @@ def post_chat(
         raise fail(f"request to {host_label} failed ({type(exc).__name__})") from None
     if status != 200:
         raise fail_status(status)
-    # isascii():http.client 把头字节按 Latin-1 解码,0xB2/0xB3/0xB9 变成 ²³¹,str.isdigit() 对它们为真而 int() 不认
+    # isascii():http.client 把头字节按 Latin-1 解码,0xB2/0xB3/0xB9 变成 ²³¹,str.isdigit() 对它们为真而 int() 不认。
+    # 位数上限:比回复上限还长的数字串不必转成 int 就知道体被截短了,也避开 int() 的 4300 位上限抛 ValueError
     if (declared is not None and declared.isascii() and declared.isdigit()
-            and len(raw) <= MAX_REPLY_BYTES and len(raw) < int(declared)):
+            and len(raw) <= MAX_REPLY_BYTES
+            and (len(declared) > len(str(MAX_REPLY_BYTES)) or len(raw) < int(declared))):
         # read(amt) 遇到比 Content-Length 短的体不抛 IncompleteRead,只是少给:对端中途断开,不是回复形状不对
         raise fail(f"the reply from {host_label} was cut off before its declared length", OpponentUnavailableError)
     if len(raw) > MAX_REPLY_BYTES:

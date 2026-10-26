@@ -205,7 +205,7 @@ MindTrainer 分两层:入口与编排一层决定"从哪跑、跑不跑",模式�
 依赖方向规则:
 
 - `mindtrainer` 可以导入 `controlplane` 与 `simulator`。复用 `Episode`、`RoleBinding` 等数据结构是允许的,受限的是子系统间的运行时调用。真实执行器与转换器另可导入 `compute`;`compute` 反过来不认识训练,只导入标准库与 `controlplane.deferred`。
-- interact 的 vLLM 服务上下文由组合根持有:组合根注入一个返回上下文管理器的可调用对象,`mindtrainer` 只把它当上下文管理器用,不导入 `compute`、也不决定端点 [已落地]。`model_ref` 的解析在策略工厂里、起服务之前完成,失败判 T2;放进运行时的后端工厂会被服务端归成 `role_backend_failure`,按瞬态重跑到上限也不会变好 [已落地]。
+- interact 的 vLLM 服务上下文由组合根持有:组合根注入一个返回上下文管理器的可调用对象,`mindtrainer` 只把它当上下文管理器用,不导入 `compute`、也不决定端点 [已落地]。`model_ref` 的解析在策略工厂里、起服务之前完成,失败判 T2;放进运行时的后端工厂会被服务端归成 `role_backend_failure`,不按条重跑,整条训练延后、续训次数用尽后升 T3,也不会变好 [已落地]。
 - `mindtrainer` 不导入 `diagnostic`。系统没有 MindTrainer 与诊断评测之间的直连;OPD 是否失效由诊断侧判定。
 - 编排器只调下层纯函数和协议,不含判定逻辑。续训判定在 `resume.py`,失败到类别的映射在 `dispatch.py`。
 - TrainScheduler 只可导入 `mindtrainer.data_spec` 与 `mindtrainer.training_config` 两个模块。factory 可以导入 `mindtrainer.dispatch` 与 `mindtrainer.data_producer`。

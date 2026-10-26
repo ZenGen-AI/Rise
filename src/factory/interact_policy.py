@@ -35,6 +35,7 @@ import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, ExitStack, contextmanager
 
+from compute.client import ComputeClient
 from compute.endpoint import ComputeEndpoint
 from compute.errors import ComputeError, ServeStopError
 from compute.service import serve as real_serve
@@ -121,8 +122,9 @@ class RolloutDeferredError(DeferredError):
     指令保持 pending,守护进程按退避重试,不被它带走。
 
     重试有界:training_run 此时仍是 pending,每次重派 `run_training` 先把 resume_attempts 加一并落盘,
-    到 `max_resume_attempts` 由 `decide_resume` 升级为 NeedsHumanError,派发器判 T3。所以一直失败的 run
-    最终是 T3,而不是无限退避。reason 只写原异常的类名与 reason 码,不带它的文字(文字里可能有远端地址)。"""
+    到 `max_resume_attempts` 由 `decide_resume` 升级为 NeedsHumanError,派发器判 T3。所以只要 `max_resume_attempts`
+    小于守护进程的连续延后上限(`DeferralBook.max_consecutive`,默认 20),一直失败的 run 最终是 T3;不小于时先撞上
+    `DeferredExhaustedError`,守护进程带原因退出。reason 只写原异常的类名与 reason 码,不带它的文字(文字里可能有远端地址)。"""
 
 
 def _rollout_deferral(exc: RolloutFailedError | OpponentApiError) -> RolloutDeferredError:
@@ -270,7 +272,7 @@ def make_policy_factory(
     store: GitStore,
     runtime: AgentRuntime,
     switch: OpponentSwitch,
-    client: object,
+    client: ComputeClient,
     endpoint: ComputeEndpoint,
     env: Mapping[str, str],
     serve_port: int = DEFAULT_SERVE_PORT,
