@@ -88,6 +88,8 @@ MindAgent 是另一条线：底座不动参数，演化技能库与记忆库。�
 | S17 | `remember` 的抽取（网络）在 SQLite 事务之外执行，落库在之后的一个 `TransactionGuard` 里提交 | `src/memory/memory_ops.cpp:196-215,241-273` |
 | S18 | 情感重排器用语句的 `activation` 列参与打分 | `src/retrieval/affect_reranker.cpp:79-83` |
 | S19 | 同文再写返回 `idempotent` 时 `statement_ids` 为空，库里语句数不变（探针：两次写后召回仍 1 条） | 实测 |
+| S20 | 一次 `remember` 顺序发三次 LLM 调用：信念、一般事实、情节，各自独立受 `timeout_ms` 约束 | `src/memory/memory_ops.cpp:176-200` |
+| S21 | 语义 `recall` 先对查询词调一次嵌入（走网络），再做向量检索 | `python/starling/_memory_core.py:250-270`、`src/retrieval/semantic_retriever.cpp:27` |
 
 ## 2. 裁决总表
 
@@ -310,14 +312,15 @@ class SessionResources:
 | 服务端等客户端提交一轮（`turn_timeout_s`，`--interact` 传入） | 30 秒 | 90 秒 |
 | 服务端后端调用上限 | 60 秒 | 60 秒 |
 | 对手 HTTP 上限 | 25 秒 | 25 秒 |
-| 记忆单次调用上限（抽取、嵌入各一次） | 无 | 8 秒 |
+| 记忆单次网络调用上限（`timeout_ms`） | 无 | 4 秒 |
+| 一轮里记忆网络调用的最坏合计 | 无 | 20 秒：recall 的查询嵌入 1 次、remember 的抽取 3 次、embed_pending 的嵌入 1 批，每次 4 秒 |
 | 训练位策略 HTTP 上限 | 120 秒 | 60 秒 |
 
-一轮对手发言的最坏耗时是 recall（本地）加 HTTP 25 秒加 remember 8 秒加嵌入 8 秒，约 41 秒，低于服务端 60 秒；训练位一轮的最坏耗时是 HTTP 60 秒加记忆 16 秒，约 76 秒，低于服务端等提交的 90 秒。两个 90 秒方向相反、互不嵌套：服务端等的是客户端的一次提交，客户端等的是相邻两条服务端消息之间的间隔，每条对手发言都是一条消息，所以一轮里有几个对手都不叠加。
+一轮对手发言的最坏耗时是 HTTP 25 秒加记忆 20 秒，约 45 秒，低于服务端 60 秒；训练位一轮的最坏耗时是 HTTP 60 秒加记忆 20 秒，约 80 秒，低于服务端等提交的 90 秒。两个 90 秒方向相反、互不嵌套：服务端等的是客户端的一次提交，客户端等的是相邻两条服务端消息之间的间隔，每条对手发言都是一条消息，所以一轮里有几个对手都不叠加。
 
 现在客户端只有整条流的 deadline（F22），没有逐轮限时。改法：客户端收消息的 `_next_msg` 加等待上限 90 秒，计的是相邻两条服务端消息之间的间隔（在接收线程里用带超时的队列取消息），超时视作 `timeout`（T1，按条重跑）并 abort 会话；整条流的 deadline 仍按 `max_turns × 90` 折算当兜底。
 
-记忆的 8 秒是**一轮里记忆调用的总预算**，不是单次 HTTP 上限：Starling 的 `timeout_ms` 配 4000、`max_retries` 配 0（两者进运行时身份），一轮至多一次抽取加一次嵌入批次；对方一轮只说一句，所以 `remember` 一次、`embed_pending` 嵌入一批（S16），不处理积压。训练副本每轮都嵌入、从不积压；部署库若有积压（上次失败留下的），在 episode 开始前先嵌完再开始，这段时间不计入任何一轮。SQLite 的 `busy_timeout` 是 5 秒，但每个库只有一个写者（M4、M20），不会等锁。
+记忆的最坏合计按调用次数算，不另设总预算：Starling 的 `timeout_ms` 配 4000、`max_retries` 配 0（两者进运行时身份），每次网络调用至多 4 秒。一轮里有五次：`recall` 嵌入查询词一次（S21），`remember` 顺序抽取三次（S20），`embed_pending` 嵌入一批（S16）。对方一轮只说一句，所以 `remember` 只调一次，不处理积压。训练位 HTTP 降到 60 秒，正是为了让 60 加 20 落在 90 秒以内。训练副本每轮都嵌入、从不积压；部署库若有积压（上次失败留下的），在 episode 开始前先嵌完再开始，这段时间不计入任何一轮。SQLite 的 `busy_timeout` 是 5 秒，但每个库只有一个写者（M4、M20），不会等锁。
 
 ## 7. 训练路
 
@@ -334,7 +337,7 @@ class SessionResources:
 - interact 配置的 `memory` **必填**（M8）：`validate_training_config` 对 `mode == "interact"` 且没有 `memory` 的配置给出原因。batch 配置不许有它。没有"不用记忆"的开关，也没有"不写记忆"的开关：所有 interact 角色位都是带记忆的 Actio 实例，每轮读写（M1、M7）。
 - 本设计落地前写下的 pending interact run：派发器在算哈希之前先做配置校验（F26），缺 `memory` 的旧配置在那里判 T2，指令 `failed`，原因写明"interact config has no memory section (written before memory support)"。由人重开。这是有意的：旧 run 的 rollout 没有记忆，续上去的 rollout 有，不是同一个实验。
 - 训练默认值 `training_defaults.yaml` 的 `interact` 段增加键 `memory`：`{seed}`，`seed` 必填（可为 `null`）。调度器写进配置时 `digests` 与 `runtime` 留空。
-- 派发器进入策略上下文之前，按 `seed` 打开每个绑定人格的起点库、算摘要、取运行时身份，写回 `memory.digests` 与 `memory.runtime`。之后才算 `config_hash`。
+- 派发器进入策略上下文之前，按 `seed` 打开每个绑定人格的起点库、算摘要、取运行时身份，写回 `memory.digests` 与 `memory.runtime`。之后才算 `config_hash`。`mindtrainer` 不导入 `actio` 与 `starling`，所以这一步靠组合根注入的可调用对象：`make_mindtrainer_dispatcher` 新增 keyword-only 参数 `memory_resolver: Callable[[str | None, tuple[str, ...]], tuple[dict[str, str], dict]]`，入参是种子 id 与绑定人格 id，返回每个人格的起点摘要与运行时身份。interact 指令没注入它时判 T2，原因点名 `--interact`；它抛的异常一律 T2。
 - 续训时重新算摘要与身份；种子库、Starling 版本、抽取或嵌入模型任一变了，`config_hash` 不同，升 T3（F13）。
 - 替身路径的 `digests` 是替身摘要、`runtime.backend` 是 `stand-in`，所以换成真 Starling 也会改哈希。
 
@@ -520,6 +523,7 @@ class SessionResources:
 | `VllmPolicy`、`ExternalApiBackend` | 新增 `respond_guided` | 2 |
 | `InteractTrajectorySource` | `policy` 改为 `policy_for_rollout`；三元组上行 | 3 |
 | `make_policy_factory` | 返回 `policy_for_rollout` 工厂 | 3 |
+| `make_mindtrainer_dispatcher` | 新增 keyword-only 参数 `memory_resolver` | 4 |
 | `TrainingConfig` | interact 必填 `memory` | 4 |
 | `training_defaults.interact` | 必填 `memory` | 4 |
 | `TrainingRun.policy_backend` | `memory` 块 | 4 |
@@ -540,7 +544,7 @@ class SessionResources:
 
 | 项 | 核实办法 |
 |---|---|
-| 真抽取与真嵌入的延迟是否在 8 秒内 | 接真端点跑 10 轮，记每次 remember 与 embed_pending 的耗时 |
+| 真抽取与真嵌入的单次延迟是否在 4 秒内 | 接真端点跑 10 轮，记每次 recall、remember（分三段）、embed_pending 的耗时；超时的会落成抽取失败或 `role_memory_unavailable` |
 | 真嵌入下 `recall` 的命中质量 | 用 SoMBench 之外的手写情境，看召回句是否相关 |
 | `VACUUM INTO` 副本与原库在 Starling 迁移版本不同时能否打开 | 在 PR 里加用例：旧版本库备份后用新版本打开 |
 | 每会话开一份库对 GRPO 一步的总时长影响 | 一步 `groups_per_step × group_size` 条 rollout，计开库、备份、删除总耗时 |
