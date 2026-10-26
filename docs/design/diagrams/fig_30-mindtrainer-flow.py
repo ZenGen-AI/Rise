@@ -5,11 +5,11 @@ from svgkit import Canvas
 def build() -> Canvas:
     c = Canvas(
         1080, 560, title="一次训练的编排",
-        desc="派发器校验指令并备好轨迹源,编排器读训练记录判定起点,落盘后加载权重。"
+        desc="派发器校验指令、算好起点记忆摘要并备好轨迹源。编排器读训练记录判定起点,落盘后加载权重。"
              "batch 先对整份 GRPO 数据集预检,再逐步训练并周期存点;最后一步之后存最终点、转换格式、注册候选、记录置 executed。"
              "确定性失败把记录写成 failed,其余异常让记录保持 pending。")
     W, H = 230, 80
-    s1 = c.box(30, 70, W, "派发器准备", "读并校验 training_config\n构造归因后端与轨迹源", kind="compute", h=H)
+    s1 = c.box(30, 70, W, "派发器准备", "读并校验 training_config\ninteract 算起点记忆摘要\n构造归因后端与轨迹源", kind="compute", h=H)
     s2 = c.box(290, 70, W, "判定起点", "decide_resume\nnoop 返回 · escalate 抛出", kind="compute", h=H)
     s3 = c.box(550, 70, W, "起点落盘", "写 pending 记录\n再 executor.load", kind="compute", h=H)
     s4 = c.box(810, 70, W, "batch 预检", "整份 GRPO 数据算奖励\n校验组大小与组数", kind="compute", h=H)
