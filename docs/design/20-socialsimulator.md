@@ -224,7 +224,7 @@ SocialSimulator 的仿真部分是工厂的"社会情境发生器":它把情境�
 
 | 驱动 | 实现 | 来源 | 状态 |
 |---|---|---|---|
-| 固定对话(角色位写 `driver: scripted`) | `ScriptedBackend` | 情境自带的 `opponent_script` 优先;情境没带时用全局台词 | [已落地] |
+| 固定对话(角色位写 `driver: scripted`) | `ScriptedBackend` | 情境自带的 `opponent_script` 优先;情境没带时用全局台词。`--interact` 下两样都没有时,派发时判 `failed`(T2),不让对手一直说“(无更多发言)” | [已落地] |
 | `frozen_reference`(默认驱动 vllm) | 站内 vLLM,挂对手模型的 LoRA | `model_ref` 经树里的模型产物解析成 `checkpoint_ref` | [已落地] |
 | `external_api`(默认驱动 external_api) | OpenAI 兼容 HTTP 客户端 | `training_defaults.yaml` 的 `opponent` 段:端点、模型名、存凭证的环境变量名 | [已落地] |
 
@@ -499,7 +499,7 @@ class EnvironmentServiceClient:
 | 对手后端抛其余异常(含回复形状不对) | FAILED | `EndSession(role_backend_failure)` | MindTrainer 不重试,抛 `RolloutFailedError` |
 | 客户端断连或 `abort()` | `request_abort`,FAILED | 无 | 不落盘;半截 episode 不污染数据 |
 | 策略自身抛异常 | 同断连 | 异常原样上抛 | 客户端先 `abort()`,不发 `EndSession` |
-| 落盘钩子抛异常 | 记日志,推 `EndSession(persistence_failed)`,不给 `episode_id`,原因写进 `failure_detail` | 不是正常收尾,MindTrainer 与 MindAgent 都按瞬态失败整条重跑,不收下这条 episode | 有上限的重跑;重跑都失败时上抛,排查落盘 [已落地] |
+| 落盘钩子抛异常 | 记日志,推 `EndSession(persistence_failed)`,不给 `episode_id`,`failure_detail` 只写异常类名(异常文字可能带远端地址或凭证,留在服务端日志里) | 不是正常收尾,MindTrainer 与 MindAgent 都按瞬态失败整条重跑,不收下这条 episode | 有上限的重跑;重跑都失败时上抛,排查落盘 [已落地] |
 
 interact 会话前的准备 [已落地]。下表是派发器与组合根在起会话之前做的事,会话本身仍是上面的 11 步。
 
@@ -643,9 +643,9 @@ interact 会话前的准备 [已落地]。下表是派发器与组合根在起�
 | `tests/test_realtime_backend.py` | 8 | [已落地] |
 | `tests/test_realtime_backend_timeout.py` | 4 | [已落地] |
 | `tests/test_realtime_runner_on_turn.py` | 5 | [已落地] |
-| `tests/test_realtime_driver.py` | 6 | [已落地] |
+| `tests/test_realtime_driver.py` | 8 | [已落地] |
 | `tests/test_realtime_servicer_e2e.py` | 7 | [已落地] |
-| `tests/test_realtime_servicer_limits.py` | 18 | [已落地] |
+| `tests/test_realtime_servicer_limits.py` | 25 | [已落地] |
 | `tests/test_realtime_client.py` | 2 | [已落地] |
 | `tests/test_realtime_client_order.py` | 5 | [已落地] |
 | `tests/test_realtime_client_abort.py` | 7 | [已落地] |
@@ -655,7 +655,7 @@ interact 会话前的准备 [已落地]。下表是派发器与组合根在起�
 | `tests/test_runner_activation_trace.py` | 10 | [已落地] |
 | `tests/test_realtime_activation_trace.py` | 11 | [已落地] |
 
-合计:批量侧 76 个,实时侧 108 个。不依赖的外部服务:GPU、ROLL、vLLM、任何外部模型 API、网络。
+合计:批量侧 76 个,实时侧 119 个。不依赖的外部服务:GPU、ROLL、vLLM、任何外部模型 API、网络。
 
 ## 10. 现状、局限与未核实项
 

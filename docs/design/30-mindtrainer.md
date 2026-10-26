@@ -113,7 +113,7 @@ MindTrainer 把一条 `pending` 的训练指令变成一个 `pending_review` 的
 | G5 | 续训有上限,不会无限循环 | `resume_attempts` 触顶后升级为 T3。资源暂时不可用走延后通道,预检在 `run_training` 之前,`ComputeBusyError` 不耗 `resume_attempts`;通道自己有连续延后上限(CP-14),G5 对真正的失败仍成立 |
 | G6 | 候选能走完审核门①并成为下一轮的基座 | `test_mt_integration.py` 两个用例。只对 mock 成立:真实后端的候选是适配器导出,不是训练起点,第二轮由真实执行器拒绝(见已知局限) |
 | G7 | 带 `data_spec` 的指令缺清单时能自补数据并训练成候选 [已落地] | 派发器合成分支的测试:合成后训练、缺生产器判 `failed`、合成中途崩溃重入收敛 |
-| G8 | interact 指令在真实入口跑完:发言经 vLLM 服务的接口落盘,奖励管线在这些发言上算得,候选走到 `pending_review` [已落地] | 端到端测试 `tests/test_factory_interact_e2e.py` 经 `factory reconcile --once --interact`:假 vLLM(本地 HTTP 回固定文本)加 mock 执行器,episode 都在产物树里。证明的是接线与落盘成立,不是模型变好,也不是真实发言:vLLM 只用本机 HTTP 替身代替过,真机没跑过,奖励管线没对真实发言验证(见第 10 章) |
+| G8 | interact 指令在真实入口跑完:发言经 vLLM 服务的接口落盘,奖励管线在这些发言上跑通,候选走到 `pending_review` [已落地] | 端到端测试 `tests/test_factory_interact_e2e.py` 经 `factory reconcile --once --interact`:假 vLLM(本地 HTTP 回固定文本)加 mock 执行器,episode 都在产物树里。证明的是接线与落盘成立,不是模型变好,也不是真实发言:vLLM 只用本机 HTTP 替身代替过,真机没跑过,奖励管线没对真实发言验证(见第 10 章) |
 
 | 非目标或推迟项 | 状态 | V1 的处理 |
 |---|---|---|
@@ -695,7 +695,7 @@ interact 的生成路多一条「生成、写树、回写、复校」的链路 [
 | MT-14 | SFT 只以训练位的 `utterance` 为目标,不训练 `inner_thought` | 同时训练内心推理 | 原设计未记录理由,是实现者的选择 | 被训模型学不到内心推理 |
 | R14 | 指令携带 `data_spec`,派发器缺清单时调用注入的数据生产器 | 由调度器先单独合成 | 合成与训练同一条指令,不多一种动作 | V1 模板生成器与目标维度无关,闭环只是流程跑通 |
 | MT-15 | 训练数据在上传前过污染准入检查,命中即整条指令失败;检查函数由组合根注入,`mindtrainer` 不导入 `diagnostic` | 在数据生产器里查;在清单登记时查;只靠约定 | 数据可以从模板、桥接或人工三条路径来,只有上传前的最后一道覆盖全部;命中就整条失败而不是剔行,是因为 ROLL 要求每步的行数固定,剔行会让训练步与数据错位 | 逐字重叠之外的内容抓不到;索引缺失时真训练直接起不来 |
-| MT-16 | 场景二这一轮做「真推理加 mock 训练」:训练位经 vLLM 说真话,权重更新仍由 mock 执行器完成 [已落地] | 只做替身;只做推理验证入口;等真实 GRPO 落地再接 | 真实执行器只支持 SFT(`supported_phases = {"sft"}`),开不了 interact 的实时会话;这一轮要证明真模型能进会话、发言能落盘、奖励管线对真实发言成立 | 本轮证明不了学习效果;真实 GRPO 落地时要改装配开关,接入工作可原样复用 |
+| MT-16 | 场景二这一轮做「真推理加 mock 训练」:训练位经 vLLM 说真话,权重更新仍由 mock 执行器完成 [已落地] | 只做替身;只做推理验证入口;等真实 GRPO 落地再接 | 真实执行器只支持 SFT(`supported_phases = {"sft"}`),开不了 interact 的实时会话;这一轮的设计目标是证明真模型能进会话、发言能落盘、奖励管线对真实发言成立;当前只用本机 HTTP 替身验证过会话接线与发言落盘,奖励管线没对真实发言验证 | 本轮证明不了学习效果;真实 GRPO 落地时要改装配开关,接入工作可原样复用 |
 | MT-17 | 派发器新增 `policy_factory`,以 run id 与 `base_checkpoint_ref` 为入参,按 run 现构造策略;旧的 `policy=` 保留 [已落地] | 沿用一次派发一个 `policy` | 训练位必须用本轮基座,与 run 无关的固定策略做不到 | 派发器接口多一个参数,两个参数并存 |
 | MT-18 | 训练位与站内对手共用一个 vLLM 进程,最多两个 LoRA [已落地] | 两个进程 | GPU 租约是整机的,只有一个持有者 | 服务命令与 `VllmServeConfig` 要从单适配器改成列表;两个 LoRA 的切换开销与显存余量未核实 |
 | MT-19 | vLLM 按指令起停,覆盖整轮训练 [已落地] | 常驻 | 租约长期被占会让真实评测与训练作业都起不来 | 每条 interact 指令多付一次启动开销,上限 900 秒 |
@@ -730,8 +730,8 @@ interact 的生成路多一条「生成、写树、回写、复校」的链路 [
 | 执行器崩溃、转换器故障、读清单时 `OSError` | T1 | 原样上抛,记录与指令保持 `pending`,下一次派发续训 | 训练记录的存点进度 |
 | interact 的 `timeout`、`role_backend_timeout`、`role_backend_unavailable`(对手 API 回 429、5xx,或连不上)、`persistence_failed`、传输层 UNAVAILABLE | T1 | 原地重跑,至多 `1 + max_retries_per_episode` 次;耗尽后上抛,记录保持 `pending`(经 `--interact` 入口时的去向见下方「真推理的 rollout 失败」一行) | `curve_summary["failed_rollout_attempts"]` |
 | interact 的 `role_backend_rejected`(对手 API 回 4xx,429 除外) [已落地] | T2 | 不重试,记录写 `failed`(category T2)并重抛,当轮把指令判 `failed`;与 `invalid_session` 同属编排器的 `_DETERMINISTIC_ROLLOUT_REASONS` | 训练记录 `failure`;指令 `payload["failure"]` |
-| interact 的 `role_backend_failure` 等其余原因(含对手 API 的回复形状不对) | T1 | 不重试,上抛,记录保持 `pending`,由续训上限兜底(经 `--interact` 入口时的去向见下一行) | 同上 |
-| 经 `--interact` 入口时,真推理的 rollout 失败:上几行里上抛的 `RolloutFailedError`(`invalid_session` 与 `role_backend_rejected` 除外),以及训练位策略自己撞上的 `OpponentApiError` [已落地] | 延后 | 策略上下文把它们译成 `RolloutDeferredError`(`DeferredError` 的子类):指令保持 `pending`,守护进程按退避重试而不退出;原因只写异常类名与 reason 码,不带异常文字(文字里可能有远端地址)。每次重派耗一次 `resume_attempts`,到 `max_resume_attempts` 由 `decide_resume` 升级为 T3,所以一直失败的 run 最终是 T3,不会无限退避。`invalid_session` 与 `role_backend_rejected` 不在此列,仍是上面的 T2。训练位策略自己抛的 `OpponentRejectedError` 也在此列而不是 T2:训练位是本 run 自己起的 vLLM,4xx 多半是服务配置坏了,但这和起服务时的瞬态失败区分不开,先按延后处理 | 守护进程结构化日志;终局时指令 `failure.category = T3` |
+| interact 的 `role_backend_failure` 等其余原因(含对手 API 的回复形状不对) | T1 或 T2,协议上不区分(与 20 篇一致) | 不按条重跑(它不在轨迹源的瞬态集合里),上抛,记录保持 `pending`,由续训上限兜底(经 `--interact` 入口时的去向见下一行) | 同上 |
+| 经 `--interact` 入口时,真推理的 rollout 失败:上几行里上抛的 `RolloutFailedError`(`invalid_session` 与 `role_backend_rejected` 除外),以及训练位策略自己撞上的 `OpponentApiError` [已落地] | 延后 | 策略上下文把它们译成 `RolloutDeferredError`(`DeferredError` 的子类):指令保持 `pending`,守护进程按退避重试而不退出;原因只写异常类名与 reason 码,不带异常文字(文字里可能有远端地址)。每次重派耗一次 `resume_attempts`,到 `max_resume_attempts` 由 `decide_resume` 升级为 T3。这条结论有前提:`max_resume_attempts`(默认 3)要小于 `DeferralBook` 的连续延后上限 `max_consecutive`(默认 20,`src/controlplane/daemon.py`)。同一条指令最多连续延后 `max_resume_attempts + 1` 次就升 T3,所以满足前提时一直失败的 run 最终是 T3,不会无限退避;配置成不小于 20 时,先撞上连续延后上限,守护进程因 `DeferredExhaustedError` 带原因退出,指令仍是 `pending`。配置校验目前不检查这个关系。`invalid_session` 与 `role_backend_rejected` 不在此列,仍是上面的 T2。训练位策略自己抛的 `OpponentRejectedError` 也在此列而不是 T2:训练位是本 run 自己起的 vLLM,4xx 多半是服务配置坏了,但这和起服务时的瞬态失败区分不开,先按延后处理 | 守护进程结构化日志;终局时指令 `failure.category = T3` |
 
 T1 的上抛异常会让 `run_daemon` 退出,需要外部监督者重启。重启后同一条指令再次派发,`resume_attempts` 上限保证它最终升级为 T3,不会无限空转。`DeferredError` 的子类不在此列:守护进程接住它们,进程不退出;同一动作连续延后超过上限才带原因退出(CP-14)。经 `--interact` 入口的真推理 rollout 失败属于这一类例外:策略上下文已把它译成延后类,见上表。
 
@@ -767,15 +767,15 @@ interact 的 `config_hash` 覆盖配置层的东西 [已落地]:情境 id、人�
 | `tests/test_mt_config.py` | 171 | [已落地] |
 | `tests/test_mt_reward_pipeline.py` | 59 | [已落地] |
 | `tests/test_mt_dispatch.py` | 42 | [已落地] |
-| `tests/test_mt_orchestrator.py` | 46 | [已落地] |
-| `tests/test_mt_executor.py`、`tests/test_mt_grouping.py`、`tests/test_mt_trajectory_interact.py` | 各 26 | [已落地] |
+| `tests/test_mt_orchestrator.py` | 57 | [已落地] |
+| `tests/test_mt_executor.py`、`tests/test_mt_grouping.py`、`tests/test_mt_trajectory_interact.py` | 26、26、29 | [已落地] |
 | `tests/test_mt_training_run.py` | 22 | [已落地] |
 | `tests/test_mt_resume.py` | 19 | [已落地] |
 | `tests/test_mt_trajectory_batch.py` | 17 | [已落地] |
 | `tests/test_mt_checkpoint.py` | 14 | [已落地] |
 | `tests/test_mt_datamodel.py` | 10 | [已落地] |
 | `tests/test_mt_wire.py`、`tests/test_mt_paths.py`、`tests/test_mt_integration.py`、`tests/test_mt_packaging.py` | 4、3、2、2 | [已落地] |
-| 合计 | 489 | [已落地] |
+| 合计 | 503 | [已落地] |
 | `tests/test_daemon_dispatcher.py`(ControlPlane 侧的派发缝) | 14 | [已落地] |
 | `tests/test_mt_data_spec.py`、`tests/test_mt_data_spec_stages.py` | 70、17 | [已落地] |
 | `tests/test_mt_data_producer.py`、`tests/test_mt_dispatch_synthesis.py` | 25、33 | [已落地] |

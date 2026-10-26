@@ -579,7 +579,7 @@ def load_library(store) -> LibraryState: ...
 | 测试文件 | 用例数 | 覆盖 |
 |---|---|---|
 | `tests/test_ma_config_library.py` [已落地] | 27 | 配置校验、库版本 8 个反例、静态检查 |
-| `tests/test_ma_deployment.py` [已落地] | 19 | 落盘 id、轨迹校验、复用、T1 重跑、实例异常 |
+| `tests/test_ma_deployment.py` [已落地] | 22 | 落盘 id、轨迹校验、复用、T1 重跑、实例异常 |
 | `tests/test_ma_analysis.py` [已落地] | 19 | 判定、阈值等号、`not` 包裹、库外技能 |
 | `tests/test_ma_proposals.py` [已落地] | 20 | 规则模板、严格解析、重试、成本条数 |
 | `tests/test_ma_verify.py` [已落地] | 8 | 精准命中、触发过宽、优先级压不过 |

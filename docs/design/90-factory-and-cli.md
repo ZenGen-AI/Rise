@@ -628,7 +628,7 @@ factory 是最后一个工作包,前八个全部落地后才能施工。
 | 轮次中途瞬态异常或被杀 | T1 | 轮次留在 `pending`,守护进程退出;重启后的 tick 复用已落盘的 episode 续上(R19) | 已落盘的 episode [已落地] |
 | 派发器或处理器抛 `DeferredError` | 资源暂不可用 | 不写树,按退避重试;连续延后超过上限抛 `DeferredExhaustedError` 退出 | 一行结构化日志 [已落地] |
 | interact 指令起 vLLM 服务:租约被占 `ComputeBusyError`,或起服务失败 `ServeStartupError` | 资源暂不可用 | 同上 | 同上 [已落地] |
-| interact 指令里真推理的 rollout 失败:对手 API 或 vLLM 服务连不上、角色位后端出错、重试用尽的超时、落盘失败(`invalid_session` 除外,它仍判 T2) | 资源暂不可用 | 策略上下文译成延后类:不写树,按退避重试,进程不退出;每次重派耗一次 `resume_attempts`,到上限升级为 T3 | 一行结构化日志;终局时指令 `failure.category = T3` [已落地] |
+| interact 指令里真推理的 rollout 失败:对手 API 或 vLLM 服务连不上、角色位后端出错、重试用尽的超时、落盘失败(`invalid_session` 除外,它仍判 T2) | 资源暂不可用 | 策略上下文译成延后类:不写树,按退避重试,进程不退出;每次重派耗一次 `resume_attempts`,到上限升级为 T3。前提:`max_resume_attempts`(默认 3)要小于 `DeferralBook.max_consecutive`(20);不小于时先撞上连续延后上限,守护进程因 `DeferredExhaustedError` 带原因退出,指令仍是 `pending`。配置校验目前不检查这个关系 | 一行结构化日志;终局时指令 `failure.category = T3` [已落地] |
 | 派发器或处理器抛其他瞬态异常 | T1 | 进程退出,外部监督者重启 | 树里已提交的部分 |
 | 门控写证据不在场或迁移非法 | 用法错误 | 命令抛错,不写文件、不提交 | 无 [已落地] |
 
@@ -661,10 +661,10 @@ factory 是最后一个工作包,前八个全部落地后才能施工。
 | 评估器装配 | 配置校验、默认资产 | `MockSoMEvalRunner`、`MockJudgeBackend` | `tests/test_factory_evaluation.py` | 12 [已落地] |
 | 组合根与命令行 | 逐字节相同、注入、装配错误、退出码、仓库锁被占用时的退出与只读照常 | 记录调用的假处理器 | `tests/test_factory_wire.py`、`tests/test_factory_cli.py` | 37、9 [已落地] |
 | 端到端框架 | 空闭环一个 tick、mock 证据默认不转 | 假处理器 | `tests/test_factory_e2e_frame.py` | 4 [已落地] |
-| 处理器构造 | 六个构造器、证据开关单一来源、Interact 流超时 | 罐头后端 | `tests/test_factory_handlers.py` | 18 [已落地] |
+| 处理器构造 | 六个构造器、证据开关单一来源、Interact 流超时 | 罐头后端 | `tests/test_factory_handlers.py` | 49 [已落地] |
 | 端到端 | 完整闭环、R5、规划等配方入库门、R18、R19、MindAgent 链 | `HeuristicBackend`、罐头后端 | `tests/test_factory_e2e_loop.py` | 10 [已落地] |
 | 跨工作包 | 共享用例表、分层规则、run 编号数值序 | 无 | `tests/test_factory_cross_plan.py`、`tests/test_factory_run_order.py` | 31、3 [已落地] |
-| `--interact` 装配 | 十一条拒绝项:第 3、9 条合用一组测试,第 10 条没有装配测试(钉住的是派发器的 `ValueError`),其余八条各有测试;打开后派发器带上实时客户端与策略工厂;真推理的 rollout 失败走延后通道、一直失败升 T3;不打开时 interact 指令的失败原因点名开关;收尾时服务停不下来判 T2;外部 API 对手超时一次后整条重跑、回 500 时指令保持 `pending` | 假 serve、本机 HTTP 桩 | `tests/test_factory_interact_wire.py` | 74 [已落地] |
+| `--interact` 装配 | 十一条拒绝项:第 3、9 条合用一组测试,第 10 条没有装配测试(钉住的是派发器的 `ValueError`),其余八条各有测试;打开后派发器带上实时客户端与策略工厂;真推理的 rollout 失败走延后通道、一直失败升 T3;不打开时 interact 指令的失败原因点名开关;收尾时服务停不下来判 T2;外部 API 对手超时或回 503 一次后整条重跑、一直回 503 时指令保持 `pending`、回 404 判 `failed`(T2);scripted 对手位没有台词时派发期判 T2;`opponent` 段在装配之后改了,下一条指令用新值,读不到或写坏了判 T2 且不带地址 | 假 serve、本机 HTTP 桩 | `tests/test_factory_interact_wire.py` | 89 [已落地] |
 | `--interact` 端到端 | `factory reconcile --once --interact` 走到候选 `pending_review`,episode 都在产物树里 | 假 vLLM(本地 HTTP 回固定文本)、mock 执行器 | `tests/test_factory_interact_e2e.py` | 2 [已落地] |
 
 上表的 pytest 用例数由 `pytest --collect-only -q` 逐个文件实测,按参数化展开计;TypeScript 的两个数按测试文件的 `it(` 计,未跑 vitest 收集。工作包 9 另有一个前置核对脚本 `scripts/check_factory_assumptions.py`:它逐行核对各包的符号名与签名,本次运行有 20 行 `OK`、1 行 `MISMATCH`,缺的是 `SchedulerConfig` 上新增的 `strategy_experience` 字段。
@@ -691,7 +691,7 @@ factory 是最后一个工作包,前八个全部落地后才能施工。
 |---|---|---|
 | 闭环模式的诊断恒为 mock 证据 | 默认入口下闭环永远不会自己转 | 开发入口打开 `--allow-mock-evidence` |
 | mock 诊断对每个候选打同样的分 | 首轮之后增益恒为 0,不再提名新配方,退化标记不会出现 | 首次闭环人工登记更低分的基线 |
-| 装配是一次性的 | 改 `evaluator.yaml`、`backends.yaml`、`agent.yaml` 要重启 | `scheduler.yaml` 与模板每次调用重读 |
+| 装配是一次性的 | 改 `evaluator.yaml`、`backends.yaml`、`agent.yaml` 要重启 | `scheduler.yaml` 与模板每次调用重读;`training_defaults.yaml` 的 `opponent` 段在每条 interact 指令进入策略上下文时重读(装配期的检查仍是启动门槛) |
 | 外部推理与部署会话同步执行 | 调用期间调和循环不转,审核被饿住 | 记录调用时长,必要时改异步 |
 | 瞬态异常让进程退出 | 需要外部监督者,但没有任何工作包交付监督脚本、重启退避或崩溃计数;规划与轮次处理器在非桥接瞬态异常下没有重入次数上限,只有 MindTrainer 的续训次数有上限 | 调和循环无状态,重启从树续接 |
 | `logs` 看不到成功调用的桥接日志 | 只能看到失败记录登记的引用 | 直接看 `.rismforge/logs/<run>/` |
