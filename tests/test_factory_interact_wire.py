@@ -594,14 +594,18 @@ def test_a_deterministic_compute_error_fails_the_directive(world, tmp_path, fake
 # ---- 策略上下文本身:登记、deadline、清理、撞车 ----
 
 def _unit(store, tmp_path, stub, *, serve=None, opponent=None, env=None, runtime=None):
-    """直接造策略工厂(不经装配),用真的 AgentRuntime 与注入的 serve。"""
+    """直接造策略工厂(不经装配),用真的 AgentRuntime 与注入的 serve。
+    opponent 非空时写进树里的 training_defaults.yaml:策略上下文每次进入时从树里读 opponent 段。"""
+    if opponent is not None:
+        write_config(store, training_defaults_file(), "training-defaults", _interact_defaults(**opponent),
+                     "test: defaults with opponent")
     runtime = runtime or AgentRuntime(store, ("hi",))
     switch = OpponentSwitch(("hi",))
     endpoint = ComputeEndpoint(**{**ENDPOINT, "launch_prefix": (), "endpoint_id": "gpu-1"})
     serve = serve or FakeServe(stub.base_url)
     factory = make_policy_factory(
         store=store, runtime=runtime, switch=switch, client=SimpleNamespace(alias="gpu-181", endpoint=endpoint),
-        endpoint=endpoint, opponent=opponent, env=env or {}, serve=serve)
+        endpoint=endpoint, env=env or {}, serve=serve)
     return runtime, switch, factory, serve
 
 
@@ -978,6 +982,153 @@ def test_a_run_that_keeps_failing_ends_in_t3_through_the_resume_budget(world, tm
     directive = _read(world, "directive")
     assert directive.status == "failed" and directive.payload["failure"]["category"] == "T3"
     assert "resume attempts exhausted" in directive.payload["failure"]["reason"]
+
+
+# ---- 清理 Task 3:没有台词的 scripted 对手、opponent 段每次进入时重读 ----
+
+def _drop_agent_yaml(store) -> None:
+    """只开 --interact、没有 agent.yaml 的仓库:运行时的全局台词是空的。"""
+    from factory.agent import AGENT_CONFIG
+
+    store._git("rm", "-q", "--", AGENT_CONFIG)
+    store._git("commit", "-q", "-m", "test: no agent.yaml", "--", AGENT_CONFIG)
+
+
+def _script_for_b(store, *scenario_ids) -> None:
+    for sid in scenario_ids:
+        write_scenario(store, Scenario(sid, "bg", [RoleSlot("a", "a"), RoleSlot("b", "b")], "c", ["n"], "training",
+                                       opponent_script={"b": ["剧本一", "剧本二"]}))
+
+
+def test_a_scripted_opponent_with_no_script_and_no_global_lines_fails_the_directive_before_serving(
+        world, tmp_path, fake_serve):
+    """只开 --interact、没有 agent.yaml,情境也没给该位剧本:对手会一直说"没有更多发言",产出的是垃圾 rollout。
+    派发时就判 T2,点名情境 id 与角色位,说明两条出路,在占租约之前。"""
+    _drop_agent_yaml(world)
+    _write_directive(world)
+    _run(world, tmp_path)
+    directive = _read(world, "directive")
+    assert directive.status == "failed" and directive.payload["failure"]["category"] == "T2"
+    reason = directive.payload["failure"]["reason"]
+    assert "t1:b" in reason and "t2:b" in reason
+    assert "agent.yaml" in reason and "opponent_script" in reason
+    assert fake_serve.calls == []                                      # 服务没起,租约没占
+    assert not world.exists(f"{run_dir(RUN)}/training_run.yaml")
+
+
+def test_only_the_scenarios_that_lack_a_script_for_the_scripted_slot_are_named(world, tmp_path, fake_serve):
+    _drop_agent_yaml(world)
+    _script_for_b(world, "t1")
+    _write_directive(world)
+    _run(world, tmp_path)
+    directive = _read(world, "directive")
+    assert directive.status == "failed"
+    reason = directive.payload["failure"]["reason"]
+    assert "t2:b" in reason and "t1:b" not in reason
+    assert fake_serve.calls == []
+
+
+def test_a_scripted_opponent_whose_every_scenario_has_a_script_runs_without_agent_yaml(
+        world, tmp_path, stub, fake_serve):
+    _drop_agent_yaml(world)
+    _script_for_b(world, "t1", "t2")
+    _write_directive(world)
+    _run(world, tmp_path)
+    assert _read(world, "directive").status == "executed"
+    assert fake_serve.trace == ["enter", "exit"]
+
+
+def test_the_global_lines_of_the_runtime_cover_a_scenario_without_a_script(world, tmp_path, stub):
+    """运行时有全局台词(agent.yaml 在)时,没有剧本的情境照常放行:全局台词就是兜底。"""
+    runtime, _, factory, _ = _unit(world, tmp_path, stub)
+    assert runtime.opponent_lines == ("hi",)
+    with factory(RUN, _cfg()):
+        pass
+
+
+def test_a_deleted_agent_yaml_check_looks_at_the_runtime_lines_not_the_file(tmp_path, stub):
+    """判据是运行时手里的全局台词(装配期从 agent.yaml 读来的),不是此刻树里有没有那个文件。"""
+    bare = GitStore(str(tmp_path / "bare"))
+    bare.init()
+    _seed_world(bare)
+    runtime = AgentRuntime(bare, ())
+    _, _, factory, _ = _unit(bare, tmp_path, stub, runtime=runtime)
+    with pytest.raises(DirectiveFailedError) as caught:
+        with factory(RUN, _cfg()):
+            pytest.fail("the body must not run")
+    assert caught.value.category == "T2" and "t1:b" in str(caught.value)
+    assert runtime._sessions == {}
+
+
+def _reconcile_after(world, tmp_path, change) -> None:
+    """装配一次(此时 opponent 段还是原样),再改树,再调和一轮:证明策略上下文进入时才读 opponent 段。"""
+    asm = assemble(world, FactoryOptions(interact=True, endpoint="gpu-2"), env=_env(tmp_path, **{OPP_KEY_ENV: OPP_KEY}))
+    try:
+        change()
+        reconcile_once(world, dispatcher=asm.dispatcher)
+    finally:
+        asm.close()
+
+
+def test_an_opponent_section_edited_after_assembly_applies_to_the_next_directive(world, tmp_path, stub, fake_serve):
+    write_config(world, training_defaults_file(), "training-defaults",
+                 _interact_defaults(base_url=stub.base_url, model="ext-model", api_key_env=OPP_KEY_ENV),
+                 "test: first opponent")
+    _write_directive(world, bindings=_external_opponent_binding())
+
+    def edit():
+        write_config(world, training_defaults_file(), "training-defaults",
+                     _interact_defaults(base_url=stub.base_url, model="ext-model-2", api_key_env=OPP_KEY_ENV),
+                     "test: edited opponent")
+
+    _reconcile_after(world, tmp_path, edit)
+    assert _read(world, "directive").status == "executed"
+    assert stub.models() == {BASE_MODEL_NAME, "ext-model-2"}          # 新值生效,旧的 ext-model 一次都没用
+
+
+@pytest.mark.parametrize("breakage", ["missing_key", "file_removed", "userinfo"])
+def test_an_opponent_section_that_breaks_after_assembly_fails_the_directive_without_the_address(
+        world, tmp_path, stub, fake_serve, breakage):
+    secret_url = "http://10.9.8.7:8000"
+    write_config(world, training_defaults_file(), "training-defaults",
+                 _interact_defaults(base_url=stub.base_url, model="ext-model", api_key_env=OPP_KEY_ENV),
+                 "test: first opponent")
+    _write_directive(world, bindings=_external_opponent_binding())
+
+    def break_it():
+        if breakage == "missing_key":
+            write_config(world, training_defaults_file(), "training-defaults",
+                         _interact_defaults(base_url=secret_url, model="ext-model"), "test: broken opponent")
+        elif breakage == "userinfo":
+            write_config(world, training_defaults_file(), "training-defaults",
+                         _interact_defaults(base_url="http://user:hunter2@10.9.8.7:8000", model="ext-model",
+                                            api_key_env=OPP_KEY_ENV), "test: opponent with credentials")
+        else:
+            (world.repo_root / training_defaults_file()).unlink()
+
+    _reconcile_after(world, tmp_path, break_it)
+    directive = _read(world, "directive")
+    assert directive.status == "failed" and directive.payload["failure"]["category"] == "T2"
+    reason = directive.payload["failure"]["reason"]
+    assert "opponent section" in reason and "training_defaults.yaml" in reason
+    if breakage != "userinfo":
+        assert "SchedulerConfigError" in reason                          # 读失败:只报段名与异常类型
+        assert "api_key_env" not in reason                               # 解析错误的文字(点名了字段)不带出来
+    assert secret_url not in reason and "hunter2" not in reason          # 地址与口令任何情形都不出现
+    assert fake_serve.calls == []                                        # 在占租约之前就判了
+
+
+def test_a_broken_opponent_section_does_not_fail_a_run_that_has_no_external_opponent(
+        world, tmp_path, stub, fake_serve):
+    """opponent 段只在本 run 有 external_api 对手位时才读:不相干的 run 不会被它拖垮。"""
+    _write_directive(world)                                              # 默认的对手位是 scripted
+
+    def break_it():
+        write_config(world, training_defaults_file(), "training-defaults",
+                     _interact_defaults(base_url="http://10.9.8.7:8000", model="ext-model"), "test: broken opponent")
+
+    _reconcile_after(world, tmp_path, break_it)
+    assert _read(world, "directive").status == "executed"
 
 
 def _failed_rollout(reason: str, detail: str = "") -> RolloutFailedError:

@@ -2,9 +2,13 @@
 
 派发器每派一条 interact 指令调用一次 `policy_factory(run_id, cfg)`,拿到一个上下文管理器。进入时按顺序:
 1. 部署情境撞车检查(Ruling 24):本 run 的情境 id 若也在 agent.yaml 的部署情境里,判 failed,什么都不登记;
-2. 解析训练位适配器与站内对手的适配器(都在占租约之前,确定性的错在这里就暴露);
-3. 起 vLLM 服务(`policy_context`),在同一服务上造 vLLM 对手工厂,按需造外部 API 对手;
-4. 把每个情境 id 登记到运行时(落盘钩子据此把 episode 写进本 run),调长流 deadline,交出策略。
+2. scripted 对手位的台词检查:某个情境的剧本里没有该位的台词、运行时的全局台词也是空的,判 failed(否则对手只会
+   说"(无更多发言)",产出的是垃圾 rollout)。生成路的情境在派发器写回之后才有 id,所以检查放在这里而不是装配期;
+3. 解析训练位适配器与站内对手的适配器(都在占租约之前,确定性的错在这里就暴露);
+4. 本 run 有 external_api 对手位时,现在才读 `training_defaults.yaml` 的 opponent 段并造那个后端(每次进入都重读,
+   改了不必重启守护进程;读不到或写坏了判 failed,原因只报段名与异常类型);
+5. 起 vLLM 服务(`policy_context`),在同一服务上造 vLLM 对手工厂;
+6. 把每个情境 id 登记到运行时(落盘钩子据此把 episode 写进本 run),调长流 deadline,交出策略。
 退出时(正常、训练抛异常都一样)先注销情境、还原 deadline,再由 `policy_context` 停服务放租约。
 
 对手后端经 `OpponentSwitch` 交给运行时:运行时在装配期就造好(它还要服务 MindAgent 部署),而 vLLM 对手要用
@@ -36,10 +40,12 @@ from compute.errors import ComputeError, ServeStopError
 from compute.service import serve as real_serve
 from controlplane.deferred import DeferredError
 from controlplane.envelope import BigRef
-from controlplane.gitstore import GitStore
+from controlplane.gitstore import UNREADABLE_PRODUCT_ERRORS, GitStore
+from controlplane.paths import scenario_file
 from factory.agent import AGENT_CONFIG, AgentRuntime, read_agent_settings
 from factory.errors import FactoryConfigError
 from factory.eval_config import DEFAULT_SERVE_PORT
+from factory.interact_checks import has_userinfo
 from factory.opponents import (
     ExternalApiBackend,
     ModelRefError,
@@ -56,6 +62,8 @@ from mindtrainer.training_config import TrainingConfig
 from mindtrainer.trajectory_source import RolloutFailedError
 from simulator.backends import ModelBackend, ScriptedBackend
 from simulator.datamodel import RoleBinding, Scenario
+from simulator.store_adapter import read_scenario
+from trainscheduler.config import load_training_defaults
 
 TRAINED_ADAPTER = "trained"          # 训练位在 vLLM 服务里的适配器名;站内对手的适配器名就是它的 model_ref
 PER_TURN_DEADLINE_S = 30.0           # 长流 deadline 按每回合 30 秒算:max_turns_per_episode * 30
@@ -161,21 +169,43 @@ def _plan_adapters(
     return trained, adapters, refs
 
 
-def _external_backend(
-    run_id: str, cfg: TrainingConfig, opponent: Mapping[str, str] | None, env: Mapping[str, str],
-) -> ExternalApiBackend | None:
-    """本 run 有 external_api 对手位时造那唯一的一个后端,否则 None。密钥现在才从环境变量读。"""
-    if not any(driver == "external_api" for _, driver in _opponent_bindings(cfg)):
-        return None
-    if opponent is None:
+def _opponent_section(store: GitStore, run_id: str) -> Mapping[str, str]:
+    """现在从树里读 training_defaults.yaml 的 opponent 段(每次进入策略上下文都读,装配之后改了也生效)。
+
+    装配期的检查(interact_checks)是启动门槛,保留不变;这里是派发期的第二道:文件被删、写坏、
+    opponent 段被删、地址被改成带 user:password@ 的,都在占租约之前判 T2。原因只报段名与异常类型,不带异常文字:
+    解析错误的文字、地址都可能带着远端地址。读失败一律译成 T2,磁盘瞬态错误也在内:重试这条指令前先要有人看一眼配置。"""
+    try:
+        section = load_training_defaults(store).opponent
+    except Exception as exc:
+        raise DirectiveFailedError(
+            f"directive {run_id}: the opponent section of training_defaults.yaml cannot be read ({type(exc).__name__})"
+        ) from None
+    if section is None:
         raise DirectiveFailedError(
             f"directive {run_id}: an opponent slot uses external_api but training_defaults.yaml has no opponent section"
         )
+    if has_userinfo(section["base_url"]):
+        raise DirectiveFailedError(
+            f"directive {run_id}: the opponent section of training_defaults.yaml must not carry credentials in "
+            "base_url (user:password@); put the key in the environment variable named by api_key_env"
+        )
+    return section
+
+
+def _external_backend(
+    run_id: str, cfg: TrainingConfig, store: GitStore, env: Mapping[str, str], timeout_s: float,
+) -> ExternalApiBackend | None:
+    """本 run 有 external_api 对手位时造那唯一的一个后端,否则 None(这时不读 opponent 段:
+    一个不相干的 run 不该被坏掉的 opponent 段拖垮)。密钥现在才从环境变量读。"""
+    if not any(driver == "external_api" for _, driver in _opponent_bindings(cfg)):
+        return None
+    opponent = _opponent_section(store, run_id)
     name = opponent["api_key_env"]
     try:
         return ExternalApiBackend(
             opponent["base_url"], opponent["model"],
-            api_key=env.get(name, ""), api_key_env=name, timeout_s=OPPONENT_TIMEOUT_S,
+            api_key=env.get(name, ""), api_key_env=name, timeout_s=timeout_s,
         )
     except ValueError as exc:
         # 构造器的 ValueError 文字里会带 base_url;只报类型,配置里的地址不进指令的失败原因
@@ -196,6 +226,28 @@ def _deployment_overlap(store: GitStore, run_id: str, cfg: TrainingConfig) -> li
         ) from exc
     deployed = set(agent_config.scenario_ids)
     return [sid for sid in cfg.scenario_ids if sid in deployed]
+
+
+def _scripted_gaps(store: GitStore, runtime: AgentRuntime, cfg: TrainingConfig) -> list[str]:
+    """没有台词可说的 scripted 对手位,形如 `情境id:角色位`。
+
+    scripted 驱动的对手位台词取情境剧本里该位的一份,没有或为空取运行时的全局台词(AgentRuntime._backends);
+    两样都没有时 ScriptedBackend 只会说"(无更多发言)"。全局台词来自装配期读的 agent.yaml,只开 --interact
+    而没有 agent.yaml 时是空的。训练位以外只有显式写了 scripted 的绑定才走这条路(driver_for 的默认是 vllm 或
+    external_api)。树里没有或读不出的情境不在这里报:会话开不起来时服务端自会判 invalid_session。"""
+    slots = [b.slot_id for b, driver in _opponent_bindings(cfg) if driver == "scripted"]
+    if not slots or runtime.opponent_lines:
+        return []
+    gaps: list[str] = []
+    for sid in cfg.scenario_ids:
+        if not store.exists(scenario_file(sid)):
+            continue
+        try:
+            script = read_scenario(store, sid).opponent_script
+        except UNREADABLE_PRODUCT_ERRORS:
+            continue
+        gaps.extend(f"{sid}:{slot}" for slot in slots if not script.get(slot))
+    return gaps
 
 
 def _dispatching(vllm_make: OpponentFactory, external: ExternalApiBackend | None) -> OpponentFactory:
@@ -220,14 +272,15 @@ def make_policy_factory(
     switch: OpponentSwitch,
     client: object,
     endpoint: ComputeEndpoint,
-    opponent: Mapping[str, str] | None,
     env: Mapping[str, str],
     serve_port: int = DEFAULT_SERVE_PORT,
     serve: Callable[..., object] | None = None,
     policy_timeout_s: float = POLICY_TIMEOUT_S,
     opponent_timeout_s: float = OPPONENT_TIMEOUT_S,
 ) -> Callable[[str, TrainingConfig], AbstractContextManager[ModelBackend]]:
-    """派发器要的 `policy_factory(run_id, cfg)`。serve 可注入,测试里不连 SSH。"""
+    """派发器要的 `policy_factory(run_id, cfg)`。serve 可注入,测试里不连 SSH。
+    外部对手的地址与模型不在这里传:每次进入上下文时从 `store` 里的 training_defaults.yaml 读(见 _opponent_section)。
+    opponent_timeout_s 同时是站内 vLLM 对手与外部 API 对手的单次 HTTP 上限。"""
 
     @contextmanager
     def scope(run_id: str, cfg: TrainingConfig) -> Iterator[ModelBackend]:
@@ -238,12 +291,19 @@ def make_policy_factory(
                 "the shared runtime would write their deployment episodes into this training run "
                 "(use scenarios that are not listed there)"
             )
+        gaps = _scripted_gaps(store, runtime, cfg)
+        if gaps:
+            raise DirectiveFailedError(
+                f"directive {run_id}: scripted opponent slot(s) {gaps} (scenario:slot) have no lines to say, so the "
+                "opponent would only answer \"(无更多发言)\" and the rollouts would be garbage; give the opponent "
+                "lines in agent.yaml (opponent_lines) or give each of those scenarios an opponent_script for the slot"
+            )
         try:
             trained, adapters, refs = _plan_adapters(store, endpoint, cfg)
         except ModelRefError as exc:
             raise _failed(run_id, exc) from exc
         try:
-            external = _external_backend(run_id, cfg, opponent, env)
+            external = _external_backend(run_id, cfg, store, env, OPPONENT_TIMEOUT_S)   # 调用时才取模块里的名字(测试夹具替换它)
         except OpponentCredentialError as exc:
             raise _failed(run_id, exc) from exc          # 文字里只有环境变量名
         try:

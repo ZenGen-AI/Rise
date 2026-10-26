@@ -137,6 +137,12 @@ class AgentRuntime:
         self.episode_write_failures: list[str] = []      # 每条一句描述,只含类名与 id,不含异常文字
 
     @property
+    def opponent_lines(self) -> tuple[str, ...]:
+        """运行时的全局对手台词,只读。没有剧本的 scripted 对手位说的就是它;为空时那个位只会说"(无更多发言)"。
+        策略上下文据此在派发时判断某个情境的 scripted 对手位有没有台词可说。"""
+        return tuple(self._lines)
+
+    @property
     def interact_deadline_s(self) -> float:
         with self._lock:
             return self._deadline

@@ -53,7 +53,7 @@ def _check_opponent(section, opponent: Mapping[str, str] | None, environ: Mappin
     from factory.opponents import ExternalApiBackend, OpponentCredentialError, driver_for
     from simulator.datamodel import RoleBinding
 
-    if opponent is not None and _has_userinfo(opponent["base_url"]):
+    if opponent is not None and has_userinfo(opponent["base_url"]):
         raise FactoryConfigError(
             f"{_DEFAULTS}: opponent.base_url must not carry credentials (user:password@); "
             f"put the key in the environment variable named by opponent.api_key_env"
@@ -87,7 +87,9 @@ def _check_opponent(section, opponent: Mapping[str, str] | None, environ: Mappin
         raise FactoryConfigError(f"{_DEFAULTS}: opponent.base_url must be an http(s) URL with a host") from None
 
 
-def _has_userinfo(base_url: str) -> bool:
+def has_userinfo(base_url: str) -> bool:
+    """地址里带不带 user:password@。装配期检查与策略上下文每次进入时重读 opponent 段都用它:
+    带着凭证的地址一旦进了请求的 host 标签,就会出现在异常文字、日志与指令的失败原因里。"""
     try:
         parts = urllib.parse.urlsplit(base_url)
     except ValueError:

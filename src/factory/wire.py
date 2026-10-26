@@ -173,12 +173,12 @@ def _interact_wiring(
     from factory.interact_checks import check_interact_config
     from factory.interact_policy import make_policy_factory
 
-    defaults = check_interact_config(store, environ)          # 设计 90 拒绝项 2 到 9,先于端点与主机映射
+    check_interact_config(store, environ)          # 设计 90 拒绝项 2 到 9,先于端点与主机映射。只作启动门槛:
+    # opponent 段不在这里取,策略上下文每次进入时自己从树里重读(装配之后改了也生效)
     endpoint = select_endpoint(read_endpoints_config(store), options.endpoint)
     client = build_compute_client(endpoint, read_host_map(env=environ))
     policy_factory = make_policy_factory(
-        store=store, runtime=runtime, switch=switch, client=client, endpoint=endpoint,
-        opponent=defaults.opponent, env=environ,
+        store=store, runtime=runtime, switch=switch, client=client, endpoint=endpoint, env=environ,
     )
     return {"policy_factory": policy_factory, "policy_endpoint": endpoint.endpoint_id}
 
