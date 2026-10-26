@@ -1,245 +1,354 @@
-# Actio 与记忆选型设计:智能体协议可扩展、记忆换成 Starling
+# 设计二：每个角色位都是带记忆的智能体，记忆用 Starling
 
-状态:草案,待审阅。日期:2026-10-25。
-前置设计:`2026-10-09-actio.md` 对应的 Actio 工作包、`2026-10-09-mindagent.md`。
-配套设计:`2026-10-24-interact-train-wiring-design.md`(场景二接通)。两者互不依赖,可分别落地。
-权威文档集是 `docs/design/`。本稿审定后并入其中的总览、SocialSimulator、Actio、MindAgent、MindTrainer 五篇,再写施工计划。
+状态：修订稿，待审阅。日期：2026-10-26（第一稿写于 2026-10-25）。
+基线：rise `705236c`，Starling `48e9f3b`（`ruijieguo/starling` main，公开仓库，Apache-2.0）。
+权威文档集是 `docs/design/`。本稿审定后并入 00、20、30、40、50、90 六篇，然后写施工计划。
 
 ## 0. 这份文档做什么
 
-三件事:
+场景二（实时交互训练）里，**每个角色位都是一个智能体**：一个 Actio 实例包着一个底座模型，带技能、经验和记忆。
 
-1. 把 `simulator` 依赖的"角色智能体"从一个具体包改成一个协议。本项目仍以 `src/actio` 为唯一实现,但以后接第二、第三个智能体系统只加实现,模拟器不改。
-2. 把 `actio` 内部的记忆换成 Starling(`ruijieguo/starling`),每个 agent 一份独立记忆,记忆在 `actio` 内部,`simulator` 看不到 Starling。
-3. 让记忆在训练里可复现:回合开始时取记忆指纹,写进训练记录并并入 `config_hash`。
+- 训练位智能体的底座是正在训练的模型，由 MindTrainer 训练。
+- 对手位智能体的底座按驱动来：固定对话、站内 vLLM、外部 OpenAI 兼容 API。
+- 记忆是个体的。每个人格（persona）一份第一人称记忆，存在 Starling 里。
+- 记忆让对手位能准确扮演某种人格的个体：它记得刚才发生的事，形成信念，并据此回应。
 
-明确不考虑:对 Actio-RSI(`ChaunceyKung/Actio-RSI-infra`)的兼容适配。它是未完工项目,接口与架构可能大改。
+MindAgent 是另一条线：底座不动参数，演化技能库与记忆库。它与训练没有关系，两条线共用同一套 Actio 与记忆端口。
 
-不做:改模型权重、把 Starling 的语义检索用于诊断、跨租户记忆共享、把记忆库放进 git 产物树。
+本稿管四件事：
+
+1. Actio 抽出记忆端口，Starling 是生产实现，现有 `MemoryEntry` 是替身。
+2. 训练路的所有角色位都换成 Actio 实例，每轮读记忆、写记忆。
+3. 记忆参与训练时可复现：起点记忆钉进 `config_hash`，每条 rollout 从同一起点出发。
+4. Starling 补齐本仓库需要的公开接口（经 PR 合入 Starling）。
+
+不做：
+
+- 对 Actio-RSI（`ChaunceyKung/Actio-RSI-infra`）的兼容。
+- 把记忆库放进 git 产物树。
+- 跨租户共享记忆。
+- 把 Starling 的语义检索用于诊断评测。
+- 诊断评测的动态轨与批量数据集生产（`simulator.dataset`）换成智能体。两者仍用裸后端，单列为后续工作。
 
 ## 1. 事实依据
 
-### 1.1 本仓库
+### 1.1 本仓库（`705236c`）
 
-1. `actio` 的记忆现在是内存元组:`MemoryEntry` 冻结数据类加词面重叠检索(`src/actio/memory.py:14,109-133`),`ActioInstance.decide` 每次调用 `retrieve(self.memories, query, limit=…)`(`src/actio/instance.py:108-113`),指导语由 `render_guidance` 拼成 `[memory:<id>] 主体: 内容`(`:71-88`)。
-2. 记忆条目由 MindAgent 从树里读出后传进来:`mindagent.library.load_library` 读 `skill_library/`、`memory_library/` 与 `library_state.yaml`(`src/mindagent/library.py:60-77`),`actio.instantiate(memories=…)` 接收元组(`src/actio/instance.py:134-152`)。
-3. 记忆提案经审核门②收录:`mindagent.admit` 把 `increments` 里的 `kind: memory` 写成 `MemoryEntry` 并落进 `memory_library/`(`src/mindagent/admit.py:27-46,79-103`)。
-4. `actio` 六个模块导入 `simulator.datamodel`;设计文档明令 `simulator` 不得导入 `actio`(`docs/design/40-actio.md:223`),而总览的上下文图已画了 `SocialSimulator → Actio`(`docs/design/00-overview.md:120`)。文档与代码分层不一致。
-5. `run_episode` 每轮按 `binding.slot_id` 取后端,后端返回二元组或三元组都接受(`src/simulator/runner.py:60-110`);`ActioInstance.respond` 返回三元组(`src/actio/instance.py:117-136`),所以实例可以直接当后端用。
-6. 引用 `MemoryEntry` 的文件共 8 个:`actio/instance.py`、`actio/memory.py`、`mindagent/admit.py`、`mindagent/library.py`,以及四个测试文件,合计 40 处。
+| 编号 | 事实 | 位置 |
+|---|---|---|
+| F1 | Actio 的记忆是内存元组 `MemoryEntry` 加词面检索；`decide` 每次调 `retrieve(self.memories, …)` | `src/actio/memory.py`、`src/actio/instance.py:108-113` |
+| F2 | Actio 实例只在 MindAgent 里构造：部署轮次与验证重放 | `src/mindagent/rounds.py:244` |
+| F3 | 训练位是裸的 `VllmPolicy`，只有 `respond`；轨迹源调 `policy.respond` 后 `submit_turn(utterance, thought)`，不带激活轨迹 | `src/factory/vllm_policy.py:31-60`、`src/mindtrainer/trajectory_source.py:260-262` |
+| F4 | 对手位是裸后端：`ScriptedBackend`、`VllmPolicy`、`ExternalApiBackend`，由 `AgentRuntime._backends` 每个会话新造 | `src/factory/agent.py:200-224` |
+| F5 | `as_guided` 给只有 `respond` 的后端套 `IgnoreGuidance`，指导语被丢弃 | `src/actio/instance.py:60-67` |
+| F6 | 服务端给每个对手后端套 `TimeoutBackend`（默认 60 秒），它只认 `respond` 并原样返回结果；运行器接受二元组或三元组 | `src/simulator/realtime/servicer.py:286-288`、`src/simulator/runner.py:21-33` |
+| F7 | 服务端下发给客户端的对手轮次抹掉 `inner_thought` 与 `activation_trace`；落盘的 episode 保留完整记录 | `src/simulator/realtime/servicer.py:312-316` |
+| F8 | 会话正常结束触发 `on_session_closed(episode)`；中途断开不触发 | `src/simulator/realtime/servicer.py:109,327` |
+| F9 | 激活轨迹校验要求 `memory_hits` 每项以 `mem-` 开头、不重复 | `src/actio/trace.py:79` |
+| F10 | `simulator` 不导入 `actio`，已成立 | `grep` 为零 |
+| F11 | MindAgent 从不生成记忆提案；`kind: memory` 只来自手写提案 | `src/mindagent/proposals.py:6` |
+| F12 | 门②收录 `kind: memory` 时写 `memory_library/` | `src/mindagent/admit.py:41-43` |
+| F13 | 续训时 `config_hash` 不同即升 `NeedsHumanError`（T3） | `src/mindtrainer/orchestrator.py:183-187` |
+| F14 | 部署 episode 复用的判据是每个智能体轮次的 `library_version` 与当前相同 | `src/mindagent/deployment.py:70-78` |
+| F15 | 树外本机配置的现成做法：路径由环境变量给，必须在仓库外且权限 0600，报错不回显取值 | `src/factory/eval_config.py` |
 
-### 1.2 Starling(读过仓库,版本 0.0.1)
+### 1.2 Starling（`48e9f3b`，本地构建实测）
 
-7. Python 门面(`python/starling/memory.py`):
-
-```python
-Memory.open(db_path, *, agent="self", tenant_id="default", llm=None, extraction=None)
-remember(text, *, holder=None, interlocutor=None, now=None) -> RememberResult
-recall(query, *, perspective="first_person", k=10, mode="semantic") -> list[{"row": StatementRow, "score": float}]
-query(text="", *, intent=…, perspective=…, …) -> {entries, context_pack, abstained, …, receipt}
-render_working_set(interlocutor, *, goal=None, token_budget=2000) -> ContextBlock
-tick(now) -> TickStats
-close()
-```
-
-8. `remember` 必须配 LLM:没有适配器时抛 `LLMNotConfigured`(`python/starling/_memory_core.py:183-190`)。抽取走三条管线(信念 / 情节 / 一般事实),由 C++ 统一执行。
-9. `record` 的语义单位是 Statement:`holder`、`subject`、`predicate`、`object`、`modality`、`polarity`、`confidence`、`observed_at`、`nesting_depth` 等;`recall` 返回的 `StatementRow` 在 Python 侧暴露 `id`、`tenant_id`、`holder_id`、`holder_perspective`、`subject_kind`、`subject_id`、`predicate`、`object_kind`、`object_value`、`modality`、`polarity`、`confidence`、`observed_at`、`consolidation_state`、`review_status`、`evidence_json`、`affect_json`、`nesting_depth`(`bindings/python/bind_05_retrieval.cpp:237-260`、`include/starling/retrieval/statement_row.hpp`)。
-10. `ContextBlock` 与 `WorkingBlock` 已绑定,`ContextBlock.render()` 输出 prompt 文本;分区固定为 `pending_commitments > persona > common_ground > relevant_memories > affect`(`include/starling/hippocampus/working_set.hpp`、`bindings/python/bind_09_brain_dynamics.cpp`)。
-11. 多 agent 隔离靠 `holder_id` 加 `tenant_id`:`recall` 的候选 SQL 带 `holder_id = ?`(`_memory_core.py:250-260`)。同一 DB 内多 holder 是设计内的;但该库的核心注释写"Command core over ONE runtime/WAL adapter",README 强调 single-adapter 纪律,多实例开同一文件的用法未见文档。
-12. 持久层是 SQLite,开 `PRAGMA journal_mode = WAL` 与 `busy_timeout = 5000`(`src/persistence/connection.cpp:23-25`)。**没有快照/导出接口**:`export_dump` 只出现在图数据库后端的接口(`docs/design/subsystems_design/04_substrate.md:279,333`),SQLite 运行时没有。
-13. 默认嵌入器是确定性 stub(8 维),写在门面里(`python/starling/memory.py:147-148`);真正的语义检索要自己注入 OpenAI 嵌入适配器(`bindings/python/bind_10_embedding.cpp`)。
-14. 构建:scikit-build-core + CMake ≥3.27 + Ninja + pybind11,要求 C++ 编译器与 SQLite ≥3.46(`pyproject.toml`、`requirements-build.txt`)。本机有 Apple clang 21 与 SQLite 3.51,缺 `cmake`、`ninja`(两者都有 PyPI 轮子)。
-15. **未发布到 PyPI**:`https://pypi.org/pypi/starling-memory/json` 返回 404。
-16. **仓库根目录没有 LICENSE 文件**,README 结尾仍写"尚未选择许可证,保留所有权利"(`README.md:195-197`)。
+| 编号 | 事实 | 实测或位置 |
+|---|---|---|
+| S1 | `uv pip install <checkout>` 用 scikit-build-core 构建，自动拉 cmake 与 ninja，本机 179 秒 | 实测 |
+| S2 | 公开 `Memory.recall(query, *, perspective, k, mode)` 不收 `holder`；私有 `MemoryCore.recall` 收 | `python/starling/memory.py:168`、`_memory_core.py:250` |
+| S3 | `remember` 要求注入 LLM，否则抛 `LLMNotConfigured`；`make_openai_llm` 的密钥由 C++ 读 `OPENAI_API_KEY` | `_memory_core.py:183-187`、`memory.py:48-70` |
+| S4 | `remember` 写入的语句要等 `tick()` 嵌入后才能被 `recall` 命中 | 实测：tick 前 0 条，tick 后 1 条 |
+| S5 | 门面固定用 8 维 stub 嵌入器，命中分数为 -0.19，语义检索无意义；真嵌入器是 `OpenAIEmbeddingAdapter`，密钥同样读 `OPENAI_API_KEY` | `memory.py:147-148`、`src/embedding/openai_embedding_adapter.cpp:35` |
+| S6 | `StatementRow` 暴露 `id`（UUID）、`holder_id`、`subject_id`、`predicate`、`object_value`、`modality`（小写，如 `believes`）、`polarity`、`confidence` 等；**没有** `nesting_depth`（表里有该列） | 实测 |
+| S7 | `remember` 的幂等只看文本：同一段文字再写，换了 `now`、`interlocutor`、`holder` 都返回 `outcome="idempotent"`，不新增语句 | 实测 |
+| S8 | `recall` 不改语句行（`access_count`、`activation`、`updated_at` 不变） | 实测 |
+| S9 | 库文件字节不稳定：每次新建空库字节不同；`close` 不合并 WAL | 实测 |
+| S10 | `VACUUM INTO` 在库打开时可执行，得到自洽的单文件副本（约 0.6 MB，3 毫秒）；副本可直接 `Memory.open` 且记忆完整 | 实测 |
+| S11 | 两个 `Memory` 分别开两个文件，互不干扰 | 实测 |
+| S12 | 空库 `Memory.open` 约 20 毫秒；替身抽取下 `remember` 4 毫秒、`tick` 2 毫秒 | 实测 |
+| S13 | Starling 自己的世界快照用 `VACUUM INTO` 加 `integrity_check`（C++ `take_snapshot`），只服务看板 | `src/governance/world_store.cpp:828` |
 
 ## 2. 裁决总表
 
-| 编号 | 裁决 | 备选 | 理由 | 判错的代价 |
-|---|---|---|---|---|
-| M1 | `simulator` 依赖"角色智能体"协议,不导入 `actio`;`actio` 是第一个实现 | 让 `simulator` 直接依赖 `actio` | 你要的是可扩展:第二、第三个智能体系统只加实现 | 协议多一层;实例构造挪到组合根 |
-| M2 | 公共数据模型下沉:把会被协议两边共享的类型留在 `simulator.datamodel`,不新建包 | 新建 `socialmodel` 包 | 新包要改 36 个导入点与所有边界测试;协议化本身并不需要它 | 跨包耦合仍在,以后要抽再抽 |
-| M3 | 记忆在 `actio` 内部,`simulator` 看不到 Starling | 记忆放在模拟器侧统一管理 | 你明确要求:记忆是个体 agent 的,不是环境的一部分 | `actio` 多一个外部依赖 |
-| M4 | 一个 Starling 实例、多 holder:进程内只开一个 `Memory`,`agent` 固定,按 `holder=<agent_id>` 读写 | 每个 agent 一个实例 | Starling 的 single-adapter 纪律只描述了单实例;多实例开同一库未验证 | 每个 agent 的"第一人称视角"靠参数而非实例维持 |
-| M5 | 记忆库在**树外**(本机路径,配置给),不进 git | 放 `control-plane/memory/` | 它是可变的原生库,不适合当 git 产物 | 记忆不可从产物树追溯,只能靠指纹 |
-| M6 | 回合开始取记忆指纹,写进训练记录并入 `config_hash` | 只记录不进哈希 | 记忆变了行为就变,不钉进哈希就复现不了、续训门也失效 | 任一 agent 写入都会改整库指纹,复现粒度是整库 |
-| M7 | 记忆指纹由智能体侧给出(协议可选方法 `fingerprint()`),组合根调用 | 组合根直接读 Starling 文件 | 模拟器与组合根都不该认识 Starling | 协议多一个可选方法 |
-| M8 | 记忆参与的时机:每轮 `recall`,轮次后 `remember` | 只 recall;回合后一次性 remember | 你要"每轮 recall + remember" | 每轮多一次抽取调用,延迟与成本上升 |
-| M9 | `actio` 现有的 `MemoryEntry` 检索降为测试替身,生产路径走 Starling | 删掉,全部换 Starling | 单元测试不该依赖原生扩展 | 两套实现要各自测试 |
-| M10 | MindAgent 的 `kind: memory` 增量改为"把增量文本交给 `remember`",不再写 `memory_library/` | 保留树内记忆库 | 记忆的唯一权威是 Starling,不能有两份 | 门②的证据形态要跟着改 |
-| M11 | Starling 作为可选 extra(`starling`),默认走内存替身 | 硬依赖 | 本地与 CI 都要能编 C++,门槛高 | 未装时功能退化,要显式报"记忆为替身" |
-| M12 | 前置条件:Starling 仓库补 LICENSE(Apache 2.0)与本仓库能取到的安装源 | 直接依赖未授权代码 | 许可未定前不能声明依赖 | 本设计在这两项完成前不能施工 |
+| 编号 | 裁决 | 理由 | 判错的代价 |
+|---|---|---|---|
+| M1 | 训练路的每个角色位都是 Actio 实例；底座按角色位的后端定 | 用户裁定：训练位与对手都是智能体，对手要靠记忆扮演个体 | 每轮多一次 recall 与 remember，会话变慢 |
+| M2 | `simulator` 仍只依赖 `ModelBackend`，不新增协议方法，不导入 `actio` | Actio 实例本来就满足 `respond`；构造在组合根 | 无 |
+| M3 | 记忆在 Actio 内部，经记忆端口访问；只有 `actio/memory_starling.py` 导入 `starling` | 记忆属于个体，不属于环境 | Actio 多一个可选依赖 |
+| M4 | 一个智能体一个 Starling 库文件，库的 `agent` 与 holder 都是该人格 | 个体隔离靠文件，不靠 holder 过滤；同时多开文件已实测 | 文件多 |
+| M5 | 记忆库在树外，根目录由树外配置给 | 原生 SQLite 带 WAL，不适合当 git 产物 | 不能从产物树追溯，靠摘要补 |
+| M6 | 记忆状态的身份是**逻辑摘要**：对规范化的语句行算 sha256，与文件字节无关 | 文件字节不稳定（S9） | 摘要不覆盖嵌入向量与看板表 |
+| M7 | 默认每轮都读写：回复前 recall，对方每句话 remember，之后 tick | 用户裁定（维持原 M8） | 每轮多一次抽取调用 |
+| M8 | 训练 run 有起点记忆，默认每个人格是空库；起点摘要进 `config_hash` | 记忆变了行为就变；不钉住续训门就失效 | 换种子库就要新开 run |
+| M9 | 每条 rollout 在起点的私有副本上跑，用完即弃 | 用户裁定：同组 rollout 的起点相同，组内优势只反映策略 | 记忆不在一条 run 内累积 |
+| M10 | 部署（MindAgent）的记忆是持久的，跨轮次累积；验证重放在快照副本上只读 | 部署记忆是演化对象；重放要让基线与候选看到同一份记忆 | 重放与线上行为不完全一致 |
+| M11 | MindAgent 的 `kind: memory` 收录改为调 `remember`，不写 `memory_library/` | 记忆只有一个权威来源 | 门②的证据要从 Starling 读回 |
+| M12 | 抽取与嵌入都走 OpenAI 兼容端点，`base_url` 与模型名写配置；密钥是 Starling 固定读的 `OPENAI_API_KEY` | 用户裁定；Starling 只认这个变量（S3、S5） | 不能为抽取和嵌入配不同的密钥 |
+| M13 | Starling 作为可选 extra `memory`，依赖钉 git 提交；未装时用替身并显式报告 | C++ 构建门槛；仓库未上 PyPI | 未装环境只测替身路径 |
+| M14 | Starling 缺的公开接口在 Starling 里补，经 PR 合入，本仓库钉合并提交 | 用户裁定；本仓库不碰 Starling 私有接口与表结构 | 依赖 Starling 先合 PR |
 
-## 3. 分层与智能体协议(M1、M2)
-
-### 3.1 目标分层
-
-```
-simulator.datamodel   纯数据模型(Persona / Scenario / RoleSlot / RoleBinding / RoleAssignment / TurnRecord / Episode)
-         ↑
-   ┌─────┴──────┐
-actio         simulator     simulator 只经协议调用智能体,不导入 actio
-  └─ starling(记忆在 actio 内部)
-         ↑
-mindtrainer · mindagent · factory(组合根)
-```
-
-`actio` 仍导入 `simulator.datamodel`;`simulator` 不导入 `actio`。两边都只依赖数据模型,协议是模拟器侧定义的结构性协议。这条保持了现有的单向依赖,不需要新建包。
-
-### 3.2 协议
-
-模拟器侧新增一个后端协议文件(可以就放在 `simulator/backends.py` 旁):
-
-```python
-class CharacterAgent(Protocol):
-    def respond(self, persona, scenario, history, speaker_slot) -> tuple[str, str | None] | tuple[str, str | None, dict]: ...
-    def fingerprint(self) -> dict | None: ...   # 可选:{"memory": <sha256>, "skills": <sha256>}
-```
-
-- `respond` 就是现有的 `ModelBackend`,不动签名;返回三元组时可带激活轨迹。
-- `fingerprint` 是新增的可选方法。有它就取,没有就当"无状态"(mock 后端、外部 API 后端都返回 `None`)。
-- 模拟器只认这两个方法。`ActioInstance` 已经满足 `respond`,`fingerprint` 在 `actio` 里补。
-
-### 3.3 实例构造留在组合根
-
-模拟器不构造实例,只在运行时按角色位取"已经构造好的对象"。构造发生在 `factory` 的装配处:读库、开 Starling、`instantiate(...)`。这样模拟器不导入 `actio`,也不读记忆。
-
-## 4. Starling 接入(M3、M4、M5、M8、M9)
-
-### 4.1 位置
+## 3. 分层
 
 ```
-src/actio/memory_starling.py     Starling 适配器:实现 actio 的记忆端口
-src/actio/memory.py              MemoryEntry + 词面检索,降为测试替身
+simulator.datamodel          纯数据模型
+   ↑            ↑
+actio        simulator       simulator 只认 ModelBackend
+  └ memory_starling → starling（可选 extra）
+   ↑
+mindtrainer（只认 ModelBackend）· mindagent · factory（组合根，构造 Actio 实例）
 ```
 
-`actio` 内部定义一个记忆端口,只要两种能力:
+- `mindtrainer` 不导入 `actio`：轨迹源只知道策略返回二元组或三元组（第 6.3 节）。
+- `factory` 构造所有训练路的 Actio 实例：训练位交给轨迹源，对手位交给服务端的后端工厂。
+- `mindagent` 继续自己构造部署实例，改为经记忆端口取记忆。
+
+## 4. Actio 的记忆端口
+
+### 4.1 端口
 
 ```python
 class MemoryBackend(Protocol):
-    def recall(self, *, holder: str, query: str, limit: int) -> list[str]   # 已渲染好的记忆句
-    def remember(self, *, holder: str, text: str, interlocutor: str | None) -> None
-    def fingerprint(self) -> str
+    def recall(self, query: str, *, limit: int) -> list[MemoryHit]: ...
+    def remember(self, text: str, *, interlocutor: str | None, now: str) -> RememberOutcome: ...
+    def digest(self) -> str: ...          # 逻辑摘要,sha256 十六进制
 ```
 
-- Starling 适配器:`recall` 调 `Memory.recall(query, k=limit)` 后按 `StatementRow` 渲染成句;`remember` 调 `Memory.remember(text, holder=holder, interlocutor=…)`;`fingerprint` 对库文件(含 WAL)算 sha256。
-- 替身适配器:现有 `MemoryEntry` + `retrieve`,供单元测试用。
-- `ActioInstance` 从"持有元组"改为"持有一个 `MemoryBackend`",`decide` 里改成 `recall(holder=self.agent_id, query=…)`。
+`MemoryHit` 是 `(id, text)`：`id` 以 `mem-` 开头（满足 F9），`text` 是渲染好的一句。`RememberOutcome` 是 `(stored, failed, category)`。一个端口实例只属于一个智能体，所以签名里没有 holder。
 
-### 4.2 渲染
-
-`StatementRow` 能拿到主体、谓词、对象、置信度、模态、二阶嵌套深度。指导语沿用现有格式并扩展:
-
-```
-[memory:<id>] <subject_id> <predicate> <object_value> (confidence=0.9, modality=BELIEVES)
-```
-
-嵌套深度大于 0 的条目前缀 `[memory:depth=<n>]`,让模型看得见"我 believe that you believe"这一层。也可以改用 `render_working_set(...).render()` 直接取五源上下文块,但那个块包含 persona / common_ground / 承诺等分区,粒度比 Actio 现在需要的粗。**取前者**,理由是可以只把记忆这一源喂给 `render_guidance`,与技能、经验并列,不引入第二套 prompt 骨架。
-
-### 4.3 时机(M8)
-
-默认读写都开:
-
-- 每轮 `respond` 之前:`recall(holder=<本角色位 agent>, query=<对方最后一句>, limit=3)`。
-- 每轮之后:把本轮对方发言交给 `remember(holder=…, text=…, interlocutor=<对方 agent>)`。
-- 抽取由 Starling 内部完成:写记忆只是调它的接口,本仓库不注入抽取器、不选抽取模型。用哪个模型由 Starling 自己的配置决定,与本仓库的凭证体系无关。
-- 抽取失败不挡训练:记一次失败、这一轮不留记忆,不抛到 `respond` 之外。Starling 的 `RememberResult` 带 `extraction_failed`、`failure_category`、`failure_detail`,直接据此记账。
-
-### 4.4 落盘(M5)
-
-记忆库**跟着智能体实例走**,位置由一个配置项给定,不写死:
-
-| 部署形态 | 实例在哪 | 记忆库在哪 |
+| 实现 | 文件 | 用途 |
 |---|---|---|
-| 现状(全部组件一台机器) | 开发机 | 开发机,如 `~/.rismforge/memory/<tenant>.db` |
-| 目标(模拟器在计算层) | 计算层 GPU 主机 | 同一台主机的一个固定目录 |
+| `TupleMemory` | `actio/memory.py` | 包现有 `MemoryEntry` 元组与 `retrieve`；`remember` 只追加到内存列表 |
+| `StarlingMemory` | `actio/memory_starling.py` | 包一个 `starling.Memory`；唯一导入 `starling` 的文件 |
 
-不写死的原因:总览把 SocialSimulator 放在计算层,而现状是全部组件在开发机上。哪一侧运行实例,库就在哪一侧,否则每轮 `recall` 都要跨机往返,实时会话撑不住。
+`TupleMemory` 也是部署时未装 Starling 的退化路径，见第 9 节。
 
-为什么不在 git 树里:它是原生 SQLite,有 WAL 与后台线程,每次写入都提交 git 会污染产物树,也让训练变成不可控的写者。
+### 4.2 实例改持端口
 
-隔离不靠物理位置:即使模拟器与实例同机,模拟器也只经协议调用,不导入 Starling、不碰库文件。代价是记忆不可从产物树追溯,补偿就是 M6 的指纹。
+| 改动 | 现状 | 改后 |
+|---|---|---|
+| 字段 | `memories: tuple[MemoryEntry, ...]` | `memory: MemoryBackend` |
+| `decide` | `retrieve(self.memories, q, limit)` | `self.memory.recall(q, limit=self.memory_limit)` |
+| `respond` 之后 | 无 | `memory_write=True` 时对新近的对方发言 `remember`，再 `tick` |
+| `instantiate` | `memories=` | `memory=`；保留 `memories=` 作为 `TupleMemory` 的简写 |
 
-## 5. 记忆指纹(M6、M7)
+`render_guidance` 改收 `list[MemoryHit]`，记忆行写成 `[memory:<id>] <text>`。
 
-```python
-# 回合开始,组合根调用一次
-fp = agent.fingerprint()          # {"memory": "<sha256>", "skills": "<sha256>"} 或 None
+### 4.3 读写时机（M7）
+
+- **读**：每次 `respond` 前，查询词是对方最后一句（现有 `_memory_query`），`limit` 默认 3。
+- **写**：每次 `respond` 后，把上次回复之后对方说的每句话按顺序交给 `remember`，`interlocutor` 是说话方的人格 id；然后 `tick` 一次。
+- **写入的文本**：`<scenario_id>#<turn_index> <说话方人格 id>：<utterance>`。Starling 的幂等只看文本（S7），带上来源后，同一句话在别的情境或别的轮次出现时照样记下；同一会话重跑同一轮则幂等，不重复写入。
+- **自己的话**：不写。它已在对话历史里，Starling 的抽取面向别人的言行。
+- **抽取失败**：`RememberOutcome.failed` 为真时这一轮不留该条记忆，计数加一，不抛到 `respond` 之外。
+- **`recall` 或 `remember` 抛异常**：原样上抛，由调用方按角色位后端故障处理（第 9 节）。
+
+`now` 由实例按“情境时钟”给出：固定起点 `2026-01-01T00:00:00Z` 加轮次序号乘一秒。同一条 rollout 的时间戳与墙钟无关，摘要里的 `observed_at` 因而可复现。
+
+### 4.4 渲染（S6）
+
+`StarlingMemory.recall` 把每个 `{row, score}` 渲染成：
+
+```
+[memory:mem-<row.id>] <subject_id> <predicate> <object_value>（<modality>，置信度 <confidence>）
 ```
 
-- `actio` 的实现:对 Starling 的 db 文件加 `-wal` 一起算 sha256;技能部分对库条目算哈希。
-- 组合根把它写进训练记录的 `agent_fingerprints` 块,并按 `{角色位: fp}` 并入 `config_hash`。
-- 共用单库时,`memory` 指纹是整库的:任一 agent 写入都会改它。这一点写进记录的字段名(`memory: "shared"`)与文档,避免读的人以为是各自的。
-- 指纹读取是只读的,不影响任何状态。
+否定语句（`polarity` 为负）在谓词前加“不”。`StatementRow` 没有 `nesting_depth`，不渲染嵌套层次；“我认为你认为”由 Starling 的谓词与主体表达。
 
-## 6. MindAgent 的记忆提案(M10)
+### 4.5 逻辑摘要（M6）
 
-现在门②收录 `kind: memory` 的增量时把它写成 `MemoryEntry` 落进 `memory_library/`(`src/mindagent/admit.py:41-43`)。记忆的唯一权威移到 Starling 之后:
+`digest()` 调 Starling 新增的公开 `Memory.digest()`（第 7 节）。摘要的输入是本 tenant 下所有语句行的规范化 JSON：
 
-- 提案里的 `definition` 仍是结构化条目(主体、内容、时间);
-- 收录处理器改为调 `memory_backend.remember(holder=<bound agent>, text=<渲染后的陈述>)`,不写树;
-- 失败时写一条 T2 失败记录,提案留在 `approved`(与现在 `repro` 缺失的处理同一形状);
-- 门②的 `review` 仍然显示提案内容,证据形态不变。
+| 进摘要 | 不进摘要 |
+|---|---|
+| `holder_id`、`subject_kind`、`subject_id`、`predicate`、`object_kind`、`object_value`、`modality`、`polarity`、`confidence`、`observed_at`、`valid_from`、`valid_to`、`review_status` | `id`（UUID，每次新造）、`created_at`、`updated_at`、`access_count`、`activation`、嵌入向量 |
 
-这条改动会动到 `tests/test_ma_admit.py` 里两个记忆用例。
+行按规范化后的 JSON 排序，再整体算 sha256。空库的摘要是固定值。`TupleMemory.digest()` 对条目 `to_dict()` 的排序列表算同样形状的 sha256。
 
-## 7. 前置条件与阻碍(M12)
+## 5. 记忆库的位置与配置
 
-按顺序,前两项不解决就不能施工:
+### 5.1 树外配置（M5、M12）
 
-1. **LICENSE。** `ruijieguo/starling` 根目录没有 LICENSE 文件,README 仍写未选许可。你确认按 Apache 2.0 授权,需要在该仓库补 `LICENSE`(与 `NOTICE`,如有第三方代码),并把 README 的许可段落改掉。完成前,本仓库不能声明对它的依赖。
-2. **安装源。** 未上 PyPI。二选一:发布到 PyPI(最优),或本仓库的 `starling` extra 指向 git 地址/本地路径。
-3. **构建门槛。** 要 C++ 编译器、CMake ≥3.27、Ninja、SQLite ≥3.46。本机缺 cmake/ninja,CI 也要能编。写进 `docs/design` 的依赖一节。
-4. **写记忆依赖 Starling 内部的抽取模型。** 本仓库不注入抽取器,只用它的接口。因此:抽取模型选型、抽取成本与超时都在 Starling 的配置里,本仓库的凭证体系不涉及;`RememberResult.extraction_failed` 是唯一的失败信号,要据此留痕。
+环境变量 `RISMFORGE_MEMORY_CONFIG` 给出 YAML 文件的绝对路径，文件必须在仓库外、权限 0600，做法同评测配置（F15）。
 
-## 8. 失败与可观测
-
-| 失败点 | 类 | 处理 |
+| 键 | 必填 | 含义 |
 |---|---|---|
-| 未装 Starling,但配置要求它 | 配置错误 | 装配期退出码 2,并说明"记忆为替身或未安装" |
-| 记忆库打不开、迁移失败 | T2 | 指令 `failed`,不静默退回替身 |
-| `remember` 抽取失败 | 不分类 | 记一次失败,这一轮不留该条记忆,不抛到 `respond` 之外 |
-| `recall` 抛异常 | T2 | 指令 `failed`(记忆是角色行为的一部分,静默降级会让行为不可解释) |
-| 指纹算不出 | T2 | 指令 `failed`(复现前提不成立) |
-| Starling 装了两个版本 | 配置错误 | 装配期核对 `starling.__version__`,与记录的版本比对 |
+| `root` | 是 | 记忆库根目录，绝对路径，在仓库外 |
+| `extraction_base_url`、`extraction_model` | 是 | 抽取用的 OpenAI 兼容端点与模型 |
+| `embedding_base_url`、`embedding_model`、`embedding_dim` | 是 | 嵌入用的端点、模型与维度 |
+| `timeout_ms` | 否 | 抽取与嵌入的单次上限，默认 20000 |
 
-## 9. 测试策略
+配置里不放密钥。启动时检查 `OPENAI_API_KEY` 非空，报错只写变量名。配置不存在时，训练路与部署路都用替身，并在启动日志与 `training_run.policy_backend` 里写 `memory: "stand-in"`。
+
+### 5.2 目录布局
+
+```
+<root>/
+  deploy/<persona_id>.db                    部署记忆,持久,跨轮次累积
+  seeds/<seed_id>/<persona_id>.db           训练起点种子库,只读
+  runs/<run_id>/<slot_id>-<attempt>.db      一条 rollout 的私有副本,会话结束即删
+  snapshots/<round_id>/<persona_id>.db      部署轮次的验证快照,轮次结束即删
+```
+
+库文件名用人格 id，因为人格才是“个体”。同一个人格在两个角色位同时出现时，两个位各开一份副本，互不可见。
+
+### 5.3 部署形态
+
+| 形态 | 实例在哪 | 库在哪 |
+|---|---|---|
+| 现状：全部组件一台机器 | 开发机 | 开发机上 `root` 指的目录 |
+| 目标：模拟器在计算层 | GPU 主机 | 同一台主机上 `root` 指的目录 |
+
+库必须和实例同机，否则每轮 recall 都跨机往返。
+
+## 6. 训练路
+
+### 6.1 起点记忆（M8）
+
+`TrainingConfig` 增加可选字段 `memory`：
+
+| 字段 | 含义 |
+|---|---|
+| `memory.seed` | 种子 id，`null` 表示每个人格都是空库 |
+| `memory.digests` | `{persona_id: 起点摘要}`，派发时算出并写回 |
+| `memory.write` | 是否每轮写，默认 `true` |
+
+- `memory` 为 `None` 时 `to_dict` 不写这个键，旧配置的 `config_hash` 逐字节不变。
+- 训练默认值 `training_defaults.yaml` 的 `interact` 段增加可选键 `memory_seed`，调度器照搬进配置。
+- 派发器进入策略上下文之前，按 `seed` 打开每个绑定人格的起点库、算摘要、写回 `memory.digests`。之后 `config_hash` 包含摘要。
+- 续训时重新算摘要；种子库被改过，摘要不同，`config_hash` 不同，升 T3（F13）。
+
+### 6.2 每条 rollout 的私有副本（M9）
+
+| 时刻 | 动作 |
+|---|---|
+| 会话开始 | 对每个角色位：从起点库 `backup_to` 一份私有副本（空起点就新建空库），打开它，构造 Actio 实例 |
+| 每轮 | 该位实例 recall、回复、remember、tick |
+| 会话结束（正常、失败、断开都一样） | 关闭副本并删除 |
+
+- 训练位的实例在客户端（轨迹源一侧），由策略工厂每条 rollout 新造一个，见 6.3。
+- 对手位的实例在服务端，由 `AgentRuntime._backends` 每个会话新造。会话结束时服务端调后端的可选 `close()`（第 6.4 节）。
+- 副本用完即弃，所以一条 run 内记忆不累积。同组 `group_size` 条 rollout 的每个角色位都从同一份记忆出发。
+
+### 6.3 训练位
+
+| 部件 | 改动 |
+|---|---|
+| `VllmPolicy` | 新增 `respond_guided(persona, scenario, history, slot, guidance)`：指导语非空时作为第二条 system 消息放在人格消息之后 |
+| 策略工厂 | 交给编排器的策略从“一个 `VllmPolicy`”改为“每条 rollout 造一个 Actio 实例”的工厂 |
+| `InteractTrajectorySource` | 收 `policy_for_rollout: Callable[[Scenario, int], ContextManager[ModelBackend]]`；每条 rollout 进一次上下文 |
+| 提交 | 策略返回三元组时，第三项作为 `activation_trace` 随 `submit_turn` 上行 |
+
+`mindtrainer` 不导入 `actio`：它只认 `ModelBackend` 的二元组或三元组。旧的单一 `policy` 参数保留，内部包成“每条 rollout 返回同一个后端”的工厂，现有测试不改。
+
+### 6.4 对手位
+
+| 驱动 | 底座 | 改后的后端 |
+|---|---|---|
+| `scripted` | `ScriptedBackend` | Actio 实例包 `ScriptedBackend`；记忆照读照写，台词不受影响 |
+| `vllm` | `VllmPolicy`（适配器 = `model_ref`） | Actio 实例包 `VllmPolicy`，指导语经 `respond_guided` 进 prompt |
+| `external_api` | `ExternalApiBackend` | Actio 实例包它；`ExternalApiBackend` 同样新增 `respond_guided` |
+
+- 对手位的技能与经验在本稿里为空：现阶段只有 MindAgent 产出技能，训练路不读技能库。
+- 部署会话（没登记给训练 run）的对手位同样换成 Actio 实例，底座仍是原来的 `ScriptedBackend`，记忆是每会话一份空库，用完即弃。部署里演化的是客户端位的智能体，对手的记忆不跨会话留存。
+- `ScriptedBackend` 只有 `respond`，套上 Actio 后指导语被忽略（F5），台词与现在逐字相同；变化只是对手轮次多了激活轨迹，`_reusable` 与分析器只看智能体位，不受影响。
+- 服务端：`TimeoutBackend` 新增 `close()` 转发；会话驱动器在终态（`CLOSED`、`FAILED`）时调每个后端的 `close()`。`close()` 只在后端有该方法时调，异常记日志后吞掉。
+- 对手的激活轨迹随落盘 episode 保存（F7），不下发给训练位。
+
+### 6.5 训练记录
+
+`training_run.policy_backend` 增加 `memory` 块：`{"backend": "starling" | "stand-in", "starling_commit": "<sha>", "seed": <id 或 null>, "digests": {persona_id: sha}}`。读记录的人不必回到配置就知道记忆从哪来。
+
+## 7. Starling 的 PR（M14）
+
+在 `ruijieguo/starling` 开分支，只改 Python 门面与绑定，每项带测试：
+
+| 接口 | 作用 |
+|---|---|
+| `Memory.recall(..., holder=None)` | 转发到 `MemoryCore.recall` 的 `holder` |
+| `Memory.open(..., embedder=None)` | 注入嵌入器；`None` 维持现状（stub） |
+| `make_openai_embedder(*, model, base_url, dim, timeout_ms)` | 构造 `OpenAIEmbeddingAdapter`，与 `make_openai_llm` 同形 |
+| `Memory.digest() -> str` | 第 4.5 节的逻辑摘要 |
+| `Memory.backup_to(path)` | `VACUUM INTO` 加 `PRAGMA integrity_check`，得到自洽的单文件副本 |
+
+合入后本仓库的 `pyproject.toml` 增加 `memory = ["starling-memory @ git+https://github.com/ruijieguo/starling@<合并提交>"]`。推送分支与开 PR 前先征得用户同意。
+
+## 8. MindAgent
+
+| 改动 | 内容 |
+|---|---|
+| 部署记忆 | 每个绑定人格一个 `deploy/<persona_id>.db`，跨轮次持久；轮次开始时记下每个库的摘要 |
+| 轮次产物 | `agent_round` 载荷增加 `memory_digests: {persona_id: sha}` |
+| episode 复用 | `_reusable` 除库版本外，还要求 episode 的 `memory_digests` 与当前相同；不同就重跑 |
+| 验证重放 | 每个人格从部署库 `backup_to` 到 `snapshots/<round_id>/`，基线与候选各开一份快照副本，`memory_write=False` |
+| 门② `kind: memory` | 收录时对该人格的部署库 `remember(<渲染后的陈述>)`，并 `tick`；不再写 `memory_library/` |
+| 门② 失败 | `remember` 抛异常或 `failed` 时写一条 T2 失败记录，提案留在 `approved`（与现有数据错误同一形状） |
+| 旧数据 | `memory_library/` 里已有的条目由 `load_library` 读出，在部署库为空时作为种子 `remember` 一次 |
+
+## 9. 失败与可观测
+
+| 失败点 | 分类 | 处理 |
+|---|---|---|
+| 配置要求 Starling 但未安装 | 配置错误 | 装配期退出码 2，信息说明 `pip install '.[memory]'` |
+| `OPENAI_API_KEY` 为空 | 配置错误 | 装配期退出码 2，只写变量名 |
+| 起点库或种子打不开、迁移失败 | T2 | 指令 `failed`，原因只报类名 |
+| 摘要算不出 | T2 | 指令 `failed`：复现前提不成立 |
+| 续训时起点摘要变了 | T3 | 现有的 `config_hash` 门 |
+| 对手位 `recall` 或 `remember` 抛异常 | 归 `role_backend_failure` | 服务端现有分支；轨迹源不重跑 |
+| 训练位 `recall` 或 `remember` 抛异常 | 策略异常 | 会话 abort，原样上抛，按 Ruling 27 译成延后 |
+| 抽取失败（`failed` 为真） | 不分类 | 计数，这一轮不留记忆；计数写进 episode 元数据 |
+| 副本删除失败 | 不分类 | 记日志；下次派发前清扫 `runs/<run_id>/` |
+
+异常信息不含端点地址与密钥：适配器只报异常类名与 `failure_category`。
+
+## 10. 测试策略
 
 | 层次 | 对象 | 替身 |
 |---|---|---|
-| 边界 | `simulator` 不导入 `actio`、不导入 `starling`;`actio` 只在 `memory_starling` 里导入 `starling` | 扫导入语句 |
-| 单元 | 记忆端口:替身适配器的 recall / remember / fingerprint | 无 |
-| 单元 | `StatementRow` 到指导语句的渲染:主体、谓词、对象、置信度、嵌套深度 | 构造行对象 |
-| 集成 | Starling 适配器:真实 `Memory.open` 一次 recall 与 remember(按 extra 是否安装跳过) | 真库,不需要 LLM 的 stub 抽取器 |
-| 集成 | 指纹:写入前后哈希变化;共用库时任一 holder 写入都会改指纹 | 真库 |
-| 集成 | `ActioInstance` 用 Starling 适配器驱动一场会话 | loopback 服务端 |
-| 单元 | MindAgent 记忆提案改写为新路径;失败留 T2 记录 | 临时仓库 |
-| 端到端 | 场景二用 Starling 记忆跑一轮,指纹进训练记录 | 假 vLLM、真 Starling(extra 装好时) |
+| 边界 | `simulator`、`mindtrainer` 不导入 `actio` 与 `starling`；`actio` 只在 `memory_starling` 导入 `starling` | 扫导入、子进程导入检查 |
+| 单元 | `TupleMemory` 的 recall、remember、digest | 无 |
+| 单元 | `Actio` 每轮读写：recall 在回复前，remember 只收对方发言，抽取失败不抛 | 记录调用的假端口 |
+| 单元 | `VllmPolicy.respond_guided` 与 `ExternalApiBackend.respond_guided` 的消息形状 | 本机 HTTP 替身 |
+| 单元 | 摘要：同一逻辑内容不同文件字节时相同；改一条语句即变 | 真 Starling（未装时跳过） |
+| 集成 | `StarlingMemory`：remember、tick、recall、渲染 | 真 Starling，`make_stub_llm` 抽取，stub 嵌入 |
+| 集成 | 同组两条 rollout 从同一起点出发；会话结束副本被删 | loopback 服务端、替身端口 |
+| 集成 | 起点摘要进 `config_hash`；续训时种子变了升 T3 | 临时仓库 |
+| 集成 | 服务端会话终态调对手后端的 `close()`，含断开路径 | loopback 服务端 |
+| 单元 | 门② 记忆提案改走 `remember`；失败留 T2 | 替身端口 |
+| 端到端 | `--interact` 一条 run：所有角色位都是带记忆的 Actio，episode 每轮带激活轨迹，记录里有 `memory` 块 | 本机 HTTP 替身 vLLM、替身端口 |
 
-没有装 Starling 的环境只跑替身路径;需要真 Starling 的用例标 `slow` 或按 extra 缺失跳过。
+需要真 Starling 的用例按 extra 缺失跳过。真抽取与真嵌入不进测试。
 
-## 10. 实施顺序
+## 11. 施工顺序
 
-1. 前置:Starling 补 LICENSE、决定安装源。**不完成则后续为草案**。
-2. `actio` 抽出记忆端口;现有实现降为替身适配器;`ActioInstance` 改持端口。
-3. `actio/memory_starling.py`:recall / remember / fingerprint。
-4. 指纹:训练记录与 `config_hash` 接入。
-5. 模拟器侧 `CharacterAgent` 协议(只是把结构写清,`ModelBackend` 已满足);`actio` 补 `fingerprint`。
-6. MindAgent 记忆提案改路。
-7. 装配:读配置、开 Starling、注入 LLM、构造实例。
-8. 并入 `docs/design/` 五篇。
+| 步 | 内容 | 依赖 Starling PR |
+|---|---|---|
+| 1 | Actio 记忆端口、`TupleMemory`、实例改持端口、每轮读写、`render_guidance` 改形 | 否 |
+| 2 | `VllmPolicy` 与 `ExternalApiBackend` 的 `respond_guided`；服务端 `close()` 钩子 | 否 |
+| 3 | 训练路换成 Actio：策略按 rollout 造实例、对手工厂包 Actio、轨迹上行；替身记忆 | 否 |
+| 4 | `TrainingConfig.memory`、起点摘要进 `config_hash`、`policy_backend.memory` | 否（替身摘要） |
+| 5 | Starling PR：五个公开接口 | 是（在 Starling 仓库） |
+| 6 | `StarlingMemory`、树外记忆配置、`memory` extra、私有副本与清扫 | 是 |
+| 7 | MindAgent：部署记忆、轮次摘要、快照重放、门② 改路 | 是 |
+| 8 | 文档与图的收尾 | 否 |
 
-第 2 步可以不依赖 Starling 先做,它把 `actio` 与具体记忆实现解耦。
+第 1 到 4 步只用替身就能跑通，可以先合。第 5 步合入后再做 6、7。
 
-## 11. 已定与未核实
+## 12. 已定与未核实
 
-已定:
+已定：
 
-1. **记忆库位置(4.4)。** 跟着智能体实例走,由配置给路径;目标是计算层,现状是开发机。
-2. **写记忆(4.3)。** 默认读写都开。抽取用 Starling 内部的实现,本仓库只调接口。
-3. **门②证据(第 6 节)。** `review` 显示提案原文;收录后从 Starling 读回核对,审批前不写库。
+1. 对手位与训练位都是带记忆的 Actio 实例（M1）。
+2. 每轮都读写（M7），每条 rollout 同一起点、用完即弃（M9）。
+3. 抽取与嵌入走 OpenAI 兼容端点，密钥 `OPENAI_API_KEY`（M12）。
+4. Starling 的缺口经 PR 补（M14）。
 
-未核实:
+未核实：
 
-- Starling 的抽取默认超时与并发表现,决定每轮 `remember` 会不会拖慢会话。要真机测。
-- 共用单库、多 holder、每轮读写下,SQLite 的 WAL 增长与 `tick` 后台线程的负载。要压测。
-- 记忆指纹在 WAL 有未合并页时的稳定性:同一逻辑状态可能对应不同的文件字节。若不稳定,改成对逻辑内容哈希。
+| 项 | 核实办法 |
+|---|---|
+| 真抽取的延迟：每轮 `remember` 会不会让一轮超过 30 秒的客户端限时或 60 秒的后端限时 | 接真端点跑 10 轮，记每轮 remember 与 tick 的耗时 |
+| 真嵌入下 `recall` 的命中质量 | 用 SoMBench 之外的手写情境，看召回句是否相关 |
+| `VACUUM INTO` 副本与原库在 Starling 迁移版本不同时能否打开 | 在 PR 里加用例：旧版本库备份后用新版本打开 |
+| 每会话开一份库对 GRPO 一步的总时长影响 | 一步 `groups_per_step × group_size` 条 rollout，计开库、备份、删除总耗时 |
