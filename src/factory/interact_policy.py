@@ -15,6 +15,11 @@
 `OpponentCredentialError` 都是确定性的,译成 `DirectiveFailedError`,原因点名异常类型与文字。
 这些异常的文字已经抹掉密钥(见 factory.opponents),凭证只报环境变量名。
 
+`ServeStopError`(停服务后作业仍在运行,租约保留)虽属延后类,却单独处理:它在进入、训练中、退出时都可能冒出来,
+统一在整个服务上下文之外接住,译成 T2 的 `DirectiveFailedError`,原因点名作业 id 并要求人工停掉占着显存的作业。
+作业停不下来,重试只会撞上同一个租约;若退出时才冒出来,训练其实已经完成,延后重试还会在已完成的训练上反复起服务。
+它冒出来时登记注销、deadline 还原、对手开关解绑都已在各自的 finally 里做完,不会被跳过。
+
 训练体里抛出的真推理失败也分两路(Ruling 27):`RolloutFailedError`(`invalid_session` 除外)与 `OpponentApiError`
 译成 `RolloutDeferredError`(`DeferredError` 的子类),走延后通道,指令保持 pending,守护进程不会被它带走。
 `invalid_session` 原样放行:编排器已把 training_run 写成 failed,派发器据此把指令判为 T2。
@@ -26,7 +31,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, ExitStack, contextmanager
 
 from compute.endpoint import ComputeEndpoint
-from compute.errors import ComputeError
+from compute.errors import ComputeError, ServeStopError
 from compute.service import serve as real_serve
 from controlplane.deferred import DeferredError
 from controlplane.envelope import BigRef
@@ -86,6 +91,14 @@ class OpponentSwitch:
 
 def _failed(run_id: str, exc: BaseException) -> DirectiveFailedError:
     return DirectiveFailedError(f"directive {run_id}: {type(exc).__name__}: {exc}")
+
+
+def _stuck_service(run_id: str, exc: ServeStopError) -> DirectiveFailedError:
+    """作业停不下来:T2。文字里只有作业 id(见 compute.service),没有密钥与远端地址。"""
+    return DirectiveFailedError(
+        f"directive {run_id}: the vLLM service could not be stopped ({exc}); stop that job on the compute host "
+        "manually, because it is still holding GPU memory and the lease"
+    )
 
 
 class RolloutDeferredError(DeferredError):
@@ -226,43 +239,47 @@ def make_policy_factory(
             external = _external_backend(run_id, cfg, opponent, env)
         except OpponentCredentialError as exc:
             raise _failed(run_id, exc) from exc          # 文字里只有环境变量名
-        with ExitStack() as stack:
-            try:
-                policy = stack.enter_context(policy_context(
-                    client, endpoint, adapters, serve_port=serve_port, trained_adapter=trained,
-                    serve=real_serve if serve is None else serve,   # 调用时才取模块里的名字,测试可替换
-                    timeout_s=policy_timeout_s,
-                ))
-                vllm_make = vllm_opponent_factory(
-                    policy.handle, {ref: ref for ref in refs}, timeout_s=opponent_timeout_s,
-                )
-            except DeferredError:
-                raise          # 租约被占、服务起不来:守护进程退避重试,指令仍是 pending
-            except (ComputeError, ModelRefError, OpponentCredentialError) as exc:
-                raise _failed(run_id, exc) from exc
-            stack.enter_context(switch.bound(_dispatching(vllm_make, external)))
-            registered: list[str] = []
-            previous: float | None = None
-            try:
-                # 先登记再放行第一个会话。注意不要在持有 runtime._lock 时碰 interact_deadline_s(同一把非重入锁)
-                previous = runtime.interact_deadline_s
-                for sid in cfg.scenario_ids:
-                    runtime.register_session(sid, run_id)
-                    registered.append(sid)
-                runtime.interact_deadline_s = cfg.max_turns_per_episode * PER_TURN_DEADLINE_S
+        try:
+            with ExitStack() as stack:
                 try:
-                    yield policy
-                except RolloutFailedError as exc:
-                    if exc.reason == "invalid_session":
-                        raise            # 请求本身有问题:编排器已写 failed,派发器判 T2
-                    # from None:异常文字(含服务端转述的细节)不跟着回溯走
-                    raise _rollout_deferral(exc) from None
-                except OpponentApiError as exc:
-                    raise _rollout_deferral(exc) from None
-            finally:
-                for sid in registered:
-                    runtime.unregister_session(sid)
-                if previous is not None:
-                    runtime.interact_deadline_s = previous
+                    policy = stack.enter_context(policy_context(
+                        client, endpoint, adapters, serve_port=serve_port, trained_adapter=trained,
+                        serve=real_serve if serve is None else serve,   # 调用时才取模块里的名字,测试可替换
+                        timeout_s=policy_timeout_s,
+                    ))
+                    vllm_make = vllm_opponent_factory(
+                        policy.handle, {ref: ref for ref in refs}, timeout_s=opponent_timeout_s,
+                    )
+                except DeferredError:
+                    raise          # 租约被占、服务起不来:守护进程退避重试,指令仍是 pending
+                except (ComputeError, ModelRefError, OpponentCredentialError) as exc:
+                    raise _failed(run_id, exc) from exc
+                stack.enter_context(switch.bound(_dispatching(vllm_make, external)))
+                registered: list[str] = []
+                previous: float | None = None
+                try:
+                    # 先登记再放行第一个会话。注意不要在持有 runtime._lock 时碰 interact_deadline_s(同一把非重入锁)
+                    previous = runtime.interact_deadline_s
+                    for sid in cfg.scenario_ids:
+                        runtime.register_session(sid, run_id)
+                        registered.append(sid)
+                    runtime.interact_deadline_s = cfg.max_turns_per_episode * PER_TURN_DEADLINE_S
+                    try:
+                        yield policy
+                    except RolloutFailedError as exc:
+                        if exc.reason == "invalid_session":
+                            raise            # 请求本身有问题:编排器已写 failed,派发器判 T2
+                        # from None:异常文字(含服务端转述的细节)不跟着回溯走
+                        raise _rollout_deferral(exc) from None
+                    except OpponentApiError as exc:
+                        raise _rollout_deferral(exc) from None
+                finally:
+                    for sid in registered:
+                        runtime.unregister_session(sid)
+                    if previous is not None:
+                        runtime.interact_deadline_s = previous
+        except ServeStopError as exc:
+            # 进入、训练中、退出时冒出来都在这里:各 finally 与服务上下文已经展开完,没有清理被跳过
+            raise _stuck_service(run_id, exc) from exc
 
     return scope

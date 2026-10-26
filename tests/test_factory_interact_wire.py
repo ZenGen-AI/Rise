@@ -246,7 +246,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 
 from compute.endpoint import ComputeEndpoint
-from compute.errors import ComputeBusyError, ComputeError, HelperError, ServeStartupError
+from compute.errors import ComputeBusyError, ComputeError, HelperError, ServeStartupError, ServeStopError
 from compute.service import ServiceHandle
 from compute.vllm_service import BASE_MODEL_NAME
 from controlplane.config import write_config
@@ -311,9 +311,11 @@ class ChatStub:
 class FakeServe:
     """照 compute.service.serve 的签名;记下被要求起服务的端点与适配器,产出指向桩的 ServiceHandle。"""
 
-    def __init__(self, base_url: str, *, enter_raises: Exception | None = None) -> None:
+    def __init__(self, base_url: str, *, enter_raises: Exception | None = None,
+                 exit_raises: Exception | None = None) -> None:
         self.base_url = base_url
         self.enter_raises = enter_raises
+        self.exit_raises = exit_raises                   # 退出(停服务)时抛,像 compute.service.serve 的 finally
         self.calls: list[tuple[str, tuple]] = []        # (端点 id, 适配器列表)
         self.trace: list[str] = []
 
@@ -331,6 +333,8 @@ class FakeServe:
                                 (BASE_MODEL_NAME, *(name for name, _ in cfg.adapters)))
         finally:
             self.trace.append("exit")
+            if self.exit_raises is not None:
+                raise self.exit_raises
 
 
 @pytest.fixture
@@ -543,6 +547,24 @@ def test_a_deferred_error_leaves_the_directive_pending(world, tmp_path, fake_ser
     assert not world.exists(f"{run_dir(RUN)}/training_run.yaml")
 
 
+STUCK = "job serve-job-a1 is still running after stop; the GPU lease was kept"
+
+
+def test_a_service_that_will_not_stop_after_a_finished_training_fails_the_directive_as_t2(
+        world, tmp_path, fake_serve):
+    """训练已完成、候选已落树,收尾时服务停不下来:重试只会撞上同一个租约,所以判 T2 要人去停作业,
+    而不是延后重试(重试会在已完成的训练上反复起服务)。"""
+    fake_serve.exit_raises = ServeStopError(STUCK)
+    _write_directive(world)
+    _run(world, tmp_path)
+    directive = _read(world, "directive")
+    assert directive.status == "failed" and directive.payload["failure"]["category"] == "T2"
+    reason = directive.payload["failure"]["reason"]
+    assert "serve-job-a1" in reason and "stop" in reason and "manually" in reason
+    assert _read(world, "training_run").status == "executed"          # 训练本身是成功的
+    assert world.exists(f"{run_dir(RUN)}/training_run.yaml")
+
+
 @pytest.mark.parametrize("error", [ComputeError("adapters must be a tuple"), HelperError("bad_request", "no such path")])
 def test_a_deterministic_compute_error_fails_the_directive(world, tmp_path, fake_serve, error):
     fake_serve.enter_raises = error
@@ -590,6 +612,49 @@ def test_a_training_exception_still_unregisters_and_restores_the_deadline(world,
             raise RuntimeError("boom")
     assert runtime._sessions == {} and runtime.interact_deadline_s == before
     assert serve.trace == ["enter", "exit"]
+
+
+def test_a_stop_error_after_a_training_exception_still_unregisters_restores_and_unbinds(world, tmp_path, stub):
+    """训练体抛错、退出时服务又停不下来:登记注销、deadline 还原、对手开关解绑都不能被跳过,
+    指令判 failed(T2),而不是被训练体的异常带走。"""
+    serve = FakeServe(stub.base_url, exit_raises=ServeStopError(STUCK))
+    runtime, switch, factory, _ = _unit(world, tmp_path, stub, serve=serve)
+    before = runtime.interact_deadline_s
+    binding = _opponent_binding()
+    scenario = Scenario("t1", "bg", [RoleSlot("a", "a"), RoleSlot("b", "b")], "c", ["n"], "training")
+    with pytest.raises(DirectiveFailedError) as caught:
+        with factory(RUN, _cfg()):
+            assert runtime._sessions == {"t1": RUN, "t2": RUN}
+            raise RuntimeError("boom")
+    assert "serve-job-a1" in str(caught.value) and caught.value.category == "T2"
+    assert runtime._sessions == {} and runtime.interact_deadline_s == before
+    assert serve.trace == ["enter", "exit"]
+    from simulator.backends import ScriptedBackend
+
+    assert isinstance(switch(binding, scenario), ScriptedBackend)      # 开关已解绑
+
+
+def test_a_stop_error_while_the_service_is_still_starting_up_is_also_t2_and_registers_nothing(
+        world, tmp_path, stub):
+    """起服务失败后收尾停不下来:compute.service 的 finally 里抛出的 ServeStopError 会顶掉原来的启动错误。"""
+    serve = FakeServe(stub.base_url, enter_raises=ServeStopError(STUCK))
+    runtime, _, factory, _ = _unit(world, tmp_path, stub, serve=serve)
+    with pytest.raises(DirectiveFailedError) as caught:
+        with factory(RUN, _cfg()):
+            pytest.fail("the body must not run")
+    assert caught.value.category == "T2" and "serve-job-a1" in str(caught.value)
+    assert runtime._sessions == {}
+
+
+def test_a_stop_error_on_a_clean_exit_is_translated_to_a_t2_failure(world, tmp_path, stub):
+    serve = FakeServe(stub.base_url, exit_raises=ServeStopError(STUCK))
+    runtime, _, factory, _ = _unit(world, tmp_path, stub, serve=serve)
+    before = runtime.interact_deadline_s
+    with pytest.raises(DirectiveFailedError) as caught:
+        with factory(RUN, _cfg()):
+            pass
+    assert caught.value.category == "T2" and "serve-job-a1" in str(caught.value)
+    assert runtime._sessions == {} and runtime.interact_deadline_s == before
 
 
 @pytest.mark.parametrize("error", [ComputeBusyError("busy"), ComputeError("bad config")])

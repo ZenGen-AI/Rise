@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from compute.client import JobSpec
-from compute.errors import ComputeBusyError, ComputeError, ServeStartupError, TransportError
+from compute.errors import ComputeBusyError, ComputeError, ServeStartupError, ServeStopError, TransportError
 from compute.sizing import MemorySizing, check_memory_fits
 from compute.vllm_service import BASE_MODEL_NAME
 
@@ -106,7 +106,7 @@ def serve(
         if started:
             if client.stop(job_id, grace_s=stop_grace_s).state == "running":
                 # 服务还占着显存:不放租约,让训练撞不上它。租约在作业退出或丢失后会被助手判为陈旧。
-                raise ServeStartupError(f"job {job_id} is still running after stop; the GPU lease was kept")
+                raise ServeStopError(f"job {job_id} is still running after stop; the GPU lease was kept")
         client.lease_release(job_id)
 
 

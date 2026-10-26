@@ -511,11 +511,11 @@ vLLM 服务按指令起停,不常驻。一条 interact 指令派发时起服务,
 |---|---|---|
 | 租约被占 | `ComputeBusyError`(`src/compute/errors.py:20`) | 延后通道 |
 | 起服务阶段失败:启动超时、进程提前退出、隧道建不起来 | `ServeStartupError`(`src/compute/errors.py:42`) | 延后通道 |
-| 收尾时发现服务仍在运行 | 同一个 `ServeStartupError` | 设计是 T2,指令 `failed`,不走延后通道;还没做 [计划中]:现在它与起服务失败一样原样上抛,指令保持 `pending`,训练记录已是 `executed` |
+| 收尾时发现服务仍在运行(停服务后作业仍是 `running`,租约保留) | `ServeStopError`(`src/compute/errors.py:53`),`ServeStartupError` 的子类 [已落地] | T2,指令 `failed`,不走延后通道。策略上下文(`src/factory/interact_policy.py`)在整个服务上下文之外接住它,译成 `DirectiveFailedError`,原因点名作业 id,写明要人工停掉占着显存的作业;不论它在进入、训练中还是退出时冒出来都这样处理 |
 
 两者都是 `DeferredError`。守护进程接住它们,按退避重试;同一动作连续延后超过上限时抛 `DeferredExhaustedError`,它刻意不继承 `DeferredError`,守护进程带原因退出,由外部监督者重启(`src/controlplane/daemon.py:60-66` 与 `:97-103`)。起服务最长等 900 秒,反复起不来会走到这一步。服务在 `resume_or_run` 之前起,校验、数据合成与清单检查都在进入服务上下文之前,所以租约被占与起服务阶段的失败不写训练记录,不耗 `resume_attempts`,确定性失败的指令也不占租约。
 
-`ServeStartupError` 不能整类归延后通道,它有一个例外:它也用于「收尾时发现服务仍在运行」。走到这一步时训练记录与候选已经写完,若按瞬态重派,下一轮会重新起服务,再次撞上同一处,反复起服务。所以这一种应当判 T2、指令 `failed`,原因写明要人清掉占显存的作业;只有起服务阶段的失败才走延后通道。目前没有这一步区分 [计划中]。判错的代价:把它当瞬态,会让守护进程在已完成的训练上空转到延后上限;当 T2 则要人工介入一次。已知缺口的实际代价是每次重试白起一次 vLLM 服务:重派时 `resume_or_run` 读到已 `executed` 的训练记录,`decide_resume` 返回 `noop`,原样返回已有记录,所以不会出现第二条训练记录或第二个候选。
+`ServeStartupError` 不能整类归延后通道,它有一个例外:「收尾时发现服务仍在运行」。走到这一步时训练记录与候选已经写完,若按瞬态重派,下一轮会重新起服务,再次撞上同一处,反复起服务。所以这一种单独成类 `ServeStopError`(继承 `ServeStartupError`,`SomevalRunner` 等其他调用方仍按延后类处理,行为不变),在 interact 的策略上下文里判 T2、指令 `failed`,原因写明作业 id 与要人清掉占显存的作业;只有起服务阶段的失败才走延后通道 [已落地]。登记注销、deadline 还原、对手开关解绑各在自己的 `finally` 里,先于 `ServeStopError` 译成 `DirectiveFailedError` 完成,所以它不会跳过任何清理;训练体抛错之后退出又抛它,指令也判 `failed`,训练体的异常不会把它顶掉。代价:要人工停一次作业(租约在作业退出或丢失后会被助手判为陈旧,不需要另行放租约),换来不在已完成的训练上反复起服务。判回延后的代价则是守护进程在已完成的训练上空转到延后上限,每次重试白起一次 vLLM 服务;重派时 `resume_or_run` 读到已 `executed` 的训练记录,`decide_resume` 返回 `noop`,所以本来也不会出现第二条训练记录或第二个候选。
 
 ### 5.4 超时口径
 
@@ -723,7 +723,7 @@ interact 的生成路多一条「生成、写树、回写、复校」的链路 [
 | `supported_phases` 不覆盖配置要求的阶段 | T2 | 配置校验期记录写 `failed`,指令判 `failed`,一步都不动执行器 | 训练记录 `failure`、指令 `failure` |
 | 资源暂时不可用:`ComputeBusyError` | 延后 | 预检在 `run_training` 之前,不写记录,不耗 `resume_attempts`;守护进程接住并按退避重试 | 守护进程结构化日志 |
 | interact 起 vLLM 服务:租约被占 `ComputeBusyError`,或起服务阶段失败 `ServeStartupError` [已落地] | 延后 | 服务在 `resume_or_run` 之前起,不写记录,不耗 `resume_attempts`;经延后通道按退避重试 | 守护进程结构化日志 |
-| interact 收尾时发现服务仍在运行(同样抛 `ServeStartupError`) [计划中] | 设计是 T2;现在原样上抛,指令保持 `pending` | 训练记录与候选已写完,重派会反复起服务,所以不该走延后通道;应判 `failed`,原因写明要人清掉占显存的作业。现状的代价是每次重试白起一次服务,`decide_resume` 对已 `executed` 的记录返回 `noop`,不出第二条训练记录或候选 | 指令 `payload["failure"]` |
+| interact 收尾时发现服务仍在运行(`ServeStopError`) [已落地] | T2 | 训练记录与候选已写完,重派会反复起服务,所以不走延后通道:指令判 `failed`,原因点名作业 id,要人工停掉占显存的作业。训练记录保持 `executed`、候选留在树里;代价是要人工停一次作业,换来不在已完成的训练上反复起服务 | 指令 `payload["failure"]`(`category = T2`) |
 | 传输层故障 `TransportError`、远端作业超时 `RemoteJobTimeoutError` | 延后 | 同上,经延后通道重试;进入 `run_training` 之后抛出的,`resume_attempts` 已加一,重试仍受 G5 的上限约束 | 同上 |
 | 远端作业非零退出 `RemoteJobFailedError` | 延后 | 同上;它是真失败,计入 `resume_attempts`,耗尽后升级为 T3 | 训练记录 `resume_attempts` |
 | 远端作业成功但指标解析不出 `MetricsMissingError` | T1 | 记录保持 `pending`,计入 `resume_attempts`;重试时作业命中已成功退出的那次尝试,只重新解析,不重训 | 训练记录 `resume_attempts` |

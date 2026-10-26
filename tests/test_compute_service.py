@@ -8,7 +8,7 @@ import pytest
 from compute_fixtures import fake_endpoint
 
 from compute.client import JobSpec, JobStatus
-from compute.errors import ComputeBusyError, DeferredError, ServeStartupError
+from compute.errors import ComputeBusyError, DeferredError, ServeStartupError, ServeStopError
 from compute.service import MAX_ATTEMPTS, ServiceHandle, serve
 from compute.vllm_service import VllmServeConfig, build_serve_job
 
@@ -242,6 +242,16 @@ def test_a_failing_stop_does_not_release_the_lease_while_the_server_may_still_ho
     with pytest.raises(ServeStartupError, match=r"still running"):
         _run(client)
     assert "lease_release" not in _order(client)
+
+
+def test_a_service_that_will_not_stop_raises_the_stop_error_a_deferred_startup_error_subtype():
+    """停不下来是单独的一类:调用方可以据此不再重试(重试只会撞上同一个租约),
+    其余调用方仍把它当起服务失败的延后类处理。"""
+    client = FakeServiceClient(stops=False)
+    with pytest.raises(ServeStopError, match=r"still running") as caught:
+        _run(client)
+    assert isinstance(caught.value, ServeStartupError) and isinstance(caught.value, DeferredError)
+    assert client.started[0][0] in str(caught.value)          # 原因点名占着显存的作业
 
 
 def test_a_start_call_that_fails_midway_still_stops_the_job_it_may_have_launched():

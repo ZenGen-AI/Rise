@@ -48,3 +48,10 @@ class ServeStartupError(DeferredError):
     def __init__(self, reason: str, *, log_tail: str = "", retry_after_seconds: int | None = None) -> None:
         super().__init__(reason, retry_after_seconds=retry_after_seconds)
         self.log_tail = log_tail
+
+
+class ServeStopError(ServeStartupError):
+    """停服务之后作业仍在运行,租约保留:服务还占着显存,不是起服务失败。
+
+    继承 ServeStartupError,所以 SomevalRunner 等其他调用方仍按延后类处理、行为不变。需要区分的调用方
+    (factory.interact_policy)据此不再重试:作业停不下来,重试只会撞上同一个租约,要人去停。"""
