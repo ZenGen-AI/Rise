@@ -3,7 +3,7 @@
 | 项 | 内容 |
 |---|---|
 | 一句话 | 权重级训练子系统:读训练指令与数据集清单,跑 SFT 与 GRPO 加 OPD,产出候选 checkpoint,崩溃后从存点续训 |
-| 状态 | 部分落地:配置、两种轨迹源、奖励管线、分组、mock 执行器、续训、编排、派发器、数据合成接线 [已落地];ROLL LoRA SFT 真实执行器与适配器导出转换器 [已落地],已由 `factory run --executor roll` 装配,已在真实主机上从训练指令端到端跑到待审候选一次(单段两步训练加导出),多段与续训尚未在真机上跑过;数据合成的失败留痕仍只有指令的 `failure` 字段,没有独立的失败记录产物(统一写入函数不在本包);场景二接通 [计划中]:interact 指令经 `--interact` 在真实入口跑完,训练位由 vLLM 上的真实模型说话,训练仍是 mock(策略工厂、一个 vLLM 进程挂最多两个 LoRA、按指令起停、`policy_backend` 训练记录块);真实 GRPO 加 OPD 训练 [推迟] |
+| 状态 | 部分落地:配置、两种轨迹源、奖励管线、分组、mock 执行器、续训、编排、派发器、数据合成接线 [已落地];ROLL LoRA SFT 真实执行器与适配器导出转换器 [已落地],已由 `factory run --executor roll` 装配,已在真实主机上从训练指令端到端跑到待审候选一次(单段两步训练加导出),多段与续训尚未在真机上跑过;数据合成的失败留痕仍只有指令的 `failure` 字段,没有独立的失败记录产物(统一写入函数不在本包);场景二接通 [已落地]:interact 指令经 `--interact` 在真实入口跑完,训练位由 vLLM 上的真实模型说话,训练仍是 mock(策略工厂、一个 vLLM 进程挂最多两个 LoRA、按指令起停、`policy_backend` 训练记录块),端到端测试用本机 HTTP 替身代替 vLLM,真机未跑;服务停不掉时的收尾判 T2、不开 `--interact` 时失败原因点名该开关、后端单次调用超时改传 15 秒仍是 [计划中];真实 GRPO 加 OPD 训练 [推迟] |
 | 所在层 | 计算层 |
 | 代码位置 | `src/mindtrainer`;`src/mindtrainer/data_spec.py`、`src/mindtrainer/data_producer.py`;真实执行器与转换器在 `src/mindtrainer/roll_executor.py` 与 `src/mindtrainer/roll_converter.py`,经 `src/compute` 调远端主机 |
 | 基线提交 | `b826440`(2026-10-21) |
@@ -113,7 +113,7 @@ MindTrainer 把一条 `pending` 的训练指令变成一个 `pending_review` 的
 | G5 | 续训有上限,不会无限循环 | `resume_attempts` 触顶后升级为 T3。资源暂时不可用走延后通道,预检在 `run_training` 之前,`ComputeBusyError` 不耗 `resume_attempts`;通道自己有连续延后上限(CP-14),G5 对真正的失败仍成立 |
 | G6 | 候选能走完审核门①并成为下一轮的基座 | `test_mt_integration.py` 两个用例。只对 mock 成立:真实后端的候选是适配器导出,不是训练起点,第二轮由真实执行器拒绝(见已知局限) |
 | G7 | 带 `data_spec` 的指令缺清单时能自补数据并训练成候选 [已落地] | 派发器合成分支的测试:合成后训练、缺生产器判 `failed`、合成中途崩溃重入收敛 |
-| G8 | interact 指令在真实入口跑完:真实模型的发言落盘,奖励管线对真实发言成立,候选走到 `pending_review` [计划中] | 端到端测试 `factory reconcile --once --interact`:假 vLLM(本地 HTTP 回固定文本)加 mock 执行器,episode 都在产物树里。证明的是推理链路成立,不是模型变好 |
+| G8 | interact 指令在真实入口跑完:真实模型的发言落盘,奖励管线对真实发言成立,候选走到 `pending_review` [已落地] | 端到端测试 `tests/test_factory_interact_e2e.py` 经 `factory reconcile --once --interact`:假 vLLM(本地 HTTP 回固定文本)加 mock 执行器,episode 都在产物树里。证明的是推理链路成立,不是模型变好 |
 
 | 非目标或推迟项 | 状态 | V1 的处理 |
 |---|---|---|
@@ -122,9 +122,9 @@ MindTrainer 把一条 `pending` 的训练指令变成一个 `pending_review` 的
 | 异步派发 | [推迟] | 派发器同步返回;接真实 LoRA SFT 的这一轮作为有限定的例外接受同步阻塞(CP-15),异步派发留给下一轮 |
 | 缺清单时先合成数据 | [已落地] | 指令带 `data_spec` 且本 run 名下的清单缺失时,派发器调注入的生产器先合成;缺清单又不带 `data_spec` 的指令仍判 `failed` |
 | judge 归因 | 代码已有,入口不提供 judge | judge 归因的指令在派发器里判 `failed` |
-| interact 的实时服务端 | 入口不启动 | `scripts/run_controlplane.py` 下 interact 指令判 `failed`;注入 `client_factory` 与 `policy` 的调用方可以跑。`factory run` 与 `factory reconcile` 的 `--interact` 在组合根起进程内实时服务端并注入策略工厂,让 interact 指令从真实入口跑通 [计划中] |
+| interact 的实时服务端 | 入口不启动 | `scripts/run_controlplane.py` 下 interact 指令判 `failed`;注入 `client_factory` 与 `policy` 的调用方可以跑。`factory run` 与 `factory reconcile` 的 `--interact` 在组合根起进程内实时服务端并注入策略工厂,让 interact 指令从真实入口跑通 [已落地] |
 | 成本记账、完整失败记录产物 | [计划中] | 由工作包 1 的统一写入函数负责,MindTrainer 现在不写 |
-| interact 的真实策略模型(真推理加 mock 训练) | [计划中] | 训练位经 vLLM 服务本轮基座,发言是真的,权重更新仍由 mock 执行器完成;由 `--interact` 装配 |
+| interact 的真实策略模型(真推理加 mock 训练) | [已落地] | 训练位经 vLLM 服务本轮基座,发言是真的,权重更新仍由 mock 执行器完成;由 `--interact` 装配 |
 | 随训练更新的 interact 策略、并行 rollout | [推迟] | 顺序 rollout;服务的权重整轮不变,真实 GRPO 落地后换执行器并同步权重 |
 | 读诊断结果调整训练 | 不做 | MindTrainer 只记录 OPD 系数与损失 |
 
@@ -195,7 +195,7 @@ MindTrainer 分两层:入口与编排一层决定"从哪跑、跑不跑",模式�
 | `src/mindtrainer/resume.py` | `decide_resume` 纯函数 | `datamodel`、`training_config` | [已落地] |
 | `src/mindtrainer/store_adapter.py` | 训练记录的读写与状态迁移检查 | `controlplane` | [已落地] |
 | `src/mindtrainer/orchestrator.py` | `resume_or_run`、`run_training` | 上述全部 | [已落地] |
-| `src/mindtrainer/dispatch.py` | `make_mindtrainer_dispatcher`:指令到训练,异常到失败类别;新增 `policy_factory` 参数,按 run 构造策略 [计划中] | `controlplane.daemon`、编排器 | [已落地] |
+| `src/mindtrainer/dispatch.py` | `make_mindtrainer_dispatcher`:指令到训练,异常到失败类别;新增 `policy_factory` 参数,按 run 构造策略 [已落地] | `controlplane.daemon`、编排器 | [已落地] |
 | `src/mindtrainer/wire.py` | 把调和循环接到派发器的入口 | `controlplane.daemon` | [已落地] |
 | `src/mindtrainer/data_spec.py` | `data_spec` 严格解析、要合成哪些阶段、`DataProducer` 协议 | `training_config` | [已落地] |
 | `src/mindtrainer/data_producer.py` | 默认数据生产器 `TemplateDataProducer` | `simulator` | [已落地] |
@@ -205,7 +205,7 @@ MindTrainer 分两层:入口与编排一层决定"从哪跑、跑不跑",模式�
 依赖方向规则:
 
 - `mindtrainer` 可以导入 `controlplane` 与 `simulator`。复用 `Episode`、`RoleBinding` 等数据结构是允许的,受限的是子系统间的运行时调用。真实执行器与转换器另可导入 `compute`;`compute` 反过来不认识训练,只导入标准库与 `controlplane.deferred`。
-- interact 的 vLLM 服务上下文由组合根持有:组合根注入一个返回上下文管理器的可调用对象,`mindtrainer` 只把它当上下文管理器用,不导入 `compute`、也不决定端点 [计划中]。`model_ref` 的解析在派发器里、起服务之前完成,失败判 T2;放进运行时的后端工厂会被服务端归成 `role_backend_failure`,按瞬态重跑到上限也不会变好 [计划中]。
+- interact 的 vLLM 服务上下文由组合根持有:组合根注入一个返回上下文管理器的可调用对象,`mindtrainer` 只把它当上下文管理器用,不导入 `compute`、也不决定端点 [已落地]。`model_ref` 的解析在策略工厂里、起服务之前完成,失败判 T2;放进运行时的后端工厂会被服务端归成 `role_backend_failure`,按瞬态重跑到上限也不会变好 [已落地]。
 - `mindtrainer` 不导入 `diagnostic`。系统没有 MindTrainer 与诊断评测之间的直连;OPD 是否失效由诊断侧判定。
 - 编排器只调下层纯函数和协议,不含判定逻辑。续训判定在 `resume.py`,失败到类别的映射在 `dispatch.py`。
 - TrainScheduler 只可导入 `mindtrainer.data_spec` 与 `mindtrainer.training_config` 两个模块。factory 可以导入 `mindtrainer.dispatch` 与 `mindtrainer.data_producer`。
@@ -223,7 +223,7 @@ MindTrainer 分两层:入口与编排一层决定"从哪跑、跑不跑",模式�
 | `RewardedTrajectory` | `episode`、`group_id`、`per_turn_rewards`、`combined_reward` | 逐轮奖励与 turns 等长;非训练轮为 None |
 | `StepResult` | `step`、`phase`、`metrics` | 指标名是契约,见第 5 章 |
 | `TrainingRun` | `run_id`、`config_hash`、`checkpoint_step`、`last_checkpoint_ref`、`resume_attempts`、`curve_summary`、`metric_stream_refs`、`status`、`failure` | `failed` 必须带 `failure["category"]` |
-| `TrainingRun` 可选字段 [计划中] | `policy_backend`:interact 运行里训练位与对手位实际用的是什么,字段见下表 | 缺省为空,只在非空时写键;`from_dict` 用 `d.get` 读(`src/mindtrainer/datamodel.py:119`),旧记录读回为空,batch 运行的记录与改动前逐字节相同 |
+| `TrainingRun` 可选字段 [已落地] | `policy_backend`:interact 运行里训练位与对手位实际用的是什么,字段见下表 | 缺省为空,只在非空时写键;`from_dict` 用 `d.get` 读(`src/mindtrainer/datamodel.py:119`),旧记录读回为空,batch 运行的记录与改动前逐字节相同 |
 
 | 配置校验要点 | 规则 |
 |---|---|
@@ -290,24 +290,24 @@ payload:
   failure: null
 ```
 
-interact 运行的训练记录另带 `policy_backend` 块 [计划中],如实记录这一轮两个角色位实际用的是什么。读记录的人据此判断这一轮的数字怎么解读。
+interact 运行的训练记录另带 `policy_backend` 块 [已落地],如实记录这一轮两个角色位实际用的是什么。读记录的人据此判断这一轮的数字怎么解读。
 
 ```yaml
 policy_backend:
   trained: {ref: "file:///compute/checkpoints/initial-base.safetensors", kind: "base", endpoint: local-h800}
   opponents:
-    b: {driver: "scripted", source: "scenario"}
+    b: {driver: "scripted", source: "zengen-v1"}
   real_inference_with_mock_training: true
 ```
 
 | 键 | 取值与含义 |
 |---|---|
-| `trained.ref` | 训练位实际服务的权重引用。`kind` 为 `base` 时是端点上服务的基座,为 `adapter` 时是挂上的适配器导出 |
+| `trained.ref` | 训练位实际服务的权重引用。`kind` 为 `base` 时是指令 `base_checkpoint_ref` 的 `uri`,为 `adapter` 时是挂上的适配器导出的 `uri` |
 | `trained.kind` | `base` 或 `adapter` |
 | `trained.endpoint` | 承载 vLLM 服务的计算端点 id |
 | `opponents` | 键是非训练角色位 id,值是 `{driver, source}` |
 | `opponents.<位>.driver` | `scripted`(固定对话)、`vllm`(站内 vLLM 上的对手模型)、`external_api`(外部 OpenAI 兼容 API) |
-| `opponents.<位>.source` | 驱动的来源说明。`scripted` 的示例值 `scenario` 表示台词取自情境自带剧本 |
+| `opponents.<位>.source` | 驱动的来源说明。`source` 取绑定的 `model_ref`,没有则为空;`scripted` 驱动也可以带 `model_ref`,此时它只是身份标签 |
 | `real_inference_with_mock_training` | `true` 表示训练位的发言来自真实推理,权重更新来自 mock 执行器 |
 
 按下表解读这一轮的数字:
@@ -418,11 +418,11 @@ GRPO 与 OPD 只有一个方法,因为两者在同一个训练 step 里联合更
 |---|---|---|
 | ControlPlane | 派发缝、`DirectiveFailedError` 的 `category`、非审核类状态机、`GitStore.write_product` 对相同内容空操作 | 派发器签名;候选的 id、状态与 `checkpoint_ref` 形状 |
 | SocialSimulator 数据集 | `verify_manifest` 逐条校验;`episode_group_id` 是分组键 | 无 |
-| SocialSimulator 实时服务 | 一条流一次会话;终止原因;`on_session_closed` 落盘 episode;后端单次调用超时 15 秒、流 deadline 按 `max_turns_per_episode` 算 [计划中] | 客户端放弃会话时调用 `abort()`,不发 EndSession |
+| SocialSimulator 实时服务 | 一条流一次会话;终止原因;`on_session_closed` 落盘 episode;流 deadline 按 `max_turns_per_episode × 30 秒` 算 [已落地];后端单次调用超时改传 15 秒 [计划中] | 客户端放弃会话时调用 `abort()`,不发 EndSession |
 | 审核门①与晋级 | 候选进入 `pending_review` 后由人审核 | `latest_promoted_checkpoint` 从晋级版本解析下一轮的 `base_checkpoint_ref` |
 | TrainScheduler | 按 `dsm-<run>-<阶段>` 写 `stage_manifest_refs` 与 `data_spec` | `validate_training_config`、`load_config_from_directive` 与 `data_spec` 解析 |
-| factory | 无 | 用 `make_mindtrainer_dispatcher` 组装,并注入数据生产器;`--interact` 时另注入 `client_factory` 与 `policy_factory` [计划中] |
-| 远端计算层 `compute` | `serve` 起停 vLLM 服务;租约被占的 `ComputeBusyError` 与起服务失败的 `ServeStartupError` 都是 `DeferredError` [计划中] | 无 |
+| factory | 无 | 用 `make_mindtrainer_dispatcher` 组装,并注入数据生产器;`--interact` 时另注入 `client_factory` 与 `policy_factory` [已落地] |
+| 远端计算层 `compute` | `serve` 起停 vLLM 服务;租约被占的 `ComputeBusyError` 与起服务失败的 `ServeStartupError` 都是 `DeferredError` [已落地] | 无 |
 
 数据合成接线:`make_mindtrainer_dispatcher` 末尾有 keyword-only 的 `data_producer=None`,不传时行为与接线前逐字节相同;factory 的组合根传 `TemplateDataProducer()`。
 
@@ -457,40 +457,40 @@ class DataProducer(Protocol):
 - 只支持 `outcome_split` 归因,其他归因抛 `DataSynthesisError`。第 i 个情境用种子 `seed + i`。
 - **V1 训练数据里的奖励差异是人造的,只证明流程跑通,不代表任何社会能力。**
 - 情境的角色位按训练配置改写:带 `bindings`(interact)就照它,训练位排第一;不带(batch)就配一个 `frozen_reference` 的对手位 `opponent`。
-- 生产器今天只写 episode 与清单,不写 `scenarios/` 与 `personas/`。interact 生成路要它额外写这两个目录 [计划中]:生成路的情境 id 在写指令时还不存在,只能到派发时由数据生产器按 `data_spec` 生成情境与人格并写进产物树,再回写进指令的 `training_config`。点名路的情境与人格本来就在树里,生产器不碰。
+- 生产器的 `produce` 只写 episode 与清单,不写 `scenarios/` 与 `personas/`。interact 生成路的情境和人格另由它的 `world_for_interact` 按 `data_spec` 生成,派发器把它们写进产物树 [已落地]:生成路的情境 id 在写指令时还不存在,只能到派发时生成,再回写进指令的 `training_config`。点名路的情境与人格本来就在树里,生产器不碰。
 
-### 5.1 策略工厂 [计划中]
+### 5.1 策略工厂 [已落地]
 
-策略工厂让训练位的策略随 run 构造。训练位必须用本轮基座,而派发器今天只有一个与 run 无关的固定策略,做不到这一点。
+策略工厂让训练位的策略随 run 构造。训练位必须用本轮基座,而只给 `policy=` 时派发器的策略是一个与 run 无关的固定后端,做不到这一点。
 
-`policy` 是 `simulator.backends.ModelBackend`,即角色位的后端协议,产出话语和内心独白。派发器构造时只接一个,所有 run 共用(`src/mindtrainer/dispatch.py:181`)。
+`policy` 是 `simulator.backends.ModelBackend`,即角色位的后端协议,产出话语和内心独白。只给 `policy=` 时所有 run 共用这一个;给 `policy_factory=` 时每条指令现构造一个。
 
 ```python
-# make_mindtrainer_dispatcher 新增的 keyword-only 参数
-policy_factory: Callable[[str, BigRef], ModelBackend] | None = None
+# make_mindtrainer_dispatcher 的 keyword-only 参数
+policy_factory: Callable[[str, TrainingConfig], AbstractContextManager[ModelBackend]] | None = None
 ```
 
 | 项 | 规则 |
 |---|---|
-| 调用 | 派发 interact 指令时,以 run id 与指令的 `base_checkpoint_ref` 调用,返回本 run 的策略 |
+| 调用 | 派发 interact 指令时,以 run id 与回写后、严格校验过的 `TrainingConfig` 调用,返回一个上下文管理器;进入时交出本 run 的策略,退出时收尾。基座引用取自 `cfg.base_checkpoint_ref` |
 | 工厂拿不到的 | `resolve_action` 算出的 `base_model_id` 不进指令载荷;需要时由引用反查模型产物 |
-| 旧参数 | 只给 `policy=` 时行为与今天相同 |
-| 实现方 | 组合根构造并注入;`mindtrainer` 只认这个可调用对象 |
-| 都没注入 | interact 指令判 `failed`(T2),原因点名 `--interact`;今天的原因是 `interact mode needs a client_factory and a policy`(`src/mindtrainer/dispatch.py:216`) |
+| 旧参数 | 只给 `policy=` 时行为与加这个参数之前相同;两者同给是调用方的错,构造时 `ValueError` |
+| 实现方 | 组合根(`src/factory/interact_policy.py`)构造并注入;`mindtrainer` 只认这个可调用对象 |
+| 都没注入 | interact 指令判 `failed`(T2),原因是 `interact mode needs a client_factory and a policy or policy_factory`;原因文字点名 `--interact` 还没做 [计划中] |
 
-### 5.2 一个 vLLM 进程,最多两个 LoRA [计划中]
+### 5.2 一个 vLLM 进程,最多两个 LoRA [已落地]
 
 训练位与站内对手共用一个 vLLM 进程,最多挂两个 LoRA。远端 GPU 租约是整机的,只有一个持有者,所以不能为两位各起一个进程(`src/compute/service.py:60-111`)。
 
-今天的服务命令只挂一个 LoRA:命令里写死 `--max-loras 1`,`--lora-modules` 只有一项(`src/compute/vllm_service.py:72-75`)。`VllmServeConfig` 只有 `adapter_name` 与 `adapter_path` 一对字段(`src/compute/vllm_service.py:29-32`)。
+服务命令按实际挂的适配器个数生成(`src/compute/vllm_service.py` 的 `_lora_args`),`VllmServeConfig.adapters` 超过 `MAX_ADAPTERS`(2)就抛 `ComputeError`。
 
-| 项 | 今天 | 计划 |
-|---|---|---|
-| `VllmServeConfig` 的适配器 | 一对 `adapter_name`、`adapter_path` | 适配器列表 |
-| `--max-loras` | 1 | 2 |
-| `--lora-modules` | 一项 | 按实际挂的适配器各一项 |
-| 适配器列表为空 | 不存在这种情况,恒带 `--enable-lora` | 不加 `--enable-lora` |
-| 基座 | 配置里的 `model_path` | 来自端点 |
+| 项 | 规则 |
+|---|---|
+| `VllmServeConfig` 的适配器 | `adapters`:`(名字, 导出路径)` 元组的元组,至多 2 项 |
+| `--max-loras` | 等于适配器个数 |
+| `--lora-modules` | 按实际挂的适配器各一项 |
+| 适配器列表为空 | 不加 `--enable-lora`,只服务基座 |
+| 基座 | 来自端点的 `base_model_path` |
 
 | 位 | 挂什么 |
 |---|---|
@@ -501,7 +501,7 @@ policy_factory: Callable[[str, BigRef], ModelBackend] | None = None
 
 适配器挂得上 vLLM,训练侧却不能从适配器接着训:`RollExecutor.load` 只接受起点基座或训练存点(`src/mindtrainer/roll_executor.py:104`)。这是这一轮只做单轮真推理的原因之一。
 
-### 5.3 服务的生命周期 [计划中]
+### 5.3 服务的生命周期 [已落地]
 
 vLLM 服务按指令起停,不常驻。一条 interact 指令派发时起服务,它的整轮训练(含 `grpo_opd` 阶段)在服务句柄的上下文里跑,退出即停服务、放租约。
 
@@ -511,21 +511,21 @@ vLLM 服务按指令起停,不常驻。一条 interact 指令派发时起服务,
 |---|---|---|
 | 租约被占 | `ComputeBusyError`(`src/compute/errors.py:20`) | 延后通道 |
 | 起服务阶段失败:启动超时、进程提前退出、隧道建不起来 | `ServeStartupError`(`src/compute/errors.py:42`) | 延后通道 |
-| 收尾时发现服务仍在运行 | 同一个 `ServeStartupError` | T2,指令 `failed`,不走延后通道 |
+| 收尾时发现服务仍在运行 | 同一个 `ServeStartupError` | 设计是 T2,指令 `failed`,不走延后通道;还没做 [计划中]:现在它与起服务失败一样原样上抛,指令保持 `pending`,训练记录已是 `executed` |
 
 两者都是 `DeferredError`。守护进程接住它们,按退避重试;同一动作连续延后超过上限时抛 `DeferredExhaustedError`,它刻意不继承 `DeferredError`,守护进程带原因退出,由外部监督者重启(`src/controlplane/daemon.py:60-66` 与 `:97-103`)。起服务最长等 900 秒,反复起不来会走到这一步。服务在 `resume_or_run` 之前起,校验、数据合成与清单检查都在进入服务上下文之前,所以租约被占与起服务阶段的失败不写训练记录,不耗 `resume_attempts`,确定性失败的指令也不占租约。
 
-`ServeStartupError` 不能整类归延后通道,它有一个例外:它也用于「收尾时发现服务仍在运行」。走到这一步时训练记录与候选已经写完,若按瞬态重派,下一轮会重新起服务,再次撞上同一处,反复起服务。所以这一种判 T2、指令 `failed`,原因写明要人清掉占显存的作业;只有起服务阶段的失败才走延后通道。判错的代价:把它当瞬态,会让守护进程在已完成的训练上空转到延后上限;当 T2 则要人工介入一次。
+`ServeStartupError` 不能整类归延后通道,它有一个例外:它也用于「收尾时发现服务仍在运行」。走到这一步时训练记录与候选已经写完,若按瞬态重派,下一轮会重新起服务,再次撞上同一处,反复起服务。所以这一种应当判 T2、指令 `failed`,原因写明要人清掉占显存的作业;只有起服务阶段的失败才走延后通道。目前没有这一步区分 [计划中]。判错的代价:把它当瞬态,会让守护进程在已完成的训练上空转到延后上限;当 T2 则要人工介入一次。
 
-### 5.4 超时口径 [计划中]
+### 5.4 超时口径
 
-真实模型的一次调用比罐头后端慢得多,今天的超时是按罐头后端定的。三处口径要改:
+真实模型的一次调用比罐头后端慢得多,默认超时是按罐头后端定的。`--interact` 下三处口径里两处已改,一处还没改 [计划中]:
 
-| 口径 | 今天 | 计划 |
+| 口径 | 默认 | `--interact` 下 |
 |---|---|---|
-| 单次角色后端调用 | 60 秒(`src/simulator/realtime/server.py:23` 的 `backend_timeout_s`) | 15 秒 |
-| 客户端提交一轮的上限 | 服务端默认 30 秒(`src/simulator/realtime/server.py:17`);`AgentRuntime` 传入 5 秒(`src/factory/agent.py:108`) | 30 秒,必须大于最慢一方一次调用加余量 |
-| 整条 gRPC 流的 deadline | 固定 15 秒(`src/factory/agent.py:87` 的 `INTERACT_DEADLINE_S`) | 按 `max_turns_per_episode × 单轮上限` 算,单轮上限即上一行的提交上限 |
+| 单次角色后端调用 | 60 秒(`src/simulator/realtime/server.py` 的 `backend_timeout_s`) | 仍是 60 秒;改传 15 秒还没做 [计划中] |
+| 客户端提交一轮的上限 | `AgentRuntime` 默认传 5 秒 | 30 秒(`src/factory/wire.py` 的 `INTERACT_TURN_TIMEOUT_S`),必须大于最慢一方一次调用加余量 [已落地] |
+| 整条 gRPC 流的 deadline | 固定 15 秒(`src/factory/agent.py` 的 `INTERACT_DEADLINE_S`) | 每条指令按 `max_turns_per_episode × 30 秒` 算,指令结束后还原 [已落地] |
 | 创建会话 | 10 秒(`create_timeout_s`) | 不变 |
 
 单次后端调用超时归 `role_backend_timeout`,是 T1,整条重跑,至多 `1 + max_retries_per_episode` 次。真机延迟没有数据,30 秒是否够用列入本文的未核实项。第 5.1 至 5.4 节的签名、参数形状与默认值取自设计,施工时可能微调。
@@ -573,9 +573,9 @@ vLLM 服务按指令起停,不常驻。一条 interact 指令派发时起服务,
 
 | 步 | 谁 | 做什么 | 写什么 |
 |---|---|---|---|
-| 1 | 派发器 | 读并校验配置,构造归因后端;interact 检查 `client_factory` 与 `policy`;batch 检查清单在场且 id 对得上。interact 改为 `policy` 与 `policy_factory` 至少给一个,都没有则判 `failed`,原因点名 `--interact` [计划中] | 失败时不写记录,指令判 `failed` |
+| 1 | 派发器 | 读并校验配置,构造归因后端;interact 检查 `client_factory` 与 `policy`;batch 检查清单在场且 id 对得上。interact 改为 `policy` 与 `policy_factory` 至少给一个,都没有则判 `failed`;原因文字现在是 `interact mode needs a client_factory and a policy or policy_factory`,尚未点名 `--interact` [计划中] | 失败时不写记录,指令判 `failed` |
 | 1a | 派发器 | 缺清单且指令带 `data_spec` 时先合成,插在客户端检查之后、读清单之前:先严格解析 `data_spec`(带了就解析,即便清单都在场),再检查不合成的其余阶段的清单在场,再交叉校验,最后调生产器。interact 指令只合成 `sft`。已在场的清单不重做 | 失败时不写记录,指令判 `failed` |
-| 1b | 派发器 | interact:`policy_factory` 按 run id 与 `base_checkpoint_ref` 构造策略,起 vLLM 服务并进入它的上下文,第 2 到 8 步都在其中;租约被占或起服务失败抛 `DeferredError` [计划中] | 失败时不写记录 |
+| 1b | 派发器 | interact:`policy_factory` 按 run id 与训练配置构造策略,起 vLLM 服务并进入它的上下文,第 2 到 8 步都在其中;租约被占或起服务失败抛 `DeferredError` [已落地] | 失败时不写记录 |
 | 2 | 编排器 | 读训练记录;已有记录时先比对存点的后端类型(不一致抛 `NeedsHumanError`,即便记录已是 `executed`),再交给 `decide_resume`;`noop` 直接返回,`escalate` 抛 `NeedsHumanError` | 无 |
 | 3 | 编排器 | 新运行从 step 0 起;resume 从 `checkpoint_step` 起;restart 从 step 0 起。之后先写 `pending` 记录,再 `executor.load` | 训练记录 |
 | 4 | 编排器 | batch 且有 GRPO 步:整份 GRPO 数据集一次算完奖励,校验组大小与组数 | 失败写 `failed` |
@@ -584,7 +584,7 @@ vLLM 服务按指令起停,不常驻。一条 interact 指令派发时起服务,
 | 7 | 编排器 | 存最终 checkpoint,先回写 `pending` 记录,再转换格式 | 训练记录 |
 | 8 | 编排器 | 注册候选,记录置 `executed`;派发器返回,调和循环把指令置 `executed` | 候选、训练记录 |
 
-interact 的生成路多一条「生成、写树、回写、复校」的链路 [计划中]。它由第 1a 步的同一个数据生产器完成,全部发生在第 1b 步起服务之前:
+interact 的生成路多一条「生成、写树、回写、复校」的链路 [已落地]。它由第 1a 步的同一个数据生产器完成,全部发生在第 1b 步起服务之前:
 
 | 环节 | 做什么 | 理由与判错的代价 |
 |---|---|---|
@@ -695,11 +695,11 @@ interact 的生成路多一条「生成、写树、回写、复校」的链路 [
 | MT-14 | SFT 只以训练位的 `utterance` 为目标,不训练 `inner_thought` | 同时训练内心推理 | 原设计未记录理由,是实现者的选择 | 被训模型学不到内心推理 |
 | R14 | 指令携带 `data_spec`,派发器缺清单时调用注入的数据生产器 | 由调度器先单独合成 | 合成与训练同一条指令,不多一种动作 | V1 模板生成器与目标维度无关,闭环只是流程跑通 |
 | MT-15 | 训练数据在上传前过污染准入检查,命中即整条指令失败;检查函数由组合根注入,`mindtrainer` 不导入 `diagnostic` | 在数据生产器里查;在清单登记时查;只靠约定 | 数据可以从模板、桥接或人工三条路径来,只有上传前的最后一道覆盖全部;命中就整条失败而不是剔行,是因为 ROLL 要求每步的行数固定,剔行会让训练步与数据错位 | 逐字重叠之外的内容抓不到;索引缺失时真训练直接起不来 |
-| MT-16 | 场景二这一轮做「真推理加 mock 训练」:训练位经 vLLM 说真话,权重更新仍由 mock 执行器完成 [计划中] | 只做替身;只做推理验证入口;等真实 GRPO 落地再接 | 真实执行器只支持 SFT(`supported_phases = {"sft"}`),开不了 interact 的实时会话;这一轮要证明真模型能进会话、发言能落盘、奖励管线对真实发言成立 | 本轮证明不了学习效果;真实 GRPO 落地时要改装配开关,接入工作可原样复用 |
-| MT-17 | 派发器新增 `policy_factory`,以 run id 与 `base_checkpoint_ref` 为入参,按 run 现构造策略;旧的 `policy=` 保留 [计划中] | 沿用一次派发一个 `policy` | 训练位必须用本轮基座,与 run 无关的固定策略做不到 | 派发器接口多一个参数,两个参数并存 |
-| MT-18 | 训练位与站内对手共用一个 vLLM 进程,最多两个 LoRA [计划中] | 两个进程 | GPU 租约是整机的,只有一个持有者 | 服务命令与 `VllmServeConfig` 要从单适配器改成列表;两个 LoRA 的切换开销与显存余量未核实 |
-| MT-19 | vLLM 按指令起停,覆盖整轮训练 [计划中] | 常驻 | 租约长期被占会让真实评测与训练作业都起不来 | 每条 interact 指令多付一次启动开销,上限 900 秒 |
-| MT-20 | 训练记录新增 `policy_backend` 块,如实记录两个角色位实际用的是什么 [计划中] | 只靠日志 | 「谁在说话」决定这一轮的数字怎么解读 | 记录多一个块;旧记录读回时缺省为空 |
+| MT-16 | 场景二这一轮做「真推理加 mock 训练」:训练位经 vLLM 说真话,权重更新仍由 mock 执行器完成 [已落地] | 只做替身;只做推理验证入口;等真实 GRPO 落地再接 | 真实执行器只支持 SFT(`supported_phases = {"sft"}`),开不了 interact 的实时会话;这一轮要证明真模型能进会话、发言能落盘、奖励管线对真实发言成立 | 本轮证明不了学习效果;真实 GRPO 落地时要改装配开关,接入工作可原样复用 |
+| MT-17 | 派发器新增 `policy_factory`,以 run id 与 `base_checkpoint_ref` 为入参,按 run 现构造策略;旧的 `policy=` 保留 [已落地] | 沿用一次派发一个 `policy` | 训练位必须用本轮基座,与 run 无关的固定策略做不到 | 派发器接口多一个参数,两个参数并存 |
+| MT-18 | 训练位与站内对手共用一个 vLLM 进程,最多两个 LoRA [已落地] | 两个进程 | GPU 租约是整机的,只有一个持有者 | 服务命令与 `VllmServeConfig` 要从单适配器改成列表;两个 LoRA 的切换开销与显存余量未核实 |
+| MT-19 | vLLM 按指令起停,覆盖整轮训练 [已落地] | 常驻 | 租约长期被占会让真实评测与训练作业都起不来 | 每条 interact 指令多付一次启动开销,上限 900 秒 |
+| MT-20 | 训练记录新增 `policy_backend` 块,如实记录两个角色位实际用的是什么 [已落地] | 只靠日志 | 「谁在说话」决定这一轮的数字怎么解读 | 记录多一个块;旧记录读回时缺省为空 |
 
 ## 8. 失败处理与可观测
 
@@ -722,8 +722,8 @@ interact 的生成路多一条「生成、写树、回写、复校」的链路 [
 | 跨模式续训:mock 存点配真实执行器,或反过来 | T3 | 在 `checkpoint_intact` 之前比对存点的 `fetch_hint.type` 与执行器的 `checkpoint_type`,不一致抛 `NeedsHumanError`,理由写「后端模式不一致」,记录不改 | 指令 `failure.category = T3` |
 | `supported_phases` 不覆盖配置要求的阶段 | T2 | 配置校验期记录写 `failed`,指令判 `failed`,一步都不动执行器 | 训练记录 `failure`、指令 `failure` |
 | 资源暂时不可用:`ComputeBusyError` | 延后 | 预检在 `run_training` 之前,不写记录,不耗 `resume_attempts`;守护进程接住并按退避重试 | 守护进程结构化日志 |
-| interact 起 vLLM 服务:租约被占 `ComputeBusyError`,或起服务阶段失败 `ServeStartupError` [计划中] | 延后 | 服务在 `resume_or_run` 之前起,不写记录,不耗 `resume_attempts`;经延后通道按退避重试 | 守护进程结构化日志 |
-| interact 收尾时发现服务仍在运行(同样抛 `ServeStartupError`) [计划中] | T2 | 训练记录与候选已写完,重派会反复起服务,所以不走延后通道;指令判 `failed`,原因写明要人清掉占显存的作业 | 指令 `payload["failure"]` |
+| interact 起 vLLM 服务:租约被占 `ComputeBusyError`,或起服务阶段失败 `ServeStartupError` [已落地] | 延后 | 服务在 `resume_or_run` 之前起,不写记录,不耗 `resume_attempts`;经延后通道按退避重试 | 守护进程结构化日志 |
+| interact 收尾时发现服务仍在运行(同样抛 `ServeStartupError`) [计划中] | 设计是 T2;现在原样上抛,指令保持 `pending` | 训练记录与候选已写完,重派会反复起服务,所以不该走延后通道;应判 `failed`,原因写明要人清掉占显存的作业 | 指令 `payload["failure"]` |
 | 传输层故障 `TransportError`、远端作业超时 `RemoteJobTimeoutError` | 延后 | 同上,经延后通道重试;进入 `run_training` 之后抛出的,`resume_attempts` 已加一,重试仍受 G5 的上限约束 | 同上 |
 | 远端作业非零退出 `RemoteJobFailedError` | 延后 | 同上;它是真失败,计入 `resume_attempts`,耗尽后升级为 T3 | 训练记录 `resume_attempts` |
 | 远端作业成功但指标解析不出 `MetricsMissingError` | T1 | 记录保持 `pending`,计入 `resume_attempts`;重试时作业命中已成功退出的那次尝试,只重新解析,不重训 | 训练记录 `resume_attempts` |
@@ -733,7 +733,7 @@ interact 的生成路多一条「生成、写树、回写、复校」的链路 [
 
 T1 的上抛异常会让 `run_daemon` 退出,需要外部监督者重启。重启后同一条指令再次派发,`resume_attempts` 上限保证它最终升级为 T3,不会无限空转。`DeferredError` 的子类不在此列:守护进程接住它们,进程不退出;同一动作连续延后超过上限才带原因退出(CP-14)。
 
-interact 的 `config_hash` 覆盖配置层的东西 [计划中]:情境 id、人格 id、角色位、`bindings` 与 `base_checkpoint_ref`。它不含 `driver` 实际连到哪个端点、`opponent_script` 的台词内容,也不含 `policy_backend`。所以只保证「同一份配置重跑得出同一份指令」,不保证重跑得出同样的轨迹;要知道某一轮实际是谁在说话,读训练记录的 `policy_backend`。
+interact 的 `config_hash` 覆盖配置层的东西 [已落地]:情境 id、人格 id、角色位、`bindings` 与 `base_checkpoint_ref`。它不含 `driver` 实际连到哪个端点、`opponent_script` 的台词内容,也不含 `policy_backend`。所以只保证「同一份配置重跑得出同一份指令」,不保证重跑得出同样的轨迹;要知道某一轮实际是谁在说话,读训练记录的 `policy_backend`。
 
 只读观测手段:
 
@@ -756,7 +756,7 @@ interact 的 `config_hash` 覆盖配置层的东西 [计划中]:情境 id、人�
 | interact | rollout 轮转、续训接着轮转、各终止原因的分类 | 本进程的实时环境服务端 |
 | 派发与接线 | 指令到候选、失败到类别、坏指令不挡后面的指令 | 临时 git 仓库 |
 | 端到端 | 候选走完未修改的调和循环到晋级,再成为下一轮基座 | 占位诊断 |
-| 端到端 [计划中] | `factory reconcile --once --interact` 走到候选 `pending_review`,episode 都在产物树里 | 假 vLLM(本地 HTTP 回固定文本)、mock 执行器 |
+| 端到端 [已落地] | `factory reconcile --once --interact` 走到候选 `pending_review`,episode 都在产物树里 | 假 vLLM(本地 HTTP 回固定文本)、mock 执行器 |
 
 默认测试套件不依赖的外部服务:ROLL、vLLM、真实 LLM judge、远程 GPU、SSH。真实后端的测试用假传输和假客户端,远端助手脚本在本机真跑 [已落地];真起子进程的那个文件标 `slow`,`-m 'not slow'` 可跳。连真实主机的冒烟用例标 `remote`、默认跳过 [计划中]:这个标记还没有注册,也还没有这样的用例。
 
@@ -790,14 +790,14 @@ interact 的 `config_hash` 覆盖配置层的东西 [计划中]:情境 id、人�
 |---|---|---|
 | 配置校验与哈希锚定 | [已落地] | |
 | batch 轨迹源与清单校验 | [已落地] | |
-| interact 轨迹源 | [已落地] | 入口不提供实时服务端与策略;`--interact` 装配 [计划中] |
+| interact 轨迹源 | [已落地] | `scripts/run_controlplane.py` 不提供实时服务端与策略;`factory run|reconcile --interact` 装配 [已落地] |
 | 规则归因与 judge 归因 | [已落地] | 入口不提供 judge |
 | 离线分组 GRPO 的分组契约 | [已落地] | 算法语义未在 ROLL 上核实 |
 | 续训判定与崩溃续训 | [已落地] | 逐字节等价只在 mock 下有证据 |
 | 调和循环接线 | [已落地] | `scripts/run_controlplane.py` 用 mock 执行器与转换器 |
 | 数据合成接线 | [已落地] | 工作包 2 |
 | ROLL LoRA SFT 真实执行器、适配器导出转换器、阶段协议 | [已落地] | 远端计算层 `compute` 是它们的前置,已先于执行器与转换器落地;已在真实主机上各跑通一次,多段与续训、端到端调和循环仍待验证 |
-| interact 在真实入口跑通:策略工厂、一个 vLLM 进程挂最多两个 LoRA、按指令起停、超时口径、`policy_backend` 记录 | [计划中] | 真推理加 mock 训练;证明推理链路与奖励管线对真实发言成立,不证明模型变好 |
+| interact 在真实入口跑通:策略工厂、一个 vLLM 进程挂最多两个 LoRA、按指令起停、超时口径、`policy_backend` 记录 | [已落地] | 真推理加 mock 训练;证明推理链路与奖励管线对真实发言成立,不证明模型变好 |
 | 真实 GRPO 加 OPD 训练、适配器合并回完整权重 | [推迟] | |
 
 | 已知局限 | 影响 | 缓解 |
@@ -810,13 +810,13 @@ interact 的 `config_hash` 覆盖配置层的东西 [计划中]:情境 id、人�
 | 训练同步阻塞调和循环 | 训练期间审核与晋级动作排队,一轮可达数小时 | 异步派发:指令加 `submitted` 状态,派发器拆成提交与轮询,训练记录里的 `remote_job_ref` 作幂等键 [推迟];接真实 LoRA SFT 的这一轮作为有限定的例外接受阻塞(CP-15) |
 | 真实后端只支持单轮 [已落地] | 真实转换器产出适配器导出,晋级把它原样复制进模型产物,下一轮基座解析得到它,真实执行器 `load` 拒绝它:第二轮必然确定性失败。G6 在真实后端下不成立。拒绝由 `RollExecutor.load` 实现,`tests/test_mt_roll_executor.py` 钉住 | 候选多带一个训练格式引用,晋级与基座解析随之改 [推迟];本轮由 `RollExecutor.load` 响亮失败,理由写明原因 |
 | 服务端 `turn_timeout_s` 小于策略最坏延迟时,慢策略被当作 T1 重试 | 推理成本按重试次数放大 | 组合根配置时保证超时大于策略延迟 |
-| 合成的情境与人格不落盘 | 想按 id 查生成的情境,只能看 episode 里的 `scenario_id` 与 `role_assignment` | 无 [计划中] |
+| batch 合成的情境与人格不落盘(interact 生成路的会写进 `scenarios/` 与 `personas/`) | 想按 id 查 batch 合成的情境,只能看 episode 里的 `scenario_id` 与 `role_assignment` | 无 [计划中] |
 | 默认生产器的奖励差异是人造的 | 合成数据只证明流程跑通 | 换桥接生成器 [计划中] |
 | judge 归因用的 `trained_model_id` 没有锚定 | 它不是训练配置字段,也不进 `config_hash` | 接入 judge 时取晋级基座的 `model_id` |
 | interact 的客户端工厂每次新建通道 | 并发会话多时连接数增长 | 工厂里复用同一个 gRPC 通道,每次只新建存根与客户端;已在真实服务端上验证过 4 个客户端共用 1 个通道,含一次中止之后再收集 |
 | interact 的 sft 合成不用 `bindings` 点名的人格 | 合成 episode 的人格与实时会话里的不同 | 无 [计划中] |
-| 接通后的 interact 是真推理加 mock 训练 [计划中] | 损失值与候选不证明模型变好;服务的权重整轮不变,`mean_reward` 随步数的变化不是学习证据 | 训练记录的 `policy_backend.real_inference_with_mock_training` 如实标出;真实 GRPO 落地后换执行器 |
-| 训练位只在指令的 `base_checkpoint_ref` 本身是适配器导出时才挂适配器 [计划中] | 闭环的候选是 `mock://` 引用,下一轮的训练位用不上上一轮的候选 | `trained.kind` 记在 `policy_backend` 里,读记录的人看得出 |
+| 接通后的 interact 是真推理加 mock 训练 [已落地] | 损失值与候选不证明模型变好;服务的权重整轮不变,`mean_reward` 随步数的变化不是学习证据 | 训练记录的 `policy_backend.real_inference_with_mock_training` 如实标出;真实 GRPO 落地后换执行器 |
+| 训练位只在指令的 `base_checkpoint_ref` 本身是适配器导出时才挂适配器 [已落地] | 闭环的候选是 `mock://` 引用,下一轮的训练位用不上上一轮的候选 | `trained.kind` 记在 `policy_backend` 里,读记录的人看得出 |
 
 | 未核实项 | 影响 | 核实办法 |
 |---|---|---|
@@ -832,7 +832,7 @@ interact 的 `config_hash` 覆盖配置层的东西 [计划中]:情境 id、人�
 | 真模型的单轮推理延迟 | 决定客户端提交上限 30 秒够不够;不够时慢策略被当作 T1 重试,推理成本按重试次数放大 | 在真机上测训练位与站内对手的单轮延迟 |
 | 一个 vLLM 进程挂两个 LoRA 的切换开销与显存余量 | 按 `--max-loras 2` 设计;切换慢或显存不足时,两位共用一个进程不成立 | 真机上同时挂两个适配器,测切换延迟与显存 |
 | `VllmServeConfig` 改成适配器列表后,真实评测运行器的调用点(`src/factory/sombench_runner.py:176`)能否原样工作 | 改坏会让 `--evaluator someval` 起不来 | 改完后跑涉及 `VllmServeConfig` 的测试,并核对该调用点 |
-| `policy_backend` 里 `trained.ref` 在 `kind` 为 `base` 时的具体形态 | 记录的可读性 | 施工时按引用原样写 `uri` 与 `sha256` [计划中] |
+| `policy_backend` 里 `trained.ref` 在 `kind` 为 `base` 时的具体形态 | 记录的可读性 | 已定:只写引用的 `uri`,不写 `sha256` [已落地] |
 
 明确不做:MindTrainer 不读诊断结果,不决定练什么,不改指令状态,不写成本记录,不并行 rollout。
 
@@ -849,6 +849,6 @@ interact 的 `config_hash` 覆盖配置层的东西 [计划中]:情境 id、人�
 | 续训 | 从存点(resume)或基座(restart)接着跑同一个 run |
 | `group_id` | GRPO 分组键,由情境 id 与各角色位的人格、后端、`model_ref` 推出 |
 | `data_spec` | 指令里描述要合成什么数据的载荷 |
-| 策略工厂 | `policy_factory`,按 run id 与基座引用现构造训练位策略的可调用对象 [计划中] |
-| 真推理加 mock 训练 | 训练位的发言来自 vLLM 上的真实模型,权重更新来自 mock 执行器 [计划中] |
-| `policy_backend` | 训练记录里的可选块,记录 interact 运行两个角色位实际用的驱动与权重 [计划中] |
+| 策略工厂 | `policy_factory`,按 run id 与训练配置现构造训练位策略的上下文管理器 [已落地] |
+| 真推理加 mock 训练 | 训练位的发言来自 vLLM 上的真实模型,权重更新来自 mock 执行器 [已落地] |
+| `policy_backend` | 训练记录里的可选块,记录 interact 运行两个角色位实际用的驱动与权重 [已落地] |

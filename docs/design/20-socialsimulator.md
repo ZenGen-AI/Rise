@@ -3,13 +3,13 @@
 | 项 | 内容 |
 |---|---|
 | 一句话 | 生成情境与人格,驱动多角色多轮交互产出 Episode,批量产出带哈希清单的数据集,并以 gRPC 实时环境服务支撑交互式训练与部署经验采集 |
-| 状态 | 部分落地:数据模型、运行器、批量数据集、实时环境服务、激活轨迹打通 [已落地];外部强模型生成后端、按目标维度生成情境与人格、episode 分片存储 [推迟];场景二接通所需的 interact 情境与人格两路来源、对手位三种驱动、`Scenario` 的可选字段 `opponent_script` [计划中] |
+| 状态 | 部分落地:数据模型、运行器、批量数据集、实时环境服务、激活轨迹打通,以及场景二接通所需的 interact 情境与人格两路来源、对手位三种驱动、`Scenario` 的可选字段 `opponent_script` [已落地];外部强模型生成后端、按目标维度生成情境与人格、episode 分片存储 [推迟];场景二接通里服务端后端单次调用超时改传 15 秒、外部 API 对手超时与非 200 的重跑口径 [计划中] |
 | 所在层 | 计算层 |
 | 代码位置 | `src/simulator`(诊断评测在 `src/diagnostic`,本文不展开) |
 | 基线提交 | `b826440`(2026-10-21) |
 | 依赖 | ControlPlane 的 `controlplane.envelope`、`controlplane.gitstore`、`controlplane.paths`;第三方 `grpcio`、`protobuf` |
 | 被依赖 | MindTrainer(`mindtrainer`)、诊断评测(`diagnostic`)、ControlPlane 骨架桩(`controlplane.daemon`);已落地:Actio、MindAgent、factory |
-| 对应实施计划 | 工作包 6(任务 70 至 72)[已落地];其余已落地部分无待施工任务;场景二接通在本篇的范围是 `opponent_script` 与对手三驱动,施工单尚未编号 [计划中] |
+| 对应实施计划 | 工作包 6(任务 70 至 72)[已落地];其余已落地部分无待施工任务;场景二接通在本篇的范围是 `opponent_script` 与对手三驱动,已随 `--interact` 接通落地 [已落地] |
 
 ## 0. 系统速览
 
@@ -123,8 +123,8 @@ SocialSimulator 的仿真部分是工厂的"社会情境发生器":它把情境�
 | 数据生产器自身做评测集隔离 | [推迟] | 模板生产器不调用隔离校验器。桥接生产器接入之前,训练数据上传前已经有最后一道:执行器把整份 `train.jsonl` 交给组合根注入的污染准入检查,对照 SoMBench 的 20 字滑窗哈希索引,命中即整条指令失败(见 MindTrainer 的 MT-15)。生产器自己再查一遍能更早失败、能给出更细的原因,但不是必需 |
 | 开发者交互调试接口 | [推迟] | 人工经命令行直接发起交互会话、实时观察模型表现,不是流水线一环,V1 没有 |
 | 多样性防护与按用途调难度分布 | [推迟] | 模板池加种子取模,不做聚类惩罚、多样性奖励,也不因情境用途调难度 |
-| interact 的情境与人格来源:点名或按种子生成,两路不混用 | [计划中] | 今天的 interact 指令靠人手写或 clone 已有配方,默认训练配置没有 interact 段 |
-| 对手位三种驱动:固定对话、站内 vLLM、外部 OpenAI 兼容 API | [计划中] | 默认固定对话;模拟器内部仍只认 `ModelBackend` 协议,驱动由组合根选 |
+| interact 的情境与人格来源:点名或按种子生成,两路不混用 | [已落地] | 点名路由 `interact` 段的 `scenario_ids` 与 `persona_ids` 给出,生成路由 `data_spec` 在派发时生成;默认训练配置没有 `interact` 段,此时 `new` 仍写不出 interact 指令 |
+| 对手位三种驱动:固定对话、站内 vLLM、外部 OpenAI 兼容 API | [已落地] | 默认固定对话;模拟器内部仍只认 `ModelBackend` 协议,驱动由组合根选 |
 | 对手 `model_ref` 的哈希锚定 | [推迟] | `model_ref` 只是名字,不锚定它指向的权重;同名引用换了权重,`config_hash` 不变 |
 
 | 约束 | 内容 | 影响 |
@@ -141,7 +141,7 @@ SocialSimulator 的仿真部分是工厂的"社会情境发生器":它把情境�
 | 等待 `CreateSession` | 10 秒 | `create_timeout_s` |
 | 等客户端提交一轮 | 30 秒 | `turn_timeout_s` |
 | 服务端后端单次调用 | 默认 60 秒;`--interact` 装配拟改传 15 秒,该默认值本身不变 [计划中] | `backend_timeout_s` |
-| 客户端提交一轮的上限 | 服务端默认 30 秒;组合根现在给 `AgentRuntime` 传 5 秒,`--interact` 下要改回 30 秒以上,否则真模型一轮就超时 [计划中] | `turn_timeout_s` |
+| 客户端提交一轮的上限 | 服务端默认 30 秒;组合根给 `AgentRuntime` 默认传 5 秒,`--interact` 下传 30 秒,否则真模型一轮就超时 [已落地] | `turn_timeout_s` |
 | 并发会话上限 | 16 | `max_workers`,与 `maximum_concurrent_rpcs` 对齐 |
 | keepalive 间隔与超时 | 30000 / 10000 毫秒 | `create_server` |
 
@@ -220,15 +220,15 @@ SocialSimulator 的仿真部分是工厂的"社会情境发生器":它把情境�
 | 核心无 IO | `datamodel`、`backends`、`runner`、`generators`、`validation`、`session` 不读写文件与网络 |
 | 已知回指 | `controlplane.daemon` 导入 `simulator.stubs`,包级循环,运行时不成环,骨架桩移出前保留 |
 
-对手位的三种驱动 [计划中]。对手位后端由调用方按角色位传入,模拟器本身只认 `ModelBackend` 协议。今天组合根的 `AgentRuntime._backends` 一律给全局罐头台词的 `ScriptedBackend`(`src/factory/agent.py:121-122`)。场景二接通后,同一个函数按角色位在三种驱动里选,实现全在组合根,模拟器不新增依赖 [计划中]。
+对手位的三种驱动 [已落地]。对手位后端由调用方按角色位传入,模拟器本身只认 `ModelBackend` 协议。不传 `--interact` 时组合根的 `AgentRuntime._backends` 仍一律给全局罐头台词的 `ScriptedBackend`;传了 `--interact`,同一个函数按角色位在三种驱动里选,实现全在组合根,模拟器不新增依赖。
 
 | 驱动 | 实现 | 来源 | 状态 |
 |---|---|---|---|
-| 固定对话(默认) | `ScriptedBackend` | 情境自带的 `opponent_script` 优先;情境没带时用全局台词 | [计划中] |
-| `frozen_reference` | 站内 vLLM,挂对手模型的 LoRA | `model_ref` 经树里的模型产物解析成 `checkpoint_ref` | [计划中] |
-| `external_api` | OpenAI 兼容 HTTP 客户端 | 新增 `opponent` 配置:端点、模型名、存凭证的环境变量名 | [计划中] |
+| 固定对话(默认) | `ScriptedBackend` | 情境自带的 `opponent_script` 优先;情境没带时用全局台词 | [已落地] |
+| `frozen_reference` | 站内 vLLM,挂对手模型的 LoRA | `model_ref` 经树里的模型产物解析成 `checkpoint_ref` | [已落地] |
+| `external_api` | OpenAI 兼容 HTTP 客户端 | `training_defaults.yaml` 的 `opponent` 段:端点、模型名、存凭证的环境变量名 | [已落地] |
 
-全仓库今天没有一处把 `model_ref` 解析成权重,这一步新增在组合根 [计划中]。解析不到,或指到的不是适配器导出,派发时确定性失败,不静默退回脚本台词。外部 API 客户端是新增的极小实现 [计划中],用标准库 `urllib`,与 `src/compute/tunnel.py` 的 HTTP 探测同一手法。凭证只从环境变量读,异常信息只报变量名。站内对手与训练位共用一个 vLLM 进程,最多挂两个 LoRA [计划中]。
+`model_ref` 在组合根里由 `resolve_model_ref` 解析成权重引用 [已落地]。解析不到,或指到的不是适配器导出,派发时确定性失败,不静默退回脚本台词。外部 API 客户端是一个极小的实现 [已落地],用标准库 `urllib`,与 `src/compute/tunnel.py` 的 HTTP 探测同一手法。凭证只从环境变量读,异常信息只报变量名。站内对手与训练位共用一个 vLLM 进程,最多挂两个 LoRA [已落地]。
 
 ## 4. 数据模型与状态机
 
@@ -237,7 +237,7 @@ SocialSimulator 的仿真部分是工厂的"社会情境发生器":它把情境�
 | 实体 | 字段与含义 | 约束 |
 |---|---|---|
 | `Persona` | `id`、`traits`、`motivation`、`speech_style`、`values`、`source` | `source` 为 `auto` 或 `external` |
-| `Scenario` | `id`、`background`、`role_slots`、`conflict`、`norms`、`purpose`、`source`;可选 `opponent_script` [计划中] | `purpose` 为 `training` 或 `deployment_simulation`;`opponent_script` 为空时不进序列化 [计划中] |
+| `Scenario` | `id`、`background`、`role_slots`、`conflict`、`norms`、`purpose`、`source`;可选 `opponent_script` [已落地] | `purpose` 为 `training` 或 `deployment_simulation`;`opponent_script` 为空时不进序列化 [已落地] |
 | `RoleSlot` | `slot_id`、`description` | 情境里的抽象角色位 |
 | `RoleBinding` | `slot_id`、`persona_id`、`model_backend`、`model_ref` | `self_play` 不得带 `model_ref`;为 None 时不进序列化 |
 | `RoleAssignment` | `scenario_id`、`bindings`、`max_turns` | `bindings` 的顺序就是发言轮转顺序 |
@@ -247,11 +247,11 @@ SocialSimulator 的仿真部分是工厂的"社会情境发生器":它把情境�
 
 `model_backend` 的取值是 `self_play`、`frozen_reference`、`external_api`。运行器不解释这个字段,真正的后端由调用方按 slot 传入。
 
-`opponent_script` 可选字段 [计划中]。它给对手位一串固定台词,形如 `{b: ["台词一", "台词二"]}`,键是角色位。台词按序消耗,用完后从头循环。今天的 `ScriptedBackend` 用完台词后返回固定文本“(无更多发言)”(`src/simulator/backends.py:54`),不循环,所以循环是新增行为。
+`opponent_script` 可选字段 [已落地]。它给对手位一串固定台词,形如 `{b: ["台词一", "台词二"]}`,键是角色位。台词按序消耗,用完后从头循环。`ScriptedBackend` 默认用完台词后返回固定文本“(无更多发言)”(`src/simulator/backends.py`),不循环;循环由默认关闭的 `loop=True` 开启,只有 `AgentRuntime` 的固定对话驱动传它。
 
 读写兼容:`to_dict` 只在字段非空时写这个键,`from_dict` 用 `d.get` 读;条件写入的先例是 `RoleBinding.model_ref`(`src/simulator/datamodel.py:98-100`),而 `source` 是无条件写入的,不属同类。旧产物读得出,既有情境的序列化与哈希不变。默认配置不写它,所以默认仍用全局台词。字段形状取自设计,施工时可能微调。
 
-interact 的情境与人格来源 [计划中]。场景二的情境与人格有两路来源,一次配置只走一路,不混用。混用会产出无法追溯的混合语料。
+interact 的情境与人格来源 [已落地]。场景二的情境与人格有两路来源,一次配置只走一路,不混用。混用会产出无法追溯的混合语料。
 
 | 来源 | 配置写法 | 情境与人格从哪来 | 约束 |
 |---|---|---|---|
@@ -408,8 +408,8 @@ class EnvironmentServiceClient:
 | Actio | 无 | 运行器接受后端返回三元组,`SubmitTurn` 携带轨迹,工作包 6 [已落地] | [已落地] |
 | MindAgent | 无 | 接口②,复用客户端"客户端后说"能力,工作包 7 [已落地] | [已落地] |
 | factory | 无 | 组合根调 `create_server` 并注入 `scenario_resolver`,工作包 9 [已落地] | [已落地] |
-| factory 组合根(场景二接通) | 无 | `Scenario.opponent_script` 与 `ModelBackend` 协议:组合根据此按角色位选对手驱动 [计划中] | [计划中] |
-| MindTrainer 派发器(场景二接通) | 无 | 生成器与 `write_scenario`、`write_persona`:生成路据此写入情境与人格,再回写指令 [计划中] | [计划中] |
+| factory 组合根(场景二接通) | 无 | `Scenario.opponent_script` 与 `ModelBackend` 协议:组合根据此按角色位选对手驱动 [已落地] | [已落地] |
+| MindTrainer 派发器(场景二接通) | 无 | 生成器与 `write_scenario`、`write_persona`:生成路据此写入情境与人格,再回写指令 [已落地] | [已落地] |
 
 工作包 6 对本文接口的改动如下。
 
@@ -497,7 +497,7 @@ class EnvironmentServiceClient:
 | 策略自身抛异常 | 同断连 | 异常原样上抛 | 客户端先 `abort()`,不发 `EndSession` |
 | 落盘钩子抛异常 | 记日志,推 `EndSession(persistence_failed)`,不给 `episode_id`,原因写进 `failure_detail` | 不是正常收尾,MindTrainer 与 MindAgent 都按瞬态失败整条重跑,不收下这条 episode | 有上限的重跑;重跑都失败时上抛,排查落盘 [已落地] |
 
-interact 会话前的准备 [计划中]。下表是派发器与组合根在起会话之前做的事,会话本身仍是上面的 11 步。
+interact 会话前的准备 [已落地]。下表是派发器与组合根在起会话之前做的事,会话本身仍是上面的 11 步。
 
 | 步 | 动作 | 执行者 | 失败时 |
 |---|---|---|---|
@@ -562,10 +562,10 @@ interact 会话前的准备 [计划中]。下表是派发器与组合根在起�
 | SS-11 | 服务端后端调用套 `TimeoutBackend`,每次一个 daemon 线程 | 线程池;不设期限 | 挂死的对手不拖住会话;daemon 线程不阻止进程退出 | 超时后底层调用继续占资源直到自然结束 |
 | SS-12 | 外部配置路强制 `source="external"` | 信任输入里的标记 | 来源可追溯,不被外部数据冒充 | 无法从外部导入标为 `auto` 的定义 |
 | SS-13 | V1 保持每条 episode 一个产物文件、一次提交,清单逐条锚定 sha256;分片文件加引用推迟到接真实训练之前 [推迟] | 现在就分片 | 小规模 mock 下逐条足够;分片要同时改清单格式、读取与校验 | 万条级数据集写入要数小时,仓库膨胀 |
-| SS-14 | interact 的情境与人格走两路来源:配置点名树里已有的,或按种子生成;一次配置只走一路,不混用 [计划中] | 允许点名一部分、生成其余 | 混用会产出无法追溯的混合语料 | 使用者要多写几行配置 |
-| SS-15 | 点名的情境 `purpose` 必须是 `training`,人格不限 [计划中] | 不限 `purpose` | 默认部署素材的情境是 `deployment_simulation`,拿它们训练等于污染训练数据 | 部署素材不能顺手拿来训练 |
-| SS-16 | 对手位三种驱动:固定对话(默认)、站内 vLLM、外部 OpenAI 兼容 API;驱动由组合根选,模拟器只认 `ModelBackend` [计划中] | 只做一种驱动 | 场景二要求三种都支持;驱动在组合根里选,模拟器协议不用改 | 三种驱动的失败分类与超时口径各要成立 |
-| SS-17 | 固定对话优先用情境自带的 `opponent_script`,情境没带时用全局台词;`Scenario` 加一个可选字段 [计划中] | 只有全局台词 | 固定对话要能按情境区分对手说什么 | `Scenario` 多一个可选字段;旧产物读回不变 |
+| SS-14 | interact 的情境与人格走两路来源:配置点名树里已有的,或按种子生成;一次配置只走一路,不混用 [已落地] | 允许点名一部分、生成其余 | 混用会产出无法追溯的混合语料 | 使用者要多写几行配置 |
+| SS-15 | 点名的情境 `purpose` 必须是 `training`,人格不限 [已落地] | 不限 `purpose` | 默认部署素材的情境是 `deployment_simulation`,拿它们训练等于污染训练数据 | 部署素材不能顺手拿来训练 |
+| SS-16 | 对手位三种驱动:固定对话(默认)、站内 vLLM、外部 OpenAI 兼容 API;驱动由组合根选,模拟器只认 `ModelBackend` [已落地] | 只做一种驱动 | 场景二要求三种都支持;驱动在组合根里选,模拟器协议不用改 | 三种驱动的失败分类与超时口径各要成立 |
+| SS-17 | 固定对话优先用情境自带的 `opponent_script`,情境没带时用全局台词;`Scenario` 加一个可选字段 [已落地] | 只有全局台词 | 固定对话要能按情境区分对手说什么 | `Scenario` 多一个可选字段;旧产物读回不变 |
 | R12 | 打通激活轨迹:`SubmitTurn` 加可选字段,运行器接受三元组 [已落地] | 轨迹走单独通道 | 原设计未记录别的理由,施工计划表现为改动最小、既有二元组后端不改 | 改协议,要重新生成并入库 pb2 文件 |
 | R14 | 指令带 `data_spec`,派发器缺清单时调注入的生产器,生产器复用 `produce_grouped_dataset` [已落地] | 数据集只能预先生产 | 闭环能自己补数据 | V1 模板生成与目标维度无关,只证明流程跑通 |
 
@@ -587,13 +587,13 @@ interact 会话前的准备 [计划中]。下表是派发器与组合根在起�
 | 客户端断连 | T1 | FAILED,不落盘 | 无 |
 | 第 N+1 个并发会话 | T1 | gRPC `RESOURCE_EXHAUSTED` | 客户端看到传输错误 |
 | T1 重试耗尽 | 仍是 T1 | MindTrainer 抛 `RolloutFailedError`,训练记录与指令保持 `pending` | 无失败记录;下一次派发续训,续训次数耗尽后才升级为 T3 |
-| 点名的情境 `purpose` 不是 `training`;点名的情境或人格不在树里;点名只写了一半 [计划中] | 配置错误 | 组合根装配期退出码 2,不进派发 | 无产物,启动即退出 |
-| 对手 `model_ref` 解析不到,或不是适配器导出 [计划中] | T2 | 指令 `failed`,不退回脚本台词 | 失败原因点名这条引用 |
-| 生成路合成情境或人格失败 [计划中] | T2 | 指令 `failed`,不留半套情境与人格 | 失败记录 |
-| 回写 `training_config` 失败 [计划中] | T1 | 上抛,指令仍 `pending`;重跑内容相同不提交 | 无 |
+| 点名的情境 `purpose` 不是 `training`;点名的情境或人格不在树里;点名只写了一半 [已落地] | 配置错误 | 组合根装配期退出码 2,不进派发 | 无产物,启动即退出 |
+| 对手 `model_ref` 解析不到,或不是适配器导出 [已落地] | T2 | 指令 `failed`,不退回脚本台词 | 失败原因点名这条引用 |
+| 生成路合成情境或人格失败 [已落地] | T2 | 指令 `failed`,不留半套情境与人格 | 失败记录 |
+| 回写 `training_config` 失败 [已落地] | T1 | 上抛,指令仍 `pending`;重跑内容相同不提交 | 无 |
 | 外部 API 对手单次调用超时 [计划中] | T1 | 套 `TimeoutBackend`,归 `role_backend_timeout`,整条重跑,有上限 | `EndSession` 的 `reason` |
 | 外部 API 对手返回非 200 [计划中] | T1 或 T2,协议上不区分 | 后端抛异常,归 `role_backend_failure`;整条重跑,有上限 | `EndSession(role_backend_failure)` |
-| 外部 API 对手缺凭证 [计划中] | 配置错误,装配期 | 不进会话:factory 的 `--interact` 装配期解析凭证,缺则退出码 2,异常只报环境变量名 | 一行 `factory: error: ...` |
+| 外部 API 对手缺凭证 [已落地] | 配置错误,装配期 | 不进会话:factory 的 `--interact` 装配期解析凭证,缺则退出码 2,异常只报环境变量名 | 一行 `factory: error: ...` |
 
 只读观测手段。
 
@@ -615,9 +615,9 @@ interact 会话前的准备 [计划中]。下表是派发器与组合根在起�
 | 组件 | 驱动器收尾分类、两种实时后端、清单校验 | 罐头后端、慢后端、抛异常后端 |
 | 回环集成 | 服务端与客户端全流程、资源边界、断连、落盘钩子 | 端口 0 的本机服务端,临时 git 仓库 |
 | 跨包 | 骨架桩、MindTrainer interact 轨迹源 | 同上 |
-| 单元 | `Scenario.opponent_script` 的读写兼容、按序消耗与循环 [计划中] | 无 |
-| 单元 | 点名与生成两路来源:互斥、成对、`purpose` 校验、生成后回写、重跑逐字节相同 [计划中] | 临时仓库 |
-| 回环集成 | 三类对手驱动各一条;外部 API 客户端的成功、超时、非 200、缺凭证只报变量名 [计划中] | 端口 0 的本机服务端,本地 HTTP 替身 |
+| 单元 | `Scenario.opponent_script` 的读写兼容、按序消耗与循环 [已落地] | 无 |
+| 单元 | 点名与生成两路来源:互斥、成对、`purpose` 校验、生成后回写、重跑逐字节相同 [已落地] | 临时仓库 |
+| 回环集成 | 三类对手驱动各一条;外部 API 客户端的成功、超时、非 200、缺凭证只报变量名 [已落地] | 端口 0 的本机服务端,本地 HTTP 替身 |
 
 | 测试文件 | 用例数 | 状态 |
 |---|---|---|
@@ -653,7 +653,7 @@ interact 会话前的准备 [计划中]。下表是派发器与组合根在起�
 
 ## 10. 现状、局限与未核实项
 
-结论:批量与实时两条路径、激活轨迹都已落地并有测试;外部生成后端与按目标维度生成是空白;场景二接通需要的两路来源与对手三驱动 [计划中]。
+结论:批量与实时两条路径、激活轨迹都已落地并有测试;外部生成后端与按目标维度生成是空白;场景二接通需要的两路来源与对手三驱动也已落地并有测试;后端单次调用超时改传 15 秒、外部 API 对手超时与非 200 的重跑口径仍是 [计划中]。
 
 | 能力 | 状态 | 说明 |
 |---|---|---|
@@ -665,9 +665,9 @@ interact 会话前的准备 [计划中]。下表是派发器与组合根在起�
 | 接口②部署经验采集 | [已落地] | 工作包 7 由 MindAgent 侧的部署驱动器消费 |
 | 组合根启动服务端 | [已落地] | 工作包 9,`factory.agent.AgentRuntime` |
 | 外部强模型生成后端 | [推迟] | 只有协议 |
-| interact 情境与人格的两路来源 | [计划中] | 点名或按种子生成,不混用;点名情境 `purpose` 必须是 `training` |
-| 对手位三种驱动 | [计划中] | 固定对话、站内 vLLM、外部 OpenAI 兼容 API;今天闭环只有全局罐头台词一种 |
-| `Scenario` 的可选字段 `opponent_script` | [计划中] | 旧产物与既有哈希不变 |
+| interact 情境与人格的两路来源 | [已落地] | 点名或按种子生成,不混用;点名情境 `purpose` 必须是 `training` |
+| 对手位三种驱动 | [已落地] | 固定对话、站内 vLLM、外部 OpenAI 兼容 API;不传 `--interact` 时闭环只有全局罐头台词一种 |
+| `Scenario` 的可选字段 `opponent_script` | [已落地] | 旧产物与既有哈希不变 |
 
 | 局限 | 影响 | 缓解 |
 |---|---|---|
@@ -679,7 +679,7 @@ interact 会话前的准备 [计划中]。下表是派发器与组合根在起�
 | 每条 episode 一次 git 提交 | 本机实测一次写入约 40 毫秒,单阶段 1024 条约 40 秒且阻塞循环;万条级数据集要数小时并撑大仓库 | V1 保持并如实写明;接真实训练之前改成分片文件加引用,清单引用分片 [推迟] |
 | 服务端无鉴权、无 TLS,只绑本机 | 不能跨机部署 | 跨机前补安全层 |
 | 超时的后端调用不能强杀 | 慢后端持续占线程 | 按会话上限 16 控制总量 |
-| 闭环里对手位只有一种驱动:`AgentRuntime._backends` 给全局罐头台词(`src/factory/agent.py:121-122`) | 对手不能按情境区分,也接不了真实模型;被训模型只对付一个固定对手 | 三种驱动与 `opponent_script` [计划中] |
+| 不传 `--interact` 时,闭环里对手位只有一种驱动:`AgentRuntime._backends` 给全局罐头台词 | 对手不能按情境区分,也接不了真实模型;被训模型只对付一个固定对手 | 三种驱动与 `opponent_script` 随 `--interact` 落地 [已落地] |
 
 | 未核实项 | 影响 | 核实办法 |
 |---|---|---|
@@ -687,8 +687,8 @@ interact 会话前的准备 [计划中]。下表是派发器与组合根在起�
 | keepalive 30 秒能否及时发现跨网段死连接 | 断连判定延迟 | 跨机部署时拔网线实测 |
 | pb2 生成物与当前 protobuf 版本兼容 | 实时服务能否启动 | 已在本地跑通 `tests/test_realtime_proto_smoke.py`;升级 protobuf 后重跑 |
 | 客户端重建与服务端落盘的 Episode 是否逐字节一致 | 对账 | 比较两边 `episode_digest` |
-| 驱动选择的配置键 [计划中] | `model_backend` 只有三个合法值,没有「固定对话」 | 已定:角色位加可选 `driver`(`vllm` / `external_api` / `scripted`),缺省按 `model_backend` 推;`scripted` 必须显式写,且可与 `frozen_reference` 并存,此时 `model_ref` 只作身份标签 |
-| 固定对话循环的实现位置 [计划中] | 循环是新行为,现有用法依赖「(无更多发言)」 | 已定:`ScriptedBackend` 加默认关闭的 `loop` 参数,只有本次装配处传 `loop=True` |
+| 驱动选择的配置键 [已落地] | `model_backend` 只有三个合法值,没有「固定对话」 | 已定:角色位加可选 `driver`(`vllm` / `external_api` / `scripted`),缺省按 `model_backend` 推;`scripted` 必须显式写,且可与 `frozen_reference` 并存,此时 `model_ref` 只作身份标签 |
+| 固定对话循环的实现位置 [已落地] | 循环是新行为,现有用法依赖「(无更多发言)」 | 已定:`ScriptedBackend` 加默认关闭的 `loop` 参数,只有本次装配处传 `loop=True` |
 | 外部 API 对手的速率上限与成本 [计划中] | 限流时 `role_backend_timeout` 的重跑次数会耗尽 | 按实际供应商压测 |
 | 站内 vLLM 同时服务训练位与对手位时的单次延迟 [计划中] | 能否稳在 `backend_timeout_s` 内 | 真机测两个 LoRA 并发的延迟 |
 
@@ -709,6 +709,6 @@ interact 会话前的准备 [计划中]。下表是派发器与组合根在起�
 | 落盘钩子 | `on_session_closed`,调用方注入的 Episode 持久化函数 |
 | 唤醒哨兵 | 让阻塞的 `respond` 退出的内部对象,不作为话语 |
 | 客户端后说 | 客户端位排在对手之后,建会话时已收到对手开场轮 |
-| 点名路、生成路 | interact 情境与人格的两种来源:配置点名树里已有的,或按种子生成 [计划中] |
-| 对手驱动 | 对手位后端的三种实现:固定对话、站内 vLLM、外部 OpenAI 兼容 API [计划中] |
-| 情境剧本 | `Scenario` 的可选字段 `opponent_script`,情境自带的对手固定台词 [计划中] |
+| 点名路、生成路 | interact 情境与人格的两种来源:配置点名树里已有的,或按种子生成 [已落地] |
+| 对手驱动 | 对手位后端的三种实现:固定对话、站内 vLLM、外部 OpenAI 兼容 API [已落地] |
+| 情境剧本 | `Scenario` 的可选字段 `opponent_script`,情境自带的对手固定台词 [已落地] |
