@@ -115,7 +115,7 @@ factory 是组合根:系统里唯一知道所有包的地方。它把各子系�
 | G4 | 门控写命令证据不在场就拒绝 | 候选缺诊断、配方候选缺 `repro`、提案缺 `verification` 时 `approve` 抛错且不提交 [已落地] |
 | G5 | 只读命令不改 `HEAD` 与工作区 | 前后比较 `HEAD` 与工作区快照 [已落地] |
 | G6 | 闭环能从一条人工指令转到第二轮训练 | 端到端测试 `test_the_whole_loop_turns_twice` [已落地] |
-| G7 | `--interact` 配置不齐就不装配 | 十一条拒绝项各有一条装配测试:退出码 2、一行错误、树里不写东西 [已落地] |
+| G7 | `--interact` 配置不齐就不装配 | 十一条拒绝项里,第 3、9 条合用一组装配测试,第 10 条从命令行够不到、没有装配测试(测试钉住的是派发器自己抛的 `ValueError`),其余八条各有装配测试:退出码 2、一行错误、树里不写东西 [已落地] |
 
 | 非目标 | 状态 | V1 的处理 |
 |---|---|---|
@@ -189,7 +189,7 @@ factory 是组合根:系统里唯一知道所有包的地方。它把各子系�
 | `factory.bridges` | `BRIDGE_ROLES`、`build_bridge` | `inference_bridge`、`controlplane.config` | [已落地] |
 | `factory.evaluation` | `EVALUATOR_CONFIG`、`read_evaluator_config`、`build_mock_evaluator`;真实 SoMEval 运行器与污染准入检查的装配 | `diagnostic`;真实运行器另加 `compute` | [已落地] |
 | `factory.handlers` | `DEFAULT_BUILDERS`、`scheduler_config_loader` | `recipestore`、`trainscheduler`、`trainplanner`、`mindagent` | [已落地] |
-| `factory.agent` | `agent.yaml` 读取、`AgentRuntime`、`DeadlineStub`、`CannedGuidedBackend`;interact 用法下带落盘钩子、按角色位选对手驱动、流 deadline 按局数算 [已落地] | `mindagent`、`simulator.realtime` | [已落地] |
+| `factory.agent` | `agent.yaml` 读取、`AgentRuntime`、`DeadlineStub`、`CannedGuidedBackend`;interact 用法下带落盘钩子、按角色位选对手驱动、流 deadline 按 `max_turns_per_episode × 30` 秒算 [已落地] | `mindagent`、`simulator.realtime` | [已落地] |
 | `factory.defaults` | 默认诊断资产、评估器配置、部署素材、`install_defaults` | `diagnostic`、`simulator`、`trainplanner`、`trainscheduler` | [已落地] |
 | `factory.sombench` | `import-sombench` 子命令:读 SoMEval 检出目录里的 parquet,写分类表、题库与污染索引;pyarrow 在函数内惰性导入 | `diagnostic.assets`、`diagnostic.contamination` | [已落地] |
 | `factory.compute_config` | 读树内 `compute/endpoints.yaml` 出 `ComputeEndpoint` 列表,读本机主机映射出 `ComputeClient`;缺文件、键缺失或多余、取值不合、映射里查不到 `endpoint_id` 一律 `FactoryConfigError`,退出码 2,只写键名与路径,不回显取值 | `compute`、`factory.configio` | [已落地] |
@@ -456,7 +456,7 @@ TypeScript 命令行:`rismforge <review|approve|reject|confirm|status> [id] [rea
 | 不打开时 | 不注入这两样,interact 指令仍判 `failed`(T2)。设计要原因点名 `--interact`,还没做 [计划中],现在的原因文字是 `interact mode needs a client_factory and a policy or policy_factory`。`--enable agent` 构造过运行时也不改变这一点 |
 | 与 `--evaluator someval` | `someval` 要求 `--executor roll`,而 `--interact` 与 `--executor roll` 互斥,所以两者无法同用 |
 
-装配期的十一条拒绝项。前十条在 `--interact` 打开时检查,第 11 条在没传 `--interact` 时检查。检查全部在第一个 tick 之前,出错都是退出码 2、一行错误、树里不写东西:
+装配期的十一条拒绝项。前十条在 `--interact` 打开时检查(第 10 条除外,见表),第 11 条在没传 `--interact` 时检查。检查全部在第一个 tick 之前,出错都是退出码 2、一行错误、树里不写东西:
 
 | 序 | 检查 | 失败原因 |
 |---|---|---|
@@ -469,7 +469,7 @@ TypeScript 命令行:`rismforge <review|approve|reject|confirm|status> [id] [rea
 | 7 | 点名路不给 `sft_steps > 0` | 点名路不带 `data_spec`,没有合成,`sft` 阶段会因缺清单判 `failed`;点名路不做冷启动 |
 | 8 | 情境数不少于 `groups_per_step`(默认 2) | 一个 GRPO step 要取 `groups_per_step` 个情境,不够时同一情境会在一步里出现两次、两组并成一组 |
 | 9 | 对手用 `external_api` 时凭证环境变量在场 | 与 `factory.bridges` 同一口径:凭证在装配期解析,缺就起不来;异常只报变量名 |
-| 10 | `policy` 与 `policy_factory` 不同时给 | 两个来源说不清谁生效,宁可报错 |
+| 10 | `policy` 与 `policy_factory` 不同时给 | 两个来源说不清谁生效,宁可报错。组合根从不给具体的 `policy`,所以这一条从命令行够不到,装配期没有可检查的:把关的是派发器自己抛的 `ValueError`,测试钉住的也是它 |
 | 11 | `--enable` 含 `plan`、`scheduler.yaml` 的 `allow_interact` 为真时,必须同时传 `--interact` [已落地] | 规划器可能写出 interact 指令,而没有 `--interact` 时派发必然判 `failed`,闭环停住。这是启动时就看得出的配置矛盾,不留到第一条指令。错误信息点名缺 `--interact`,并说明二选一:加 `--interact`,或把 `allow_interact` 关掉 |
 
 没点名时按 `data_spec` 的 `seed` 生成情境与人格,生成发生在派发时,装配期不检查。开关名、检查顺序与错误文字以 `src/factory/interact_checks.py` 为准;第 4、8 条由 `training_defaults.yaml` 的严格解析一并把关,先于第 2 条。
@@ -628,6 +628,7 @@ factory 是最后一个工作包,前八个全部落地后才能施工。
 | 轮次中途瞬态异常或被杀 | T1 | 轮次留在 `pending`,守护进程退出;重启后的 tick 复用已落盘的 episode 续上(R19) | 已落盘的 episode [已落地] |
 | 派发器或处理器抛 `DeferredError` | 资源暂不可用 | 不写树,按退避重试;连续延后超过上限抛 `DeferredExhaustedError` 退出 | 一行结构化日志 [已落地] |
 | interact 指令起 vLLM 服务:租约被占 `ComputeBusyError`,或起服务失败 `ServeStartupError` | 资源暂不可用 | 同上 | 同上 [已落地] |
+| interact 指令里真推理的 rollout 失败:对手 API 或 vLLM 服务连不上、角色位后端出错、重试用尽的超时、落盘失败(`invalid_session` 除外,它仍判 T2) | 资源暂不可用 | 策略上下文译成延后类:不写树,按退避重试,进程不退出;每次重派耗一次 `resume_attempts`,到上限升级为 T3 | 一行结构化日志;终局时指令 `failure.category = T3` [已落地] |
 | 派发器或处理器抛其他瞬态异常 | T1 | 进程退出,外部监督者重启 | 树里已提交的部分 |
 | 门控写证据不在场或迁移非法 | 用法错误 | 命令抛错,不写文件、不提交 | 无 [已落地] |
 
@@ -663,7 +664,7 @@ factory 是最后一个工作包,前八个全部落地后才能施工。
 | 处理器构造 | 六个构造器、证据开关单一来源、Interact 流超时 | 罐头后端 | `tests/test_factory_handlers.py` | 18 [已落地] |
 | 端到端 | 完整闭环、R5、规划等配方入库门、R18、R19、MindAgent 链 | `HeuristicBackend`、罐头后端 | `tests/test_factory_e2e_loop.py` | 10 [已落地] |
 | 跨工作包 | 共享用例表、分层规则、run 编号数值序 | 无 | `tests/test_factory_cross_plan.py`、`tests/test_factory_run_order.py` | 31、3 [已落地] |
-| `--interact` 装配 | 十一条拒绝项各一条;打开后派发器带上实时客户端与策略工厂;不打开时 interact 指令的失败原因点名开关还没做 [计划中] | 假 serve、本机 HTTP 桩 | `tests/test_factory_interact_wire.py` | 58 [已落地] |
+| `--interact` 装配 | 十一条拒绝项:第 3、9 条合用一组测试,第 10 条没有装配测试(钉住的是派发器的 `ValueError`),其余八条各有测试;打开后派发器带上实时客户端与策略工厂;真推理的 rollout 失败走延后通道、一直失败升 T3;不打开时 interact 指令的失败原因点名开关还没做 [计划中] | 假 serve、本机 HTTP 桩 | `tests/test_factory_interact_wire.py` | 67 [已落地] |
 | `--interact` 端到端 | `factory reconcile --once --interact` 走到候选 `pending_review`,episode 都在产物树里 | 假 vLLM(本地 HTTP 回固定文本)、mock 执行器 | `tests/test_factory_interact_e2e.py` | 2 [已落地] |
 
 上表的 pytest 用例数由 `pytest --collect-only -q` 逐个文件实测,按参数化展开计;TypeScript 的两个数按测试文件的 `it(` 计,未跑 vitest 收集。工作包 9 另有一个前置核对脚本 `scripts/check_factory_assumptions.py`:它逐行核对各包的符号名与签名,本次运行有 20 行 `OK`、1 行 `MISMATCH`,缺的是 `SchedulerConfig` 上新增的 `strategy_experience` 字段。

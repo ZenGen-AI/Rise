@@ -124,7 +124,7 @@ SocialSimulator 的仿真部分是工厂的"社会情境发生器":它把情境�
 | 开发者交互调试接口 | [推迟] | 人工经命令行直接发起交互会话、实时观察模型表现,不是流水线一环,V1 没有 |
 | 多样性防护与按用途调难度分布 | [推迟] | 模板池加种子取模,不做聚类惩罚、多样性奖励,也不因情境用途调难度 |
 | interact 的情境与人格来源:点名或按种子生成,两路不混用 | [已落地] | 点名路由 `interact` 段的 `scenario_ids` 与 `persona_ids` 给出,生成路由 `data_spec` 在派发时生成;默认训练配置没有 `interact` 段,此时 `new` 仍写不出 interact 指令 |
-| 对手位三种驱动:固定对话、站内 vLLM、外部 OpenAI 兼容 API | [已落地] | 默认固定对话;模拟器内部仍只认 `ModelBackend` 协议,驱动由组合根选 |
+| 对手位三种驱动:固定对话、站内 vLLM、外部 OpenAI 兼容 API | [已落地] | 默认驱动按 `model_backend` 取(`frozen_reference` 走站内 vLLM,`external_api` 走外部 API),固定对话只在角色位写 `driver: scripted` 时用;模拟器内部仍只认 `ModelBackend` 协议,驱动由组合根选 |
 | 对手 `model_ref` 的哈希锚定 | [推迟] | `model_ref` 只是名字,不锚定它指向的权重;同名引用换了权重,`config_hash` 不变 |
 
 | 约束 | 内容 | 影响 |
@@ -220,13 +220,13 @@ SocialSimulator 的仿真部分是工厂的"社会情境发生器":它把情境�
 | 核心无 IO | `datamodel`、`backends`、`runner`、`generators`、`validation`、`session` 不读写文件与网络 |
 | 已知回指 | `controlplane.daemon` 导入 `simulator.stubs`,包级循环,运行时不成环,骨架桩移出前保留 |
 
-对手位的三种驱动 [已落地]。对手位后端由调用方按角色位传入,模拟器本身只认 `ModelBackend` 协议。不传 `--interact` 时组合根的 `AgentRuntime._backends` 仍一律给全局罐头台词的 `ScriptedBackend`;传了 `--interact`,同一个函数按角色位在三种驱动里选,实现全在组合根,模拟器不新增依赖。
+对手位的三种驱动 [已落地]。对手位后端由调用方按角色位传入,模拟器本身只认 `ModelBackend` 协议。不传 `--interact` 时组合根的 `AgentRuntime._backends` 仍一律给全局罐头台词的 `ScriptedBackend`;传了 `--interact`,同一个函数对登记给训练 run 的会话按角色位在三种驱动里选,实现全在组合根,模拟器不新增依赖。默认驱动来自 `model_backend`:`frozen_reference` 走站内 vLLM,`external_api` 走外部 API;固定对话只在角色位写了 `driver: scripted` 时才用。部署会话(没登记给训练 run 的)不判绑定,沿用原来的罐头后端,显式写了 `driver: scripted` 的除外。
 
 | 驱动 | 实现 | 来源 | 状态 |
 |---|---|---|---|
-| 固定对话(默认) | `ScriptedBackend` | 情境自带的 `opponent_script` 优先;情境没带时用全局台词 | [已落地] |
-| `frozen_reference` | 站内 vLLM,挂对手模型的 LoRA | `model_ref` 经树里的模型产物解析成 `checkpoint_ref` | [已落地] |
-| `external_api` | OpenAI 兼容 HTTP 客户端 | `training_defaults.yaml` 的 `opponent` 段:端点、模型名、存凭证的环境变量名 | [已落地] |
+| 固定对话(角色位写 `driver: scripted`) | `ScriptedBackend` | 情境自带的 `opponent_script` 优先;情境没带时用全局台词 | [已落地] |
+| `frozen_reference`(默认驱动 vllm) | 站内 vLLM,挂对手模型的 LoRA | `model_ref` 经树里的模型产物解析成 `checkpoint_ref` | [已落地] |
+| `external_api`(默认驱动 external_api) | OpenAI 兼容 HTTP 客户端 | `training_defaults.yaml` 的 `opponent` 段:端点、模型名、存凭证的环境变量名 | [已落地] |
 
 `model_ref` 在组合根里由 `resolve_model_ref` 解析成权重引用 [已落地]。解析不到,或指到的不是适配器导出,派发时确定性失败,不静默退回脚本台词。外部 API 客户端是一个极小的实现 [已落地],用标准库 `urllib`,与 `src/compute/tunnel.py` 的 HTTP 探测同一手法。凭证只从环境变量读,异常信息只报变量名。站内对手与训练位共用一个 vLLM 进程,最多挂两个 LoRA [已落地]。
 
@@ -564,7 +564,7 @@ interact 会话前的准备 [已落地]。下表是派发器与组合根在起�
 | SS-13 | V1 保持每条 episode 一个产物文件、一次提交,清单逐条锚定 sha256;分片文件加引用推迟到接真实训练之前 [推迟] | 现在就分片 | 小规模 mock 下逐条足够;分片要同时改清单格式、读取与校验 | 万条级数据集写入要数小时,仓库膨胀 |
 | SS-14 | interact 的情境与人格走两路来源:配置点名树里已有的,或按种子生成;一次配置只走一路,不混用 [已落地] | 允许点名一部分、生成其余 | 混用会产出无法追溯的混合语料 | 使用者要多写几行配置 |
 | SS-15 | 点名的情境 `purpose` 必须是 `training`,人格不限 [已落地] | 不限 `purpose` | 默认部署素材的情境是 `deployment_simulation`,拿它们训练等于污染训练数据 | 部署素材不能顺手拿来训练 |
-| SS-16 | 对手位三种驱动:固定对话(默认)、站内 vLLM、外部 OpenAI 兼容 API;驱动由组合根选,模拟器只认 `ModelBackend` [已落地] | 只做一种驱动 | 场景二要求三种都支持;驱动在组合根里选,模拟器协议不用改 | 三种驱动的失败分类与超时口径各要成立 |
+| SS-16 | 对手位三种驱动:固定对话(角色位写 `driver: scripted`)、站内 vLLM、外部 OpenAI 兼容 API;驱动由组合根选,模拟器只认 `ModelBackend` [已落地] | 只做一种驱动 | 场景二要求三种都支持;驱动在组合根里选,模拟器协议不用改 | 三种驱动的失败分类与超时口径各要成立 |
 | SS-17 | 固定对话优先用情境自带的 `opponent_script`,情境没带时用全局台词;`Scenario` 加一个可选字段 [已落地] | 只有全局台词 | 固定对话要能按情境区分对手说什么 | `Scenario` 多一个可选字段;旧产物读回不变 |
 | R12 | 打通激活轨迹:`SubmitTurn` 加可选字段,运行器接受三元组 [已落地] | 轨迹走单独通道 | 原设计未记录别的理由,施工计划表现为改动最小、既有二元组后端不改 | 改协议,要重新生成并入库 pb2 文件 |
 | R14 | 指令带 `data_spec`,派发器缺清单时调注入的生产器,生产器复用 `produce_grouped_dataset` [已落地] | 数据集只能预先生产 | 闭环能自己补数据 | V1 模板生成与目标维度无关,只证明流程跑通 |

@@ -113,7 +113,7 @@ MindTrainer 把一条 `pending` 的训练指令变成一个 `pending_review` 的
 | G5 | 续训有上限,不会无限循环 | `resume_attempts` 触顶后升级为 T3。资源暂时不可用走延后通道,预检在 `run_training` 之前,`ComputeBusyError` 不耗 `resume_attempts`;通道自己有连续延后上限(CP-14),G5 对真正的失败仍成立 |
 | G6 | 候选能走完审核门①并成为下一轮的基座 | `test_mt_integration.py` 两个用例。只对 mock 成立:真实后端的候选是适配器导出,不是训练起点,第二轮由真实执行器拒绝(见已知局限) |
 | G7 | 带 `data_spec` 的指令缺清单时能自补数据并训练成候选 [已落地] | 派发器合成分支的测试:合成后训练、缺生产器判 `failed`、合成中途崩溃重入收敛 |
-| G8 | interact 指令在真实入口跑完:真实模型的发言落盘,奖励管线对真实发言成立,候选走到 `pending_review` [已落地] | 端到端测试 `tests/test_factory_interact_e2e.py` 经 `factory reconcile --once --interact`:假 vLLM(本地 HTTP 回固定文本)加 mock 执行器,episode 都在产物树里。证明的是推理链路成立,不是模型变好 |
+| G8 | interact 指令在真实入口跑完:发言经 vLLM 服务的接口落盘,奖励管线在这些发言上算得,候选走到 `pending_review` [已落地] | 端到端测试 `tests/test_factory_interact_e2e.py` 经 `factory reconcile --once --interact`:假 vLLM(本地 HTTP 回固定文本)加 mock 执行器,episode 都在产物树里。证明的是接线与落盘成立,不是模型变好,也不是真实发言:vLLM 只用本机 HTTP 替身代替过,真机没跑过,奖励管线没对真实发言验证(见第 10 章) |
 
 | 非目标或推迟项 | 状态 | V1 的处理 |
 |---|---|---|
@@ -124,7 +124,7 @@ MindTrainer 把一条 `pending` 的训练指令变成一个 `pending_review` 的
 | judge 归因 | 代码已有,入口不提供 judge | judge 归因的指令在派发器里判 `failed` |
 | interact 的实时服务端 | 入口不启动 | `scripts/run_controlplane.py` 下 interact 指令判 `failed`;注入 `client_factory` 与 `policy` 的调用方可以跑。`factory run` 与 `factory reconcile` 的 `--interact` 在组合根起进程内实时服务端并注入策略工厂,让 interact 指令从真实入口跑通 [已落地] |
 | 成本记账、完整失败记录产物 | [计划中] | 由工作包 1 的统一写入函数负责,MindTrainer 现在不写 |
-| interact 的真实策略模型(真推理加 mock 训练) | [已落地] | 训练位经 vLLM 服务本轮基座,发言是真的,权重更新仍由 mock 执行器完成;由 `--interact` 装配 |
+| interact 的真实策略模型(真推理加 mock 训练) | [已落地] | 训练位经 vLLM 服务本轮基座说话,权重更新仍由 mock 执行器完成;由 `--interact` 装配。接线只用本机 HTTP 替身代替 vLLM 验证过,真机没跑过,奖励管线也没对真实发言验证(见第 10 章) |
 | 随训练更新的 interact 策略、并行 rollout | [推迟] | 顺序 rollout;服务的权重整轮不变,真实 GRPO 落地后换执行器并同步权重 |
 | 读诊断结果调整训练 | 不做 | MindTrainer 只记录 OPD 系数与损失 |
 
@@ -223,7 +223,7 @@ MindTrainer 分两层:入口与编排一层决定"从哪跑、跑不跑",模式�
 | `RewardedTrajectory` | `episode`、`group_id`、`per_turn_rewards`、`combined_reward` | 逐轮奖励与 turns 等长;非训练轮为 None |
 | `StepResult` | `step`、`phase`、`metrics` | 指标名是契约,见第 5 章 |
 | `TrainingRun` | `run_id`、`config_hash`、`checkpoint_step`、`last_checkpoint_ref`、`resume_attempts`、`curve_summary`、`metric_stream_refs`、`status`、`failure` | `failed` 必须带 `failure["category"]` |
-| `TrainingRun` 可选字段 [已落地] | `policy_backend`:interact 运行里训练位与对手位实际用的是什么,字段见下表 | 缺省为空,只在非空时写键;`from_dict` 用 `d.get` 读(`src/mindtrainer/datamodel.py:119`),旧记录读回为空,batch 运行的记录与改动前逐字节相同 |
+| `TrainingRun` 可选字段 [已落地] | `policy_backend`:interact 运行里训练位与对手位实际用的是什么,字段见下表 | 缺省为空,只在非空时写键;`from_dict` 用 `d.get` 读(`src/mindtrainer/datamodel.py:139`),旧记录读回为空,batch 运行的记录与改动前逐字节相同 |
 
 | 配置校验要点 | 规则 |
 |---|---|
@@ -515,7 +515,7 @@ vLLM 服务按指令起停,不常驻。一条 interact 指令派发时起服务,
 
 两者都是 `DeferredError`。守护进程接住它们,按退避重试;同一动作连续延后超过上限时抛 `DeferredExhaustedError`,它刻意不继承 `DeferredError`,守护进程带原因退出,由外部监督者重启(`src/controlplane/daemon.py:60-66` 与 `:97-103`)。起服务最长等 900 秒,反复起不来会走到这一步。服务在 `resume_or_run` 之前起,校验、数据合成与清单检查都在进入服务上下文之前,所以租约被占与起服务阶段的失败不写训练记录,不耗 `resume_attempts`,确定性失败的指令也不占租约。
 
-`ServeStartupError` 不能整类归延后通道,它有一个例外:它也用于「收尾时发现服务仍在运行」。走到这一步时训练记录与候选已经写完,若按瞬态重派,下一轮会重新起服务,再次撞上同一处,反复起服务。所以这一种应当判 T2、指令 `failed`,原因写明要人清掉占显存的作业;只有起服务阶段的失败才走延后通道。目前没有这一步区分 [计划中]。判错的代价:把它当瞬态,会让守护进程在已完成的训练上空转到延后上限;当 T2 则要人工介入一次。
+`ServeStartupError` 不能整类归延后通道,它有一个例外:它也用于「收尾时发现服务仍在运行」。走到这一步时训练记录与候选已经写完,若按瞬态重派,下一轮会重新起服务,再次撞上同一处,反复起服务。所以这一种应当判 T2、指令 `failed`,原因写明要人清掉占显存的作业;只有起服务阶段的失败才走延后通道。目前没有这一步区分 [计划中]。判错的代价:把它当瞬态,会让守护进程在已完成的训练上空转到延后上限;当 T2 则要人工介入一次。已知缺口的实际代价是每次重试白起一次 vLLM 服务:重派时 `resume_or_run` 读到已 `executed` 的训练记录,`decide_resume` 返回 `noop`,原样返回已有记录,所以不会出现第二条训练记录或第二个候选。
 
 ### 5.4 超时口径
 
@@ -723,15 +723,16 @@ interact 的生成路多一条「生成、写树、回写、复校」的链路 [
 | `supported_phases` 不覆盖配置要求的阶段 | T2 | 配置校验期记录写 `failed`,指令判 `failed`,一步都不动执行器 | 训练记录 `failure`、指令 `failure` |
 | 资源暂时不可用:`ComputeBusyError` | 延后 | 预检在 `run_training` 之前,不写记录,不耗 `resume_attempts`;守护进程接住并按退避重试 | 守护进程结构化日志 |
 | interact 起 vLLM 服务:租约被占 `ComputeBusyError`,或起服务阶段失败 `ServeStartupError` [已落地] | 延后 | 服务在 `resume_or_run` 之前起,不写记录,不耗 `resume_attempts`;经延后通道按退避重试 | 守护进程结构化日志 |
-| interact 收尾时发现服务仍在运行(同样抛 `ServeStartupError`) [计划中] | 设计是 T2;现在原样上抛,指令保持 `pending` | 训练记录与候选已写完,重派会反复起服务,所以不该走延后通道;应判 `failed`,原因写明要人清掉占显存的作业 | 指令 `payload["failure"]` |
+| interact 收尾时发现服务仍在运行(同样抛 `ServeStartupError`) [计划中] | 设计是 T2;现在原样上抛,指令保持 `pending` | 训练记录与候选已写完,重派会反复起服务,所以不该走延后通道;应判 `failed`,原因写明要人清掉占显存的作业。现状的代价是每次重试白起一次服务,`decide_resume` 对已 `executed` 的记录返回 `noop`,不出第二条训练记录或候选 | 指令 `payload["failure"]` |
 | 传输层故障 `TransportError`、远端作业超时 `RemoteJobTimeoutError` | 延后 | 同上,经延后通道重试;进入 `run_training` 之后抛出的,`resume_attempts` 已加一,重试仍受 G5 的上限约束 | 同上 |
 | 远端作业非零退出 `RemoteJobFailedError` | 延后 | 同上;它是真失败,计入 `resume_attempts`,耗尽后升级为 T3 | 训练记录 `resume_attempts` |
 | 远端作业成功但指标解析不出 `MetricsMissingError` | T1 | 记录保持 `pending`,计入 `resume_attempts`;重试时作业命中已成功退出的那次尝试,只重新解析,不重训 | 训练记录 `resume_attempts` |
 | 执行器崩溃、转换器故障、读清单时 `OSError` | T1 | 原样上抛,记录与指令保持 `pending`,下一次派发续训 | 训练记录的存点进度 |
-| interact 的 `timeout`、`role_backend_timeout`、`persistence_failed`、传输层 UNAVAILABLE | T1 | 原地重跑,至多 `1 + max_retries_per_episode` 次;耗尽后上抛,记录保持 `pending` | `curve_summary["failed_rollout_attempts"]` |
-| interact 的 `role_backend_failure` 等其余原因 | T1 | 不重试,上抛,记录保持 `pending`,由续训上限兜底 | 同上 |
+| interact 的 `timeout`、`role_backend_timeout`、`persistence_failed`、传输层 UNAVAILABLE | T1 | 原地重跑,至多 `1 + max_retries_per_episode` 次;耗尽后上抛,记录保持 `pending`(经 `--interact` 入口时的去向见下方「真推理的 rollout 失败」一行) | `curve_summary["failed_rollout_attempts"]` |
+| interact 的 `role_backend_failure` 等其余原因 | T1 | 不重试,上抛,记录保持 `pending`,由续训上限兜底(经 `--interact` 入口时的去向见下一行) | 同上 |
+| 经 `--interact` 入口时,真推理的 rollout 失败:上两行里上抛的 `RolloutFailedError`(`invalid_session` 除外),以及对手后端的 `OpponentApiError` [已落地] | 延后 | 策略上下文把它们译成 `RolloutDeferredError`(`DeferredError` 的子类):指令保持 `pending`,守护进程按退避重试而不退出;原因只写异常类名与 reason 码,不带异常文字(文字里可能有远端地址)。每次重派耗一次 `resume_attempts`,到 `max_resume_attempts` 由 `decide_resume` 升级为 T3,所以一直失败的 run 最终是 T3,不会无限退避。`invalid_session` 不在此列,仍是上面的 T2 | 守护进程结构化日志;终局时指令 `failure.category = T3` |
 
-T1 的上抛异常会让 `run_daemon` 退出,需要外部监督者重启。重启后同一条指令再次派发,`resume_attempts` 上限保证它最终升级为 T3,不会无限空转。`DeferredError` 的子类不在此列:守护进程接住它们,进程不退出;同一动作连续延后超过上限才带原因退出(CP-14)。
+T1 的上抛异常会让 `run_daemon` 退出,需要外部监督者重启。重启后同一条指令再次派发,`resume_attempts` 上限保证它最终升级为 T3,不会无限空转。`DeferredError` 的子类不在此列:守护进程接住它们,进程不退出;同一动作连续延后超过上限才带原因退出(CP-14)。经 `--interact` 入口的真推理 rollout 失败属于这一类例外:策略上下文已把它译成延后类,见上表。
 
 interact 的 `config_hash` 覆盖配置层的东西 [已落地]:情境 id、人格 id、角色位、`bindings` 与 `base_checkpoint_ref`。它不含 `driver` 实际连到哪个端点、`opponent_script` 的台词内容,也不含 `policy_backend`。所以只保证「同一份配置重跑得出同一份指令」,不保证重跑得出同样的轨迹;要知道某一轮实际是谁在说话,读训练记录的 `policy_backend`。
 
@@ -803,7 +804,7 @@ interact 的 `config_hash` 覆盖配置层的东西 [已落地]:情境 id、人�
 | 已知局限 | 影响 | 缓解 |
 |---|---|---|
 | 派发器不传 `metric_stream_refs` 与 `on_step` | 接线路径下没有逐步指标,只有存点时的摘要 | 组合根调用编排器时自行传入 |
-| interact 的 T1 重试没有退避间隔 | 服务端持续不可用时,重试在瞬间耗尽 | 续训上限兜底;需要时在客户端工厂里加退避 |
+| interact 的 T1 重试没有退避间隔 | 服务端持续不可用时,重试在瞬间耗尽 | 续训上限兜底;需要时在客户端工厂里加退避。经 `--interact` 入口时,耗尽后上抛的失败走延后通道,重派之间有守护进程的退避 |
 | interact 失败的 collect 会在产物树留下不属于任何 batch 的 episode | 按情境扫描取数据会取错 | 下游只按 `metadata["episode_ids"]` 取数据 |
 | 续训次数耗尽后无法通过放宽配置救回 | 人只能写一条新指令 | 改为只哈希影响训练产物的字段 |
 | `gamma<1` 时较长的 episode 均值偏低 | batch 数据集长度不一时奖励有长度偏置 | 默认 `gamma=1.0`;interact 下 episode 都跑满 `max_turns`,不受影响 |
