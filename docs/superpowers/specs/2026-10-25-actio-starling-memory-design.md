@@ -1,6 +1,6 @@
 # 设计二：每个角色位都是带记忆的智能体，记忆用 Starling
 
-状态：修订稿第二版，待审阅。日期：2026-10-26（第一稿 2026-10-25）。
+状态：修订稿第三版，待审阅。日期：2026-10-26（第一稿 2026-10-25）。
 基线：rise `705236c`，Starling `48e9f3b`（`ruijieguo/starling` main，公开仓库，Apache-2.0）。
 权威文档集是 `docs/design/`。本稿审定后并入 00、20、30、40、50、90 六篇，然后写施工计划。
 
@@ -57,6 +57,10 @@ MindAgent 是另一条线：底座不动参数，演化技能库与记忆库。�
 | F17 | 时间限制有四个：客户端每轮等待 `PER_TURN_DEADLINE_S` 30 秒、服务端后端调用 60 秒、训练位策略 HTTP 120 秒、对手 HTTP 25 秒 | `src/factory/interact_policy.py:70-71`、`src/simulator/realtime/servicer.py:65`、`src/factory/vllm_policy.py:28` |
 | F18 | 驱动器把后端异常分四类：超时、不可用、拒绝各有专门的终止原因，其余一律 `role_backend_failure`；轨迹源对它不重跑，策略上下文把它译成延后 | `src/simulator/realtime/driver.py:140-163`、`src/factory/interact_policy.py:338-349` |
 | F19 | 分析器与 `_reusable` 都只读智能体位的轨迹，对手位的轨迹不参与 | `src/mindagent/analysis.py:101-108`、`src/mindagent/deployment.py:73` |
+| F20 | 激活轨迹里不能有数字：protobuf `Struct` 把整数存成 double，所以叶子只许 str、None、bool | `src/actio/trace.py:3-4,96-98` |
+| F21 | 服务端的 episode id 是 `ep-<session_id>`，每次重试都是新的；逻辑 id（训练 `{run}-{stage}-{scenario}-r{k}`、部署 `deploy-{model}-{scenario}-{k}`）只在客户端 | `src/simulator/realtime/servicer.py:294`、`src/mindagent/deployment.py:66-67` |
+| F22 | 客户端没有逐轮超时，只有整条流的 gRPC deadline（`DeadlineStub`，由 `max_turns × PER_TURN_DEADLINE_S` 折算）；服务端对客户端位有逐轮超时 `turn_timeout_s` | `src/factory/agent.py:97-107`、`src/simulator/realtime/backend.py:54-67` |
+| F23 | 审核类状态机：`approved` 只能去 `effective`；`rejected` 只能从 `pending_review` 来 | `src/controlplane/states.py:8-15` |
 
 ### 1.2 Starling（`48e9f3b`，代码核对加本机探针）
 
@@ -76,6 +80,8 @@ MindAgent 是另一条线：底座不动参数，演化技能库与记忆库。�
 | S12 | `tick` 有 9 个阶段（嵌入、承诺、共同点、回放三段、TTL 清扫、投影、派发），每段受运行时健康门控，负载高时跳过；回放调度用 `random_device` 播种 | `src/memory/memory_ops.cpp:688-742`、`src/replay/replay_scheduler.cpp:48` |
 | S13 | `RememberResult` 带 `extraction_failed`、`failure_category`（`timeout`、`transport_failure`、`extraction_failure`、`persistence_failure` 等）、`failure_detail` | `memory.py:98-116`、`memory_ops.cpp:134-144,310-354` |
 | S14 | Starling 自己的世界快照用 `VACUUM INTO` 加 `integrity_check`，只服务看板 | `src/governance/world_store.cpp:828` |
+| S15 | 向量存在 `statement_vectors` 表：`stmt_id`、`raw_embedding`（float32 blob）、`index_vector`、`dim`、`model`、`status` | `migrations/0016_statement_vectors.sql` |
+| S16 | 嵌入适配器用 `base_url + "/embeddings"` 拼请求地址，路径有意义 | `src/embedding/openai_embedding_adapter.cpp:64` |
 
 ## 2. 裁决总表
 
@@ -86,18 +92,19 @@ MindAgent 是另一条线：底座不动参数，演化技能库与记忆库。�
 | M3 | 记忆在 Actio 内部，经记忆端口访问；只有 `actio/memory_starling.py` 导入 `starling` | 记忆属于个体，不属于环境 | Actio 多一个可选依赖 |
 | M4 | 一个智能体一个 Starling 库文件，库的 `agent` 与 holder 都是该人格 | 个体隔离靠文件，不靠 holder 过滤；同时多开文件已实测 | 文件多 |
 | M5 | 记忆库在树外，根目录由树外配置给 | 原生 SQLite 带 WAL，不适合当 git 产物 | 不能从产物树追溯，靠摘要补 |
-| M6 | 记忆状态的身份是逻辑摘要：对所有影响召回的语句字段算 sha256，与文件字节无关 | 文件字节不稳定（S9） | 摘要不覆盖嵌入向量；向量由固定的嵌入模型决定，模型身份进哈希 |
+| M6 | 记忆状态的身份是逻辑摘要：对所有影响召回的语句字段加每条语句的向量 blob 算 sha256，与文件字节无关 | 文件字节不稳定（S9）；同模型名不保证同向量，所以向量本身进摘要（S15） | 摘要要读向量表，算得慢一些 |
 | M7 | 默认每轮都读写：回复前 recall，对方每句话 remember，之后只做嵌入，不做后台维护 | 用户裁定每轮读写；后台维护有随机性与负载门控（S12），不可复现 | 训练里没有 TTL、回放与巩固 |
-| M8 | 训练 run 的起点记忆与记忆运行时身份一起进 `config_hash`；`memory` 字段缺省表示不用记忆 | 记忆变了行为就变；换 Starling 或换抽取模型行为也变 | 换种子、换模型都要新开 run |
+| M8 | 训练 run 的起点记忆与记忆运行时身份一起进 `config_hash`；`memory` 字段缺省表示不用记忆，且角色位仍是裸后端、轨迹仍是 v1 | 记忆变了行为就变；换 Starling 或换抽取模型行为也变；旧配置的产物形状也不能变 | 换种子、换模型都要新开 run |
 | M9 | 每条 rollout 在起点的私有副本上跑，用完即弃 | 用户裁定：同组 rollout 的起点相同，组内优势只反映策略 | 记忆不在一条 run 内累积 |
-| M10 | 每条会话一个 `rollout_id`，服务端所有角色位的记忆与后端由一个 `SessionResources` 持有；终态时先停调用、再等线程、再关库、再删文件 | 超时线程还在跑时删库会写坏文件（F6、S9） | 会话收尾要等最慢的后台调用 |
+| M10 | 每条会话一个 `SessionResources`，持有服务端所有角色位的记忆与后端；终态时先停调用、再等线程、再关库、再删文件。等不到线程退出的资源整个保留并占住一个会话名额，不关不删 | 超时线程还在跑时关库或删库会写坏文件（F6、S9）；daemon 线程杀不掉 | 挂死的后端会永久占用会话名额，直到进程重启 |
 | M11 | 部署（MindAgent）的记忆持久、跨轮次累积，用持久的单调事件序号当时钟；每条 episode 记起点摘要；验证重放在快照副本上只读 | 固定时钟在持久库里会倒退；重放要让基线与候选看到同一份记忆 | 重放与线上行为不完全一致 |
 | M12 | 抽取与嵌入都走 OpenAI 兼容端点，`base_url` 与模型名写配置；密钥是 Starling 固定读的 `OPENAI_API_KEY` | 用户裁定；Starling 只认这个变量（S3、S5） | 不能为抽取和嵌入配不同的密钥 |
 | M13 | Starling 作为可选 extra `memory`，依赖钉 git 提交；未装时用替身并显式报告 | C++ 构建门槛；仓库未上 PyPI | 未装环境只测替身路径 |
 | M14 | Starling 缺的公开接口在 Starling 里补，经 PR 合入，本仓库钉合并提交 | 用户裁定；本仓库不碰 Starling 私有接口与表结构 | 依赖 Starling 先合 PR |
-| M15 | 记忆异常有自己的终止原因 `role_memory_failure`，确定性，T2 | 混进 `role_backend_failure` 会被译成延后反复重试（F18） | 瞬态的抽取端点故障也判 T2，要人工重派 |
+| M15 | 记忆异常按 Starling 的 `failure_category` 分两个终止原因：`role_memory_unavailable`（`timeout`、`transport_failure`，T1，按条重跑）与 `role_memory_failure`（其余，T2） | 混进 `role_backend_failure` 会被译成延后反复重试（F18）；抽取端点的网络抖动不该升人工 | 分类依赖 Starling 的类别名，它改名要跟着改 |
 | M16 | 指导语合并进唯一的那条 system 消息 | 连续两条 system 消息不是所有兼容端点都接受 | 无 |
-| M17 | 替身与 Starling 过同一套契约测试，端口语义先定后实现 | 先做替身再接 Starling 会长出两套语义 | 契约测试要先写 |
+| M17 | 替身与 Starling 过同一套契约测试，端口语义与规范样例先定后实现 | 先做替身再接 Starling 会长出两套语义 | 契约测试要先写 |
+| M18 | 事件 key 用逻辑 episode id，不用传输层的 session id；部署重试前先把该人格的库回滚到 episode 起点 | 重试会换 session id（F21），部署库会重复记忆 | 回滚要多一次备份与恢复 |
 
 ## 3. 分层
 
@@ -131,6 +138,7 @@ class MemoryBackend(Protocol):
 |---|---|---|
 | `MemoryHit` | `id`、`text` | `id` 以 `mem-` 开头（F9），`text` 是渲染好的一句 |
 | `MemoryEvent` | `key`、`text`、`interlocutor`、`seq` | `key` 是事件的稳定身份；`seq` 是该记忆库里单调递增的事件序号，决定 `now` |
+| `MemoryEventConflict` | 异常 | 同 `key` 已存在且文本不同时抛出 |
 | `RememberOutcome` | `stored`、`failed`、`category` | `category` 取 Starling 的 `failure_category`（S13） |
 
 一个端口实例只属于一个智能体，所以签名里没有 holder。
@@ -140,7 +148,7 @@ class MemoryBackend(Protocol):
 | `TupleMemory` | `actio/memory.py` | 包现有 `MemoryEntry` 元组与 `retrieve`；`remember` 追加一条 `MemoryEntry`，`subject` 是 `interlocutor` |
 | `StarlingMemory` | `actio/memory_starling.py` | 包一个 `starling.Memory`；唯一导入 `starling` 的文件 |
 
-两种实现过同一套契约测试（M17）：recall 命中的形状、remember 后 embed_pending 再 recall 能命中、同 key 的事件只记一次、digest 对内容敏感且对 id 不敏感、close 后再调抛 `MemoryClosedError`。
+两种实现过同一套契约测试与规范样例（M17）。样例是一份 YAML：固定的事件序列、每步之后的 recall 预期命中 id 顺序、每步之后的 digest、同 key 同文本重写的结果、同 key 不同文本抛 `MemoryEventConflict`、close 后再调抛 `MemoryClosedError`。替身与 Starling 对同一份样例必须给出同样的命中顺序与摘要变化曲线（摘要值本身两边不同）。事件 key 的去重由端口实现自己维护：`StarlingMemory` 在库旁的 `events` 表（第 8 节 PR 新增）里记 `key → 文本 sha256、语句 id 列表`，查表早于 `remember`；`TupleMemory` 用字典。
 
 ### 4.2 实例改持端口
 
@@ -158,8 +166,8 @@ class MemoryBackend(Protocol):
 
 - **读**：每次 `respond` 前，查询词是对方最后一句（现有 `_memory_query`），`limit` 默认 3。
 - **写**：每次 `respond` 后，把上次回复之后对方说的每句话按顺序交给 `remember`，然后 `embed_pending` 一次。不调 `tick`：后台维护的随机性与负载门控会让同一起点得到不同状态（S12）。
-- **事件身份**：`key` 是 `<episode_id>#<turn_index>`，`text` 是 `<说话方人格 id>：<utterance>`。Starling 的幂等只看文本（S7），所以适配器把 `key` 作为前缀写进文本：`[<key>] <text>`。不同 episode 的同一句话是不同事件；同一 episode 重跑同一轮才幂等。
-- **时钟**：`now` 由 `seq` 推出：`2026-01-01T00:00:00Z` 加 `seq` 秒。训练副本的 `seq` 从 0 起；部署库的 `seq` 持久保存在库旁的 `<persona_id>.seq` 文件里，每次写入递增，不倒退。
+- **事件身份**：`key` 是 `<逻辑 episode id>#<turn_index>`，`text` 是 `<说话方人格 id>：<utterance>`。逻辑 episode id 由客户端定（F21）：训练是 `{run}-{stage}-{scenario}-r{k}`，部署是 `deploy-{model}-{scenario}-{k}`，重试不变；它经 `CreateSession` 新增的 `episode_id` 字段传给服务端，服务端落盘的 episode 也用它当 id。`key` 作为前缀写进 Starling 的文本：`[<key>] <text>`，所以不同 episode 的同一句话是不同事件；同 key 的重写由 `events` 表拦下，不再调 `remember`。
+- **时钟**：`now` 由 `seq` 推出：`2026-01-01T00:00:00Z` 加 `seq` 秒。`seq` 存在 `events` 表所在的同一个 SQLite 库里，与写事件同一事务递增；训练副本从 0 起，部署库跨轮次单调。
 - **自己的话**：不写。它已在对话历史里。
 - **抽取失败**：`RememberOutcome.failed` 为真时这一轮不留该条记忆，实例计数加一，不抛到 `respond` 之外；计数在激活轨迹里（第 4.6 节）。
 - **`recall`、`remember`、`embed_pending` 抛异常**：包成 `MemoryFailureError` 上抛，由调用方按第 9 节分类。
@@ -180,13 +188,13 @@ class MemoryBackend(Protocol):
 
 | 进摘要 | 不进摘要 |
 |---|---|
-| `holder_id`、`holder_perspective`、`subject_kind`、`subject_id`、`predicate`、`object_kind`、`object_value`、`canonical_object_hash`、`modality`、`polarity`、`confidence`、`salience`、`observed_at`、`valid_from`、`valid_to`、`nesting_depth`、`consolidation_state`、`review_status`、`supersedes_id` 是否为空 | `id`（UUID）、`created_at`、`updated_at`、`access_count`、`last_accessed`、`activation`、嵌入向量、看板表 |
+| 语句行：`holder_id`、`holder_perspective`、`subject_kind`、`subject_id`、`predicate`、`object_kind`、`object_value`、`canonical_object_hash`、`modality`、`polarity`、`confidence`、`salience`、`observed_at`、`valid_from`、`valid_to`、`nesting_depth`、`consolidation_state`、`review_status`、`supersedes_id` 指向行的规范化 JSON 的 sha256、`affect_json`、`semantic_claim_json`、`evidence_json`；向量行（S15）：`raw_embedding`、`dim`、`model`、`status`；事件表：`key`、文本 sha256 | `id`（UUID）、`created_at`、`updated_at`、`access_count`、`last_accessed`、`activation`、`retry_count`、`last_attempt_at`、`embedded_at`、看板表 |
 
-行按规范化 JSON 排序后整体算 sha256。空库的摘要是固定值。嵌入向量不进摘要：它由嵌入模型与语句文本决定，嵌入模型的身份进 `config_hash`（第 7.1 节）。`TupleMemory.digest()` 对条目 `to_dict()` 去掉 `id` 后的排序列表算同样形状的 sha256。
+语句按规范化 JSON 排序，向量按所属语句的位置排，整体算 sha256。空库的摘要是固定值。向量进摘要是因为同一个模型名在外部端点上不保证给出同一向量；向量变了召回就变，摘要必须跟着变。`TupleMemory.digest()` 对条目 `to_dict()` 去掉 `id` 后的排序列表加事件表算同样形状的 sha256。
 
 ### 4.6 激活轨迹
 
-轨迹模式升到 `actio.trace.v2`，在八个键之外加 `memory`：`{"digest_before": sha, "remembered": n, "extraction_failed": n}`。消费方（分析器、`_reusable`）对 v1 与 v2 都接受；`memory_hits` 的校验不变。抽取失败的计数因此随 episode 落盘，不需要 `Episode` 加元数据（F16）。
+轨迹模式升到 `actio.trace.v2`，在八个键之外加 `memory`：`{"digest_before": sha, "remembered": "n", "extraction_failed": "n"}`。两个计数是十进制字符串，与 `library_version` 同一规矩（F20），经 `Struct` 往返不失真。校验：v2 的键集合是九个，`memory` 的三个值都是非空字符串，计数必须是 ASCII 十进制。消费方（分析器、`_reusable`）对 v1 与 v2 都接受；`memory_hits` 的校验不变。抽取失败的计数因此随 episode 落盘，不需要 `Episode` 加元数据（F16）。
 
 ## 5. 记忆库的位置与配置
 
@@ -210,20 +218,21 @@ class MemoryBackend(Protocol):
 | 键 | 取值 |
 |---|---|
 | `backend` | `starling` 或 `stand-in` |
-| `starling_version` | `starling.__version__` 加安装来源的提交（`direct_url.json` 的 `vcs_info.commit_id`；源码目录安装时为 `local`） |
-| `extraction` | `{base_url_host, model, prompts: Starling ExtractionConfig 的摘要}` |
-| `embedding` | `{base_url_host, model, dim}` |
+| `starling_version` | `starling.__version__` 加安装来源：git 安装取 `direct_url.json` 的 `vcs_info.commit_id`；源码目录安装取已安装包 `RECORD` 里全部文件哈希的 sha256（装配期算一次） |
+| `extraction` | `{base_url, model, prompts: Starling ExtractionConfig 的摘要}` |
+| `embedding` | `{base_url, model, dim}` |
 | `trace_schema` | `actio.trace.v2` |
 
-`base_url_host` 只取主机名，不含路径与凭证。替身时 `extraction` 与 `embedding` 为 `null`。
+`base_url` 是规范化后的完整地址（小写 scheme 与主机、去掉末尾斜杠、含路径），不含 userinfo；配置读取时已拒绝带 `user:password@` 的地址。替身时 `extraction` 与 `embedding` 为 `null`。
 
 ### 5.3 目录布局
 
 ```
 <root>/
-  deploy/<persona_id>.db  <persona_id>.seq         部署记忆,持久,跨轮次累积
+  deploy/<persona_id>.db                            部署记忆,持久,跨轮次累积(seq 与事件表在库内)
   seeds/<seed_id>/<persona_id>.db                   训练起点种子库,只读
-  runs/<run_id>/<rollout_id>/<slot_id>.db           一条 rollout 的私有副本,会话终态即删
+  runs/<run_id>/<session_id>/<slot_id>.db           服务端对手位的私有副本,会话终态即删
+  runs/<run_id>/client/<episode_id>/<slot_id>.db    客户端训练位的私有副本,rollout 结束即删
   snapshots/<round_id>/<persona_id>.db              部署轮次的验证快照,轮次结束即删
 ```
 
@@ -246,12 +255,13 @@ class MemoryBackend(Protocol):
 
 | 处 | 改动 |
 |---|---|
-| 后端工厂 | 签名加 `session_id`：`(Scenario, RoleAssignment, personas, client_slot, session_id)` |
-| 落盘钩子 | `on_session_closed(episode)` 不变；`AgentRuntime` 按 `session_id` 查登记表 |
-| 登记表 | `AgentRuntime._sessions` 从“情境 id → run id”改为两级：策略上下文登记“情境 id → run id”，工厂在造后端时把 `session_id → run id` 记下，终态时删除 |
+| `CreateSession` | 新增可选字段 `episode_id`（逻辑 episode id，F21）；给了就用它当落盘 episode 的 id，没给沿用 `ep-<session_id>` |
+| 后端工厂 | 签名改为 `(SessionInfo) -> SessionResources`，`SessionInfo` 含 `scenario`、`assignment`、`personas`、`client_slot`、`session_id`、`episode_id` |
+| 落盘钩子 | 签名改为 `on_session_closed(session_id, episode)`；`AgentRuntime` 按 `session_id` 查归属 |
+| 登记表 | 策略上下文登记“情境 id → run id”只用于判定会话归属；工厂造资源时把 `session_id → run id` 记进第二张表，终态时删除；落盘只查第二张表 |
 | 记忆目录 | `runs/<run_id>/<session_id>/<slot_id>.db` |
 
-现有的“情境 id 不得同时属于训练与部署”检查（Ruling 24）保留，它仍是工厂判定会话归属的依据。
+现有的“情境 id 不得同时属于训练与部署”检查（Ruling 24）保留。落盘不再按情境 id 路由，所以策略上下文注销情境时，仍在跑的会话照样能落到自己的 run。
 
 ### 6.2 SessionResources
 
@@ -265,14 +275,16 @@ class SessionResources:
     def close(self) -> None: ...           # 关每个智能体的记忆,删副本目录
 ```
 
+- 所有权：工厂造出 `SessionResources` 交给 servicer；servicer 把 `backends` 给驱动器，自己持有资源对象直到流结束。驱动器只调后端，不持有资源。
 - `TimeoutBackend` 改为登记在途线程：`respond` 开始时加入 `SessionResources` 的在途集合，结束时移出；超时只是调用方放弃等待，线程本身仍在集合里。
-- 驱动器进入终态（`CLOSED` 或 `FAILED`，含断开）后，由 servicer 在流结束的 `finally` 里按顺序调 `quiesce`、`join(timeout_s=60)`、`close`。`join` 超时则记日志、跳过删除，留给清扫。
-- 清扫：每次派发 interact 指令前，策略上下文删掉 `runs/<run_id>/` 下不属于任何活动会话的目录；守护进程启动时删掉 `runs/` 下所有目录（启动时没有活动会话）。
+- 驱动器进入终态（`CLOSED` 或 `FAILED`，含断开）后，由 servicer 在流结束的 `finally` 里按顺序调 `quiesce`、`join(timeout_s=60)`、`close`。
+- `join` 超时：**不 close、不删**。资源对象移交给运行时的滞留表（`AgentRuntime.lingering`），并继续占住一个会话名额：servicer 的准入检查“活动会话数加滞留数小于 `max_workers`”不过就拒绝 `CreateSession`，终止原因 `role_backend_unavailable`（T1，客户端按条重跑）。滞留表每 60 秒重试一次 `join(0)`，成功后 close 并删目录。
+- 清扫：守护进程启动时删掉 `runs/` 下所有目录（启动时没有活动会话、也没有滞留线程）；运行中只删滞留表 join 成功的目录，不扫目录。
 - 在途集合的操作持一把锁；`join` 不持锁等待。
 
 ### 6.3 并发上限
 
-每条会话最多 `len(bindings) - 1` 个在途后端线程，加驱动器线程一个。gRPC 的 `max_workers` 限制并发会话数（`server.py:38-46`），所以线程总数有上界：`max_workers × len(bindings)`。超时后遗留的线程在 `join` 之前算在该会话名下，不会跨会话累积。
+每条会话最多 `len(bindings) - 1` 个在途后端线程，加驱动器线程与泄流线程各一个。gRPC 的 `max_workers` 限制并发会话数（`server.py:38-46`），滞留的资源也占会话名额（6.2 节），所以进程里的后端线程总数不超过 `max_workers × (len(bindings) + 1)`。代价是挂死的后端会一直占着名额：滞留数达到 `max_workers` 时服务端拒绝所有新会话，守护进程的日志每分钟报一次滞留数，由人重启进程。Python 的 daemon 线程杀不掉，这是能给出的最强保证。
 
 ### 6.4 时间预算（F17）
 
@@ -284,7 +296,9 @@ class SessionResources:
 | 记忆单次调用上限（抽取、嵌入各一次） | 无 | 8 秒 |
 | 训练位策略 HTTP 上限 | 120 秒 | 60 秒 |
 
-一轮对手发言的最坏耗时是 recall（本地）加 HTTP 25 秒加 remember 8 秒加嵌入 8 秒，约 41 秒，低于服务端 60 秒；客户端 90 秒大于服务端 60 秒加传输。训练位一轮的最坏耗时是 HTTP 60 秒加记忆 16 秒，低于 90 秒。
+一轮对手发言的最坏耗时是 recall（本地）加 HTTP 25 秒加 remember 8 秒加嵌入 8 秒，约 41 秒，低于服务端 60 秒；训练位一轮的最坏耗时是 HTTP 60 秒加记忆 16 秒，低于 90 秒。
+
+现在客户端只有整条流的 deadline（F22），没有逐轮限时。改法：客户端收消息的 `_next_msg` 加逐轮等待上限 90 秒（在接收线程里用带超时的队列取消息），超时视作 `timeout`（T1，按条重跑）并 abort 会话；整条流的 deadline 仍按 `max_turns × 90` 折算当兜底。记忆的 8 秒是每次调用的上限：`embed_pending` 一次只嵌入本轮新写的几条，不处理积压，因为训练副本每轮都嵌入、从不积压；部署库若有积压（上次失败留下的），在 episode 开始前先嵌完再开始。
 
 ## 7. 训练路
 
@@ -299,7 +313,7 @@ class SessionResources:
 | `memory.runtime` | `MemoryRuntimeIdentity`，派发时写回 |
 | `memory.write` | 是否每轮写，默认 `true` |
 
-- `memory` 缺省表示**不用记忆**：角色位仍是 Actio 实例，但记忆端口是空的 `TupleMemory` 且 `memory_write=false`，行为与现在的裸后端相同。旧配置的 `config_hash` 不变，语义也不变。
+- `memory` 缺省表示**不用记忆**：角色位仍是现在的裸后端，不套 Actio，轨迹仍是 v1（对手位没有轨迹，训练位不上行轨迹），落盘的 episode 与现在逐字节同形。旧配置的 `config_hash` 不变，语义与产物也不变。只有 `memory` 存在时才走 Actio 路径。
 - 训练默认值 `training_defaults.yaml` 的 `interact` 段增加可选键 `memory`：`{seed, write}`。调度器写进配置时 `digests` 与 `runtime` 留空。
 - 派发器进入策略上下文之前，按 `seed` 打开每个绑定人格的起点库、算摘要、取运行时身份，写回 `memory.digests` 与 `memory.runtime`。之后才算 `config_hash`。
 - 续训时重新算摘要与身份；种子库、Starling 版本、抽取或嵌入模型任一变了，`config_hash` 不同，升 T3（F13）。
@@ -313,7 +327,7 @@ class SessionResources:
 | 每轮 | 该位实例 recall、回复、remember、embed_pending |
 | 会话终态 | `SessionResources` 按 6.2 节收尾 |
 
-- 训练位的实例在客户端（轨迹源一侧），由策略工厂每条 rollout 新造一个，见 7.3。它的副本目录是 `runs/<run_id>/<session_id>/<trained_slot>.db`，`session_id` 从 `SessionReady` 取。
+- 训练位的实例在客户端（轨迹源一侧），由策略工厂每条 rollout 新造一个，见 7.3。它的副本目录是 `runs/<run_id>/client/<逻辑 episode id>/<trained_slot>.db`，重试时同名目录先删后建。
 - 对手位的实例在服务端，由后端工厂每个会话新造。
 - 同组 `group_size` 条 rollout 的每个角色位都从同一份记忆出发。
 
@@ -323,7 +337,7 @@ class SessionResources:
 |---|---|
 | `VllmPolicy`、`ExternalApiBackend` | 新增 `respond_guided(persona, scenario, history, slot, guidance)`：指导语非空时追加到唯一的 system 消息末尾，以“当前要点：”起头，一行一条（M16） |
 | 策略工厂 | 交给编排器的不再是一个后端，而是 `policy_for_rollout(session_id) -> ContextManager[ModelBackend]`：每条 rollout 造一个 Actio 实例，退出时关实例 |
-| `InteractTrajectorySource` | 新参数 `policy_for_rollout`；`_attempt` 在 `create_session` 拿到 `session_id` 之后进入上下文，`finally` 里退出。旧参数 `policy` 保留，内部包成“每次返回同一个后端”的上下文 |
+| `InteractTrajectorySource` | 新参数 `policy_for_rollout(episode_id)`；`_attempt` 在 `create_session` 之前进入上下文（副本目录按逻辑 episode id 命名），`finally` 里退出。旧参数 `policy` 保留，只许在 `cfg.memory` 缺省时用；两者都传或 `memory` 存在却传 `policy`，构造期抛 `ValueError` |
 | 提交 | 策略返回三元组时，第三项作为 `activation_trace` 随 `submit_turn` 上行；二元组照旧 |
 | 续训 | 不变：`make_sources(start)` 每次构造轨迹源，`policy_for_rollout` 在每条 rollout 内进出，和 `start` 无关 |
 
@@ -356,9 +370,11 @@ class SessionResources:
 | `Memory.open(..., embedder=None)` | 注入嵌入器；`None` 维持现状（stub） |
 | `make_openai_embedder(*, model, base_url, dim, timeout_ms)` | 构造 `OpenAIEmbeddingAdapter`，与 `make_openai_llm` 同形 |
 | `Memory.embed_pending(now) -> int` | 只跑嵌入阶段（`EmbeddingWorker.tick_one_batch`），不跑后台维护 |
-| `Memory.digest() -> str` | 第 4.5 节的逻辑摘要 |
+| `Memory.digest() -> str` | 第 4.5 节的逻辑摘要，覆盖语句行、向量行与事件表 |
 | `Memory.backup_to(path)` | `VACUUM INTO` 加 `PRAGMA integrity_check`，得到自洽的单文件副本 |
 | `Memory.close()` | 关闭 SQLite 连接并等待自己的工作线程退出 |
+| `Memory.remember_event(key, text, *, interlocutor, now) -> RememberResult` | 查库内 `events` 表（新迁移）：同 key 同文本直接返回 `idempotent` 且不抽取；同 key 不同文本抛 `EventConflict`；新 key 则写事件行、递增 `seq`、调 `remember`，三者同一事务 |
+| `Memory.next_seq() -> int` | 读 `events` 表的当前 `seq` |
 
 合入后本仓库的 `pyproject.toml` 增加 `memory = ["starling-memory @ git+https://github.com/ruijieguo/starling@<合并提交>"]`。推送分支与开 PR 前先征得用户同意。
 
@@ -366,13 +382,13 @@ class SessionResources:
 
 | 改动 | 内容 |
 |---|---|
-| 部署记忆 | 每个绑定人格一个 `deploy/<persona_id>.db`，跨轮次持久；`seq` 持久在旁 |
-| 轮次产物 | `agent_round` 载荷增加 `memory_digests: {persona_id: 起点摘要}` 与 `memory_runtime` |
-| episode 起点 | 每条部署 episode 开始前记下该人格的摘要，写进该 episode 第一个智能体轮次的轨迹 `memory.digest_before` |
-| episode 复用 | `_reusable` 除库版本外，还要求首个智能体轮次的 `digest_before` 与本轮次产物记的起点摘要相同 |
-| 验证重放 | 每个人格从部署库 `backup_to` 到 `snapshots/<round_id>/`，基线与候选各开一份快照副本，`memory_write=False` |
-| 门② `kind: memory` | 收录时对该人格的部署库 `remember`（`key` 是 `<proposal_id>#<k>`），成功后把返回的语句 id 写进提案载荷的 `admitted_statements`，再递增库版本。重入时 `admitted_statements` 已有的增量跳过，不再 `remember` |
-| 门② 失败 | `remember` 抛异常或 `failed` 时写一条 T2 失败记录，提案改为 `rejected` 并带原因；不留在 `approved` |
+| 部署记忆 | 每个绑定人格一个 `deploy/<persona_id>.db`，跨轮次持久；`seq` 与事件表在库内 |
+| 轮次产物 | `agent_round` 载荷增加 `memory_runtime` 与 `episode_digests: {episode_id: {persona_id: 起点摘要}}`，每条 episode 开始前写回一次（轮次产物本来就逐步回写） |
+| episode 起点与重试 | 每条部署 episode 开始前：把该人格的部署库 `backup_to` 到 `snapshots/<round_id>/<episode_id>-<persona_id>.db` 作起点，记摘要进 `episode_digests` 与首个智能体轮次的轨迹 `memory.digest_before`。该 episode 的任一次尝试失败要重试时，先用起点副本覆盖部署库再重试（M18）；成功后删起点副本 |
+| episode 复用 | `_reusable` 除库版本外，还要求首个智能体轮次的 `digest_before` 等于 `episode_digests[episode_id]` 里该人格的摘要，且该摘要等于部署库当前摘要（即它之后没有别的 episode 写过）；三者不全等就重跑 |
+| 验证重放 | 每个人格从部署库 `backup_to` 到 `snapshots/<round_id>/verify-<persona_id>.db`，基线与候选各开一份快照副本，`memory_write=False` |
+| 门② `kind: memory` | 收录时对该人格的部署库调 `remember_event(key="<proposal_id>#<k>")`。key 去重在 Starling 库内与写入同一事务，所以“写成功但收据没落树”的重入不会二次抽取：重入时再调一次，得到 `idempotent` 与同一批语句 id。语句 id 写进提案载荷的 `admitted_statements` 只作证据，不作幂等依据 |
+| 门② 失败 | `remember_event` 抛异常或 `failed` 时写一条 T2 失败记录，提案改为 `rejected` 并带原因；审核类状态机增加 `approved → rejected` 这一条边（F23），只许收录处理器走 |
 | 人格归属 | 记忆提案的 `definition` 增加必填 `persona_id`，指明写进哪个人格的库 |
 | 旧数据 | `memory_library/` 必须为空（第 0 节），`load_library` 不再读它 |
 
@@ -385,10 +401,13 @@ class SessionResources:
 | `memory_library/` 非空 | 配置错误 | 装配期退出码 2，要求人工处理 |
 | 起点库或种子打不开、迁移失败、摘要算不出 | T2 | 指令 `failed`，原因只报类名 |
 | 续训时起点摘要或运行时身份变了 | T3 | 现有的 `config_hash` 门 |
-| 对手位 `MemoryFailureError` | `role_memory_failure`，T2 | 驱动器新增分支；轨迹源不重跑；策略上下文把它加进确定性集合，指令判 `failed` |
-| 训练位 `MemoryFailureError` | 策略异常，T2 | 会话 abort；策略上下文译成 `DirectiveFailedError`，不延后 |
+| 对手位 `MemoryFailureError`，类别是 `timeout` 或 `transport_failure` | `role_memory_unavailable`，T1 | 驱动器新增分支；轨迹源与部署按条重跑（加进两边的瞬态集合） |
+| 对手位 `MemoryFailureError`，其余类别或非 Starling 异常 | `role_memory_failure`，T2 | 驱动器新增分支；轨迹源不重跑；策略上下文把它加进确定性集合，指令判 `failed` |
+| 训练位 `MemoryFailureError`，瞬态类别 | 按条重跑 | 轨迹源在 `_attempt` 里接住，译成瞬态 `_AttemptFailed`，会话 abort |
+| 训练位 `MemoryFailureError`，其余 | 策略异常，T2 | 会话 abort；策略上下文译成 `DirectiveFailedError`，不延后 |
 | 抽取失败（`failed` 为真） | 不分类 | 计数进轨迹；这一轮不留记忆 |
-| `join` 超时 | 不分类 | 记日志，跳过删除，留给清扫 |
+| 准入时活动加滞留会话数达上限 | `role_backend_unavailable`，T1 | 客户端按条重跑；日志每分钟报滞留数 |
+| `join` 超时 | 不分类 | 资源进滞留表，不关不删，占一个会话名额（6.2 节） |
 | 副本删除失败 | 不分类 | 记日志；清扫兜底 |
 
 异常信息不含端点地址与密钥：适配器只报异常类名与 `failure_category`。
@@ -402,11 +421,16 @@ class SessionResources:
 | 单元 | Actio 每轮读写：recall 在回复前，remember 只收对方发言、带 key 前缀，抽取失败不抛且进轨迹 | 记录调用的假端口 |
 | 单元 | `respond_guided` 只产生一条 system 消息 | 本机 HTTP 替身 |
 | 单元 | 摘要：同一逻辑内容不同文件字节时相同；改任一进摘要的字段即变 | 真 Starling |
-| 单元 | `SessionResources`：quiesce 后 respond 抛；join 等到超时线程退出；close 删目录 | 阻塞的假后端 |
+| 单元 | `SessionResources`：quiesce 后 respond 抛；join 等到超时线程退出；close 删目录；join 超时则进滞留表、目录仍在、名额被占 | 阻塞的假后端 |
+| 单元 | 轨迹 v2：计数是字符串；经 `Struct` 往返后 `validate_trace` 仍通过 | 无 |
+| 单元 | 客户端逐轮等待超时译成 `timeout` 并 abort | 不回消息的假服务端 |
 | 集成 | 服务端会话终态（正常、超时、断开）都走 quiesce、join、close；副本被删 | loopback 服务端 |
+| 集成 | 滞留数达上限时 `CreateSession` 被拒为 `role_backend_unavailable`；滞留线程退出后名额释放 | loopback 服务端、可解除阻塞的假后端 |
+| 集成 | 部署 episode 重试：第二次尝试前部署库被回滚到起点，摘要相同 | 真 Starling 或替身 |
 | 集成 | 同组两条 rollout 从同一起点出发，会话结束副本被删；`session_id` 出现在目录名里 | loopback 服务端、替身端口 |
-| 集成 | 起点摘要与运行时身份进 `config_hash`；续训时种子或模型变了升 T3；`memory` 缺省时哈希与行为不变 | 临时仓库 |
-| 集成 | `role_memory_failure` 让指令判 `failed` 而不是延后 | 抛异常的假端口 |
+| 集成 | 起点摘要与运行时身份进 `config_hash`；续训时种子或模型变了升 T3；`memory` 缺省时哈希、落盘 episode 与现在逐字节相同 | 临时仓库 |
+| 集成 | `role_memory_failure` 让指令判 `failed` 而不是延后；`role_memory_unavailable` 按条重跑 | 抛异常的假端口 |
+| 集成 | `memory` 存在却传旧 `policy` 参数时构造期拒绝 | 无 |
 | 单元 | 门② 记忆提案改走 `remember`；重入不重复写；失败转 `rejected` | 替身端口 |
 | 端到端 | `--interact` 一条 run：所有角色位都是带记忆的 Actio，episode 每轮带 v2 轨迹，记录里有 `memory` 块 | 本机 HTTP 替身 vLLM、替身端口 |
 
@@ -426,6 +450,29 @@ class SessionResources:
 | 8 | 文档与图的收尾 | 否 |
 
 第 1 到 4 步只用替身就能跑通，可以先合。第 5 步合入后再做 6、7。
+
+接口变更清单（每一项都在上面的某一步里，列在一处便于对照）：
+
+| 接口 | 变更 | 步 |
+|---|---|---|
+| `actio.instance.instantiate` | `memories=` 之外加 `memory=`、`memory_write=` | 1 |
+| `actio.trace` | 新增 `actio.trace.v2`，`validate_trace` 接受 v1 与 v2 | 1 |
+| `CreateSession` proto | 新增可选 `episode_id` | 2 |
+| `BackendsFactory` | `(SessionInfo) -> SessionResources` | 2 |
+| `on_session_closed` | `(session_id, episode)` | 2 |
+| `TimeoutBackend` | 构造时收 `SessionResources`，登记在途线程 | 2 |
+| `EnvironmentServicer` | 准入检查、终态收尾、滞留表 | 2 |
+| `SessionDriver` | 新增 `role_memory_unavailable`、`role_memory_failure` 分支 | 2 |
+| `EnvironmentServiceClient` | 逐轮等待上限 | 2 |
+| `VllmPolicy`、`ExternalApiBackend` | 新增 `respond_guided` | 2 |
+| `InteractTrajectorySource` | 新参数 `policy_for_rollout`；三元组上行 | 3 |
+| `make_policy_factory` | 返回 `policy_for_rollout` 工厂 | 3 |
+| `TrainingConfig` | 可选 `memory` | 4 |
+| `training_defaults.interact` | 可选 `memory` | 4 |
+| `TrainingRun.policy_backend` | `memory` 块 | 4 |
+| `controlplane.states` | `approved → rejected` | 7 |
+| `agent_round` 载荷 | `memory_runtime`、`episode_digests` | 7 |
+| 记忆提案 `definition` | 必填 `persona_id` | 7 |
 
 ## 13. 已定与未核实
 
