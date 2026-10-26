@@ -81,6 +81,7 @@ message TurnUpdate {
 message EndSession {
   string reason = 1;  // "max_turns" | "goal_reached" | "client_terminated"
                        // | "role_backend_failure" | "role_backend_timeout" | "timeout"
+                       // | "role_backend_rejected"(对端明确拒绝,4xx 且非 429;确定性,T2)
                        // | "invalid_session" | "client_disconnected"
                        // | "persistence_failed"(会话跑完,但落盘钩子失败)
   string episode_id = 2;

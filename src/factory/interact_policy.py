@@ -20,9 +20,10 @@
 作业停不下来,重试只会撞上同一个租约;若退出时才冒出来,训练其实已经完成,延后重试还会在已完成的训练上反复起服务。
 它冒出来时登记注销、deadline 还原、对手开关解绑都已在各自的 finally 里做完,不会被跳过。
 
-训练体里抛出的真推理失败也分两路(Ruling 27):`RolloutFailedError`(`invalid_session` 除外)与 `OpponentApiError`
+训练体里抛出的真推理失败也分两路(Ruling 27):`RolloutFailedError`(确定性拒绝除外)与 `OpponentApiError`
 译成 `RolloutDeferredError`(`DeferredError` 的子类),走延后通道,指令保持 pending,守护进程不会被它带走。
-`invalid_session` 原样放行:编排器已把 training_run 写成 failed,派发器据此把指令判为 T2。
+确定性拒绝(`invalid_session`、`role_backend_rejected`,见 `mindtrainer.orchestrator` 的 `_DETERMINISTIC_ROLLOUT_REASONS`)
+原样放行:编排器已把 training_run 写成 failed,派发器据此把指令判为 T2。
 """
 from __future__ import annotations
 
@@ -50,6 +51,7 @@ from factory.opponents import (
 from factory.sombench_runner import EXPORT_FORMAT
 from factory.vllm_policy import POLICY_TIMEOUT_S, policy_context, vllm_opponent_factory
 from mindtrainer.dispatch import DirectiveFailedError
+from mindtrainer.orchestrator import _DETERMINISTIC_ROLLOUT_REASONS
 from mindtrainer.training_config import TrainingConfig
 from mindtrainer.trajectory_source import RolloutFailedError
 from simulator.backends import ModelBackend, ScriptedBackend
@@ -272,11 +274,16 @@ def make_policy_factory(
                     try:
                         yield policy
                     except RolloutFailedError as exc:
-                        if exc.reason == "invalid_session":
-                            raise            # 请求本身有问题:编排器已写 failed,派发器判 T2
+                        if exc.reason in _DETERMINISTIC_ROLLOUT_REASONS:
+                            # invalid_session(请求本身有问题)、role_backend_rejected(对手 API 明确拒绝):
+                            # 编排器已写 failed,派发器据此判 T2
+                            raise
                         # from None:异常文字(含服务端转述的细节)不跟着回溯走
                         raise _rollout_deferral(exc) from None
                     except OpponentApiError as exc:
+                        # 含训练位策略自己抛的 OpponentRejectedError。训练位是本 run 自己起的 vLLM,4xx 多半意味着
+                        # 服务配置坏了(适配器名不对之类),重试无益;但这一点和起服务时的瞬态失败区分不开,
+                        # 所以先按现状译成延后(重试有界,最终升 T3)。已记进 Concerns。
                         raise _rollout_deferral(exc) from None
                 finally:
                     for sid in registered:

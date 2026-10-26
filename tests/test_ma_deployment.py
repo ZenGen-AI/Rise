@@ -323,6 +323,7 @@ def test_transient_retries_are_bounded(store):
 @pytest.mark.parametrize("plan,reason", [
     ({"create_error": SessionRejectedError("invalid_session", "bad")}, "invalid_session"),
     ({"end_reason": "role_backend_failure"}, "role_backend_failure"),
+    ({"end_reason": "role_backend_rejected"}, "role_backend_rejected"),
     ({"end_reason": "client_disconnected"}, "client_disconnected"),
 ])
 def test_non_transient_failures_are_not_rerun(store, plan, reason):

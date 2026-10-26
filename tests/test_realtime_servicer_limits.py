@@ -333,6 +333,37 @@ def test_an_external_api_opponent_answering_500_ends_the_session_as_role_backend
     assert end.end_session.reason == "role_backend_failure", end.end_session
 
 
+def test_a_backend_that_raises_role_backend_rejected_ends_the_session_as_role_backend_rejected(start_server):
+    """对端明确拒绝(确定性,T2):终止原因独立于 role_backend_failure,经 gRPC 到客户端原样。"""
+    from simulator.realtime.backend_timeout import RoleBackendRejectedError
+
+    class RejectingBackend:
+        def respond(self, persona, scenario, history, speaker_slot):
+            raise RoleBackendRejectedError("HTTP 404 from the peer")
+
+    address = start_server(factory=lambda *_: {"b": RejectingBackend()}, backend_timeout_s=10.0)
+    stream = _Stream(address)
+    stream.send(_create_msg(max_turns=4))
+    assert stream.recv().WhichOneof("payload") == "session_ready"
+    stream.send(pb2.ClientMessage(submit_turn=pb2.SubmitTurn(utterance="cand-0")))
+    assert stream.recv().WhichOneof("payload") == "turn_update"
+    end = stream.recv()
+    assert end.WhichOneof("payload") == "end_session"
+    assert end.end_session.reason == "role_backend_rejected", end.end_session
+    stream.close()
+
+
+def test_an_external_api_opponent_answering_404_ends_the_session_as_role_backend_rejected(
+        start_server, slow_chat):
+    """4xx(429 除外)是对端明确拒绝:真实 ExternalApiBackend 抛 OpponentRejectedError,经 TimeoutBackend 原样重抛,
+    服务端据此报 role_backend_rejected。信息里没有密钥。"""
+    server = slow_chat(0.0, status=404)
+    end = _external_opponent_session(start_server, server.base_url, opponent_timeout_s=5.0)
+    assert end.WhichOneof("payload") == "end_session"
+    assert end.end_session.reason == "role_backend_rejected", end.end_session
+    assert "sk-test-not-a-secret" not in end.end_session.failure_detail
+
+
 def test_concurrent_rpc_limit_rejects_extra_session(start_server):
     address = start_server(max_workers=1)
     first = _Stream(address)

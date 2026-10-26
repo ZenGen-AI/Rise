@@ -135,7 +135,8 @@ class InteractTrajectorySource:
     - 只有 terminated_reason ∈ {max_turns, goal_reached} 的 episode 进 batch。
     - T1 瞬态(timeout、role_backend_timeout、传输层 UNAVAILABLE)原样重跑,上限
       max_retries_per_episode,每次失败记入 metadata["failed_attempts"]。
-    - 其余(invalid_session、role_backend_failure 等)不重试,抛 RolloutFailedError。
+    - 其余(invalid_session、role_backend_rejected、role_backend_failure 等)不重试,抛 RolloutFailedError。
+      role_backend_rejected 是对手 API 明确拒绝(4xx,429 除外),确定性,T2:重试无益,编排器据此写 failed。
       role_backend_failure 在服务端同时覆盖"后端确定性异常"和"工厂/解析器故障",
       光看 reason 分不出 T1 还是 T2,所以保守地不重试。
     - 策略自己抛的异常不重试、不包装:会话先 abort()(服务端按断连判 FAILED、不落盘),

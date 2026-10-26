@@ -383,11 +383,13 @@ def test_zero_retries_means_a_single_attempt(store):
         ({"create_error": SessionRejectedError("invalid_session", "bad persona")}, "invalid_session"),
         ({"create_error": SessionRejectedError("role_backend_failure", "factory exploded")}, "role_backend_failure"),
         ({"end_reason": "role_backend_failure"}, "role_backend_failure"),
+        ({"end_reason": "role_backend_rejected"}, "role_backend_rejected"),
         ({"end_reason": "client_disconnected"}, "client_disconnected"),
         ({"create_error": _Exhausted()}, "transport_resource_exhausted"),
         ({"submit_error": RuntimeError("server closed the stream without sending EndSession")}, "client_protocol_error"),
     ],
-    ids=["invalid_session", "factory_fault", "backend_failure", "disconnected", "exhausted", "protocol_error"],
+    ids=["invalid_session", "factory_fault", "backend_failure", "backend_rejected", "disconnected", "exhausted",
+         "protocol_error"],
 )
 def test_non_transient_failures_are_not_retried(store, plan, reason):
     factory = _FakeFactory(plan)

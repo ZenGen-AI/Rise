@@ -22,7 +22,7 @@ from controlplane.models import version_of_id
 from controlplane.paths import model_file
 from factory.sombench_runner import EXPORT_FORMAT
 from simulator.datamodel import OPPONENT_DRIVERS, Persona, RoleBinding, Scenario, TurnRecord
-from simulator.realtime.backend_timeout import RoleBackendTimeoutError
+from simulator.realtime.backend_timeout import RoleBackendRejectedError, RoleBackendTimeoutError
 
 # 回复体上限:一句对手发言用不了这么多,挡住对端发来没完没了的响应
 MAX_REPLY_BYTES = 1 << 20
@@ -48,6 +48,16 @@ class OpponentTimeoutError(OpponentApiError, RoleBackendTimeoutError):
     (T1,轨迹源按 max_retries_per_episode 整条重跑),而不是被通用异常分支吞成 role_backend_failure;
     仍是 OpponentApiError,所以训练位策略超时时,策略上下文照旧把它译成延后。
     非 200 与形状不对的回复不是它:那些仍是普通的 OpponentApiError。信息里绝不含密钥值。"""
+
+
+class OpponentRejectedError(OpponentApiError, RoleBackendRejectedError):
+    """对手 API(外部 API 或站内 vLLM,共用 post_chat)明确拒绝了这次请求:4xx,429 除外(400、401、403、404 等)。
+    同样的请求再发还是同样的回答,重试无益。
+
+    同时是两样东西,各有用处:是 RoleBackendRejectedError,所以服务端驱动把对手位的拒绝归 role_backend_rejected
+    (T2,轨迹源不重跑、编排器把训练记录写 failed),而不是被通用异常分支吞成 role_backend_failure;
+    仍是 OpponentApiError,所以训练位策略撞上时,策略上下文照旧把它译成延后(理由见 interact_policy)。
+    429、5xx、回复形状不对不是它。信息里绝不含密钥值。"""
 
 
 # ---------------- 驱动选择 ----------------
@@ -182,11 +192,17 @@ def post_chat(
     """向 OpenAI 兼容的 `<base_url>/v1/chat/completions` POST 一次,返回 choices[0].message.content。
 
     外部 API 与 vLLM 服务共用这一处:不重试(重试与降级是调用方的事),不跟随重定向,回复体有上限。
-    失败一律抛 OpponentApiError(超时是它的子类 OpponentTimeoutError),信息只含状态码、host_label、异常类型名,不含响应体;密钥若出现在
-    信息里会被抹掉,且切断异常链(from None),回溯里没有携带请求头的原异常。
+    失败一律抛 OpponentApiError,信息只含状态码、host_label、异常类型名,不含响应体;密钥若出现在
+    信息里会被抹掉,且切断异常链(from None),回溯里没有携带请求头的原异常。子类按失败的性质分:
+    超时 OpponentTimeoutError(T1);对端明确拒绝 OpponentRejectedError(4xx,429 除外;T2);其余是普通的 OpponentApiError。
     host_label 是写进错误信息的"对端是谁"(外部 API 用 host:port,vLLM 用服务名)。"""
     require_http_url(base_url)
     timeout = require_timeout(timeout_s)
+
+    def fail_status(code: int) -> OpponentApiError:
+        """非 200 的状态码:4xx(429 除外)是对端明确拒绝,其余照旧是普通的 OpponentApiError。"""
+        rejected = 400 <= code < 500 and code != 429
+        return fail(f"HTTP {code} from {host_label}", OpponentRejectedError if rejected else OpponentApiError)
 
     def fail(message: str, error: type[OpponentApiError] = OpponentApiError) -> OpponentApiError:
         """所有失败走这一处,出口前抹掉密钥(原异常的文本理论上不该含,这里是第二道防线)。"""
@@ -204,7 +220,7 @@ def post_chat(
             raw = response.read(MAX_REPLY_BYTES + 1)
     except urllib.error.HTTPError as exc:
         exc.close()
-        raise fail(f"HTTP {exc.code} from {host_label}") from None
+        raise fail_status(exc.code) from None
     except TimeoutError:
         raise fail(f"request to {host_label} timed out after {timeout:g}s", OpponentTimeoutError) from None
     except urllib.error.URLError as exc:
@@ -216,7 +232,7 @@ def post_chat(
     except Exception as exc:  # http.client.HTTPException 不是 OSError 的子类(状态行不合规、读到一半断开等)
         raise fail(f"request to {host_label} failed ({type(exc).__name__})") from None
     if status != 200:
-        raise fail(f"HTTP {status} from {host_label}")
+        raise fail_status(status)
     if len(raw) > MAX_REPLY_BYTES:
         raise fail(f"the reply from {host_label} is larger than {MAX_REPLY_BYTES} bytes")
     try:

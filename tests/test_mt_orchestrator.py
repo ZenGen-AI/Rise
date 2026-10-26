@@ -655,15 +655,17 @@ class _RejectedSource:
         )
 
 
-def test_an_invalid_session_rejection_fails_the_run_and_is_never_retried(store):
-    source = _RejectedSource("invalid_session")
+@pytest.mark.parametrize("reason", ["invalid_session", "role_backend_rejected"])
+def test_a_deterministic_rejection_fails_the_run_and_is_never_retried(store, reason):
+    """invalid_session(请求本身有问题)与 role_backend_rejected(对手 API 明确拒绝)同属确定性:写 failed,不续训。"""
+    source = _RejectedSource(reason)
     with pytest.raises(RolloutFailedError):
         _go(store, _interact_cfg(), MockExecutor(), make_sources=_stub_sources(store, source))
     failed = read_training_run(store, RUN)
     assert (failed.status, failed.failure["category"], failed.failure["point"]) == (
         "failed", "T2", "step 1 (grpo_opd)",
     )
-    assert "invalid_session" in failed.failure["detail"]
+    assert reason in failed.failure["detail"]
     with pytest.raises(NeedsHumanError, match="failed"):
         _go(store, _interact_cfg(), MockExecutor(), make_sources=_stub_sources(store, source))
     assert source.collects == 1  # 第二次进入被 escalate 挡住,没有再去开会话

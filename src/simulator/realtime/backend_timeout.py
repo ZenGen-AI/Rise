@@ -12,6 +12,13 @@ class RoleBackendTimeoutError(Exception):
     确定性异常（T2，映射为 role_backend_failure）必须区分开，故单独成类。"""
 
 
+class RoleBackendRejectedError(Exception):
+    """服务端角色后端（外部 API）的对端明确拒绝了这次请求（4xx，429 除外：密钥不对、模型名不存在、请求体不合规）。
+    同样的请求再发还是同样的回答，重试无益，是 T2。驱动把它归 role_backend_rejected，与"后端抛了说不清的
+    异常"的 role_backend_failure 分开：后者在服务端同时覆盖工厂/解析器故障，轨迹源分不出 T1 与 T2，
+    所以保守地不重跑；这一个则能确定，轨迹源不重跑，编排器把训练记录写成 failed。"""
+
+
 class TimeoutBackend:
     """给任意 ModelBackend 套一层调用期限：每次 respond() 在一个 daemon 线程里
     执行被包装的后端，超过 timeout_s 未返回即抛 RoleBackendTimeoutError。

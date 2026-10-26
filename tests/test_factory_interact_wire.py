@@ -905,6 +905,26 @@ def test_an_external_opponent_answering_500_defers_the_directive_with_role_backe
     assert OPP_KEY not in caplog.text and server.base_url not in caplog.text
 
 
+def test_an_external_opponent_answering_404_fails_the_directive_with_role_backend_rejected(
+        world, tmp_path, stub, fake_serve, external_api):
+    """对手 API 明确拒绝(4xx,429 除外)是确定性的:服务端 role_backend_rejected -> 轨迹源不重跑 -> 编排器把
+    training_run 写 failed -> 策略上下文原样放行 -> 派发器判指令 failed(T2),不进延后通道。"""
+    server = external_api([(404, 0.0)] * 50)
+    _use_external_opponent(world, server)
+    book = _ticks(world, tmp_path, **{OPP_KEY_ENV: OPP_KEY})
+    directive = _read(world, "directive")
+    assert directive.status == "failed" and directive.payload["failure"]["category"] == "T2"
+    assert "role_backend_rejected" in directive.payload["failure"]["reason"]
+    assert OPP_KEY not in directive.payload["failure"]["reason"]
+    assert server.base_url not in directive.payload["failure"]["reason"]
+    run = _read(world, "training_run")
+    assert run.status == "failed" and run.payload["failure"]["category"] == "T2"
+    assert "role_backend_rejected" in run.payload["failure"]["detail"]
+    assert book.streak(DISPATCH_KEY) == 0                      # 没进延后通道
+    assert fake_serve.trace == ["enter", "exit"]               # 服务照常停了、租约照常放了
+    assert server.count == 1                                   # 不重跑:只打了一次对手
+
+
 def test_a_policy_that_cannot_reach_its_service_defers_the_directive(world, tmp_path, stub, monkeypatch):
     """训练位自己的 respond 抛 OpponentApiError(轨迹源不包装策略异常),同样不该逃出去。"""
     import factory.interact_policy as ip
@@ -965,9 +985,10 @@ def test_the_deferral_reason_names_the_class_and_reason_but_not_the_message(worl
     assert serve.trace == ["enter", "exit"]
 
 
-def test_an_invalid_session_rollout_failure_passes_through_the_policy_scope_unchanged(world, tmp_path, stub):
+@pytest.mark.parametrize("reason", ["invalid_session", "role_backend_rejected"])
+def test_a_deterministic_rollout_failure_passes_through_the_policy_scope_unchanged(world, tmp_path, stub, reason):
     _, _, factory, _ = _unit(world, tmp_path, stub)
-    original = _failed_rollout("invalid_session", "bad persona")
+    original = _failed_rollout(reason, "bad persona")
     with pytest.raises(RolloutFailedError) as caught:
         with factory(RUN, _cfg()):
             raise original

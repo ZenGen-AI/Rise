@@ -40,6 +40,11 @@ _DETERMINISTIC = (
     NotEnoughGroupsError, InvalidTrainingConfigError, TrainingDataRejectedError,
 )
 
+# 这两个 rollout 终止原因是确定性的拒绝(T2),重试无益:invalid_session 是请求本身有问题,
+# role_backend_rejected 是对手 API 明确拒绝了请求(4xx,429 除外)。编排器据此把训练记录写 failed;
+# factory 的策略上下文也据此原样放行(其余 RolloutFailedError 都译成延后),所以两边共用这一个集合。
+_DETERMINISTIC_ROLLOUT_REASONS = frozenset({"invalid_session", "role_backend_rejected"})
+
 # start_grpo_step -> {"sft": 源, "grpo_opd": 源}。用工厂而不是现成的源,因为续训时
 # Interact 源要从正确的 scenario 轮转位置起步(start_step),而这取决于续训点。
 SourcesFactory = Callable[[int], dict[str, TrajectorySource]]
@@ -162,8 +167,8 @@ def run_training(
       曲线摘要只在存点时落盘,所以续训后它与存点时一致,不会重复计入崩溃前多跑的步。
     - 收尾:存最终 checkpoint(先回写 pending,再转换),注册候选,置 executed。候选若在崩溃
       窗口里已被人审核、且确属本 run 本配置同一份权重,视为注册已完成,照常置 executed。
-    - 确定性失败写 failed(category T2)并原样重抛,其中包括 Interact 的 invalid_session 拒绝;
-      其余异常(含 timeout 用尽、role_backend_failure)不吞,run 保持 pending。
+    - 确定性失败写 failed(category T2)并原样重抛,其中包括 Interact 的 invalid_session 与
+      role_backend_rejected 拒绝;其余异常(含 timeout 用尽、role_backend_failure)不吞,run 保持 pending。
     - metric_stream_refs 与 on_step:逐步指标不进 git(补充 D.2),on_step 是调用方观察
       每一步的唯一出口;指标流文件本身由调用方写,只把引用交给这里记录。
     - policy_backend:说明这条记录的数据来自哪种后端(interact 才有)。只在构造新记录时写入;
@@ -311,9 +316,10 @@ def run_training(
         write_training_run(store, _failed(run, point, exc))
         raise
     except RolloutFailedError as exc:
-        # invalid_session 是请求本身有问题(服务端、客户端、轨迹源都写明重试无益):写 failed 保留。
-        # 其余 reason(timeout 用尽、role_backend_failure 分不出 T1/T2)不吞,run 保持 pending。
-        if exc.reason == "invalid_session":
+        # invalid_session(请求本身有问题)与 role_backend_rejected(对手 API 明确拒绝)都是重试无益的确定性拒绝:
+        # 写 failed 保留。其余 reason(timeout 与 role_backend_timeout 用尽、role_backend_failure 分不出 T1/T2)
+        # 不吞,run 保持 pending。
+        if exc.reason in _DETERMINISTIC_ROLLOUT_REASONS:
             write_training_run(store, _failed(run, point, exc))
         raise
 

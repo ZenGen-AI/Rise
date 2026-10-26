@@ -17,6 +17,7 @@ from factory.opponents import (
     ModelRefError,
     OpponentApiError,
     OpponentCredentialError,
+    OpponentRejectedError,
     OpponentTimeoutError,
     chat_messages,
     driver_for,
@@ -25,7 +26,7 @@ from factory.opponents import (
 )
 from factory.sombench_runner import EXPORT_FORMAT
 from simulator.datamodel import Persona, RoleBinding, RoleSlot, Scenario, TurnRecord
-from simulator.realtime.backend_timeout import RoleBackendTimeoutError
+from simulator.realtime.backend_timeout import RoleBackendRejectedError, RoleBackendTimeoutError
 
 SECRET = "sk-opponent-must-not-leak"
 
@@ -329,6 +330,43 @@ def test_a_non_200_status_is_an_api_error_naming_the_status(stub, status):
     with pytest.raises(OpponentApiError, match=str(status)) as info:
         _respond(_backend(stub.url))
     assert SECRET not in str(info.value)
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 422])
+def test_a_4xx_other_than_429_is_a_rejection_the_peer_will_repeat(stub, status):
+    """对端明确拒绝了请求(密钥不对、模型名不存在、请求体不合规):重试无益,归 OpponentRejectedError(T2)。
+    它仍是 OpponentApiError,训练位策略撞上时策略上下文照旧把它译成延后。"""
+    stub.script.append((status, json.dumps({"error": f"bad key {SECRET}"}).encode()))
+    with pytest.raises(OpponentRejectedError, match=str(status)) as info:
+        _respond(_backend(stub.url))
+    assert isinstance(info.value, OpponentApiError) and isinstance(info.value, RoleBackendRejectedError)
+    rendered = "".join(traceback.format_exception(info.value))
+    assert SECRET not in str(info.value) and SECRET not in rendered
+    assert info.value.__cause__ is None and info.value.__suppress_context__
+
+
+@pytest.mark.parametrize("status", [429, 500, 502, 503])
+def test_429_and_5xx_are_not_rejections(stub, status):
+    """429 是限流、5xx 是对端的毛病:都可能过一会儿就好,不能判成确定性拒绝。"""
+    stub.script.append((status, b"x"))
+    with pytest.raises(OpponentApiError, match=str(status)) as info:
+        _respond(_backend(stub.url))
+    assert not isinstance(info.value, (OpponentRejectedError, RoleBackendRejectedError))
+
+
+@pytest.mark.parametrize("script", [(200, b"not json"), (200, b"{}"), (302, b"", {"Location": "http://127.0.0.1:1/"})])
+def test_a_malformed_reply_or_a_redirect_is_not_a_rejection(stub, script):
+    stub.script.append(script)
+    with pytest.raises(OpponentApiError) as info:
+        _respond(_backend(stub.url))
+    assert not isinstance(info.value, (OpponentRejectedError, RoleBackendRejectedError))
+
+
+def test_post_chat_rejection_scrubs_the_key_from_a_label_that_carries_it(stub):
+    stub.script.append((401, b"x"))
+    with pytest.raises(OpponentRejectedError) as info:
+        post_chat(stub.url, "m1", SECRET, _msgs(), timeout_s=5.0, host_label=f"host-{SECRET}")
+    assert SECRET not in str(info.value) and "***" in str(info.value)
 
 
 def test_a_2xx_that_is_not_200_is_an_api_error(stub):

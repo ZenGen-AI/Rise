@@ -2,6 +2,7 @@ from simulator.datamodel import (
     Scenario, RoleSlot, Persona, RoleBinding, RoleAssignment,
 )
 from simulator.backends import ScriptedBackend
+from simulator.realtime.backend_timeout import RoleBackendRejectedError
 from simulator.realtime.driver import SessionDriver, DriverEvent
 from simulator.realtime.session import SessionState
 
@@ -86,6 +87,26 @@ def test_driver_role_backend_failure_transitions_to_failed():
     ev2 = driver.poll_event(timeout_s=2.0)
     assert ev2.kind == "failed"
     assert ev2.payload == "role_backend_failure"
+    assert driver.state == SessionState.FAILED
+
+
+def test_driver_role_backend_rejection_transitions_to_failed_with_its_own_reason():
+    """对端明确拒绝(RoleBackendRejectedError)不是通用的后端故障:单独的终止原因,轨迹源据此不重跑。"""
+    class RejectedBackend:
+        def respond(self, persona, scenario, history, speaker_slot):
+            raise RoleBackendRejectedError("the peer said no")
+
+    scenario, assignment, personas = _fixture(max_turns=2)
+    driver = SessionDriver(
+        scenario, assignment, personas,
+        server_backends={"b": RejectedBackend()},
+        client_driven_slot="a", episode_id="ep-3r", turn_timeout_s=2.0,
+    )
+    driver.start()
+    driver.submit_turn("candidate turn 1", None)
+    assert driver.poll_event(timeout_s=2.0).kind == "turn"
+    ev = driver.poll_event(timeout_s=2.0)
+    assert (ev.kind, ev.payload) == ("failed", "role_backend_rejected")
     assert driver.state == SessionState.FAILED
 
 
