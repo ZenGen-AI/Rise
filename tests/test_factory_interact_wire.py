@@ -668,6 +668,128 @@ def test_an_external_opponent_without_an_opponent_section_fails_the_directive(wo
             pytest.fail("the body must not run")
 
 
+# ---- 真推理的 rollout 失败不逃出两条通道(Ruling 27) ----
+
+import socket
+
+from controlplane.daemon import DeferralBook
+from controlplane.deferred import DeferredError
+from factory.opponents import OpponentApiError
+from mindtrainer.trajectory_source import RolloutFailedError
+
+DISPATCH_KEY = ("dispatch_directive", RUN)
+
+
+def _closed_port_url() -> str:
+    """一个刚释放、没人监听的本机端口:连上去立刻被拒,不等超时。"""
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return f"http://127.0.0.1:{s.getsockname()[1]}"
+
+
+def _ticks(store, tmp_path, *, ticks=1, until=None, **env) -> DeferralBook:
+    """装配一次,调和 ticks 轮(退避设为 0,每轮都到期)。reconcile_once 只接 DeferredError,
+    别的异常会从这里直接逃出来,所以调用本函数本身就是"守护进程没被杀死"的断言。"""
+    book = DeferralBook(default_backoff_s=0.0)
+    asm = assemble(store, FactoryOptions(interact=True, endpoint="gpu-2"), env=_env(tmp_path, **env))
+    try:
+        for _ in range(ticks):
+            reconcile_once(store, dispatcher=asm.dispatcher, deferrals=book)
+            if until is not None and until():
+                break
+    finally:
+        asm.close()
+    return book
+
+
+def _external_opponent_binding():
+    return [RoleBinding("a", "pa", "self_play"),
+            _opponent_binding(model_ref="gpt-x", driver="external_api", backend="external_api")]
+
+
+def test_an_opponent_that_cannot_be_reached_defers_the_directive_instead_of_killing_the_daemon(
+        world, tmp_path, stub, fake_serve):
+    """对手的 HTTP 失败 -> 服务端判 role_backend_failure -> 轨迹源抛 RolloutFailedError。过去它一路逃出调和循环。"""
+    write_config(world, training_defaults_file(), "training-defaults",
+                 _interact_defaults(base_url=_closed_port_url(), model="ext-model", api_key_env=OPP_KEY_ENV),
+                 "test: unreachable opponent")
+    _write_directive(world, bindings=_external_opponent_binding())
+    book = _ticks(world, tmp_path, **{OPP_KEY_ENV: OPP_KEY})
+    assert _read(world, "directive").status == "pending"
+    assert _read(world, "training_run").status == "pending"
+    assert book.streak(DISPATCH_KEY) == 1 and book.next_try(DISPATCH_KEY) is not None
+    assert fake_serve.trace == ["enter", "exit"]                      # 服务照常停了、租约照常放了
+
+
+def test_a_policy_that_cannot_reach_its_service_defers_the_directive(world, tmp_path, stub, monkeypatch):
+    """训练位自己的 respond 抛 OpponentApiError(轨迹源不包装策略异常),同样不该逃出去。"""
+    import factory.interact_policy as ip
+
+    monkeypatch.setattr(ip, "real_serve", FakeServe(_closed_port_url()))
+    _write_directive(world)
+    book = _ticks(world, tmp_path)
+    assert _read(world, "directive").status == "pending"
+    assert _read(world, "training_run").status == "pending"
+    assert book.streak(DISPATCH_KEY) == 1
+
+
+def test_an_invalid_session_still_fails_the_directive_this_tick(world, tmp_path, stub, fake_serve):
+    """invalid_session 是请求本身有问题:订单写 failed,派发器译成 T2,不进延后通道。"""
+    write_scenario(world, Scenario("t1", "bg", [RoleSlot("a", "a")], "c", ["n"], "training"))   # 缺 b 位
+    _write_directive(world)
+    book = _ticks(world, tmp_path)
+    directive = _read(world, "directive")
+    assert directive.status == "failed" and directive.payload["failure"]["category"] == "T2"
+    assert "invalid_session" in directive.payload["failure"]["reason"]
+    assert _read(world, "training_run").status == "failed"
+    assert book.streak(DISPATCH_KEY) == 0
+
+
+def test_a_run_that_keeps_failing_ends_in_t3_through_the_resume_budget(world, tmp_path, stub, fake_serve):
+    """延后通道不会让它无限转:每次重派 resume_attempts 加一,到 max_resume_attempts 由 decide_resume 升 T3。"""
+    write_config(world, training_defaults_file(), "training-defaults",
+                 _interact_defaults(base_url=_closed_port_url(), model="ext-model", api_key_env=OPP_KEY_ENV),
+                 "test: unreachable opponent")
+    _write_directive(world, bindings=_external_opponent_binding())
+    _ticks(world, tmp_path, ticks=10, until=lambda: _read(world, "directive").status == "failed",
+           **{OPP_KEY_ENV: OPP_KEY})
+    directive = _read(world, "directive")
+    assert directive.status == "failed" and directive.payload["failure"]["category"] == "T3"
+    assert "resume attempts exhausted" in directive.payload["failure"]["reason"]
+
+
+def _failed_rollout(reason: str, detail: str = "") -> RolloutFailedError:
+    return RolloutFailedError(scenario_id="t1", rollout=0, reason=reason, detail=detail, attempts=1, failed_attempts=[])
+
+
+@pytest.mark.parametrize("raised, expected", [
+    (_failed_rollout("role_backend_failure", "http://10.9.8.7:8000 refused"), "RolloutFailedError: role_backend_failure"),
+    (_failed_rollout("timeout"), "RolloutFailedError: timeout"),
+    (_failed_rollout("persistence_failed"), "RolloutFailedError: persistence_failed"),
+    (OpponentApiError("HTTP 500 from 10.9.8.7:8000"), "OpponentApiError"),
+])
+def test_the_deferral_reason_names_the_class_and_reason_but_not_the_message(world, tmp_path, stub, raised, expected):
+    from factory.interact_policy import RolloutDeferredError
+
+    _, _, factory, serve = _unit(world, tmp_path, stub)
+    with pytest.raises(RolloutDeferredError) as caught:
+        with factory(RUN, _cfg()):
+            raise raised
+    assert isinstance(caught.value, DeferredError)
+    assert expected in caught.value.reason and "10.9.8.7" not in caught.value.reason
+    assert caught.value.__cause__ is None and caught.value.__suppress_context__      # 原异常的文字不跟着回溯走
+    assert serve.trace == ["enter", "exit"]
+
+
+def test_an_invalid_session_rollout_failure_passes_through_the_policy_scope_unchanged(world, tmp_path, stub):
+    _, _, factory, _ = _unit(world, tmp_path, stub)
+    original = _failed_rollout("invalid_session", "bad persona")
+    with pytest.raises(RolloutFailedError) as caught:
+        with factory(RUN, _cfg()):
+            raise original
+    assert caught.value is original
+
+
 # ---------------- Part 4:装配期拒绝项(设计 90 §6.1 的十一条) ----------------
 # 每条:退出码 2、一行 `factory: error: ...` 点名缺什么、树里不写东西(没有新提交)。
 

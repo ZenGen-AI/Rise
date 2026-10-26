@@ -14,6 +14,10 @@
 异常分类:延后类(租约被占、服务起不来)原样上抛,走守护进程的延后通道;其余计算层错误、`ModelRefError`、
 `OpponentCredentialError` 都是确定性的,译成 `DirectiveFailedError`,原因点名异常类型与文字。
 这些异常的文字已经抹掉密钥(见 factory.opponents),凭证只报环境变量名。
+
+训练体里抛出的真推理失败也分两路(Ruling 27):`RolloutFailedError`(`invalid_session` 除外)与 `OpponentApiError`
+译成 `RolloutDeferredError`(`DeferredError` 的子类),走延后通道,指令保持 pending,守护进程不会被它带走。
+`invalid_session` 原样放行:编排器已把 training_run 写成 failed,派发器据此把指令判为 T2。
 """
 from __future__ import annotations
 
@@ -33,6 +37,7 @@ from factory.eval_config import DEFAULT_SERVE_PORT
 from factory.opponents import (
     ExternalApiBackend,
     ModelRefError,
+    OpponentApiError,
     OpponentCredentialError,
     driver_for,
     resolve_model_ref,
@@ -41,6 +46,7 @@ from factory.sombench_runner import EXPORT_FORMAT
 from factory.vllm_policy import POLICY_TIMEOUT_S, policy_context, vllm_opponent_factory
 from mindtrainer.dispatch import DirectiveFailedError
 from mindtrainer.training_config import TrainingConfig
+from mindtrainer.trajectory_source import RolloutFailedError
 from simulator.backends import ModelBackend, ScriptedBackend
 from simulator.datamodel import RoleBinding, Scenario
 
@@ -80,6 +86,21 @@ class OpponentSwitch:
 
 def _failed(run_id: str, exc: BaseException) -> DirectiveFailedError:
     return DirectiveFailedError(f"directive {run_id}: {type(exc).__name__}: {exc}")
+
+
+class RolloutDeferredError(DeferredError):
+    """真推理的 rollout 这一次没成(对手 API 或 vLLM 服务连不上、角色位后端出错、超时用尽、落盘失败):
+    指令保持 pending,守护进程按退避重试,不被它带走。
+
+    重试有界:training_run 此时仍是 pending,每次重派 `run_training` 先把 resume_attempts 加一并落盘,
+    到 `max_resume_attempts` 由 `decide_resume` 升级为 NeedsHumanError,派发器判 T3。所以一直失败的 run
+    最终是 T3,而不是无限退避。reason 只写原异常的类名与 reason 码,不带它的文字(文字里可能有远端地址)。"""
+
+
+def _rollout_deferral(exc: RolloutFailedError | OpponentApiError) -> RolloutDeferredError:
+    if isinstance(exc, RolloutFailedError):
+        return RolloutDeferredError(f"a real-inference rollout failed ({type(exc).__name__}: {exc.reason})")
+    return RolloutDeferredError(f"an opponent backend failed during a rollout ({type(exc).__name__})")
 
 
 def _is_adapter_export(ref: BigRef) -> bool:
@@ -229,7 +250,15 @@ def make_policy_factory(
                     runtime.register_session(sid, run_id)
                     registered.append(sid)
                 runtime.interact_deadline_s = cfg.max_turns_per_episode * PER_TURN_DEADLINE_S
-                yield policy
+                try:
+                    yield policy
+                except RolloutFailedError as exc:
+                    if exc.reason == "invalid_session":
+                        raise            # 请求本身有问题:编排器已写 failed,派发器判 T2
+                    # from None:异常文字(含服务端转述的细节)不跟着回溯走
+                    raise _rollout_deferral(exc) from None
+                except OpponentApiError as exc:
+                    raise _rollout_deferral(exc) from None
             finally:
                 for sid in registered:
                     runtime.unregister_session(sid)
