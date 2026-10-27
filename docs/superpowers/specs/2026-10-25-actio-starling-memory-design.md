@@ -303,14 +303,15 @@ class DeploymentMemoryStore(Protocol):     # 一个人格一个库,按人格 id 
 
 ```python
 class SessionResources:
-    backends: dict[str, ModelBackend]      # 角色位 -> 已套 TimeoutBackend 的后端
+    backends: dict[str, ModelBackend]      # 角色位 -> 未套期限的后端;servicer 拿到后再套 TimeoutBackend
     def quiesce(self) -> None: ...         # 拒绝新调用,之后的 respond 抛 SessionClosingError
     def join(self, timeout_s: float) -> bool: ...   # 等所有在途后端调用退出
-    def close(self) -> None: ...           # 关每个智能体的记忆,删副本目录
+    def close(self) -> None: ...           # 对每个智能体直接调 close(),不经包装层转发;再删副本目录
 ```
 
 - 所有权：工厂造出 `SessionResources` 交给 servicer；servicer 把 `backends` 给驱动器，自己持有资源对象直到流结束。驱动器只调后端，不持有资源。工厂返回之后、驱动器启动之前的任何失败（校验、缺后端、`start` 抛）都由 servicer 在同一个 `try` 里对资源做 `quiesce`、`join`、`close`；工厂自己抛异常时由工厂保证不留半开的库（先建所有库再返回，中途失败先关已开的）。
 - 准入：`CreateSession` 的处理在运行时的一把锁里做完三件事：检查“活动数加滞留数小于 `max_workers`”且 `episode_id` 没有活动会话，登记会话，然后才调工厂（M19）。工厂在锁外跑，失败时在同一把锁里撤销登记。
+- 谁套期限：servicer 拿到资源后给每个后端套 `TimeoutBackend` 再交驱动器，与现状同一处（`servicer.py:286`）。资源自己持有未套的智能体，所以 `close()` 直接调它们，包装层（期限、记忆异常转换）都不需要转发 `close`。
 - `TimeoutBackend` 改为登记在途线程：`respond` 开始时加入 `SessionResources` 的在途集合，结束时移出；超时只是调用方放弃等待，线程本身仍在集合里。
 - 驱动器进入终态（`CLOSED` 或 `FAILED`，含断开）后，由 servicer 在流结束的 `finally` 里按顺序调 `quiesce`、`join(timeout_s=60)`、`close`。
 - `join` 超时：**不 close、不删**。资源对象移交给 servicer 的滞留表（`EnvironmentServicer` 持有，准入检查就在 servicer 里做，回环服务端不经组合根就能测），并继续占住一个会话名额：servicer 的准入检查“活动会话数加滞留数小于 `max_workers`”不过就拒绝 `CreateSession`，终止原因 `role_backend_unavailable`（T1，客户端按条重跑）。滞留表每 60 秒重试一次 `join(0)`，成功后 close 并删目录。
