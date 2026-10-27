@@ -220,7 +220,7 @@ class DeploymentMemoryStore(Protocol):     # 一个人格一个库,按人格 id 
 |---|---|
 | `statements`、`statement_vectors`、`events` 三张表的全部列，减去排除清单；`events` 里 `abandoned` 行只计 `key` 与 `state` | 排除清单：`id`、`stmt_id`、`created_at`、`updated_at`、`last_accessed`、`access_count`、`last_replayed`、`replay_count`、`last_replay_batch_id`、`retry_count`、`last_attempt_at`、`embedded_at`、`inferred_at`；`supersedes_id`、`derived_from_json` 里的 UUID 换成被指向行的内容 id；其他所有表 |
 
-按排除清单而不是包含清单：加列默认进摘要，漏掉只会让摘要过敏感，不会让它漏变化。`activation` 进摘要（S18：重排器用它）。所有引用语句 UUID 的列（`supersedes_id`、`derived_from_json`、`events.statement_ids_json`、`statement_vectors.stmt_id` 的归属）在规范化时一律换成被指向语句的内容 id；指向不存在的语句时换成固定串 `missing`。每行按列名排序后规范化成 JSON，行之间按内容 id 排序，整体算 sha256。空库的摘要是固定值。向量进摘要是因为同一个模型名在外部端点上不保证给出同一向量。`TupleMemory.digest()` 对条目 `to_dict()` 去掉 `id` 后的排序列表加事件表算同样形状的 sha256。
+按排除清单而不是包含清单：加列默认进摘要，漏掉只会让摘要过敏感，不会让它漏变化。`activation` 进摘要（S18：重排器用它）。所有引用语句 UUID 的列（`supersedes_id`、`derived_from_json`、`events.statement_ids_json`、`statement_vectors.stmt_id` 的归属）在规范化时一律换成被指向语句的内容 id；指向不存在的语句时换成固定串 `missing`。每行按列名排序后规范化成 JSON，行之间按内容 id 排序，整体算 sha256。空库的摘要是固定值。向量进摘要是因为同一个模型名在外部端点上不保证给出同一向量。`TupleMemory.digest()` 对 `snapshot(entries)` 的结果（召回实际看到的条目，不是原始列表）逐条 `to_dict()` 去掉 `id` 后的排序列表加事件表算同样形状的 sha256。
 
 ### 4.6 激活轨迹
 
