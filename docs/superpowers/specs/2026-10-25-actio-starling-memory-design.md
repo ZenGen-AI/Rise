@@ -193,7 +193,7 @@ class DeploymentMemoryStore(Protocol):     # 一个人格一个库,按人格 id 
 
 - **读**：每次 `respond` 前，查询词是对方最后一句（现有 `_memory_query`），`limit` 默认 3。
 - **写**：每次 `respond` 后，把上次回复之后对方说的每句话按顺序交给 `remember`，然后 `embed_pending` 一次。不调 `tick`：后台维护的随机性与负载门控会让同一起点得到不同状态（S12）。
-- **事件身份**：`key` 是 `<逻辑 episode id>#<turn_index>`；部署的逻辑 episode id 前面再加轮次 id（`<round_id>/deploy-...`），因为部署库跨轮次持久，而 `deploy-{model}-{scenario}-{k}` 在下一轮会重复出现，不加就撞上上一轮已 `committed` 的同 key。`text` 是 `<说话方人格 id>：<utterance>`。逻辑 episode id 由客户端定（F21）：训练是 `{run}-{stage}-{scenario}-r{k}`，部署是 `deploy-{model}-{scenario}-{k}`，重试不变；它经 `CreateSession` 新增的 `episode_id` 字段传给服务端，服务端落盘的 episode 也用它当 id。`key` 作为前缀写进 Starling 的文本：`[<key>] <text>`，所以不同 episode 的同一句话是不同事件；同 key 的重写由 `events` 表拦下，不再调 `remember`。
+- **事件身份**：`key` 是 `<逻辑 episode id>#<turn_index>`；部署的事件 key 前面再加轮次 id，写成 `<round_id>/deploy-{model}-{scenario}-{k}#<turn_index>`，因为部署库跨轮次持久，而 `deploy-{model}-{scenario}-{k}` 在下一轮会重复出现，不加就撞上上一轮已 `committed` 的同 key。轮次前缀只进事件 key：`instantiate` 的 `episode_id` 参数收 `<round_id>/deploy-...`，交给服务端的 `CreateSession.episode_id` 与落盘文件名仍是不带轮次的 `deploy-...`（白名单不含 `/`）。`text` 是 `<说话方人格 id>：<utterance>`。逻辑 episode id 由客户端定（F21）：训练是 `{run}-{stage}-{scenario}-r{k}`，部署是 `deploy-{model}-{scenario}-{k}`，重试不变；它经 `CreateSession` 新增的 `episode_id` 字段传给服务端，服务端落盘的 episode 也用它当 id。`key` 作为前缀写进 Starling 的文本：`[<key>] <text>`，所以不同 episode 的同一句话是不同事件；同 key 的重写由 `events` 表拦下，不再调 `remember`。
 - **时钟**：`now` 由 `seq` 推出：`2026-01-01T00:00:00Z` 加 `seq` 秒。`seq` 存在 `events` 表所在的同一个 SQLite 库里，与写事件同一事务递增；训练副本从 0 起，部署库跨轮次单调。
 - **自己的话**：不写。它已在对话历史里。
 - **episode 内重试**：`remember` 的抽取失败在同一次 `respond` 里不重试；同一 episode 的下一次 `respond` 会把上次失败的那几句连同新发言一起再交给 `remember_event`（同 key 同文本，`pending` 行被推进）。`close()` 只关库，不放弃任何事件：放弃是终态，同 key 再写会抛 `EventConflict`，放早了就堵死重试。
