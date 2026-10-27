@@ -4,7 +4,8 @@
 respond 的参数与 ModelBackend 相同、返回三元组 (utterance, inner_thought, trace),
 所以 runner 可以直接把它当后端用(R12),MindAgent 的客户端循环也直接调用它。
 本模块不导入 simulator.backends:后端协议在这里按结构重新声明。
-记忆经 MemoryBackend 端口读(召回)与摘要;每次 respond 的轨迹都是 v2,带 memory 块。
+记忆经 MemoryBackend 端口读(召回)与摘要;非只读实例在回复之后把对方的新发言写进端口(remember,
+抽取失败在 episode 内重试一次)。每次 respond 的轨迹都是 v2,带 memory 块。
 """
 from __future__ import annotations
 
@@ -162,6 +163,8 @@ class ActioInstance:
         reply = self.backend.respond_guided(persona, scenario, deepcopy(history), speaker_slot, guidance)
         if not isinstance(reply, (tuple, list)) or len(reply) != 2:
             raise TypeError(f"guided backend must return (utterance, inner_thought), got {reply!r}")
+        if not self.replay_read_only:
+            self._remember_new(history, speaker_slot)
         trace = build_trace(
             signals=routed.signals,
             candidates=routed.candidates,
@@ -176,6 +179,43 @@ class ActioInstance:
             },
         )
         return reply[0], reply[1], trace
+
+    def _remember_new(self, history: list[TurnRecord], speaker_slot: str) -> None:
+        """写路径:先重试上一轮抽取失败的事件,再写 history 里对方的新发言,最后 embed_pending 一次。
+        事件 key 用 history 里的 turn_index 而不是实例计数:重放与断线重连后重建的 history 给出同一批 key,
+        端口的去重才拦得住。抽取失败只计数:来自旧重试表的丢掉(episode 内只重试一次,行留 pending,
+        由 MindAgent 在 episode 最终结束时处理),来自新发言的进下一轮的重试表。不调 tick。
+        状态在 remember 全部返回之后一次提交:中途抛出时 seen_turn、重试表与计数都不动,调用方重试
+        同一份 history 会重发同样的事件(同 key 同文本,端口幂等),不丢事件也不重复计数。"""
+        state = self._state
+        fresh: list[MemoryEvent] = []
+        for t in history:
+            if t.turn_index > state.seen_turn and t.speaker_slot != speaker_slot:
+                pid = self.interlocutors.get(t.speaker_slot, t.speaker_slot)
+                fresh.append(MemoryEvent(f"{self.episode_id}#{t.turn_index}", f"{pid}：{t.utterance}", pid))
+
+        def store(event: MemoryEvent) -> bool:
+            return _guard(lambda: self.memory.remember(event)).failed
+
+        remembered = failed = 0
+        retry: list[MemoryEvent] = []
+        for event in state.retry:
+            if store(event):
+                failed += 1
+            else:
+                remembered += 1
+        for event in fresh:
+            if store(event):
+                failed += 1
+                retry.append(event)
+            else:
+                remembered += 1
+        state.remembered += remembered
+        state.extraction_failed += failed
+        state.retry = tuple(retry)
+        if history:
+            state.seen_turn = max(t.turn_index for t in history)
+        _guard(self.memory.embed_pending)
 
     def close(self) -> None:
         """关掉记忆端口。不放弃任何事件:放弃由 MindAgent 在 episode 最终结束时经部署管理面做。"""

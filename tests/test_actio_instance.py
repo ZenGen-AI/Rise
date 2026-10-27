@@ -8,7 +8,7 @@ from actio.errors import ActioDataError
 from actio.experience import ReasoningExperience
 from actio.instance import IgnoreGuidance, as_guided, instantiate, render_guidance
 from actio.memory import FileTupleStore, MemoryEntry, TupleMemory, content_id
-from actio.memory_port import MemoryClosedError, MemoryFailureError, MemoryHit, RememberOutcome
+from actio.memory_port import MemoryClosedError, MemoryEvent, MemoryFailureError, MemoryHit, RememberOutcome
 from actio.signals import default_registry
 from actio.skills import Skill
 from actio.trace import (
@@ -378,9 +378,10 @@ def test_an_instance_over_a_file_port_reads_the_same_store_the_management_plane_
     store = FileTupleStore(tmp_path)
     store.remember_event("pa", "ep0:1", "对方担心预算", interlocutor="pb")
     inst = _ported(store.open("pa"), EchoGuidance())
+    before = store.digest("pa")  # 实例回复后会写库,摘要要在 respond 之前取
     _, _, trace = inst.respond(_persona(), _scenario(), [TurnRecord(0, "b", "预算呢")], "a")
     assert len(trace["memory_hits"]) == 1 and trace["memory_hits"][0].startswith("mem-")
-    assert trace["memory"]["digest_before"] == store.digest("pa")
+    assert trace["memory"]["digest_before"] == before
     validate_trace(trace)
     inst.close()
     inst.close()  # 再关一次是空操作
@@ -453,6 +454,112 @@ def test_a_custom_registry_signal_can_drive_a_skill():
     u, _, trace = inst.respond(_persona(), _scenario(), [TurnRecord(0, "b", "钱不够")], "a")
     assert trace["selected"] == "skill-calm"
     assert "mentions_money" in trace["signals"]
+
+
+# ---------------- 写路径 ----------------
+
+B0, A1, B2, A3, B4 = (TurnRecord(0, "b", "钱不够"), TurnRecord(1, "a", "嗯"), TurnRecord(2, "b", "预算呢"),
+                      TurnRecord(3, "a", "好"), TurnRecord(4, "b", "人手呢"))
+
+
+def _events(log):
+    return [entry[1] for entry in log if entry[0] == "remember"]
+
+
+def test_after_the_reply_each_new_opponent_turn_is_remembered_then_embedded_once():
+    log = []
+    inst = _ported(RecordingPort(log), LoggingBackend(log), episode_id="run-1-sft-sc-r0",
+                   interlocutors={"b": "pb"})
+    _, _, first = inst.respond(_persona(), _scenario(), [B0], "a")
+    assert [e[0] for e in log] == ["digest", "recall", "backend", "remember", "embed_pending"]
+    assert _events(log) == [MemoryEvent("run-1-sft-sc-r0#0", "pb：钱不够", "pb")]
+    log.clear()
+    _, _, second = inst.respond(_persona(), _scenario(), [B0, A1, B2], "a")
+    assert _events(log) == [MemoryEvent("run-1-sft-sc-r0#2", "pb：预算呢", "pb")]  # 自己的话与旧发言都不写
+    assert [e[0] for e in log][-1] == "embed_pending" and [e[0] for e in log].count("embed_pending") == 1
+    assert (first["memory"]["remembered"], second["memory"]["remembered"]) == ("1", "2")
+    assert second["memory"]["digest_before"] == f"{1:064x}"   # 本轮 recall 之前,含上一轮的写入
+
+
+def test_an_unmapped_slot_speaks_as_itself():
+    port = RecordingPort()
+    _ported(port, episode_id="ep").respond(_persona(), _scenario(), [B0], "a")
+    assert _events(port.log) == [MemoryEvent("ep#0", "b：钱不够", "b")]
+
+
+def test_the_turn_index_comes_from_history_not_from_a_counter():
+    port = RecordingPort()
+    _ported(port, episode_id="ep").respond(_persona(), _scenario(), [TurnRecord(7, "b", "钱不够")], "a")
+    assert _events(port.log)[0].key == "ep#7"
+
+
+def test_a_failed_extraction_is_counted_not_raised_and_retried_once_in_the_next_respond():
+    port = RecordingPort(fail_keys={"ep#0": 1})
+    inst = _ported(port, episode_id="ep")
+    _, _, t1 = inst.respond(_persona(), _scenario(), [B0], "a")
+    assert (t1["memory"]["remembered"], t1["memory"]["extraction_failed"]) == ("0", "1")
+    port.log.clear()
+    _, _, t2 = inst.respond(_persona(), _scenario(), [B0, A1, B2], "a")
+    assert [e.key for e in _events(port.log)] == ["ep#0", "ep#2"]       # 上次失败的在前,同 key 同文本
+    assert (t2["memory"]["remembered"], t2["memory"]["extraction_failed"]) == ("2", "1")
+
+
+def test_a_second_failure_is_counted_and_not_retried_again():
+    port = RecordingPort(fail_keys={"ep#0": 5})
+    inst = _ported(port, episode_id="ep")
+    inst.respond(_persona(), _scenario(), [B0], "a")
+    inst.respond(_persona(), _scenario(), [B0, A1, B2], "a")
+    port.log.clear()
+    _, _, t3 = inst.respond(_persona(), _scenario(), [B0, A1, B2, A3, B4], "a")
+    assert [e.key for e in _events(port.log)] == ["ep#4"]
+    assert (t3["memory"]["remembered"], t3["memory"]["extraction_failed"]) == ("2", "2")
+
+
+def test_a_read_only_instance_never_writes():
+    port = RecordingPort()
+    inst = _ported(port, replay_read_only=True)
+    _, _, t = inst.respond(_persona(), _scenario(), [B0], "a")
+    assert [e[0] for e in port.log] == ["digest", "recall"]
+    assert (t["memory"]["remembered"], t["memory"]["extraction_failed"]) == ("0", "0")
+    short = instantiate(EchoGuidance(), skills=[], memories=[], library_version=LV, profile=None)
+    short.respond(_persona(), _scenario(), [B0], "a")  # memories= 简写默认只读,不需要 episode_id
+
+
+@pytest.mark.parametrize("method", ["remember", "embed_pending"])
+def test_write_exceptions_become_memory_failures(method):
+    port = RecordingPort(raise_on={method: OSError("/secret/path")})
+    with pytest.raises(MemoryFailureError) as info:
+        _ported(port).respond(_persona(), _scenario(), [B0], "a")
+    assert info.value.transient is False and str(info.value) == "OSError"
+    transient = MemoryFailureError("embedding failed", transient=True)
+    port = RecordingPort(raise_on={method: transient})
+    with pytest.raises(MemoryFailureError) as info:
+        _ported(port).respond(_persona(), _scenario(), [B0], "a")
+    assert info.value is transient
+
+
+def test_a_write_that_raises_leaves_the_state_alone_so_the_same_history_is_resent():
+    port = RecordingPort(raise_on={"remember": OSError("boom")})
+    inst = _ported(port, episode_id="ep")
+    with pytest.raises(MemoryFailureError):
+        inst.respond(_persona(), _scenario(), [B0], "a")
+    port.raise_on.clear()
+    port.log.clear()
+    _, _, t = inst.respond(_persona(), _scenario(), [B0], "a")
+    assert [e.key for e in _events(port.log)] == ["ep#0"]  # 上次中途抛出,seen_turn 没前进,事件不丢
+    assert (t["memory"]["remembered"], t["memory"]["extraction_failed"]) == ("1", "0")  # 抛出那次不计数
+
+
+def test_with_the_file_store_the_round_prefixed_key_lands_and_close_abandons_nothing(tmp_path):
+    store = FileTupleStore(tmp_path, extraction_failure=lambda event: "timeout")
+    inst = instantiate(EchoGuidance(), skills=[], memory=store.open("pa"), episode_id="round-7/deploy-m-sc-0",
+                       interlocutors={"b": "pb"}, library_version=LV, profile=None)
+    _, _, t = inst.respond(_persona(), _scenario(), [B0], "a")
+    assert t["memory"]["extraction_failed"] == "1"
+    inst.close()
+    assert store.pending_events("pa") == ["round-7/deploy-m-sc-0#0"]  # close 只关库,不放弃
+    with pytest.raises(MemoryFailureError):
+        inst.respond(_persona(), _scenario(), [B0], "a")              # 端口已关:MemoryClosedError
 
 
 # ---------------- 依赖边界 ----------------
