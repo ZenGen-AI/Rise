@@ -196,9 +196,9 @@ factory 是组合根:系统里唯一知道所有包的地方。它把各子系�
 | `factory.defaults` | 默认诊断资产、评估器配置、部署素材、`install_defaults` | `diagnostic`、`simulator`、`trainplanner`、`trainscheduler` | [已落地] |
 | `factory.sombench` | `import-sombench` 子命令:读 SoMEval 检出目录里的 parquet,写分类表、题库与污染索引;pyarrow 在函数内惰性导入 | `diagnostic.assets`、`diagnostic.contamination` | [已落地] |
 | `factory.compute_config` | 读树内 `compute/endpoints.yaml` 出 `ComputeEndpoint` 列表,读本机主机映射出 `ComputeClient`;缺文件、键缺失或多余、取值不合、映射里查不到 `endpoint_id` 一律 `FactoryConfigError`,退出码 2,只写键名与路径,不回显取值 | `compute`、`factory.configio` | [已落地] |
-| `factory.interact_policy` | `--interact` 的策略工厂与对手切换 `OpponentSwitch`(`make_policy_factory`)[已落地]。改后每条 rollout 造一个训练位 Actio 实例并在退出时关闭。对手工厂给每个对手位包一层 Actio 实例。客户端等相邻两条服务端消息 90 秒(`_next_msg`),整条流按 `max_turns × 90` 兜底(`PER_TURN_DEADLINE_S` 取 90)。服务端等客户端一次提交的 `turn_timeout_s` 也取 90 秒。两个 90 秒方向相反、互不嵌套(施工时可能微调)[计划中] | `factory.opponents`、`factory.vllm_policy`、`factory.agent`、`actio`、`mindtrainer` | [已落地];记忆部分 [计划中] |
+| `factory.interact_policy` | `--interact` 的策略工厂与对手切换 `OpponentSwitch`(`make_policy_factory`)[已落地]。改后每条 rollout 造一个训练位 Actio 实例并在退出时关闭。对手工厂给每个对手位包一层 Actio 实例。客户端等相邻两条服务端消息 90 秒(`_next_msg`),整条流按 `max_turns × 90` 兜底(常量 `PER_TURN_DEADLINE_S` 取 90,移到轨迹源,经 `client_factory(deadline_s=)` 传)。服务端等客户端一次提交的 `turn_timeout_s` 也取 90 秒。本模块不再改写运行时的 `interact_deadline_s`,两开关同开时部署会话不借用训练的 deadline(施工时可能微调)[计划中] | `factory.opponents`、`factory.vllm_policy`、`factory.agent`、`actio`、`mindtrainer` | [已落地];记忆部分 [计划中] |
 | factory.memory_config | 读树外记忆配置、检查 `OPENAI_API_KEY` 非空与 `memory_library/` 为空、拒绝 editable 安装的 Starling、算记忆运行时身份;配置不在场返回替身记忆。造起点记忆解析函数 `memory_resolver`,按记忆配置在场与否选部署记忆管理面(FC-29)。提供清扫 `runs/` 的函数(FC-27)(施工时可能微调)[计划中] | `factory.configio`、`factory.errors`、`actio` | [计划中] |
-| factory.memory_translate | 转换后端:包在每个 Actio 实例外面,接住 actio 的 MemoryFailureError,按 `transient` 改抛本模块的两个异常。FactoryMemoryUnavailableError 继承 RoleMemoryUnavailableError(瞬态),FactoryMemoryFailureError 继承 RoleMemoryFailureError(确定性)。两个基类在 `src/simulator/realtime/backend_timeout.py`,所以 simulator 与 mindtrainer 不导入 actio(FC-30)(施工时可能微调)[计划中] | `actio`、`simulator.realtime`、`factory.errors` | [计划中] |
+| factory.memory_translate | 转换后端:包在每个 Actio 实例外面,接住 actio 的 MemoryFailureError,按 `transient` 改抛本模块的两个异常。FactoryMemoryUnavailableError 继承 RoleMemoryUnavailableError(瞬态),FactoryMemoryFailureError 继承 RoleMemoryFailureError(确定性)。两个基类在 `src/simulator/realtime/backend_timeout.py`,所以 simulator 与 mindtrainer 不导入 actio(FC-30)。查询词嵌入失败与 `embed_pending` 有嵌入失败都由 Starling 适配器译成瞬态 MemoryFailureError,不静默(施工时可能微调)[计划中] | `actio`、`simulator.realtime`、`factory.errors` | [计划中] |
 | `factory.vllm_policy`、`factory.opponents` | 现有 `VllmPolicy` 与 `ExternalApiBackend`;各补一个 `respond_guided`:指导语非空时追加到唯一的 system 消息末尾,以“当前要点:”起头,一行一条;连续两条 system 消息不是所有兼容端点都接受。训练位策略 HTTP 上限取 60 秒(`POLICY_TIMEOUT_S`)(施工时可能微调)[计划中] | `compute`、`simulator` | [已落地];`respond_guided` 与超时改动 [计划中] |
 
 两个入口脚本 `scripts/run_factory.py` 与 `scripts/run_factory_dev.py` 都是 `factory.cli` 的薄壳 [已落地]。前者默认不接受 mock 证据,后者对 `run`、`reconcile` 自动加 `--allow-mock-evidence`。
@@ -298,7 +298,7 @@ sampling_k: 4       # 整数,至少 1
 
 `agent.yaml` 的载荷必填三个键:`scenario_ids`、`bindings`(角色绑定字典的列表)、`opponent_lines`(对手台词列表)。可选键是 `AgentConfig` 的其余八个字段,缺省取它的默认值。未知键与类型错误都是装配错误,退出码 2 [已落地]。`install-defaults` 写入的默认值:三个部署情境 `factory-deploy-s1` 至 `s3`;`user` 位绑定 `frozen_reference`(`model_ref` 为 `zengen-v1`),`agent` 位绑定 `self_play`;对手台词三句;`max_turns` 为 4,`min_support` 为 3,`min_ratio` 为 0.5 [已落地]。
 
-`training_defaults.yaml` 的 `interact` 段增加必填键 `memory`,形如 `{seed}` [计划中]。`seed` 必填,可为 `null`,表示每个人格从空库出发。调度器把它写进指令配置时,`digests` 与 `runtime` 留空,派发时才算。
+`training_defaults.yaml` 的 `interact` 段增加必填键 `memory`,形如 `{seed}` [计划中]。`seed` 必填,可为 `null`,表示每个人格从空库出发。调度器把它写进指令配置时,`digests` 与 `runtime` 留空,派发时才算(称未解析;校验放行未解析的段,只填一半拒绝;解析后再校验一次)。
 
 所有 interact 角色位都是带记忆的 Actio 实例,每轮读写。所以没有"不用记忆"和"不写记忆"的开关(FC-26)。`interact` 段缺 `memory`,装配期由严格解析拒绝,与其他必填键同一口径。指令配置里缺 `memory` 的 interact 指令,在派发器的配置校验处判 T2,原因点名缺 `memory`;batch 配置带 `memory` 同样拒绝 [计划中]。
 
@@ -326,7 +326,7 @@ sampling_k: 4       # 整数,至少 1
 | `snapshots/<round_id>/<episode_id>-<persona_id>.db` | 某条部署 episode 的起点副本 | 跨重启保留;episode 落盘后删除,删除就是这条 episode 的提交 |
 | `snapshots/<round_id>/verify-<persona_id>.db` | 验证重放的快照 | 轮次结束即删 |
 
-一个记忆根目录只属于一个控制面仓库:根目录下的 `.owner` 文件记该仓库的绝对路径,首次使用时写入。装配期读到的路径与当前仓库不同,就退出码 2,信息写两个路径。否则两个仓库共用一个根目录时,部署记忆会混写,启动清扫也会删掉对方在途会话的副本 [计划中]。
+一个记忆根目录只属于一个控制面仓库:根目录下的 `.owner` 文件记该仓库的绝对路径,首次使用时以 `O_CREAT | O_EXCL` 原子创建,`FileExistsError` 时读回再比。装配期读到的路径与当前仓库不同,就退出码 2,信息写两个路径;两个仓库同时首次使用,只有一个能创建,另一个读到对方的路径而退出。否则两个仓库共用一个根目录时,部署记忆会混写,启动清扫也会删掉对方在途会话的副本 [计划中]。
 
 同一个人格在两个角色位同时出现时,两个位各开一份副本,互不可见。库必须与 Actio 实例同机,否则每轮 recall 都跨机往返;现状是全部组件一台机器,模拟器移到计算层之后,库跟着实例落在 GPU 主机上 `root` 指的目录。
 
@@ -367,11 +367,11 @@ sampling_k: 4       # 整数,至少 1
 10. `--evaluator someval` 要求本机评测配置在场、权限 0600、不在仓库目录里,且 SoMEval 检出目录与数据集哈希都对得上;缺一项退出码 2,不回显任何凭证取值(DX-20)。
 11. `--interact` 或 `--enable agent` 时读本机记忆配置,两个开关同开只读一次。环境变量 `RISMFORGE_MEMORY_CONFIG` 未设置即配置不在场(第 13 条)。已设置就必须指向仓库外的 0600 普通文件,键恰好是上表那几个;指向不存在的文件是装配错误,不静默退回替身 [计划中]。
 12. 装配期还查四件事 [计划中]:
-    - 配置在场时,记忆根目录的 `.owner` 记的仓库路径与当前仓库相同;首次使用时写入。不同就退出码 2,信息写两个路径(FC-28)。
+    - 配置在场时,记忆根目录的 `.owner` 记的仓库路径与当前仓库相同;首次使用时以 `O_CREAT | O_EXCL` 原子创建,`FileExistsError` 时读回再比。不同就退出码 2,信息写两个路径(FC-28)。
     - 产物树里的 `memory_library/` 为空,配置在不在场都查。非空拒绝启动并要求人工处理:它现在为空(MindAgent 从不生成记忆提案),`load_library` 不再读它,所以不做迁移。
     - 配置在场时,`OPENAI_API_KEY` 非空,报错只写变量名。
     - 配置在场时,Starling 不是 editable 安装:editable 的源码目录随时在变,运行时身份无从钉住。
-13. 记忆配置不在场(变量未设置)时,训练路与部署路都用替身记忆,并在启动日志写 `memory backend: stand-in`。替身路径的摘要是替身摘要、运行时身份的 `backend` 是 `stand-in`,所以之后换成真 Starling 也会改 `config_hash`,不会静默续训。部署路的替身是 FileTupleStore,条目与事件表存成 JSON 文件。它也落盘,根目录取控制面仓库之外的临时目录,不进产物树 [计划中]。
+13. 记忆配置不在场(变量未设置)时,训练路与部署路都用替身记忆,并在启动日志写 `memory backend: stand-in`。替身路径的摘要是替身摘要、运行时身份的 `backend` 是 `stand-in`,所以之后换成真 Starling 也会改 `config_hash`,不会静默续训。部署路的替身是 FileTupleStore,条目与事件表存成 JSON 文件。它也落盘,根目录是 `<git 目录>/rismforge-memory`(与 `rismforge.lock` 同处,不入树,跨重启保留)。不用临时目录:每次重启换一个空库,崩溃重入与门② 收录都会失效 [计划中]。
 14. 记忆配置要求 Starling 但环境没装它时,装配期退出码 2,信息说明 `pip install '.[memory]'`。不装 extra 的环境只跑替身路径,不会半路缺依赖 [计划中]。
 
 ## 5. 接口契约
@@ -467,7 +467,7 @@ TypeScript 命令行:`rismforge <review|approve|reject|confirm|status> [id] [rea
 | RecipeStore | `handle_admit_recipe`、`handle_record_track` [已落地] | 无 |
 | MindAgent | `make_start_round_handler`、`handle_admit_proposal` [已落地] | 实时客户端工厂、罐头后端、人格 loader;记忆装配后另要部署记忆管理面 DeploymentMemoryStore 与记忆运行时身份。配置在场用 StarlingDeploymentStore,不在场用 FileTupleStore(FC-29)。轮次处理器造出 make_instance,交给部署驱动器 [计划中] |
 | Actio | `instantiate(memory=..., replay_read_only=..., episode_id=...)`:构造带记忆端口的实例,`episode_id` 是逻辑 episode id、事件 key 的前缀,可写端口不给就抛 `ValueError`;`memories=` 保留为替身记忆的简写;部署记忆管理面 DeploymentMemoryStore,放在 `actio`,所以 MindAgent 不导入 `starling`;`memory_starling`:唯一导入 `starling` 的模块;激活轨迹模式 actio.trace.v2(施工时可能微调)[计划中] | 本机记忆配置、运行时身份、库目录与每条 rollout 的私有副本,由组合根装配 [计划中] |
-| Starling | 可选 extra `memory`(`starling-memory`,钉 git 提交)[计划中]。缺的公开接口经 PR 补进 Starling:`Memory.recall` 的 `holder`、嵌入器注入、`make_openai_embedder`、`embed_pending`、`digest`、`backup_to`、`close`、`remember_event`,以及事件表配套的 `next_seq`、`pending_events`、`abandon_event`(施工时可能微调)[计划中] | 无 |
+| Starling | 可选 extra `memory`(`starling-memory`,钉 git 提交)[计划中]。缺的公开接口经 PR 补进 Starling:`Memory.recall` 的 `holder`、`strict`(查询词嵌入失败抛 RecallDegradedError)、`include_volatile`(召回放宽到未巩固的 `volatile` 行);`Memory.open(embedder=)`、`make_openai_embedder`(带 `max_retries`);`embed_pending` 返回 EmbedStats;`digest`、`backup_to`、`close(timeout=)`;`remember_event` 带 `interlocutor` 与 `epoch`;事件表 `events` 加 `tenant_id`、`failure_category`,主键 `(tenant_id, key)`,配套 `next_seq`、`pending_events`、`abandon_event`(未知 key 抛 `KeyError`)。三段写入、摘要、备份、嵌入循环进 C++ 内核,Python 门面只转发;`[key] ` 文本前缀在 Starling 一侧加(施工时可能微调)[计划中] | 无 |
 | 外部推理桥接 | `CliBridge` [已落地] | `backends.yaml` 的 `planner`、`agent` 两个角色 |
 | 远端计算层 | `ComputeClient`;`--executor roll` 与 `--evaluator someval` 已在用 [已落地];`--interact` 的策略工厂经 `serve` 按指令起停 vLLM [已落地] | 无 |
 
@@ -542,10 +542,10 @@ TypeScript 命令行:`rismforge <review|approve|reject|confirm|status> [id] [rea
 | 与 `--evaluator someval` | `someval` 要求 `--executor roll`,而 `--interact` 与 `--executor roll` 互斥,所以两者无法同用 |
 | 策略工厂的形态 [计划中] | 交给派发器的策略工厂改为 `policy_for_rollout`:每条 rollout 进出一次,进入时造训练位 Actio 实例,退出时关闭。轨迹源在创建会话之前进入它,副本目录按逻辑 episode id 命名;策略返回三元组时,第三项作为激活轨迹随提交上行 |
 | 会话登记 [计划中] | 策略上下文登记的“情境 id 到 run id”只用于判定会话归属。后端工厂造资源时另把 `session_id` 到 run id 记进第二张表,终态时删除,落盘只查第二张表。所以策略上下文注销情境时,仍在跑的会话照样落到自己的 run。“情境 id 不得同时属于训练与部署”的检查保留 |
-| 记忆运行时身份 [计划中] | 装配期读本机记忆配置,算出记忆运行时身份(第 4 章)。派发时,策略上下文之前,按 `memory.seed` 为每个绑定人格打开起点库、算起点摘要。摘要与身份一起写回指令配置的 `memory` 块,之后才算 `config_hash`。训练记录的 `policy_backend` 带同一个 `memory` 块 |
+| 记忆运行时身份 [计划中] | 装配期读本机记忆配置,算出记忆运行时身份(第 4 章)。派发时,策略上下文之前,按 `memory.seed` 为每个绑定人格打开起点库、算起点摘要。摘要与身份一起写进本次派发的配置(不回写 `directive.yaml`),之后才算 `config_hash`。训练记录的 `policy_backend.memory` 带同一个块,读者由此看到记忆从哪来 |
 | 续训与替身 [计划中] | 续训时重算摘要与身份;种子库、Starling 版本、抽取或嵌入模型任一变了,哈希不同,升 T3。替身路径的 `backend` 是 `stand-in`,换成真 Starling 同样改哈希。判错的代价:哈希不变,续训的后半程与前半程就不是同一个实验 |
 | 每条 rollout 的私有副本 [计划中] | 每个角色位从起点库复制一份私有副本,用完即弃,见下表。同组 `group_size` 条 rollout 从同一份记忆出发,组内优势只反映策略;代价是记忆不在一条 run 内累积 |
-| 时间预算:等待上限 [计划中] | 客户端等相邻两条服务端消息 90 秒(`_next_msg`),超时视作 `timeout`(T1,按条重跑)并 abort 会话。整条流按 `max_turns × 90` 兜底,`PER_TURN_DEADLINE_S` 取 90 秒。服务端等一次提交的 `turn_timeout_s` 也取 90 秒。两个 90 秒方向相反、互不嵌套(FC-32):服务端等一次提交,客户端等相邻两条消息的间隔,一轮里有几个对手都不叠加。部署路(`--enable agent`)记忆配置在场时,服务端等提交取 40 秒,整条流按 `max_turns × 40` 秒折算(FC-31);替身时保持现值 5 秒与 15 秒 |
+| 时间预算:等待上限 [计划中] | 客户端等相邻两条服务端消息 90 秒(`_next_msg`),超时视作 `timeout`(T1,按条重跑)并 abort 会话。整条流按 `max_turns × 90` 兜底,由轨迹源经 `client_factory(deadline_s=)` 传(`PER_TURN_DEADLINE_S` 取 90 秒)。服务端等一次提交的 `turn_timeout_s` 也取 90 秒。两个 90 秒方向相反、互不嵌套(FC-32):服务端等一次提交,客户端等相邻两条消息的间隔,一轮里有几个对手都不叠加。部署路(`--enable agent`)记忆配置在场时,服务端等提交取 40 秒,整条流按 `max_turns × 40` 秒折算(FC-31);替身时保持现值 5 秒与 15 秒 |
 | 时间预算:内层与记忆 [计划中] | 训练位策略 HTTP 上限 60 秒(`POLICY_TIMEOUT_S`),服务端后端调用 60 秒,对手 HTTP 25 秒。记忆配置的 `timeout_ms` 默认 4000,`max_retries` 默认 0,两者都进运行时身份。一轮五次记忆网络调用,最坏合计 20 秒:召回嵌入一次,写入抽取三次,嵌入一批。对手一轮约 45 秒(HTTP 25 秒加 20 秒),低于服务端 60 秒;训练位一轮约 80 秒(HTTP 60 秒加 20 秒),低于 90 秒。外层上限高于内层最坏耗时,内层先超时,外层才看得到分类过的失败 |
 | 对手位包 Actio [计划中] | 三种驱动的对手后端都由对手工厂包进 Actio 实例;部署会话的对手位同样包(FC-25)。对手位的技能与经验为空:现阶段只有 MindAgent 产出技能,训练路不读技能库。对手的激活轨迹随落盘 episode 保存,不下发给训练位 |
 | 启动清扫 [计划中] | 清扫只删记忆根目录下 `runs/` 的子目录,不碰 `deploy/`、`seeds/`、`snapshots/`。`reconcile` 在装配前就取了仓库排他锁,装配里直接清扫。`run` 的装配在锁外,取锁发生在 `run_daemon` 里,所以清扫经它的新参数 `on_locked` 传入,在取锁之后、第一个 tick 之前调用。此刻本进程还没有会话,实时服务端在第一次需要会话时才起;别的进程被仓库锁挡在外面,根目录又只属于本仓库(FC-28),所以没有在途副本会被误删。运行中只删滞留表 join 成功的目录,不扫目录(FC-27) |
@@ -583,7 +583,7 @@ TypeScript 命令行:`rismforge <review|approve|reject|confirm|status> [id] [rea
 | 14 | [计划中] 产物树里的 `memory_library/` 为空,配置在不在场都查 | 旧目录不迁移,`load_library` 不再读它;非空就有记忆条目无人认领,拒绝启动并要求人工处理 |
 | 15 | [计划中] 记忆配置设置后,Starling 不是 editable 安装 | editable 安装的源码目录随时在变,运行时身份无从钉住 |
 | 16 | [计划中] 记忆配置设置后,Starling 已安装 | 配置要求 Starling 却没装它,信息说明 `pip install '.[memory]'`。不装 extra 的环境不设 `RISMFORGE_MEMORY_CONFIG` 就走替身路径 |
-| 17 | [计划中] 记忆配置设置后,记忆根目录的 `.owner` 记的是当前仓库;首次使用时写入 | 根目录属于别的仓库:两个仓库共用时部署记忆会混写,启动清扫会删掉对方在途会话的副本。信息写两个路径 |
+| 17 | [计划中] 记忆配置设置后,记忆根目录的 `.owner` 记的是当前仓库;首次使用时以 `O_CREAT | O_EXCL` 原子创建,两个仓库同时首次使用只有一个能创建 | 根目录属于别的仓库:两个仓库共用时部署记忆会混写,启动清扫会删掉对方在途会话的副本。信息写两个路径 |
 
 没点名时按 `data_spec` 的 `seed` 生成情境与人格,生成发生在派发时,装配期不检查。开关名、检查顺序与错误文字以 `src/factory/interact_checks.py` 为准;第 4、8 条由 `training_defaults.yaml` 的严格解析一并把关,先于第 2 条。
 
@@ -729,11 +729,11 @@ factory 是最后一个工作包,前八个全部落地后才能施工。
 | FC-25 | 对手位的三种驱动都由对手工厂包进 Actio 实例,`ExternalApiBackend` 改为每个会话新造一个;部署会话的对手位同样包,记忆是每会话一份空的替身记忆 [计划中] | 对手位保持裸后端;只给 `vllm` 驱动包 | 对手要靠记忆扮演某种人格的个体;共享的外部后端实例现在无害,因为它无状态。会话资源要有归属,所以每个会话各持一个 | 每轮多一次 recall 与 remember,会话变慢;`scripted` 的后端只有 `respond`,指导语被忽略,台词与现在逐字相同 |
 | FC-26 | interact 配置的 `memory` 必填,没有"不用记忆"和"不写记忆"的开关;记忆支持落地前写下的 pending interact run 在派发器的配置校验处判 T2,由人重开 [计划中] | `memory` 可选;留一个关写开关 | 记忆变了行为就变,可选就等于留了绕过记忆的口子;旧 run 的 rollout 没有记忆,续上去的有,不是同一个实验 | 落地前的 pending interact run 要人工重开 |
 | FC-27 | 每条 rollout 在起点库的私有副本上跑,用完即弃;清扫记忆根目录下 `runs/` 的子目录,只删这一处,不碰 `deploy/`、`seeds/`、`snapshots/`。`reconcile` 在装配里清扫,`run` 把清扫作为启动钩子传给 `run_daemon`,在它取到仓库排他锁之后、第一个 tick 之前调用。运行中只删已释放会话的目录 [计划中] | 同一 run 内共用一个库、记忆累积;运行中周期性扫目录;`run` 也在装配里清扫 | 同组 rollout 的起点相同,组内优势才只反映策略。`run` 的装配在取锁之前,装配里清扫会和另一个持锁进程抢删在途副本。钩子在锁内,本进程还没有会话,别的进程被仓库锁挡在外面,扫目录才安全。运行中扫会误删在用的库 | 记忆不在一条 run 内累积;`run` 要给 `run_daemon` 多开一个启动钩子参数;崩溃留下的副本到下一次 `run` 或 `reconcile` 取到锁时才清 |
-| FC-28 | 一个记忆根目录只属于一个控制面仓库:根目录下 `.owner` 文件记该仓库的绝对路径,首次使用时写入;装配期读到的路径与当前仓库不同,就退出码 2,信息写两个路径 [计划中] | 不记归属,靠使用者自觉;每个仓库在根目录下建自己的子目录 | 两个仓库共用一个根目录时,部署记忆会混写,启动清扫又会删掉对方在途会话的副本;仓库锁只挡同一个仓库的进程,挡不住另一个仓库的进程 | 换仓库路径(移动或重新克隆)后要人工改 `.owner` |
-| FC-29 | 组合根按记忆配置在场与否选部署记忆管理面:在场用 StarlingDeploymentStore,不在场用 FileTupleStore。FileTupleStore 把数据存成 JSON 文件,根目录取控制面仓库之外的临时目录。部署驱动器改收实例工厂 make_instance(episode_id, memory),组合根用模型后端工厂造出它,每次尝试新造一个实例 [计划中] | MindAgent 自己读配置、自己选实现;替身不落盘;驱动器仍收一个现成的实例 | 只有组合根读记忆配置;管理面在 `actio`,MindAgent 不导入 `starling`,依赖边界仍可扫描。替身也落盘,备份起点、成功后删副本的提交点协议在两种实现上一样成立。实例按 episode 新造,事件 key 才带各自的逻辑 episode id | 覆盖部署库必须先关实例与端口,驱动器要管实例的完整生命周期;替身路径多一个临时目录 |
+| FC-28 | 一个记忆根目录只属于一个控制面仓库:根目录下 `.owner` 文件记该仓库的绝对路径,首次使用时以 `O_CREAT | O_EXCL` 原子创建;装配期读到的路径与当前仓库不同,就退出码 2,信息写两个路径 [计划中] | 不记归属,靠使用者自觉;每个仓库在根目录下建自己的子目录 | 两个仓库共用一个根目录时,部署记忆会混写,启动清扫又会删掉对方在途会话的副本;仓库锁只挡同一个仓库的进程,挡不住另一个仓库的进程 | 换仓库路径(移动或重新克隆)后要人工改 `.owner` |
+| FC-29 | 组合根按记忆配置在场与否选部署记忆管理面:在场用 StarlingDeploymentStore,不在场用 FileTupleStore。FileTupleStore 把数据存成 JSON 文件,根目录是 `<git 目录>/rismforge-memory`,不是临时目录(重启要保留)。部署驱动器改收实例工厂 make_instance(episode_id, memory),组合根用模型后端工厂造出它,每次尝试新造一个实例 [计划中] | MindAgent 自己读配置、自己选实现;替身不落盘;驱动器仍收一个现成的实例 | 只有组合根读记忆配置;管理面在 `actio`,MindAgent 不导入 `starling`,依赖边界仍可扫描。替身也落盘,备份起点、成功后删副本的提交点协议在两种实现上一样成立。实例按 episode 新造,事件 key 才带各自的逻辑 episode id | 覆盖部署库必须先关实例与端口,驱动器要管实例的完整生命周期;替身路径多一个临时目录 |
 | FC-30 | 组合根给每个 Actio 实例外套转换后端(模块 factory.memory_translate),接住 actio 的 MemoryFailureError,按 `transient` 改抛两个 factory 异常子类。FactoryMemoryUnavailableError 继承 simulator 的 RoleMemoryUnavailableError(瞬态),FactoryMemoryFailureError 继承 RoleMemoryFailureError(确定性)。两个基类在 `src/simulator/realtime/backend_timeout.py` [计划中] | simulator 导入 actio 的异常;把记忆失败并进 `role_backend_failure` | simulator 与 mindtrainer 不导入 actio,只有组合根知道两边。并进 `role_backend_failure` 会被译成延后,确定性的故障反复重试,抽取端点的网络抖动又不该升人工 | 组合根多一层包装;分类依赖 actio 对 `transient` 的穷举映射 |
 | FC-31 | 部署路(`--enable agent`)的时间预算随记忆配置放宽。配置在场时,服务端等提交取 40 秒,整条流按 `max_turns × 40` 秒折算。替身时保持现值 5 秒与 15 秒 [计划中] | 部署路一律放宽;一律不变 | 部署现值是按罐头后端定的,罐头在 1 秒内返回;接上真记忆后每轮最坏多 20 秒。替身读本地文件、没有网络调用,放宽只会让超时检测变钝 | 真实模型接进部署路时要再按它的延迟加;不放宽,含网络记忆的部署会话会撞 5 秒超时,轮次判 `failed` |
-| FC-32 | `--interact` 的客户端新增消息间隔上限:等相邻两条服务端消息 90 秒(`_next_msg`),超时视作 `timeout`(T1,按条重跑)并 abort;整条流按 `max_turns × 90` 兜底,`PER_TURN_DEADLINE_S` 取 90。服务端等客户端一次提交的 `turn_timeout_s` 也取 90 秒。两个 90 秒方向相反、互不嵌套 [计划中] | 只靠整条流 deadline;两个超时取同一个计时器 | 现在客户端只有整条流的 deadline,服务端失联时要等满整条流。训练位一轮最坏约 80 秒,低于 90 秒,内层先超时,外层才看得到分类过的失败。每条对手发言都是一条消息,一轮里有几个对手都不叠加 | 真模型一轮超过 90 秒会判 `timeout` 重跑;客户端要用带超时的队列在接收线程里取消息 |
+| FC-32 | `--interact` 的客户端新增消息间隔上限:等相邻两条服务端消息 90 秒(`_next_msg`),超时视作 `timeout`(T1,按条重跑)并 abort;整条流按 `max_turns × 90` 兜底,由轨迹源经 `client_factory(deadline_s=)` 传。服务端等客户端一次提交的 `turn_timeout_s` 也取 90 秒。两个 90 秒方向相反、互不嵌套 [计划中] | 只靠整条流 deadline;两个超时取同一个计时器 | 现在客户端只有整条流的 deadline,服务端失联时要等满整条流。训练位一轮最坏约 80 秒,低于 90 秒,内层先超时,外层才看得到分类过的失败。每条对手发言都是一条消息,一轮里有几个对手都不叠加 | 真模型一轮超过 90 秒会判 `timeout` 重跑;客户端要用带超时的队列在接收线程里取消息 |
 
 ## 8. 失败处理与可观测
 
@@ -807,7 +807,7 @@ factory 是最后一个工作包,前八个全部落地后才能施工。
 | 跨工作包 | 共享用例表、分层规则、run 编号数值序 | 无 | `tests/test_factory_cross_plan.py`、`tests/test_factory_run_order.py` | 31、3 [已落地] |
 | `--interact` 装配 | 十一条拒绝项:第 3、9 条合用一组测试,第 10 条没有装配测试(钉住的是派发器的 `ValueError`),其余八条各有测试;打开后派发器带上实时客户端与策略工厂;真推理的 rollout 失败走延后通道、一直失败升 T3;不打开时 interact 指令的失败原因点名开关;收尾时服务停不下来判 T2;外部 API 对手超时或回 503 一次后整条重跑、一直回 503 时指令保持 `pending`、回 404 判 `failed`(T2);scripted 对手位没有台词时派发期判 T2;`opponent` 段在装配之后改了,下一条指令用新值,读不到或写坏了判 T2 且不带地址 | 假 serve、本机 HTTP 桩 | `tests/test_factory_interact_wire.py` | 89 [已落地] |
 | `--interact` 端到端 | `factory reconcile --once --interact` 走到候选 `pending_review`,episode 都在产物树里 | 假 vLLM(本地 HTTP 回固定文本)、mock 执行器 | `tests/test_factory_interact_e2e.py` | 2 [已落地] |
-| 记忆配置读取 | 文件不存在、权限过宽、路径在仓库里、缺键或多余键、地址带 userinfo。另有 `OPENAI_API_KEY` 为空、`memory_library/` 非空、editable 安装、要求 Starling 却未装、`.owner` 属于别的仓库。各自退出码 2,不回显取值;首次使用写入 `.owner` | 临时目录、临时仓库、假的安装元数据 | 施工时定 | [计划中] |
+| 记忆配置读取 | 文件不存在、权限过宽、路径在仓库里、缺键或多余键、地址带 userinfo。另有 `OPENAI_API_KEY` 为空、`memory_library/` 非空、editable 安装、要求 Starling 却未装、`.owner` 属于别的仓库。各自退出码 2,不回显取值;首次使用以 `O_CREAT | O_EXCL` 创建 `.owner`,并发首次使用只有一个成功 | 临时目录、临时仓库、假的安装元数据 | 施工时定 | [计划中] |
 | extra 缺失跳过 | 需要真 Starling 的用例在 extra 未装时跳过;真抽取与真嵌入不进测试 | 无 | 施工时定 | [计划中] |
 | 替身路径端到端 | `--interact` 一条 run:所有角色位都是带记忆的 Actio,episode 每轮带第二版激活轨迹,训练记录里有 `memory` 块;启动日志写 `memory backend: stand-in` | 本机 HTTP 替身 vLLM、替身记忆 | 施工时定 | [计划中] |
 | 部署路装配 | 记忆配置在场与否选 StarlingDeploymentStore 或 FileTupleStore;实例工厂按 episode 新造;部署会话的时间预算随配置取值(40 秒与 5 秒两档) | 假的安装元数据、FileTupleStore、临时目录 | 施工时定 | [计划中] |
@@ -845,7 +845,7 @@ factory 是最后一个工作包,前八个全部落地后才能施工。
 | 瞬态异常让进程退出 | 需要外部监督者,但没有任何工作包交付监督脚本、重启退避或崩溃计数;规划与轮次处理器在非桥接瞬态异常下没有重入次数上限,只有 MindTrainer 的续训次数有上限 | 调和循环无状态,重启从树续接 |
 | `logs` 看不到成功调用的桥接日志 | 只能看到失败记录登记的引用 | 直接看 `.rismforge/logs/<run>/` |
 | 默认诊断资产是一个一级维度、两道题的最小夹具 | 只证明流程,规划器只看到一个维度 | 换真实题库 |
-| 一条部署会话超过 15 秒即 `DEADLINE_EXCEEDED`;`--interact` 下流 deadline 改按 `max_turns × 30 秒` 算,提交上限传 30 秒 [已落地];记忆装配后改为客户端等相邻两条服务端消息 90 秒、整条流按 `max_turns × 90` 兜底 [计划中] | 轮次 `failed` | `AgentRuntime` 的 `interact_deadline_s` 是运行时属性,每条 interact 指令进出时设置并还原,不在 `agent.yaml` 里 [已落地]。部署路:记忆配置在场时服务端等提交 40 秒、整条流 `max_turns × 40` 秒,替身时保持 5 秒与 15 秒(FC-31)[计划中] |
+| 一条部署会话超过 15 秒即 `DEADLINE_EXCEEDED`;`--interact` 下流 deadline 改按 `max_turns × 30 秒` 算,提交上限传 30 秒 [已落地];记忆装配后改为客户端等相邻两条服务端消息 90 秒、整条流按 `max_turns × 90` 兜底 [计划中] | 轮次 `failed` | `AgentRuntime` 的 `interact_deadline_s` 是运行时属性,每条 interact 指令进出时设置并还原,不在 `agent.yaml` 里 [已落地];记忆装配后流 deadline 改由调用方经 `client_factory(deadline_s=)` 传,不再改写这个属性 [计划中]。部署路:记忆配置在场时服务端等提交 40 秒、整条流 `max_turns × 40` 秒,替身时保持 5 秒与 15 秒(FC-31)[计划中] |
 | Starling 未上 PyPI,只能源码或 git 安装 [计划中] | 源码构建依赖 C++ 工具链,本机一次约 179 秒(环境测量,不作预算依据);extra 要等 Starling 的 PR 合入才能钉提交 | 不装 extra 的环境走替身记忆,只测替身路径 |
 | 记忆库必须与 Actio 实例同机 [计划中] | 否则每轮 recall 都跨机往返;模拟器移到计算层后,记忆根目录在 GPU 主机上 | 记忆配置的 `root` 指本机目录 |
 | 挂死的对手后端会占住会话名额 [计划中] | 滞留数达 `max_workers` 时拒绝所有新会话;Python 的 daemon 线程杀不掉 | 日志每分钟报滞留数,由人重启进程 |
@@ -873,7 +873,7 @@ factory 是最后一个工作包,前八个全部落地后才能施工。
 | 真抽取与真嵌入的单次延迟是否在 4 秒内 [计划中] | 超时的抽取落成抽取失败;超时的召回让对手位一轮失败,按瞬态重跑 | 接真端点跑 10 轮,记每次召回、三段抽取与嵌入的耗时 |
 | 每会话开一份库对 GRPO 一步总时长的影响 [计划中] | 一步 `groups_per_step × group_size` 条 rollout 各开库、备份、删除 | 跑一步,计开库、备份、删除的总耗时 |
 | 外部端点同一模型名换了向量,摘要会变、续训升 T3,但旧向量不可复现 [计划中] | 要复现需缓存向量 | 观察一个月内同一端点的向量是否稳定,再决定要不要加向量缓存 |
-| 两个开关同开时服务端等提交取 90 秒 [计划中] | 部署会话只是多等,超时检测变钝;它的整条流 deadline 仍按 `max_turns × 40` 由部署驱动器自己设 | 写同开的装配测试,断言运行时的 `turn_timeout_s` 是 90 秒 |
+| 两个开关同开时服务端等提交取 90 秒 [计划中] | 部署会话只是多等,超时检测变钝。整条流 deadline 今天也只有一份,所以改为按调用方给:`client_factory(*, deadline_s=)`,轨迹源与部署驱动器各自传 `max_turns × 90` 与 `max_turns × 40` | 写同开的装配测试,断言运行时的 `turn_timeout_s` 是 90 秒 |
 | 起点库由旧版本 Starling 写下、新版本打开时能否打开 [计划中] | 种子库打不开则每条指令判 T2 | 在 Starling 的 PR 里加用例:旧版本库备份后用新版本打开 |
 | TypeScript 泛化只按测试文件的用例清单核对过 | 本次没有在 `cli/` 仓库里实跑 vitest,用例数按源码里的 `it(` 计 | 在仓库里跑一次 `npx vitest run` |
 
