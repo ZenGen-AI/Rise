@@ -212,6 +212,18 @@ def test_chat_messages_skips_empty_scenario_and_persona_fields():
     assert "None" not in messages[0]["content"] and "背景" not in messages[0]["content"]
 
 
+def test_chat_messages_appends_guidance_to_the_only_system_message():
+    history = [TurnRecord(0, "a", "你好")]
+    plain = chat_messages(_persona(), _scenario(), history, "b")
+    guided = chat_messages(_persona(), _scenario(), history, "b",
+                           ["[skill:s1] 先复述对方", "[memory:mem-0123456789abcdef] 对方上周迟到"])
+    assert [m["role"] for m in guided].count("system") == 1
+    assert guided[0]["content"] == (
+        plain[0]["content"] + "\n当前要点：\n[skill:s1] 先复述对方\n[memory:mem-0123456789abcdef] 对方上周迟到"
+    )
+    assert guided[1:] == plain[1:]
+
+
 # ---------------- ExternalApiBackend:本机 http.server 桩 ----------------
 
 class _Stub:
@@ -325,6 +337,26 @@ def test_the_request_is_a_chat_completions_post_with_a_bearer_header(stub):
     body = json.loads(request["body"])
     assert body["model"] == "gpt-x"
     assert body["messages"] == chat_messages(_persona(), _scenario(), [TurnRecord(0, "a", "你好")], "b")
+
+
+def test_empty_guidance_is_byte_identical_to_respond(stub):
+    stub.script += [_ok("甲"), _ok("甲")]
+    backend = _backend(stub.url)
+    history = [TurnRecord(0, "a", "你好")]
+    assert backend.respond(_persona(), _scenario(), history, "b") == ("甲", None)
+    assert backend.respond_guided(_persona(), _scenario(), history, "b", []) == ("甲", None)
+    first, second = stub.requests
+    assert first["body"] == second["body"]          # 原始请求体逐字节相同
+
+
+def test_external_api_respond_guided_posts_one_system_message_with_the_guidance(stub):
+    stub.script.append(_ok("乙"))
+    backend = _backend(stub.url)
+    assert backend.respond_guided(_persona(), _scenario(), [TurnRecord(0, "a", "你好")], "b",
+                                  ["[skill:s1] 先复述对方"]) == ("乙", None)
+    messages = json.loads(stub.requests[0]["body"])["messages"]
+    assert [m["role"] for m in messages].count("system") == 1
+    assert messages[0]["content"].endswith("\n当前要点：\n[skill:s1] 先复述对方")
 
 
 @pytest.mark.parametrize("status", [400, 401, 429, 500, 503])

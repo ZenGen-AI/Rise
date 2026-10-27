@@ -51,9 +51,20 @@ class VllmPolicy:
         history: list[TurnRecord],
         speaker_slot: str,
     ) -> tuple[str, str | None]:
+        return self.respond_guided(persona, scenario, history, speaker_slot, ())
+
+    def respond_guided(
+        self,
+        persona: Persona,
+        scenario: Scenario,
+        history: list[TurnRecord],
+        speaker_slot: str,
+        guidance: Sequence[str],
+    ) -> tuple[str, str | None]:
+        """带指导语的发言:guidance 并入 system 消息(见 chat_messages),其余与 respond 同一条路径。"""
         content = post_chat(
             self.handle.base_url, self._model, self.handle.api_key,
-            chat_messages(persona, scenario, history, speaker_slot),
+            chat_messages(persona, scenario, history, speaker_slot, guidance),
             timeout_s=self._timeout, host_label=self._label,
         )
         return content, None

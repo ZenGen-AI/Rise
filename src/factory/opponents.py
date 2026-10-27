@@ -16,6 +16,7 @@ import math
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Sequence
 
 from controlplane.envelope import BigRef, InvalidBigRefError
 from controlplane.gitstore import UNREADABLE_PRODUCT_ERRORS, GitStore
@@ -138,11 +139,20 @@ def resolve_model_ref(store: GitStore, model_ref: str) -> BigRef:
 
 # ---------------- 对话消息 ----------------
 
-def chat_messages(persona: Persona, scenario: Scenario, history: list[TurnRecord], speaker_slot: str) -> list[dict]:
+def chat_messages(
+    persona: Persona,
+    scenario: Scenario,
+    history: list[TurnRecord],
+    speaker_slot: str,
+    guidance: Sequence[str] = (),
+) -> list[dict]:
     """给聊天补全接口的消息:一条 system(人格与情境),历史里每个回合一条:说话者自己的发言是 assistant
     (vLLM 的聊天模板把模型自己说过的话放在 assistant 轮,不带前缀),别人的发言是 user(前缀说话的角色位)。
     只放话语,不放内心独白与激活轨迹(那是评估材料,不是对手该看见的)。
-    历史为空、或第一条就是自己的发言时,先补一条开场的 user:有的聊天模板要求 user 轮打头。"""
+    历史为空、或第一条就是自己的发言时,先补一条开场的 user:有的聊天模板要求 user 轮打头。
+
+    guidance 非空时(Actio 给的技能、经验与记忆要点,每条一行),并入同一条 system 文本的末尾,
+    前面加「当前要点：」(全角冒号);仍只有一条 system。空时不碰 system 文本,请求体与不带指导语时逐字节相同。"""
     role = next((r.description for r in scenario.role_slots if r.slot_id == speaker_slot), "")
     lines = [f"你在一段社会情境对话里扮演角色位「{speaker_slot}」" + (f"({role})。" if role else "。")]
     if scenario.background:
@@ -159,7 +169,10 @@ def chat_messages(persona: Persona, scenario: Scenario, history: list[TurnRecord
     if described:
         lines.append("你的人格——" + ";".join(described))
     lines.append("只说出你这一轮要说的话,不要加角色名前缀,不要解释。")
-    messages = [{"role": "system", "content": "\n".join(lines)}]
+    system_text = "\n".join(lines)
+    if guidance:
+        system_text += "\n当前要点：\n" + "\n".join(guidance)
+    messages = [{"role": "system", "content": system_text}]
     if not history or history[0].speaker_slot == speaker_slot:
         messages.append({"role": "user", "content": "对话刚开始,请你先开口。"})
     for turn in history:
@@ -311,9 +324,20 @@ class ExternalApiBackend:
         history: list[TurnRecord],
         speaker_slot: str,
     ) -> tuple[str, str | None]:
+        return self.respond_guided(persona, scenario, history, speaker_slot, ())
+
+    def respond_guided(
+        self,
+        persona: Persona,
+        scenario: Scenario,
+        history: list[TurnRecord],
+        speaker_slot: str,
+        guidance: Sequence[str],
+    ) -> tuple[str, str | None]:
+        """带指导语的发言:guidance 并入 system 消息(见 chat_messages),其余与 respond 同一条路径。"""
         content = post_chat(
             self._base_url, self._model, self._api_key,
-            chat_messages(persona, scenario, history, speaker_slot),
+            chat_messages(persona, scenario, history, speaker_slot, guidance),
             timeout_s=self._timeout, host_label=self._host,
         )
         return content, None

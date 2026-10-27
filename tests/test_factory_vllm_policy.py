@@ -153,6 +153,18 @@ def test_the_trained_policy_posts_the_trained_adapter_as_the_model(stub):
     assert body["messages"] == chat_messages(_persona(), _scenario(), HISTORY, "b")
 
 
+def test_the_policy_respond_guided_appends_guidance_and_empty_guidance_matches_respond(stub):
+    stub.script += [_ok("好吧"), _ok("好吧"), _ok("好吧")]
+    with _context(FakeServe(stub.url)) as policy:
+        policy.respond(_persona(), _scenario(), HISTORY, "b")
+        policy.respond_guided(_persona(), _scenario(), HISTORY, "b", [])
+        policy.respond_guided(_persona(), _scenario(), HISTORY, "b", ["[skill:s1] 先复述对方"])
+    plain, empty, guided = stub.requests
+    assert plain["body"] == empty["body"]
+    assert stub.bodies()[2]["messages"] == chat_messages(
+        _persona(), _scenario(), HISTORY, "b", ["[skill:s1] 先复述对方"])
+
+
 def test_without_a_trained_adapter_the_policy_posts_the_base_model_name(stub):
     stub.script.append(_ok())
     with _context(FakeServe(stub.url), adapters=(), trained_adapter=None) as policy:
