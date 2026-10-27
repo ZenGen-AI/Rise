@@ -1,0 +1,54 @@
+import dataclasses
+
+import pytest
+
+from actio.errors import ActioDataError
+from actio.memory_port import (
+    DeploymentMemoryStore, MemoryBackend, MemoryClosedError, MemoryEvent, MemoryEventConflict,
+    MemoryFailureError, MemoryHit, RememberOutcome,
+)
+
+
+def test_port_value_types_are_frozen_with_exact_fields():
+    assert [f.name for f in dataclasses.fields(MemoryHit)] == ["id", "text"]
+    assert [f.name for f in dataclasses.fields(MemoryEvent)] == ["key", "text", "interlocutor"]  # 没有 seq
+    assert [f.name for f in dataclasses.fields(RememberOutcome)] == ["stored", "failed", "category"]
+    for value in (MemoryHit("mem-a", "pb: x"), MemoryEvent("ep#0", "pb：x", "pb"),
+                  RememberOutcome(("mem-a",), False, None)):
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            setattr(value, dataclasses.fields(value)[0].name, "y")
+
+
+def test_memory_failure_is_its_own_exception_and_carries_transient():
+    exc = MemoryFailureError("RecallDegradedError", transient=True)
+    assert exc.transient is True and str(exc) == "RecallDegradedError"
+    assert not isinstance(exc, ActioDataError) and not isinstance(exc, ValueError)
+    with pytest.raises(TypeError):
+        MemoryFailureError("x")  # transient 必须显式给
+
+
+@pytest.mark.parametrize("cls", [MemoryEventConflict, MemoryClosedError])
+def test_conflict_and_closed_are_never_transient(cls):
+    exc = cls("x")
+    assert isinstance(exc, MemoryFailureError) and exc.transient is False
+
+
+def test_both_protocols_are_checked_by_method_names():
+    class Port:
+        def recall(self, query, *, limit): return []
+        def remember(self, event): return RememberOutcome((), False, None)
+        def embed_pending(self): return 0
+        def digest(self): return "0" * 64
+        def close(self): return None
+
+    class Store:
+        def open(self, persona_id): return Port()
+        def remember_event(self, persona_id, key, text, *, interlocutor): ...
+        def abandon_event(self, persona_id, key): ...
+        def pending_events(self, persona_id): return []
+        def backup_to(self, persona_id, path): return ""
+        def restore_from(self, persona_id, path): return ""
+        def digest(self, persona_id): return ""
+
+    assert isinstance(Port(), MemoryBackend) and not isinstance(object(), MemoryBackend)
+    assert isinstance(Store(), DeploymentMemoryStore) and not isinstance(Port(), DeploymentMemoryStore)

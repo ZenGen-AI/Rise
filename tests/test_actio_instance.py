@@ -255,7 +255,7 @@ def _imports(path):
             yield node.module
 
 
-_ALLOWED = ("actio", "simulator.datamodel", "__future__", "copy", "dataclasses", "re", "typing")
+_ALLOWED = ("actio", "simulator.datamodel", "__future__", "copy", "dataclasses", "pathlib", "re", "typing")
 
 
 def _allowed(mod):
