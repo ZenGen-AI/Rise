@@ -3,7 +3,7 @@
 | 项 | 内容 |
 |---|---|
 | 一句话 | 把技能、推理经验与记忆渲染成指导语交给模型后端,每次响应附带激活轨迹 |
-| 状态 | [已落地]:技能、推理经验、记忆、激活轨迹与协议打通,十一个源文件,185 个用例;MindAgent 部署驱动器已装配实例,但默认入口用的仍是罐头后端,真实模型是否遵循指导语未核实,见「现状」。设计二 [计划中]:记忆改经记忆端口访问,生产实现是 Starling 适配器,替身是内存元组;每轮回复前 recall、回复后 remember 再只做嵌入;激活轨迹升到 actio.trace.v2;新增 `memory_port`、`memory_starling` 两个源文件 |
+| 状态 | [已落地]:技能、推理经验、记忆、激活轨迹与协议打通,十一个源文件,185 个用例;MindAgent 部署驱动器已装配实例,但默认入口用的仍是罐头后端,真实模型是否遵循指导语未核实,见「现状」。设计二 [计划中]:记忆改经记忆端口访问,生产实现是 Starling 适配器,替身是内存元组;每轮回复前 recall、回复后 remember 再只做嵌入;激活轨迹升到 actio.trace.v2;部署记忆另有只给 MindAgent 的管理面,同样有替身与 Starling 两个实现;新增 `memory_port`、`memory_starling` 两个源文件 |
 | 所在层 | 共享基础设施 |
 | 代码位置 | `src/actio` [已落地];协议改动在 `src/simulator/realtime` 与 `src/simulator/runner.py`;记忆端口 `src/actio/memory_port.py` 与 Starling 适配器 `src/actio/memory_starling.py` [计划中] |
 | 基线提交 | `b826440`(2026-10-21) |
@@ -72,7 +72,7 @@ Actio 不读写产物树。技能库由 MindAgent 读出来传给它,记忆端�
 <!-- figure:begin 40-actio-context -->
 ![Actio 的上下文](diagrams/40-actio-context.svg)
 
-**图 1　Actio 的上下文**　SocialSimulator 的运行器与 MindAgent 的客户端循环都实例化 Actio 并调用 respond。Actio 把技能、经验与记忆渲染成指导语交给模型后端,包外只导入 simulator.datamodel。技能库由 MindAgent 读入后传给 Actio,Actio 自己不读产物树。记忆经记忆端口读写 Starling 的树外 SQLite 库,Starling 是可选依赖。
+**图 1　Actio 的上下文**　SocialSimulator 的运行器把实例当后端调用,MindAgent 的客户端循环实例化 Actio 并调用 respond,factory 组合根构造训练路的实例。Actio 把技能、经验与记忆渲染成指导语交给模型后端,包外只导入 simulator.datamodel。技能库由 MindAgent 读入后传给 Actio,Actio 自己不读产物树。记忆经记忆端口读写 Starling 的树外 SQLite 库,Starling 是可选依赖。
 
 <details>
 <summary>文字版:图中的节点与连线</summary>
@@ -86,15 +86,17 @@ Actio 不读写产物树。技能库由 MindAgent 读出来传给它,记忆端�
 - 模型后端:respond 或 respond_guided / 测试用罐头后端
 - Starling 记忆库:每个人格一个 SQLite 库(树外) / 可选依赖 extra memory
 - 技能库:skill_library/ / 由 MindAgent 读写
+- factory 组合根:构造训练路的全部实例 / 训练位 · 对手位
 
 **连线**
 
-- SocialSimulator → Actio:runner 把实例当后端
+- SocialSimulator → Actio:运行器把实例当后端调用
 - MindAgent → Actio:instantiate · respond
 - MindAgent ↔ SocialSimulator:② submit_turn 带轨迹
 - Actio → 模型后端:指导语 + history 副本
 - Actio ↔ Starling 记忆库:recall · remember
 - Actio → simulator.datamodel:唯一的包外导入
+- factory 组合根 → Actio
 - 技能库 → MindAgent:读入条目与库版本
 
 </details>
@@ -103,7 +105,7 @@ Actio 不读写产物树。技能库由 MindAgent 读出来传给它,记忆端�
 读图说明:
 
 - MindAgent 读入技能库的条目和库版本,调用 `instantiate` 组装实例,再逐轮调用 `respond` [已落地]。
-- SocialSimulator 的运行器 `run_episode` 可以直接把实例当后端,因为 `respond` 的参数与 `ModelBackend` 相同。
+- SocialSimulator 的运行器 `run_episode` 把实例当后端调用,因为 `respond` 的参数与 `ModelBackend` 相同。训练路的实例由 factory 组合根构造 [计划中]。
 - Actio 只向模型后端输出指导语列表与 history 的深拷贝;项目内的包外导入只有 `simulator.datamodel` 一处。
 - 记忆经记忆端口读写:每轮 recall 在回复前,remember 在回复后。生产实现是 Starling 适配器,库文件在仓库之外,Starling 是可选 extra [计划中]。
 - MindAgent 与 SocialSimulator 之间的受限直连接口②经 `submit_turn` 携带轨迹,不经过 Actio。
@@ -130,7 +132,7 @@ Actio 的 V1 按规则选技能、经记忆端口取记忆、把选择写进轨�
 | 项 | 状态 | V1 的处理 |
 |---|---|---|
 | 技能库的产物读写、`library_state` | 不在本包 | 由 MindAgent 的收录处理器读写,本包只给字典形状 |
-| 记忆库文件的创建、副本、清扫 | 不在本包 | 由 factory 与 MindAgent 管,Actio 只持有端口并在 `close` 时转发 [计划中] |
+| 记忆库文件的创建、副本、清扫 | 不在本包 | 由 factory 与 MindAgent 管,MindAgent 经本包的部署记忆管理面操作部署库,实例只持有端口并在 `close` 时转发 [计划中] |
 | 语义检索、近义词匹配 | 由 Starling 提供 [计划中] | 替身仍只做词面重叠与二字切分 |
 | 记忆按主体过滤 | [推迟] | 替身的 `retrieve` 支持 `subjects` 参数,实例不传;Starling 路径一个人格一个库,靠文件隔离 |
 | `profile` 参与决策 | [推迟] | 只深拷贝保存 |
@@ -201,7 +203,7 @@ Actio 是十一个源文件的纯 Python 包,`instance` 在顶,`text` 在底,依
 - `instance.py` 编排一次响应,它导入技能、经验、记忆、记忆端口、轨迹五个模块。
 - 技能与经验共用 `triggers.py` 的谓词语言,谓词里的信号来自 `signals.py`。
 - `signals.py` 与 `memory.py` 都用 `text.py` 切词面。
-- `memory_port.py` 只定义协议与数据类型,不依赖任何实现。`memory.py` 里的 TupleMemory 与 `memory_starling.py` 里的 StarlingMemory 是它的两个实现 [计划中]。
+- `memory_port.py` 只定义协议与数据类型,不依赖任何实现。`memory.py` 里的 TupleMemory 与 `memory_starling.py` 里的 StarlingMemory 是端口的两个实现。部署记忆管理面也有两个实现:FileTupleStore 在 `memory.py`,StarlingDeploymentStore 在 `memory_starling.py` [计划中]。
 - 只有 `memory_starling.py` 导入第三方包 `starling`。图里 `memory_starling` 只画了导入 `memory_port` 与 `starling` 两条线,它对 `errors` 的导入与其他模块一样从略。
 - `errors.py` 与 `_check.py` 被各模块导入,图里不画连线。项目内的包外依赖只有 `simulator.datamodel`,已落地。`signals`、`triggers`、`skills`、`experience`、`instance` 五个模块都导入它,图里只画了 `signals` 一条,其余从略。
 - 第三方依赖只有 `starling`,只被 `memory_starling.py` 导入 [计划中]。
@@ -216,9 +218,9 @@ Actio 是十一个源文件的纯 Python 包,`instance` 在顶,`text` 在底,依
 | `actio/signals.py` | `SignalRegistry` 与三个内置信号 | `text`、`simulator.datamodel` | [已落地] |
 | `actio/triggers.py` | 五算子谓词语言:校验、求值、`referenced_signals` | `signals`、`simulator.datamodel` | [已落地] |
 | `actio/skills.py` | `Skill`、`route`、`check_library` | `triggers`、`_check`、`simulator.datamodel` | [已落地] |
-| `actio/memory.py` | `MemoryEntry`、`snapshot`、`retrieve`;TupleMemory:包 `MemoryEntry` 元组与 `retrieve` 的替身记忆 | `text`、`_check`;替身另依赖 `memory_port` | [已落地];TupleMemory [计划中] |
-| `actio/memory_port.py` | 记忆端口:MemoryBackend 协议、MemoryHit、MemoryEvent、RememberOutcome、MemoryFailureError、MemoryEventConflict、MemoryClosedError。放独立文件而不是并进 `memory.py`,因为适配器与替身都依赖它,并进去会让适配器导入 `MemoryEntry` 的校验链 | `errors` | [计划中] |
-| `actio/memory_starling.py` | StarlingMemory:包一个 `starling.Memory`,把 Starling 的行渲染成 MemoryHit,把 Starling 的失败按穷举映射成 MemoryFailureError。唯一导入 `starling` 的文件 | `memory_port`、`errors`、第三方包 `starling` | [计划中] |
+| `actio/memory.py` | `MemoryEntry`、`snapshot`、`retrieve`;TupleMemory:包 `MemoryEntry` 元组与 `retrieve` 的替身记忆;FileTupleStore:部署记忆管理面的替身实现,条目与事件表存成 JSON 文件 | `text`、`_check`;替身另依赖 `memory_port` | [已落地];TupleMemory、FileTupleStore [计划中] |
+| `actio/memory_port.py` | 记忆端口:MemoryBackend 协议、MemoryHit、MemoryEvent、RememberOutcome、MemoryFailureError、MemoryEventConflict、MemoryClosedError,以及部署记忆管理面协议 DeploymentMemoryStore。放独立文件而不是并进 `memory.py`,因为适配器与替身都依赖它,并进去会让适配器导入 `MemoryEntry` 的校验链 | `errors` | [计划中] |
+| `actio/memory_starling.py` | StarlingMemory:包一个 `starling.Memory`,把 Starling 的行渲染成 MemoryHit,把 Starling 的失败按穷举映射成 MemoryFailureError;StarlingDeploymentStore:部署记忆管理面的 Starling 实现。唯一导入 `starling` 的文件 | `memory_port`、`errors`、第三方包 `starling` | [计划中] |
 | `actio/experience.py` | `ReasoningExperience`、三级回退 | `triggers`、`_check`、`simulator.datamodel` | [已落地] |
 | `actio/trace.py` | 轨迹模式:`build_trace`、`validate_trace`;升到 actio.trace.v2,校验接受 actio.trace.v1 与 actio.trace.v2 | `errors` | [已落地];actio.trace.v2 [计划中] |
 | `actio/instance.py` | `instantiate`、`ActioInstance`、后端协议与适配器;实例改持记忆端口,每轮读写 | 除 `memory_starling` 外的以上全部、`simulator.datamodel` | [已落地];改持端口 [计划中] |
@@ -239,7 +241,7 @@ Actio 是十一个源文件的纯 Python 包,`instance` 在顶,`text` 在底,依
 
 | 包 | 可以导入 | 不得导入 |
 |---|---|---|
-| `actio` [已落地] | 自身、`simulator.datamodel`、标准库 `__future__`、`copy`、`dataclasses`、`re`、`typing` | `controlplane`、`simulator.backends`、`simulator.realtime`、任何第三方包 |
+| `actio` [已落地] | 自身、`simulator.datamodel`、标准库 `__future__`、`copy`、`dataclasses`、`re`、`typing`;内容 id 与摘要另用 `hashlib`、`json` [计划中]。依赖边界测试 `tests/test_actio_instance.py` 的白名单要同步加这两个 [计划中] | `controlplane`、`simulator.backends`、`simulator.realtime`、任何第三方包 |
 | `actio/memory_starling.py` [计划中] | 上一行允许的全部,加第三方包 `starling` | 其余文件一律不得导入 `starling`;适配器不得被 `actio` 的其他模块导入,装配方在组合根按需导入它 |
 | `simulator` | 不变 | `actio`、`starling`(运行器按结构调用后端,不导入) |
 | `mindtrainer` | 不变 | `actio`、`starling`(轨迹源只认策略返回的二元组或三元组) |
@@ -255,8 +257,9 @@ Actio 管四类实体:技能、记忆条目、推理经验、激活轨迹。前�
 | `Skill` [已落地] | `id`、`version`、`level`(`macro` 宏观 / `micro` 微观)、`priority`、`trigger` 触发条件、`policy_instructions` 指令、`description` | id 以 `skill-` 开头且前缀后非空;`version` 是不小于 1 的整数;`priority` 默认 0,越大越优先 |
 | `MemoryEntry` [已落地] | `id`、`version`、`subject` 主体、`content`、`timestamp`、`confidence`、`source_episode`、`keywords` | id 以 `mem-` 开头;时间戳严格为 `YYYY-MM-DDTHH:MM:SSZ`;置信度在 [0, 1],整数转 `float`。设计二里它只是替身记忆的条目 [计划中] |
 | MemoryHit [计划中] | `id`、`text` | `id` 是内容 id:`mem-` 加规范化语句行(不含 UUID 与簿记列)sha256 的前 16 位,以 `mem-` 开头所以过轨迹校验;`text` 是渲染好的一句 |
-| MemoryEvent [计划中] | `key`、`text`、`interlocutor` 对话方、`seq` | `key` 是 `<逻辑 episode id>#<turn_index>`;`seq` 是该记忆库里单调递增的事件序号,决定写入时钟 |
+| MemoryEvent [计划中] | `key`、`text`、`interlocutor` 对话方 | `key` 是 `<逻辑 episode id>#<turn_index>`。没有 `seq` 字段:事件序号由库在写事件行时分配,决定写入时钟,实例不计数 |
 | RememberOutcome [计划中] | `stored`、`failed`、`category` | `category` 取 Starling 的 `failure_category` |
+| DeploymentMemoryStore [计划中] | 按人格 id 操作的七个方法:`open`、`remember_event`、`abandon_event`、`pending_events`、`backup_to`、`restore_from`、`digest` | 只给 MindAgent 的部署记忆管理面,放在 `actio`,所以 MindAgent 不导入 `starling`。两个实现:StarlingDeploymentStore 与 FileTupleStore(JSON 落盘,替身也有提交点)。`restore_from` 在该人格还有打开的端口时抛 MemoryFailureError,`transient` 为假 |
 | MemoryRuntimeIdentity [计划中] | 字典:`backend`、`starling_version`、`extraction`、`embedding`、`trace_schema` | 记录记忆行为由什么决定;换其中任一项,记忆行为就变。由组合根写进训练记录与部署轮次产物,Actio 自己只在轨迹里写 `trace_schema` |
 | `ReasoningExperience` [已落地] | `id`、`version`、`pattern`、`applies_when`、三级 `primary`、`secondary`、`fallback` | `fallback.when` 必须为 `None`,另两级必须有触发条件;id 不受前缀约束 |
 | `Tier` [已落地] | `when` 触发条件、`instructions` | 指令是非空字符串元组 |
@@ -271,9 +274,8 @@ Actio 管四类实体:技能、记忆条目、推理经验、激活轨迹。前�
 
 | 异常 | 何时抛 | 说明 |
 |---|---|---|
-| MemoryFailureError | `recall`、`remember`、`embed_pending` 失败 | 带布尔属性 `transient`,由适配器按穷举映射给出,见第 8 章 |
-| MemoryEventConflict | 同 `key` 已存在且文本不同 | 契约测试覆盖;适配器把 Starling 的同类异常译成它 |
-| MemoryClosedError | `close` 之后再调用任何方法 | 实例关闭后不能复用 |
+| MemoryFailureError | `recall`、`embed_pending` 失败,或 `remember` 抛出异常 | 带布尔属性 `transient`,由适配器按穷举映射给出,见第 8 章 |
+| MemoryEventConflict、MemoryClosedError | 前者:同 `key` 已存在且文本不同,或该 key 已放弃。后者:`close` 之后再调用任何方法 | 都是 MemoryFailureError 的子类,`transient` 为假;适配器把 Starling 的同类异常译成冲突。已关闭的实例不能复用 |
 
 逻辑摘要的算法 [计划中]。`digest()` 对本租户下的三张表算同一个 sha256:
 
@@ -281,8 +283,7 @@ Actio 管四类实体:技能、记忆条目、推理经验、激活轨迹。前�
 |---|---|
 | 进摘要 | 语句表、向量表、事件表的全部列,减去下一行的排除清单。向量进摘要,因为同一个模型名在外部端点上不保证给出同一个向量;事件表里已放弃的行只计 `key` 与 `state` |
 | 排除清单 | `id`、`stmt_id`、`created_at`、`updated_at`、`last_accessed`、`access_count`、`last_replayed`、`replay_count`、`last_replay_batch_id`、`retry_count`、`last_attempt_at`、`embedded_at`、`inferred_at`;其他所有表 |
-| 语句 UUID 换成内容 id | 所有引用语句 UUID 的列(`supersedes_id`、`derived_from_json`、事件表的 `statement_ids_json`、向量表 `stmt_id` 的归属)一律换成被指向语句的内容 id;指向不存在的语句时换成固定串 `missing` |
-| 规范化 | 每行按列名排序后写成 JSON,行之间按内容 id 排序,整体算 sha256;空库的摘要是固定值 |
+| 规范化 | 引用语句 UUID 的列(`supersedes_id`、`derived_from_json`、事件表的 `statement_ids_json`、向量表 `stmt_id` 的归属)一律换成被指向语句的内容 id。指向不存在的语句时换成固定串 `missing`。每行按列名排序后写成 JSON,行之间按内容 id 排序,整体算 sha256;空库的摘要是固定值 |
 | 替身 | TupleMemory 对条目 `to_dict()` 去掉 `id` 后的排序列表,加事件表,算同样形状的 sha256 |
 
 ### 4.2 触发条件的谓词语言
@@ -341,9 +342,8 @@ memory: {digest_before: <sha256>, remembered: "2", extraction_failed: "0"}
 | 规则 | 内容 |
 |---|---|
 | 三个值 | `memory` 恰好三个键,值都是非空字符串;`digest_before` 是这一轮 recall 之前记忆的逻辑摘要 |
-| 计数是字符串 | `remembered`、`extraction_failed` 是实例构造以来的累计数,写成 ASCII 十进制串,与 `library_version` 同一规矩,经 `Struct` 往返不失真 |
+| 计数是字符串 | `remembered`、`extraction_failed` 是实例构造以来的累计数,写成 ASCII 十进制串,与 `library_version` 同一规矩,经 `Struct` 往返不失真;计数随轨迹落盘,`Episode` 不加元数据字段 |
 | 新旧并存 | 凡是带记忆端口构造的实例都产出 actio.trace.v2,包括 `memories=` 简写的替身;actio.trace.v1 只剩旧的落盘 episode。消费方(分析器、`_reusable`)两者都接受;`memory_hits` 的校验不变 |
-| 不另存元数据 | 抽取失败的计数随轨迹落盘,`Episode` 不加元数据字段 |
 
 ### 4.4 产物与路径
 
@@ -351,8 +351,8 @@ memory: {digest_before: <sha256>, remembered: "2", extraction_failed: "0"}
 |---|---|---|---|---|
 | 激活轨迹 | episode 里每个 `TurnRecord` 的 `activation_trace` 字段 | 无,随 episode 一次写入 | SocialSimulator 的运行器 | [已落地] |
 | 技能条目 | `skill_library/` 下的 `skill` 产物 | 由 MindAgent 管 | MindAgent 收录处理器 | [已落地] |
-| 记忆条目 | `memory_library/` 下的 `memory` 产物 | 由 MindAgent 管 | 无:设计二起记忆不再写这里,目录必须为空 | [推迟] |
-| 记忆库文件 | 仓库之外的 `<root>/…/<persona_id>.db`,每个人格一个 Starling SQLite 库 | 无,文件内部有 `pending/committed/abandoned` 事件状态(见 4.5) | factory 与 MindAgent 创建和备份;Actio 实例经端口读写 | [计划中] |
+| 记忆条目 | `memory_library/` 下的 `memory` 产物 | 由 MindAgent 管 | 无:设计二起废弃,记忆不再写这里,目录必须为空 | [计划中] |
+| 记忆库文件 | 仓库之外的 `<root>/…/<persona_id>.db`,每个人格一个 Starling SQLite 库 | 无,文件内部有 `pending/committed/abandoned` 事件状态(见 4.5) | 训练副本由 factory 创建,部署库由 MindAgent 经管理面创建、备份与覆盖;Actio 实例经端口读写 | [计划中] |
 
 Actio 自身不写任何产物。技能的 `to_dict()` 原样作为产物的 `payload`;`MemoryEntry` 的 `to_dict()` 现在只供替身记忆与摘要使用。记忆库文件不进 git 树,因为原生 SQLite 带预写日志,文件字节不稳定。
 
@@ -360,15 +360,21 @@ Actio 自身不写任何产物。技能的 `to_dict()` 原样作为产物的 `pa
 
 Actio 自己没有状态机,所以本文没有状态机图。实例是冻结的:组装后技能、经验、库版本都不变,换库就重新 `instantiate`。替身记忆的"版本演进"由快照规则表达:每个 id 取 `timestamp <= at` 的最高版本。
 
-记忆端口背后有一套事件状态 [计划中],状态存在 Starling 库内的事件表里,由端口实现维护。端口的五个方法里只有 `remember` 会推进它:
+记忆端口背后有一套事件状态 [计划中],存在库内的事件表里,由端口实现维护。五个方法里 `remember` 推进它,`close` 放弃本实例留下的 `pending` 行。一次事件写入分三段,不是同一段提交:
+
+| 段 | 动作 | 崩在这一段时,再调同 key 同文本 |
+|---|---|---|
+| ① | 短事务写 `pending` 事件行,含原文与 `interlocutor`;库在此刻分配序号 | 行与原文都在,用行里的原文再抽 |
+| ② | 事务之外调 Starling 的 `remember`,抽取走网络 | 语句可能已落库而收据没填:按 `engram_ref` 查已有语句补收据,不二次抽取 |
+| ③ | 短事务改 `committed`,填 `engram_ref` 与语句 id | 已是终态,返回首次的语句 id,幂等 |
 
 | 状态 | 含义 | 进入 | 出口 |
 |---|---|---|---|
-| `pending` | 事件行已写入,抽取还没成功 | 新 key 的第一次 `remember` | 同 key 同文本再调:抽取成功转 `committed`;被放弃转 `abandoned` |
-| `committed` | 抽取成功,语句与收据同库提交 | `pending` 抽取成功 | 终态,不许放弃;同 key 同文本再调返回幂等结果和首次相同的语句 id |
+| `pending` | 第一段已提交:事件行(含原文)已写,抽取还没成功 | 新 key 的第一次 `remember` | 同 key 同文本再调:按 `engram_ref` 查到已有语句就补成 `committed`,否则用行里的原文再抽;被放弃转 `abandoned` |
+| `committed` | 第三段已提交:收据(`engram_ref` 与语句 id)已填 | `pending` 抽取成功 | 终态,不许放弃;同 key 同文本再调返回幂等结果和首次相同的语句 id |
 | `abandoned` | 调用方放弃,以后任何路径都不推进它 | `pending` 被放弃 | 终态;同 key 再调抛 MemoryEventConflict |
 
-`pending` 行没有自动恢复,只在调用方再次对同一 key 调用时推进。训练副本用完即弃,不会带着 `pending` 行进下一条 rollout。部署库里的 `pending` 行各有主人:对话事件的主人是产生它的 episode。放弃不进端口签名:`close()` 先对本实例写过、仍 `pending` 的 key 逐个调 Starling 的 `abandon_event`,再关库。所以部署 episode 结束后库里没有它的 `pending` 行,起点快照也不会带着别人的行。门② 的记忆事件不经 Actio 实例,由收录处理器直接调 Starling。
+`pending` 行没有自动恢复,只在调用方再次对同一 key 调用时推进。训练副本用完即弃,不会带着 `pending` 行进下一条 rollout。部署库里的 `pending` 行各有主人:对话事件归产生它的 episode,门② 事件归提案。放弃不进端口签名:`close()` 先逐个放弃本实例写过的 `pending` key,再关库。所以部署 episode 结束后库里没有它的 `pending` 行;门② 的事件不经实例,由管理面写与放弃。
 
 ### 4.6 不变量
 
@@ -377,10 +383,9 @@ Actio 自己没有状态机,所以本文没有状态机图。实例是冻结的:
 3. 后端拿到的是 history 的深拷贝,改它不影响调用方。
 4. 运行器写进 `TurnRecord` 的轨迹是深拷贝,后端事后改自己的字典不污染 episode。
 5. 轨迹只能由 Actio 产生:带指导语的后端返回三元组时抛 `TypeError`。
-6. 同一起点副本、同一输入序列,`decide` 的结果恒定 [计划中]。`decide` 只读记忆,不改记忆。
+6. 同一起点副本、同一输入序列,`decide` 的结果恒定 [计划中]。`decide` 只读记忆,不改记忆。训练副本每轮只做嵌入,不做后台维护:后台维护有随机性和负载门控,会让同一起点得到不同状态。
 7. 记忆 id 是内容 id [计划中]:同样内容在任何库里得到同一个 id。所以 id 进了 prompt,相同的逻辑状态也产生相同的输入。
-8. 训练副本每轮只做嵌入,不做后台维护 [计划中]。后台维护有随机性和负载门控,会让同一起点得到不同状态。
-9. 实例关闭后不再读写 [计划中]:`close` 先放弃本实例留下的 `pending` 事件,再关库;之后任何调用抛 MemoryClosedError。
+8. 实例关闭后不再读写 [计划中]:`close` 先放弃本实例留下的 `pending` 事件,再关库;之后任何调用抛 MemoryClosedError。
 
 ## 5. 接口契约
 
@@ -404,7 +409,7 @@ class GuidedBackend(Protocol):
                        guidance: list[str]) -> tuple[str, str | None]: ...
 ```
 
-设计二的新增签名 [计划中,施工时可能微调]:
+设计二的新增签名 [计划中],施工时可能微调:
 
 ```python
 # actio.memory_port:记忆端口,一个端口实例只属于一个智能体,所以没有 holder
@@ -421,10 +426,21 @@ def instantiate(model_backend, *, skills, library_version, profile,
                 experiences=(), registry=None, memory_limit=3) -> ActioInstance: ...
 ```
 
+```python
+class DeploymentMemoryStore(Protocol):   # 只给 MindAgent 用,按人格 id 操作
+    def open(self, persona_id: str) -> MemoryBackend: ...
+    def remember_event(self, persona_id, key, text, *, interlocutor) -> RememberOutcome: ...
+    def abandon_event(self, persona_id, key) -> None: ...
+    def pending_events(self, persona_id) -> list[str]: ...
+    def backup_to(self, persona_id, path) -> str: ...      # 返回副本的逻辑摘要
+    def restore_from(self, persona_id, path) -> str: ...   # 端口未全关则抛 MemoryFailureError
+    def digest(self, persona_id) -> str: ...
+```
+
 | 入口 | 行为 | 状态 |
 |---|---|---|
 | `instantiate` | 校验技能库、记忆与经验类型、经验 id 不重复、信号已注册;库版本规范成字符串;`profile` 深拷贝 | [已落地] |
-| `instantiate` 的记忆参数 | `memory` 与 `memories` 恰好给一个。`memories` 保留为 TupleMemory 的简写,等价于只读的替身:不写记忆,供既有测试与离线重放沿用。`episode_id` 是调用方在构造时给出的逻辑 episode id,一个实例对应一条 episode,事件 key 以它为前缀。`memory` 可写(`replay_read_only` 为假)而没给 `episode_id` 时,`instantiate` 抛 `ActioDataError`(它是 `ValueError` 的子类):没有 key 就写不了事件,静默跳过会让训练少写记忆而不自知 | [计划中] |
+| `instantiate` 的记忆参数 | `memory` 与 `memories` 恰好给一个,`memories` 保留为 TupleMemory 的简写。`episode_id` 是调用方在构造时给出的逻辑 episode id,一个实例对应一条 episode,事件 key 以它为前缀。`memory` 可写(`replay_read_only` 为假)而没给 `episode_id` 时,`instantiate` 抛 `ActioDataError`(它是 `ValueError` 的子类):没有 key 就写不了事件,静默跳过会让训练少写记忆而不自知 | [计划中] |
 | `ActioInstance.respond` | 七步流程,返回三元组 | [已落地] |
 | `ActioInstance.respond` 的记忆步 | 在后端回复与组装轨迹之间加写记忆,成八步。自己上一次发言之后的每句他人发言按顺序 remember,再 `embed_pending` 一次。`replay_read_only` 为真时整步跳过 | [计划中] |
 | `ActioInstance.decide` | 只做路由、经验、记忆,不调后端 | [已落地] |
@@ -446,9 +462,9 @@ def instantiate(model_backend, *, skills, library_version, profile,
 | `actio.signals` | `SignalRegistry`(`register`、`get`、`names`、`fired`)、`default_registry`、`DEFAULT_EMOTION_LEXICON`、`make_emotion_high`、`no_new_information`、`first_turn` [已落地] |
 | `actio.triggers` | `InvalidTriggerError`、`validate_trigger`、`evaluate_trigger`、`referenced_signals`(只计偶数层 `not` 之下的信号,所以 `{"not": {"signal": X}}` 不算针对 X,分析器据此判断技能是否针对某信号) [已落地] |
 | `actio.skills` | `SKILL_ID_PREFIX`、`Skill`、`RouteResult`、`route_order`、`check_library`、`route` [已落地] |
-| `actio.memory` | `MEMORY_ID_PREFIX`、`MemoryEntry`、`snapshot`、`overlap`、`retrieve` [已落地];TupleMemory [计划中] |
-| actio.memory_port | MemoryBackend、MemoryHit、MemoryEvent、RememberOutcome、MemoryFailureError、MemoryEventConflict、MemoryClosedError [计划中] |
-| actio.memory_starling | StarlingMemory [计划中],构造时收一个已打开的 `starling.Memory` |
+| `actio.memory` | `MEMORY_ID_PREFIX`、`MemoryEntry`、`snapshot`、`overlap`、`retrieve` [已落地];TupleMemory、FileTupleStore [计划中] |
+| actio.memory_port | MemoryBackend、MemoryHit、MemoryEvent、RememberOutcome、MemoryFailureError、MemoryEventConflict、MemoryClosedError、DeploymentMemoryStore [计划中] |
+| actio.memory_starling | StarlingMemory、StarlingDeploymentStore [计划中],前者构造时收一个已打开的 `starling.Memory` |
 | `actio.experience` | `ReasoningExperience`、`Tier`、`ExperienceActivation`、`select_tier`、`activate` [已落地] |
 | `actio.trace` | `TRACE_SCHEMA`、`TIE_BREAK_RULE`、`TRACE_KEYS`、`build_trace`、`validate_trace`、`normalize_library_version` [已落地] |
 | `simulator.realtime.client` | `EnvironmentServiceClient.submit_turn(utterance, inner_thought=None, *, activation_trace=None)` [已落地] |
@@ -460,18 +476,14 @@ def instantiate(model_backend, *, skills, library_version, profile,
 | 技能 | `[skill:<id>] <指令>` |
 | 推理经验 | `[experience:<id>/<tier>] <指令>` |
 | 记忆(现状) | `[memory:<id>] <subject>: <content>` |
-| 记忆(设计二) [计划中] | `[memory:<内容 id>] <text>` |
-
-设计二里 `<text>` 的来源 [计划中]:替身把条目渲染成 `<subject>: <content>`,所以替身路径的指导语与现状逐字相同。Starling 适配器把每个命中行渲染成 `<subject_id> <predicate> <object_value>(<modality>,置信度 <confidence>)`,否定语句在谓词前加"不"。Starling 的语句行没有嵌套层次这一列,所以不渲染嵌套。
+| 记忆(设计二) [计划中] | `[memory:<内容 id>] <text>`。替身的 text 是 `<subject>: <content>`,指导语与现状逐字相同;Starling 适配器渲染成 `<subject_id> <predicate> <object_value>(<modality>,置信度 <confidence>)`,否定语句在谓词前加「不」,不渲染嵌套层次 |
 
 ### 5.2 协议改动的接口
 
 | 接口 | 改动 | 状态 |
 |---|---|---|
 | `SubmitTurn.activation_trace` | 新增可选 `Struct` 字段,编号 3 | [已落地] |
-| `EnvironmentServiceClient.submit_turn` | 加 `*, activation_trace=None`;非 `None` 时先 SetInParent 再 update | [已落地] |
-| `SessionDriver.submit_turn` | 加 `*, activation_trace=None`,原样转交 | [已落地] |
-| `ClientDrivenBackend.submit` | 加 `*, activation_trace=None`;`respond` 带轨迹返回三元组,不带仍返回二元组 | [已落地] |
+| `EnvironmentServiceClient.submit_turn`、`SessionDriver.submit_turn`、`ClientDrivenBackend.submit` | 各加 `*, activation_trace=None`;客户端非 `None` 时先 SetInParent 再 update;`respond` 带轨迹返回三元组,不带仍返回二元组 | [已落地] |
 | `run_episode` | 签名不变;后端可返回长度 2 或 3 的 `tuple` 或 `list`,其余抛 `TypeError`;第三项必须是字典或空,写进 `TurnRecord` 的是深拷贝;协议层不对轨迹做数字规范化,取回什么存什么 | [已落地] |
 | `CreateSession.episode_id` | 新增可选字段,调用方给出的逻辑 episode id。Actio 的事件 key 以它为前缀,服务端落盘的 episode 也用它当 id。重试不换 id,所以同一句话重写是同一个事件 | [计划中] |
 | 训练位的三元组上行 | InteractTrain 的轨迹源接受策略返回的二元组或三元组,第三项作为 `activation_trace` 随 `submit_turn` 上行;二元组照旧 | [计划中] |
@@ -524,9 +536,9 @@ tiers:
 | 调用 | 谁触发 | 时机 |
 |---|---|---|
 | `instantiate` | MindAgent 部署驱动器 | 每个部署轮次开始时,按绑定的库版本读好条目后 |
-| `instantiate` 带记忆端口 [计划中] | factory 的 `policy_for_rollout`(训练位)、后端工厂(对手位)、MindAgent 部署驱动器 | 训练位在每条 rollout 进入时;对手位在每个会话创建时;部署在每条 episode 开始前。三处都把逻辑 episode id 传进 `episode_id` |
+| `instantiate` 带记忆端口 [计划中] | factory 的 `policy_for_rollout`(训练位)、后端工厂(对手位)、MindAgent 部署驱动器 | 训练位在每条 rollout 进入时;对手位在每个会话创建时;部署在每条 episode 每次尝试开始前,由实例工厂 make_instance(episode_id, memory) 造出。三处都把逻辑 episode id 传进 `episode_id` |
 | `respond` | MindAgent 客户端循环,或 SocialSimulator 运行器 | 轮到实例所占角色位说话时 |
-| `ActioInstance.close` [计划中] | 上一行的同一调用方 | rollout、会话、episode 结束时。训练位在上下文退出时关;对手位随会话资源有序关闭 |
+| `ActioInstance.close` [计划中] | 上一行的同一调用方 | rollout、会话、episode 结束时。训练位在上下文退出时关;对手位随会话资源有序关闭;部署先关实例与端口,之后才能覆盖部署库 |
 | `validate_trace` | MindAgent 经验分析器 | 读落盘 episode,对每个 `activation_trace is not None` 的轮次 |
 
 ### 5.5 对邻居的假设
@@ -536,9 +548,9 @@ tiers:
 | `simulator.datamodel` | `Persona`、`Scenario`、`TurnRecord`(`activation_trace: dict \| None` 已存在) | 无 |
 | SocialSimulator 运行器 | 按 `ModelBackend` 的参数调用 `respond`;接受三元组 | `respond` 返回三元组,第三项是 `dict` 或 `None` |
 | SocialSimulator 实时环境服务 | 不对轨迹做数字规范化;对手轮次的轨迹与内心推理不下行;`CreateSession.episode_id` [计划中] 把逻辑 episode id 带到服务端 | 轨迹没有数字,往返后相等;对手位换成 Actio 实例后,落盘 episode 里的对手轮次带轨迹 [计划中] |
-| MindAgent | 按库版本读好技能再传入;每轮带轨迹调用 `submit_turn`;记忆端口 [计划中] 由它为部署库构造并传入 | 轨迹模式(actio.trace.v1 与 actio.trace.v2 并存)、条目字典形状、id 前缀、`normalize_library_version`;Actio 只要求库版本是非空字符串,但 MindAgent 的收录要按整数加一,只接受十进制数字串 |
+| MindAgent | 按库版本读好技能再传入;每轮带轨迹调用 `submit_turn`;每条 episode 的每次尝试经管理面新造实例,先关实例与端口、后覆盖部署库 [计划中] | 轨迹模式(actio.trace.v1 与 actio.trace.v2 并存)、条目字典形状、id 前缀、`normalize_library_version`;Actio 只要求库版本是非空字符串,但 MindAgent 的收录要按整数加一,只接受十进制数字串。部署记忆管理面 DeploymentMemoryStore [计划中]:两个实现 StarlingDeploymentStore 与 FileTupleStore,所以 MindAgent 不导入 `starling`;`restore_from` 在该人格还有打开的端口时抛 MemoryFailureError |
 | factory 与 MindTrainer | 构造训练路的全部实例并传入记忆端口;给每个实例外套一层转换后端,接住 MemoryFailureError,按 `transient` 改抛 simulator 的两个基类。所以 simulator 与 MindTrainer 都不导入 `actio`,MindTrainer 只认策略返回的二元组或三元组 [计划中] | 实例满足 `ModelBackend` 的 `respond`;关闭实例会放弃 `pending` 事件并关闭它持有的端口;Actio 只抛 MemoryFailureError |
-| Starling | 公开接口 [计划中,经 PR 补齐]:`Memory.recall`、`Memory.remember_event`、`Memory.embed_pending`、`Memory.digest`、`Memory.close`、`Memory.pending_events`、`Memory.abandon_event`。副本由 factory 与 MindAgent 经 `Memory.backup_to` 做出,Actio 拿到的是已打开的副本。Actio 不碰它的私有接口与表结构 | 无;Starling 不知道 Actio。未装 Starling 时适配器不可导入,装配期退到替身并显式报告 |
+| Starling | 公开接口 [计划中],经 PR 补齐:`Memory.recall`、`Memory.remember_event`、`Memory.embed_pending`、`Memory.digest`、`Memory.close`、`Memory.pending_events`、`Memory.abandon_event`。副本由 factory(训练)与管理面(部署)经 `Memory.backup_to` 做出,Actio 拿到的是已打开的副本。Actio 不碰它的私有接口与表结构 | 无;Starling 不知道 Actio。未装 Starling 时适配器不可导入,装配期退到替身并显式报告 |
 | 模型后端 | 实现 `respond_guided`,或只实现 `respond` | 指导语列表与 history 深拷贝 |
 
 ## 6. 关键流程
@@ -550,7 +562,7 @@ tiers:
 <!-- figure:begin 40-actio-respond -->
 ![一次 respond 的内部流程](diagrams/40-actio-respond.svg)
 
-**图 3　一次 respond 的内部流程**　前三步是 decide:求信号并路由技能、激活推理经验、从记忆端口 recall。第四步按固定顺序渲染指导语,第五步把 history 副本与指导语交给后端,第六步把对方新发言逐条写进记忆再只做嵌入,第七步组装并校验激活轨迹,第八步返回三元组。后端返回值不合规时抛 TypeError,记忆调用失败时抛 MemoryFailureError。
+**图 3　一次 respond 的内部流程**　前三步是 decide:求信号并路由技能、激活推理经验、从记忆端口 recall。第四步按固定顺序渲染指导语,第五步把 history 副本与指导语交给后端,第六步把对方新发言逐条写进记忆再只做嵌入,第七步组装并校验激活轨迹,第八步返回三元组。后端返回值不合规时抛 TypeError;recall 或 embed_pending 失败、remember 抛异常时抛 MemoryFailureError。
 
 <details>
 <summary>文字版:图中的节点与连线</summary>
@@ -567,7 +579,7 @@ tiers:
 - 组装激活轨迹:build_trace 组装 / 随即 validate_trace
 - 返回三元组:(utterance, / inner_thought, trace)
 - TypeError:后端返回值不是二元组
-- MemoryFailureError:记忆调用抛异常 / 带 transient 标记上抛
+- MemoryFailureError:recall、embed_pending 失败 / remember 抛异常,带 transient
 
 **连线**
 
@@ -580,7 +592,8 @@ tiers:
 - 写记忆 → 组装激活轨迹
 - 组装激活轨迹 → 返回三元组
 - 后端 respond_guided → TypeError:不合规
-- 写记忆 → MemoryFailureError:失败
+- 写记忆 → MemoryFailureError:嵌入失败或抛异常
+- 记忆检索 → MemoryFailureError:recall 失败
 
 </details>
 <!-- figure:end 40-actio-respond -->
@@ -596,7 +609,7 @@ tiers:
 | 7 | 组装激活轨迹:`build_trace` 组装,随即 `validate_trace` | 八键轨迹;带记忆端口的实例是九键 actio.trace.v2 [计划中] |
 | 8 | 返回 `(utterance, inner_thought, trace)` | 三元组 |
 
-第 1 至 3 步就是 `decide` [已落地],不调后端,也不写记忆。第 5 步后端返回值不是二元组时抛 `TypeError`,图中的红色分支即此。第 6 步记忆调用抛异常时包成 MemoryFailureError 上抛,图中另一条红色分支即此 [计划中]。
+第 1 至 3 步就是 `decide` [已落地],不调后端,也不写记忆。第 5 步后端返回值不是二元组时抛 `TypeError`,图中的红色分支即此。`recall`(第 3 步)与 `embed_pending`(第 6 步)失败、`remember` 抛出异常时包成 MemoryFailureError 上抛,图中另外两条红色分支即此 [计划中]。`remember` 返回 `failed` 不抛,只计数。
 
 写记忆放在后端回复之后、组装轨迹之前,有两个理由 [计划中]。第一,第 3 步的查询词正是对方刚说的这句;若先写入并嵌入再召回,这句会命中它自己,指导语里只剩对方原话的复述。第二,轨迹里的 `remembered` 与 `extraction_failed` 两个计数来自这一步,所以它必须先于组装。`turn_index` 取自 history 里那条他人发言的 `TurnRecord.turn_index`,所以同一句话在重试里得到同一个 key。
 
@@ -658,10 +671,8 @@ tiers:
 | 技能引用未注册信号 | `instantiate` 抛错 | 传入含该信号的注册表,或改技能 |
 | 带指导语的后端返回三元组或其他形状 | 第 5 步抛 `TypeError` | 修后端 |
 | 运行器收到长度不是 2 或 3、或第三项不是 `dict` 或 `None` 的返回值 | 抛 `TypeError`,信息分别含 `2- or 3-tuple`、`activation_trace` | 修后端 |
-| `recall`、`remember`、`embed_pending` 抛异常 [计划中] | 包成 MemoryFailureError 上抛,带 `transient` 标记;信息只含异常类名与失败类别 | 调用方按 `transient` 分类,见第 8 章 |
-| `remember` 返回 `failed` 为真 [计划中] | 不抛:这一轮不留该条记忆,`extraction_failed` 加一,计数进轨迹 | 事件行留在 `pending`;同 key 同文本再调会再抽一次 |
-| 可写端口没给 `episode_id` [计划中] | `instantiate` 抛 `ActioDataError` | 构造方补上逻辑 episode id |
-| 实例 `close` 之后再调 [计划中] | 抛 MemoryClosedError | 不复用已关闭的实例,重新构造 |
+| `recall`、`embed_pending` 失败,或 `remember` 抛异常 [计划中] | 包成 MemoryFailureError 上抛,带 `transient` 标记;信息只含异常类名与失败类别 | 调用方按 `transient` 分类,见第 8 章 |
+| `remember` 返回 `failed` 为真(含类别 `timeout`)[计划中] | 不抛:这一轮不留该条记忆,`extraction_failed` 加一,计数进轨迹 | 事件行留在 `pending`;同 key 同文本再调会再抽一次 |
 
 Actio 内部没有重试。抽取失败的事件在同一次 `respond` 里不重试,留 `pending` 并计数;同一 episode 的下一次 `respond` 把上次失败的几句连同新发言一起再交给 `remember`,同 key 同文本推进 `pending` 行 [计划中]。episode 结束时 `close()` 放弃仍未推进的。其余失败向上抛给调用方。
 
@@ -702,11 +713,9 @@ Actio 内部没有重试。抽取失败的事件在同一次 `respond` 里不重
 | 时刻 | 动作 | 结果 |
 |---|---|---|
 | 第 1 轮 Actio 说话前 | 第 3 步 `recall`,查询词「我真的很生气!!」 | 回复前库里没有这句,不会命中它 |
-| 第 1 轮回复后 | 第 6 步 `remember` 对手第 0 轮的话 | key `deploy-zengen-v2-s1-1#0`;文本 `pb：我真的很生气!!`;写进 Starling 的是 `[deploy-zengen-v2-s1-1#0] pb：我真的很生气!!` |
-| 同上 | 事件序号加一 | `seq` 为 41,写入时钟 `2026-01-01T00:00:41Z` |
-| 同上 | `embed_pending` | 嵌入这一句,返回 1;此后它才能被 `recall` 命中 |
+| 第 1 轮回复后 | 第 6 步 `remember` 对手第 0 轮的话,再 `embed_pending` | key `deploy-zengen-v2-s1-1#0`;写进 Starling 的是 `[deploy-zengen-v2-s1-1#0] pb：我真的很生气!!`;库分配序号 41,写入时钟 `2026-01-01T00:00:41Z`;嵌入返回 1,此后它才能被 `recall` 命中 |
 | 第 1 轮轨迹 | 第 7 步组装 actio.trace.v2 轨迹 | `memory = {digest_before: <这一轮 recall 之前的摘要>, remembered: "1", extraction_failed: "0"}` |
-| 第 3 轮回复后 | 自己上次发言是第 1 轮,之后只有对手第 2 轮的话 | key `deploy-zengen-v2-s1-1#2`,`seq` 为 42,时钟 `2026-01-01T00:00:42Z`;累计 `remembered` 为 `"2"` |
+| 第 3 轮回复后 | 自己上次发言是第 1 轮,之后只有对手第 2 轮的话 | key `deploy-zengen-v2-s1-1#2`,序号 42,时钟 `2026-01-01T00:00:42Z`;累计 `remembered` 为 `"2"` |
 | 假设第 3 轮的抽取失败 | `remember` 返回 `failed` | 事件行留在 `pending`;第 3 轮轨迹的 `remembered` 仍是 `"1"`,`extraction_failed` 是 `"1"`;这一句不进记忆 |
 
 同一条 episode 重试时 key 不变,因为逻辑 episode id 不随传输层的会话 id 变化;所以已 `committed` 的事件再写是幂等的,不会二次抽取。
@@ -733,12 +742,13 @@ Actio 内部没有重试。抽取失败的事件在同一次 `respond` 里不重
 | AC-15 | 记忆状态的身份是逻辑摘要 [计划中]。语句表、向量表、事件表的全部列,按排除清单去掉纯簿记列后算 sha256,与文件字节无关 | 算库文件的字节哈希;按包含清单只列召回相关的字段 | 库文件字节不稳定:每次新建空库字节都不同。包含清单会漏字段,例如情感重排器用语句的 `activation` 列打分。排除清单的方向相反:新增列默认进摘要,漏掉只会让摘要过敏感,不会让它漏变化 | 摘要要读三张表;Starling 加列时要维护排除清单。向量进摘要,所以外部端点换了向量,摘要就变 |
 | AC-16 | 召回、指导语与轨迹里的记忆 id 是内容 id:`mem-` 加规范化语句行 sha256 的前 16 位,不是库里的 UUID [计划中] | 直接用 Starling 的语句 UUID | UUID 不进摘要却会进 prompt,会让摘要相同而 prompt 不同,破坏"同一起点同一输入同一输出"。内容 id 以 `mem-` 开头,过现有轨迹校验 | 同一内容的两条语句得到同一个 id;规范化规则一改,历史轨迹里的 id 与新 id 对不上 |
 | AC-17 | 每轮都读写:回复前 recall,回复后对他人新发言逐条 remember,再 `embed_pending` 一次;不调 `tick`,不写自己的话 [计划中] | 只读不写;每若干轮批量写;写后跑 `tick` 做后台维护 | 后台维护有随机性且受运行时负载门控,同一起点会得到不同状态,训练不可复现。自己的话已在对话历史里,再写一遍只会重复。读在前、写在后:写入嵌入后再召回,会命中对方刚说的这句本身 | 训练里没有 TTL、回放与巩固;承诺、共同点等分区不更新,对召回质量的影响未核实,见 10.3 |
-| AC-18 | 事件 key 是 `<逻辑 episode id>#<turn_index>`,文本是 `<说话方人格 id>：<原话>`,key 作为前缀写进 Starling 的文本;写入时钟由库内单调事件序号 `seq` 推出:`2026-01-01T00:00:00Z` 加 `seq` 秒 [计划中] | key 用传输层 session id;时钟用固定时间或墙钟 | session id 每次重试都换,部署库会把重试的同一句话当新事件重复记忆;逻辑 id 重试不变,同 key 同文本是幂等的。key 进文本前缀,所以不同 episode 的同一句话是不同事件。固定时钟在持久库里会倒退,墙钟让同一起点得到不同状态 | `seq` 要和事件在同一事务里递增;训练副本从 0 起,部署库跨轮次单调 |
+| AC-18 | 事件 key 是 `<逻辑 episode id>#<turn_index>`,文本是 `<说话方人格 id>：<原话>`,key 作为前缀写进 Starling 的文本;写入时钟由库在写事件行时分配的单调序号 `seq` 推出(MemoryEvent 没有 `seq` 字段,实例不计数):`2026-01-01T00:00:00Z` 加 `seq` 秒 [计划中] | key 用传输层 session id;时钟用固定时间或墙钟 | session id 每次重试都换,部署库会把重试的同一句话当新事件重复记忆;逻辑 id 重试不变,同 key 同文本是幂等的。key 进文本前缀,所以不同 episode 的同一句话是不同事件。固定时钟在持久库里会倒退,墙钟让同一起点得到不同状态 | `seq` 要和事件行在同一事务里递增;训练副本从 0 起,部署库跨轮次单调 |
 | AC-19 | 实例构造时收 keyword-only 的 `episode_id`,可写端口没有它就在 `instantiate` 抛 `ActioDataError`;`turn_index` 取自 history 里那条他人发言的 `TurnRecord.turn_index` [计划中] | 事件 key 由端口自己生成;从 `CreateSession` 的回包里取 id;缺 id 时静默不写 | `respond` 的参数与 `ModelBackend` 相同,没有地方传 episode id;逻辑 episode id 只有调用方知道:训练位由 `policy_for_rollout` 传入,对手位由服务端工厂从会话信息传入,部署由驱动器传入。缺 id 静默不写,会让训练少写记忆而不自知 | 每个调用方都要把 episode id 传进构造;一个实例只对应一条 episode,不能跨 episode 复用 |
 | AC-20 | 激活轨迹升到 actio.trace.v2:八个键之外加 `memory`,内含 `digest_before`、`remembered`、`extraction_failed` 三个非空字符串,两个计数是 ASCII 十进制串;`validate_trace` 同时接受 actio.trace.v1 与 actio.trace.v2 [计划中] | 在 `Episode` 上加元数据字段;计数用整数;只接受 actio.trace.v2 | `Episode` 没有元数据字段,轨迹是抽取失败计数随 episode 落盘的唯一通道。整数经 `Struct` 往返变浮点,所以与 `library_version` 同一规矩用字符串。落盘的旧 episode 是 actio.trace.v1,分析器与 `_reusable` 要继续能读 | 键集合从八个变九个,断言旧键集合的用例要改;消费方多一个分支 |
 | AC-21 | 端口的两种实现过同一套契约测试与规范样例,端口语义与样例先定后实现 [计划中] | 先做替身,再接 Starling 时补测试 | 先做替身再接 Starling 会长出两套语义。样例是一份 YAML。内容:固定事件序列;每步之后的召回命中 id 顺序与摘要;同 key 同文本重写的结果;同 key 异文本抛 MemoryEventConflict;`close` 后再调抛 MemoryClosedError。两边必须给出同样的命中顺序与摘要变化曲线,摘要值本身两边不同 | 契约测试要先写;命中顺序依赖 Starling 的排序,Starling 升级后样例要重新对齐 |
-| AC-22 | 记忆调用的失败映射是穷举的 [计划中]。Starling 失败类别 `timeout`、`transport_failure` 是瞬态。其余已知类别、未知类别、任何异常、MemoryEventConflict、MemoryClosedError 都是确定性。适配器只报异常类名与类别,不带端点地址与密钥 | 一律当瞬态重试;一律当确定性;按异常类型逐个列入 | 映射不穷举,新类别会落进错误的桶。误判瞬态会反复重试一个永远失败的调用,误判确定性会把一次网络抖动升成人工。未知类别保守当确定性:确定性失败不重试,代价是停下来而不是空转 | Starling 改类别名时要跟着改;出现新的瞬态类别前,它先按确定性处理 |
-| AC-23 | 抽取失败不抛:这一轮不留该条记忆,`extraction_failed` 计数加一进轨迹;事件行只在抽取成功后才变成 `committed`,失败的事件留在 `pending` [计划中] | 抽取失败就抛 MemoryFailureError 中断会话;失败的事件也记成已提交 | 抽取端点偶发失败不该让整条 rollout 作废。失败的事件若被记成已提交,下次重试会被当成幂等丢掉,这句话就永远没进记忆;留在 `pending`,下一次 `respond` 把它连同新发言再交给 `remember`,同 key 同文本推进该行 | 一轮会少一条记忆,序列因此和无故障时不同;失败多时只能看轨迹里的计数发现 |
+| AC-22 | 记忆调用的失败映射是穷举的 [计划中]。只有 `recall`、`embed_pending` 的嵌入请求超时或连不上是瞬态;Starling 抛的其余异常、`sqlite3` 异常、`OSError`、任何其他异常都是确定性。MemoryEventConflict、MemoryClosedError 是 MemoryFailureError 的子类,`transient` 为假。适配器只报异常类名与类别,不带端点地址与密钥 | 一律当瞬态重试;一律当确定性;按异常类型逐个列入 | 映射不穷举,新情形会落进错误的桶。误判瞬态会反复重试一个永远失败的调用,误判确定性会把一次网络抖动升成人工。未知情形保守当确定性:确定性失败不重试,代价是停下来而不是空转 | 出现新的瞬态情形前,它先按确定性处理;Starling 改异常类型时要跟着改 |
+| AC-23 | 抽取失败不抛:`remember` 返回 `failed` 为真(含类别 `timeout`)只计数,这一轮不留该条记忆,`extraction_failed` 加一进轨迹;事件行只在抽取成功后才变成 `committed`,失败的事件留在 `pending`。只有 `recall`、`embed_pending` 的失败与 `remember` 抛出的异常才抛 MemoryFailureError [计划中] | 抽取失败就抛 MemoryFailureError 中断会话;失败的事件也记成已提交 | 写失败只少一条记忆,回复照样成立;读失败或库坏了,这一轮的指导语已经不可信,所以读失败才抛。失败的事件若被记成已提交,下次重试会被当成幂等丢掉,这句话就永远没进记忆;留在 `pending`,下一次 `respond` 把它连同新发言再交给 `remember`,同 key 同文本推进该行 | 一轮会少一条记忆,序列因此和无故障时不同;失败多时只能看轨迹里的计数发现 |
+| AC-24 | 部署记忆管理面 DeploymentMemoryStore 放在 `actio`,按人格 id 操作,有 StarlingDeploymentStore 与 FileTupleStore 两个实现;`restore_from` 在该人格还有打开的端口时抛 MemoryFailureError [计划中] | MindAgent 直接持有 `starling.Memory` 并自己备份;替身不落盘 | 部署库要备份、覆盖,门② 要写事件与放弃,都碰库文件。放在 `actio`,MindAgent 就不导入 `starling`,依赖边界仍可检查。替身也落盘,所以备份起点、成功后删副本的提交点协议在两种实现上一样成立。覆盖正被打开的 SQLite 文件会写坏库,所以端口没关就拒绝 | 管理面多七个方法,两个实现要过同一套契约测试;MindAgent 必须先关实例与端口再覆盖 |
 
 ## 8. 失败处理与可观测
 
@@ -751,23 +761,20 @@ Actio 自己的失败是 T2 确定性:同样输入必然再失败,不重放。�
 | 后端返回值形状不对 | T2 | 抛 `TypeError` | 同上 |
 | 轨迹不合模式 | T2 | `build_trace` 内的 `validate_trace` 抛错 | 同上 |
 | 后端超时、网络错误、实时会话断开 | 不在 Actio | 原样上抛,由调用方分类 | 由调用方决定 |
-| 记忆调用的瞬态失败 [计划中] | T1,由调用方分类 | 包成 MemoryFailureError 上抛,`transient` 为真;调用方按条重跑 | 无;由调用方记 |
-| 记忆调用的确定性失败 [计划中] | T2 | 包成 MemoryFailureError 上抛,`transient` 为假;调用方不重跑 | 无;由调用方记 |
-| 抽取失败(`remember` 返回 `failed`)[计划中] | 不分类 | 不抛;这一轮不留该条记忆,计数加一 | 轨迹 `memory.extraction_failed` |
+| `recall`、`embed_pending` 失败,或 `remember` 抛异常 [计划中] | T1 或 T2,由调用方分类 | 包成 MemoryFailureError 上抛;`transient` 为真调用方按条重跑(T1),为假不重跑(T2) | 无;由调用方记 |
+| 抽取失败(`remember` 返回 `failed`,含类别 `timeout`)[计划中] | 不分类 | 不抛;这一轮不留该条记忆,计数加一 | 轨迹 `memory.extraction_failed` |
 | 可写端口没给 `episode_id` [计划中] | T2 | `instantiate` 抛 `ActioDataError` | 同上 |
-| 实例关闭后再调 [计划中] | T2 | 抛 MemoryClosedError;它不是 MemoryFailureError,是调用方的编程错误 | 同上 |
+| 实例关闭后再调 [计划中] | T2 | 抛 MemoryClosedError,它是 MemoryFailureError 的子类,`transient` 为假;本质是调用方的编程错误 | 同上 |
 
-`MemoryFailureError.transient` 由适配器按穷举映射给出 [计划中]。映射不穷举,新类别会落进错误的桶,所以未知值一律归确定性:
+`MemoryFailureError.transient` 由适配器按穷举映射给出 [计划中]。映射不穷举,新情形会落进错误的桶,所以未知情形一律归确定性。`remember` 返回的 `failure_category` 不进这张表,它只计数、不变成异常:
 
 | 来源 | `transient` | 后果 |
 |---|---|---|
-| `RememberResult.failure_category` 是 `timeout` 或 `transport_failure` | 真 | 调用方当 T1,整条重跑 |
-| `failure_category` 是其他已知值(`extraction_failure`、`persistence_failure`、`commit_failure`、`prepare_failure`、`holder_identity_failure`) | 假 | 调用方当 T2,不重跑 |
-| `failure_category` 是未知值 | 假 | 同上;出现新的瞬态类别前先按 T2 处理 |
-| Starling 抛的异常、`sqlite3` 异常、`OSError`、任何其他异常 | 假 | 同上 |
-| MemoryEventConflict、MemoryClosedError | 假 | 同上;这两个本来就是调用方的编程错误或数据冲突 |
+| `recall`、`embed_pending` 的嵌入请求超时或连不上 | 真 | 调用方当 T1,整条重跑 |
+| Starling 抛的其余异常、`sqlite3` 异常、`OSError`、任何其他异常 | 假 | 调用方当 T2,不重跑;出现新的瞬态情形前先按 T2 处理 |
+| MemoryEventConflict、MemoryClosedError | 假 | 同上;两个都是 MemoryFailureError 的子类,本来就是调用方的编程错误或数据冲突 |
 
-异常信息不含端点地址与密钥:适配器只报异常类名与 `failure_category`。终止原因由调用方映射。组合根给每个 Actio 实例外套一层转换后端,按 `transient` 改抛 simulator 的两个基类,所以 simulator 与 MindTrainer 不导入 `actio`。对手位在服务端:瞬态译成 `role_memory_unavailable`(T1),确定性译成 `role_memory_failure`(T2)。训练位在客户端:瞬态按条重跑,确定性判指令 `failed`。MindAgent 自己造部署实例,直接接 MemoryFailureError。
+异常信息不含端点地址与密钥(适配器只报异常类名与 `failure_category`),终止原因由调用方映射。组合根给每个 Actio 实例外套一层转换后端,按 `transient` 改抛 simulator 的两个基类,所以 simulator 与 MindTrainer 不导入 `actio`。转换后端只接 MemoryFailureError 一个基类,两个子类也被正确映射,不会落进驱动器的 `role_backend_failure`。对手位在服务端:瞬态译成 `role_memory_unavailable`(T1),确定性译成 `role_memory_failure`(T2);训练位在客户端:瞬态按条重跑,确定性判指令 `failed`。MindAgent 自己造部署实例,直接接 MemoryFailureError。
 
 只读观测手段:
 
@@ -802,14 +809,12 @@ Actio 自己的失败是 T2 确定性:同样输入必然再失败,不重放。�
 |---|---|---|
 | 边界 | `simulator`、`mindtrainer` 不导入 `actio` 与 `starling`;`actio` 只在 `memory_starling` 导入 `starling` | 扫导入;子进程导入检查 |
 | 契约 | 记忆端口的两种实现过同一份规范样例。逐步断言召回命中 id 顺序与摘要变化曲线;同 key 同文本重写;同 key 异文本抛 MemoryEventConflict;`close` 后再调抛 MemoryClosedError | TupleMemory 与 StarlingMemory;未装 Starling 时只跑替身 |
-| 单元 | 每轮读写:召回在回复前,`remember` 只收他人发言且带 key 前缀,抽取失败不抛且进轨迹 | 记录调用的假端口 |
-| 单元 | 事件身份:`turn_index` 取自 history,同一句话重试得到同一个 key;可写端口没给 `episode_id` 时 `instantiate` 抛错 | 记录调用的假端口 |
-| 单元 | 轨迹 actio.trace.v2:计数是字符串;经 `Struct` 往返后 `validate_trace` 仍通过;两个版本都被接受。`memories=` 简写实例也产出 actio.trace.v2,所以 `tests/test_actio_instance.py` 里断言 actio.trace.v1 的用例要跟着改 | 无 |
-| 单元 | 失败映射:每个 `failure_category` 与每类异常都有确定的 `transient` 值 | 假 Starling |
-| 单元 | Starling 适配器:命中行的渲染、否定语句加"不"、异常信息不含端点与密钥 | 假 Starling |
-| 单元 | 摘要:同一逻辑内容在不同文件字节下相同;改任一进摘要的字段即变;对事件表里语句 UUID 的变化不敏感 | 真 Starling;未装时跳过 |
-| 单元 | 内容 id:同一语句在两个库里得到同一个 `mem-` id | 真 Starling 或替身 |
-| 单元 | 事件状态:抽取失败的事件行留 `pending`,同 key 同文本再调再抽;`committed` 之后再调幂等;`abandoned` 之后再调抛冲突 | 真 Starling(在 Starling 的 PR 里) |
+| 契约 | 部署记忆管理面的两种实现过同一套契约:`backup_to` 与 `restore_from` 往返后摘要相同;端口未关时 `restore_from` 抛 MemoryFailureError;写事件与放弃的提交点行为一致 | FileTupleStore 与 StarlingDeploymentStore;未装 Starling 时只跑前者 |
+| 单元 | 每轮读写:召回在回复前,`remember` 只收他人发言且带 key 前缀,抽取失败不抛且进轨迹;`turn_index` 取自 history,同一句话重试得到同一个 key;可写端口没给 `episode_id` 时 `instantiate` 抛错 | 记录调用的假端口 |
+| 单元 | 轨迹 actio.trace.v2:计数是字符串;经 `Struct` 往返后 `validate_trace` 仍通过;两个版本都被接受。`memories=` 简写实例也产出 actio.trace.v2,所以 `tests/test_actio_instance.py` 里断言 actio.trace.v1 的用例要跟着改,该文件的导入白名单也要加 `hashlib`、`json` | 无 |
+| 单元 | 失败映射与适配器:每类异常都有确定的 `transient` 值;`remember` 返回 `failed`(含类别 `timeout`)只计数、不抛;命中行的渲染、否定语句加「不」;异常信息不含端点与密钥 | 假 Starling |
+| 单元 | 摘要:同一逻辑内容在不同文件字节下相同;改任一进摘要的字段即变;对事件表里语句 UUID 的变化不敏感。内容 id:同一语句在两个库里得到同一个 `mem-` id | 真 Starling;未装时跳过,内容 id 一项用替身 |
+| 单元 | 事件状态:抽取失败的事件行留 `pending`,同 key 同文本再调再抽;语句已落库而第三段没写成(模拟崩溃)时再调不再抽取,按 `engram_ref` 补成 `committed`;`committed` 之后再调幂等;`abandoned` 之后再调抛冲突 | 真 Starling(在 Starling 的 PR 里) |
 | 单元 | 重试与放弃:失败的几句在下一次 `respond` 连同新发言再交给 `remember`;`close()` 放弃仍 `pending` 的 key 再关库,部署库里不留该实例的 `pending` 行 | 记录调用的假端口 |
 | 集成 | 同一起点副本、同一输入序列,`decide` 的结果恒定 | 替身端口 |
 
@@ -817,7 +822,7 @@ Actio 自己的失败是 T2 确定性:同样输入必然再失败,不重放。�
 
 ## 10. 现状、局限与未核实项
 
-`src/actio` 十一个源文件全部在主干上,协议一侧的 `SubmitTurn.activation_trace`、客户端与驱动器的参数、运行器的三元组解包也已落地;第 9 章列出的 185 个用例在 `b826440` 上实测照数。装配位置是 MindAgent 部署驱动器的轮次处理器,它经 `factory` 的 `agent.yaml` 取罐头后端 `CannedGuidedBackend`;真实模型后端还没有接上,真实模型是否遵循指导语仍未核实,见 10.3。设计二的记忆端口、Starling 适配器与 actio.trace.v2 都是 [计划中]:前一半只用替身就能跑通,后一半依赖 Starling 的 PR 合入。
+`src/actio` 十一个源文件全部在主干上,协议一侧的 `SubmitTurn.activation_trace`、客户端与驱动器的参数、运行器的三元组解包也已落地;第 9 章列出的 185 个用例在 `b826440` 上实测照数。装配位置是 MindAgent 部署驱动器的轮次处理器,它经 `factory` 的 `agent.yaml` 取罐头后端 `CannedGuidedBackend`;真实模型后端还没有接上,真实模型是否遵循指导语仍未核实,见 10.3。设计二的记忆端口、部署记忆管理面、Starling 适配器与 actio.trace.v2 都是 [计划中]:前一半只用替身就能跑通,后一半依赖 Starling 的 PR 合入。
 
 ### 10.1 已落地与计划中
 
@@ -828,11 +833,9 @@ Actio 自己的失败是 T2 确定性:同样输入必然再失败,不重放。�
 | `SubmitTurn.activation_trace` | [已落地] | 可选 `Struct`,字段编号 3;HasField 区分空轨迹与没有轨迹 |
 | 客户端、驱动器、客户端驱动后端带轨迹 | [已落地] | keyword-only 参数 |
 | `actio` 包全部模块 | [已落地] | 十一个源文件,含 `__init__.py` |
-| 记忆端口与替身 | [计划中] | `memory_port.py` 与 TupleMemory;实例改持端口,每轮读写;只用替身即可跑通 |
+| 记忆端口、替身与契约测试 | [计划中] | `memory_port.py`、TupleMemory 与管理面的 FileTupleStore;实例改持端口,每轮读写,带 `episode_id` 与关闭语义(`close()` 放弃本实例留下的 `pending` 事件);替身与 Starling 过同一份规范样例,先定样例后实现;只用替身即可跑通 |
 | 激活轨迹 actio.trace.v2 | [计划中] | 九个键,`memory` 块三个字符串值;actio.trace.v1 与 actio.trace.v2 都接受 |
-| 记忆端口的契约测试与规范样例 | [计划中] | 替身与 Starling 过同一份;先定样例,后实现 |
-| Starling 适配器 `memory_starling.py` | [计划中] | 依赖 Starling 补齐的公开接口合入;唯一导入 `starling` 的文件 |
-| 实例的 `episode_id` 参数与关闭语义 | [计划中] | 三个调用方构造实例时传入逻辑 episode id;`close()` 放弃本实例留下的 `pending` 事件 |
+| Starling 适配器 `memory_starling.py` | [计划中] | StarlingMemory 与 StarlingDeploymentStore;依赖 Starling 补齐的公开接口合入;唯一导入 `starling` 的文件 |
 
 ### 10.2 已知局限
 
@@ -840,12 +843,10 @@ Actio 自己的失败是 T2 确定性:同样输入必然再失败,不重放。�
 |---|---|---|
 | 信号词典、阈值、检索参数无数据支持;`emotion_high` 是子串匹配,"不生气"也命中 | 命中率不可知 | 词典与注册表可按实例替换 |
 | 二字切分检不到近义表达 | 相关记忆漏检,只影响替身路径 | Starling 路径做语义召回 [计划中];替身仍是词面检索 |
-| 记忆检索不按主体过滤 | 替身路径上别人的记忆会被检出 | Starling 路径一个人格一个库,靠文件隔离;替身沿用 `subjects` 参数的约定 |
 | Starling 没装时退化为替身 | 训练与部署的记忆行为是词面检索加内存元组,和装了 Starling 的行为不同 | 记忆运行时身份里 `backend` 记 `stand-in`,换成真 Starling 会改摘要和 `config_hash`;启动日志显式报告 [计划中] |
 | 训练里不做后台维护 | 没有 TTL、回放与巩固;召回只靠嵌入 | 换来同一起点可复现;影响程度未核实,见 10.3 |
 | 抽取失败的那一句不进记忆 | 一轮的记忆少一条,与无故障时的序列不同 | 计数进轨迹;失败的事件留 `pending`,同 key 同文本再调还会再抽 |
 | 轨迹只记录路由决定 | `IgnoreGuidance` [已落地] 包装的后端忽略指导语,轨迹照写 `selected` | 分析器把轨迹当"决定",不当"行为" |
-| InteractTrain 按二元组解包 | 现状下 Actio 实例不能直接当训练策略 | 设计二让轨迹源接受二元组或三元组,第三项随 `submit_turn` 上行 [计划中] |
 | 重新生成依赖锁定的 `grpcio-tools 1.84.0` | 升级会改生成物版本头 | 升级时先做不改 proto 的重新生成并比对 |
 
 ### 10.3 未核实项
@@ -870,7 +871,6 @@ Actio 不读写产物树,不决定用哪个库版本,不对轨迹做数字规范
 | 不把记忆库放进 git 产物树 | 原生 SQLite 带预写日志,文件字节不稳定,不适合当 git 产物 |
 | 不做跨租户共享记忆 | 记忆是个体的,一个人格一个库 |
 | 不用 Starling 的语义检索做诊断评测 | 诊断评测的动态轨与批量数据集生产仍用裸后端,不经过 Actio |
-| 不写自己的话 | 它已在对话历史里 |
 | 不兼容 Actio-RSI | 设计二不接外部的同名项目 |
 
 ## 附 本文术语
@@ -880,8 +880,8 @@ Actio 不读写产物树,不决定用哪个库版本,不对轨迹做数字规范
 | 技能 | 带触发条件、优先级、版本与指令的条目;命中且排第一时其指令进入指导语 |
 | 推理经验 | 带主、次、保底三级指令的条目,三级回退按触发条件逐级尝试 |
 | 显式记忆 | 带主体、内容、关键词、时间戳与置信度的条目,按词面重叠检索;设计二里它是替身记忆的条目 |
-| 记忆端口 | Actio 访问记忆的统一协议:召回、写入、只做嵌入、算摘要、关闭。一个端口实例只属于一个智能体 [计划中] |
-| 替身记忆 | TupleMemory,把现有 `MemoryEntry` 元组与词面检索包成端口的实现,Starling 缺席时用它 [计划中] |
+| 记忆端口 | Actio 访问记忆的统一协议:召回、写入、只做嵌入、算摘要、关闭。一个端口实例只属于一个智能体;部署记忆另有只给 MindAgent 的管理面,按人格 id 操作 [计划中] |
+| 替身记忆 | TupleMemory,把现有 `MemoryEntry` 元组与词面检索包成端口的实现,Starling 缺席时用它;管理面的替身是 FileTupleStore,条目与事件表存成 JSON 文件 [计划中] |
 | 内容 id | 记忆命中的 id:`mem-` 加规范化语句行 sha256 的前 16 位;同样内容在任何库里得到同一个 id [计划中] |
 | 逻辑摘要 | 记忆库内容的 sha256:语句、向量、事件三张表的全部列去掉纯簿记列后算出,与文件字节无关 [计划中] |
 | 事件 key | 一次写记忆的稳定身份,`<逻辑 episode id>#<turn_index>`;同 key 同文本重写是幂等的 [计划中] |

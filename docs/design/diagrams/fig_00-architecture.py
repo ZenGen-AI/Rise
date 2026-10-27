@@ -9,6 +9,7 @@ def build() -> Canvas:
         1080, 730, title="RismForge 系统架构",
         desc="四层结构。控制层放决策与配方相关的四个组件。协调层 ControlPlane 配三道人工审核门。"
              "计算层放三个子系统。共享基础设施放 Actio、Starling 记忆库、远端计算层、训练与推理引擎。"
+             "三个计算层子系统都使用 Actio 实例,MindTrainer 用的是训练位实例。"
              "所有子系统经 ControlPlane 读写产物,只有两条受限直连接口绕过它。")
     c.lane(14, 44, 1052, 146, "控制层(本地开发机)", kind="control")
     c.lane(14, 214, 1052, 128, "协调层", kind="control", dashed=False)
@@ -50,6 +51,9 @@ def build() -> Canvas:
     # SocialSimulator 正下方是 ROLL · vLLM,出口靠右、在两层之间的空隙里横移,再落到 Actio 顶边
     c.edge(ss, ac, "bottom", "top", a_f=0.8, b_f=0.17)
     c.edge(ma, ac, "bottom", "top", a_f=0.2, b_f=(ma.x + ma.w * 0.2 - ac.x) / ac.w)
+    # MindTrainer 的训练位实例:从 MindTrainer 底边右端下行,穿过计算层与共享层之间的空隙,横移后落到 Actio 顶边左端
+    c.edge(mt, ac, "bottom", "top", a_f=0.97, b_f=0.06, label="训练位实例", label_at=0.62,
+           via=[(mt.x + mt.w * 0.97, 552), (ac.x + ac.w * 0.06, 552)])
     c.edge(ac, st, "right", "left", label="读写", tail=True)
 
     c.note(860, 412, 190, "①② 是受限直连接口\n只在计算层内部发生\n不经过 ControlPlane")

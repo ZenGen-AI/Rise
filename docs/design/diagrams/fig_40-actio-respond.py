@@ -8,7 +8,7 @@ def build() -> Canvas:
         desc="前三步是 decide:求信号并路由技能、激活推理经验、从记忆端口 recall。"
              "第四步按固定顺序渲染指导语,第五步把 history 副本与指导语交给后端,"
              "第六步把对方新发言逐条写进记忆再只做嵌入,第七步组装并校验激活轨迹,第八步返回三元组。"
-             "后端返回值不合规时抛 TypeError,记忆调用失败时抛 MemoryFailureError。")
+             "后端返回值不合规时抛 TypeError;recall 或 embed_pending 失败、remember 抛异常时抛 MemoryFailureError。")
     c.lane(14, 40, 1052, 170, "decide:不调用模型后端,不写记忆", kind="infra")
     c.lane(14, 240, 1052, 300, "调用后端、写记忆并组装激活轨迹", kind="infra", dashed=False)
 
@@ -27,7 +27,7 @@ def build() -> Canvas:
     tr = c.box(xs[0], 290, 220, "组装激活轨迹", "build_trace 组装\n随即 validate_trace", h=84, kind="infra")
     out = c.box(xs[0], 440, 220, "返回三元组", "(utterance,\ninner_thought, trace)", h=64, kind="neutral")
     err = c.box(xs[2], 440, 220, "TypeError", "后端返回值不是二元组", h=64, kind="danger")
-    merr = c.box(xs[1], 440, 220, "MemoryFailureError", "记忆调用抛异常\n带 transient 标记上抛", h=64,
+    merr = c.box(xs[1], 440, 220, "MemoryFailureError", "recall、embed_pending 失败\nremember 抛异常,带 transient", h=64,
                  kind="danger")
 
     c.edge(inp, rt)
@@ -39,7 +39,10 @@ def build() -> Canvas:
     c.edge(mw, tr, "left", "right")
     c.edge(tr, out, "bottom", "top")
     c.edge(bk, err, "bottom", "top", label="不合规", color="#dc2626")
-    c.edge(mw, merr, "bottom", "top", label="失败", color="#dc2626")
+    c.edge(mw, merr, "bottom", "top", label="嵌入失败或抛异常", color="#dc2626")
+    # recall 在第 3 步失败:从记忆检索右侧绕到最下方,再从下边进入 MemoryFailureError
+    c.edge(me, merr, "right", "bottom", via=[(1050, 138), (1050, 524), (400, 524)], label="recall 失败",
+           label_at=0.6, color="#dc2626")
 
     for n, node in enumerate((rt, ex, me, rg, bk, mw, tr, out), 1):
         c.badge(node.x, node.y, n, kind="infra")

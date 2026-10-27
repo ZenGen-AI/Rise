@@ -7,8 +7,8 @@ ORANGE = "#d97706"
 def build() -> Canvas:
     c = Canvas(
         1080, 610, title="Actio 的上下文",
-        desc="SocialSimulator 的运行器与 MindAgent 的客户端循环都实例化 Actio 并调用 respond。"
-             "Actio 把技能、经验与记忆渲染成指导语交给模型后端,包外只导入 simulator.datamodel。"
+        desc="SocialSimulator 的运行器把实例当后端调用,MindAgent 的客户端循环实例化 Actio 并调用 respond,"
+             "factory 组合根构造训练路的实例。Actio 把技能、经验与记忆渲染成指导语交给模型后端,包外只导入 simulator.datamodel。"
              "技能库由 MindAgent 读入后传给 Actio,Actio 自己不读产物树。"
              "记忆经记忆端口读写 Starling 的树外 SQLite 库,Starling 是可选依赖。")
     c.lane(14, 40, 1052, 150, "计算层", kind="compute")
@@ -27,8 +27,9 @@ def build() -> Canvas:
     mem = c.store(548, 448, 244, "Starling 记忆库", "每个人格一个 SQLite 库(树外)\n可选依赖 extra memory",
                   h=90)
     lib = c.store(808, 448, 244, "技能库", "skill_library/\n由 MindAgent 读写", h=90)
+    fac = c.box(730, 262, 200, "factory 组合根", "构造训练路的全部实例\n训练位 · 对手位", h=90, kind="neutral")
 
-    c.edge(ss, ac, "bottom", "top", a_f=0.75, b_f=0.15, label="runner 把实例当后端")
+    c.edge(ss, ac, "bottom", "top", a_f=0.75, b_f=0.15, label="运行器把实例当后端调用")
     c.edge(ma, ac, "bottom", "top", a_f=0.25, b_f=0.85, label="instantiate · respond")
     c.edge(ma, ss, "left", "right", label="② submit_turn 带轨迹", tail=True, color=ORANGE, width=2.4)
     # 下行连线竖直对齐:Actio 底边 x = 380 + 320 * a_f,目标顶边 x = 左缘 + 244 * b_f
@@ -36,8 +37,10 @@ def build() -> Canvas:
     c.edge(ac, mem, "bottom", "top", a_f=(640 - 380) / 320, b_f=(640 - 548) / 244,
            label="recall · remember", tail=True)
     c.edge(ac, dm, "left", "top", b_f=(215 - 28) / 244, label="唯一的包外导入")
-    c.edge(lib, ma, "top", "bottom", b_f=(930 - 700) / 320, label="读入条目与库版本")
+    c.edge(fac, ac, "left", "right")
+    c.edge(lib, ma, "top", "bottom", a_f=(1000 - 808) / 244, b_f=(1000 - 700) / 320, label="读入条目与库版本")
 
     c.legend(40, 592, [("compute", "计算层", False), ("infra", "共享基础设施", False),
-                       ("store", "产物与记忆库", False), ("human", "受限直连②", False)])
+                       ("store", "产物与记忆库", False), ("neutral", "组合根与外部", False),
+                       ("human", "受限直连②", False)])
     return c
