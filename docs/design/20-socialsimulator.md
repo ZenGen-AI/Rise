@@ -390,7 +390,8 @@ class ModelBackend(Protocol):
 def create_server(backends_factory, *, port=0, turn_timeout_s=30.0,
                   on_session_closed=None, max_workers=16, scenario_resolver=None,
                   max_turns_cap=200, create_timeout_s=10.0, backend_timeout_s=60.0,
-                  keepalive_time_ms=30_000, keepalive_timeout_ms=10_000) -> grpc.Server
+                  keepalive_time_ms=30_000, keepalive_timeout_ms=10_000,
+                  resource_join_timeout_s=60.0, linger_retry_s=60.0) -> grpc.Server
 class EnvironmentServiceClient:
     def create_session(self, *, scenario_id, role_assignment, personas,
                        purpose, client_driven_slot) -> str
@@ -401,7 +402,7 @@ class EnvironmentServiceClient:
     def abort(self) -> None
 ```
 
-会话资源与会话身份的新签名 [计划中],施工时可能微调。工厂改为收会话信息、返回会话资源,落盘钩子多带 `session_id`,`create_server` 的其余参数不变。
+会话资源与会话身份的新签名 [计划中],施工时可能微调。工厂改为收会话信息、返回会话资源,落盘钩子多带 `session_id`,`create_server` 另加 `resource_join_timeout_s`、`linger_retry_s` 两个参数(滞留表的 join 等待与重试间隔,默认都是 60 秒),`max_workers` 透传给 servicer 算名额。
 
 ```python
 BackendsFactory = Callable[[SessionInfo], SessionResources]
@@ -433,7 +434,7 @@ SessionInfo、SessionResources、SessionClosingError 三个类型都放在 `src/
 |---|---|
 | 批量写序 | 先写全部 episode,最后写清单;清单在即代表数据集完整 |
 | episode id | 批量为 `<run>-<阶段>-<情境 id>-r<k>`;实时取 `CreateSession.episode_id`,没给时为 `ep-sess-<12 位十六进制>` [计划中] |
-| 逻辑 episode id | 由客户端定,同一条 rollout 的重试不变:训练是 `{run}-{stage}-{scenario}-r{k}`,部署是 `deploy-{model}-{scenario}-{k}`。服务端落盘的 episode 用它当 id [计划中] |
+| 逻辑 episode id | 由客户端定,同一条 rollout 的重试不变:训练是 `{run_id}-grpo{step}-{scenario_id}-r{k}`(同一情境在不同 GRPO step 反复出现,id 里带 step 才不撞),部署是 `deploy-{model}-{scenario}-{k}`。服务端落盘的 episode 用它当 id [计划中] |
 | `episode_id` 校验 | 只许 `[A-Za-z0-9._-]`,1 到 128 字节,不是 `.` 或 `..`,不合以 `invalid_session`(T2)拒绝。同 id 已有活动会话以 `role_backend_unavailable`(T1)拒绝:客户端 abort 后旧会话要等收尾,立刻重试会撞上它,这是暂时的。活动指从准入登记起,到 servicer 收尾完或移交滞留表为止 [计划中] |
 | 实时落盘 | 服务端不自己写产物树,由调用方注入 `on_session_closed`,钩子须线程安全。新签名带 `session_id`,调用方据此而不是按情境 id 找会话归属 [计划中] |
 | 钩子异常 | 只记日志,不中断流,客户端仍收到 `EndSession` |
@@ -607,9 +608,9 @@ interact 会话前的准备 [已落地]。下表是派发器与组合根在起�
 | 1 准入 [计划中] | 在服务端的一把锁里做完三件事:检查活动数加滞留数小于 `max_workers`,检查 `episode_id` 没有活动会话,登记会话。之后才调工厂 | servicer | 名额满或 `episode_id` 有活动会话:`role_backend_unavailable`(T1) |
 | 2 造资源 [计划中] | 工厂按会话信息造全部后端并返回资源,在锁外跑 | 工厂 | 工厂抛异常:在同一把锁里撤销登记,以 `role_backend_failure` 拒绝。工厂保证不留半开的库:先建全部再返回,中途失败先关已开的 |
 | 3 启动 [计划中] | servicer 用资源给每个后端套 `TimeoutBackend`,期限取 `backend_timeout_s`,再把套好的字典交给驱动器,自己持有资源到流结束。驱动器只调后端,不持有资源 | servicer | 工厂返回之后、驱动器启动之前的任何失败(校验、缺后端、`start` 抛),由 servicer 在同一个 `try` 里对资源做 quiesce、join、close |
-| 4 运行 [计划中] | `TimeoutBackend` 在每次 `respond` 开始时把调用线程加入资源的在途集合,结束时移出。超时只是调用方放弃等待,线程仍在集合里 | TimeoutBackend | 集合的操作持一把锁;join 不持锁等待 |
+| 4 运行 [计划中] | `TimeoutBackend` 在调用方线程里先登记(quiesce 之后直接抛 SessionClosingError,不起线程),daemon 线程退出时再移出。超时只是调用方放弃等待,线程仍在集合里 | TimeoutBackend | 集合的操作持一把锁;join 不持锁等待 |
 | 5 终态收尾 [计划中] | 驱动器进入 CLOSED 或 FAILED(含断开)后,流结束的 `finally` 按序调 quiesce、join(超时 60 秒)、close | servicer | quiesce 之后的 `respond` 抛 SessionClosingError |
-| 6 join 超时 [计划中] | 不 close、不删。资源移交滞留表,继续占一个会话名额 | servicer | 准入检查把滞留数算进名额 |
+| 6 join 超时 [计划中] | 不 close、不删。资源移交滞留表,继续占一个会话名额;滞留数可由 servicer 的 lingering_count() 读,每分钟一行日志 | servicer | 准入检查把滞留数算进名额 |
 | 7 滞留重试 [计划中] | 滞留表每 60 秒对每个资源做一次零等待的 join,成功后 close 并删目录 | servicer | 删除失败记日志,留给启动清扫 |
 | 8 清扫 [计划中] | 取到仓库排他锁之后、起任何会话之前,删掉记忆根目录下 `runs/` 的全部子目录,不碰 `deploy/`、`seeds/`、`snapshots/`。此时本进程没有会话。别的进程被仓库锁挡在外面。记忆根目录只属于这个仓库,所以不会误删在途副本。运行中只删滞留表 join 成功的资源登记的目录,不扫目录 | 组合根 | 无 |
 
@@ -633,7 +634,7 @@ interact 会话前的准备 [已落地]。下表是派发器与组合根在起�
 
 两个 90 秒方向相反,互不嵌套。服务端等的是客户端的一次提交。客户端等的是相邻两条服务端消息之间的间隔,每条对手发言都是一条消息,所以一轮里有几个对手都不叠加。
 
-客户端限时的做法。收消息的 `_next_msg` 在接收线程里用带超时的队列取消息,计的是相邻两条服务端消息之间的间隔。超时视作 `timeout`(T1,按条重跑)并 abort 会话。
+客户端限时的做法。收消息的 `_next_msg` 在接收线程里用带超时的队列取消息,计的是相邻两条服务端消息之间的间隔。超时视作 `timeout`(T1,按条重跑)并 abort 会话(客户端本地合成 `EndSession(reason="timeout")`,由既有收尾处理;不抛异常,否则会被分类成不可重跑的 `client_protocol_error`)。
 
 ## 7. 关键决策
 
