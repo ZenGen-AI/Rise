@@ -673,6 +673,33 @@ def test_a_deterministic_rejection_fails_the_run_and_is_never_retried(store, rea
     assert source.collects == 1  # 第二次进入被 escalate 挡住,没有再去开会话
 
 
+class _MemoryBrokenSource:
+    """替身 Interact 源:collect 时训练位策略抛确定性记忆失败(轨迹源不接它,原样穿出)。"""
+
+    def __init__(self):
+        self.collects = 0
+
+    def collect(self):
+        from simulator.realtime.backend_timeout import RoleMemoryFailureError
+        self.collects += 1
+        raise RoleMemoryFailureError("memory backend failed for slot 'a': MemoryClosedError")
+
+
+def test_a_deterministic_memory_failure_of_the_trained_slot_fails_the_run_instead_of_leaving_it_pending(store):
+    from simulator.realtime.backend_timeout import RoleMemoryFailureError
+    source = _MemoryBrokenSource()
+    with pytest.raises(RoleMemoryFailureError):
+        _go(store, _interact_cfg(), MockExecutor(), make_sources=_stub_sources(store, source))
+    failed = read_training_run(store, RUN)
+    assert (failed.status, failed.failure["category"], failed.failure["point"]) == (
+        "failed", "T2", "step 1 (grpo_opd)",
+    )
+    assert failed.failure["detail"].startswith("RoleMemoryFailureError: ")
+    with pytest.raises(NeedsHumanError, match="failed"):
+        _go(store, _interact_cfg(), MockExecutor(), make_sources=_stub_sources(store, source))
+    assert source.collects == 1
+
+
 @pytest.mark.parametrize("reason", ["timeout", "role_backend_failure"])
 def test_other_rollout_failures_stay_pending_for_the_attempt_limit_to_bound(store, reason):
     source = _RejectedSource(reason)

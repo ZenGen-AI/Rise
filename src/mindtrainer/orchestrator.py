@@ -26,6 +26,7 @@ from mindtrainer.training_config import (
 from mindtrainer.trajectory_source import RolloutFailedError, TrajectorySource, batch_for_step
 from simulator.datamodel import Episode
 from simulator.dataset import DatasetIntegrityError
+from simulator.realtime.backend_timeout import RoleMemoryFailureError
 
 
 class NotEnoughGroupsError(ValueError):
@@ -34,10 +35,12 @@ class NotEnoughGroupsError(ValueError):
 
 
 # 这几类是确定性失败(补充 E.2 的 T2):同样的输入还会再失败,写 failed 并保留,不进续训。
+# RoleMemoryFailureError 是训练位的记忆端口确定性失败:经组合根的转换后端变成它的子类,同样的输入还会再失败。
 # 其余异常一律不吞,run 保持 pending,交给 decide_resume 判定。
 _DETERMINISTIC = (
     DatasetIntegrityError, DegenerateGroupError, AttributionError,
     NotEnoughGroupsError, InvalidTrainingConfigError, TrainingDataRejectedError,
+    RoleMemoryFailureError,
 )
 
 # 这三个 rollout 终止原因是确定性的拒绝(T2),重试无益:invalid_session 是请求本身有问题,
