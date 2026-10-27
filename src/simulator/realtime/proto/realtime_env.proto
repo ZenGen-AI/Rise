@@ -54,6 +54,10 @@ message CreateSession {
   map<string, PersonaProto> personas = 3;
   string purpose = 4;  // "training" | "deployment_simulation"
   string client_driven_slot = 5;
+  // 逻辑 episode id(可选)。给了就是服务端落盘 episode 的 id;空串表示没给,服务端用 ep-<session_id>。
+  // 只许 [A-Za-z0-9._-]、1 到 128 字节、不是 "." 或 "..",否则 invalid_session;
+  // 同一 episode_id 已有活动会话时以 role_backend_unavailable 拒绝(T1)。
+  string episode_id = 6;
 }
 
 // 服务端 → 客户端:会话已进入 ACTIVE。

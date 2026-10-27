@@ -101,9 +101,14 @@ class EnvironmentServiceClient:
         personas: dict[str, Persona],
         purpose: str,
         client_driven_slot: str,
+        episode_id: str | None = None,
     ) -> str:
         """建立会话，返回 session_id。服务端拒绝时抛 SessionRejectedError；
-        传输层出错时抛 grpc.RpcError。"""
+        传输层出错时抛 grpc.RpcError。
+
+        episode_id 是逻辑 episode id:给了就随 CreateSession 发给服务端,本地重建的
+        Episode.id 也用它;不给则服务端用 ep-<session_id>,本地同样如此。格式由服务端
+        判(invalid_session),客户端不校验。"""
         cs = pb2.CreateSession(
             scenario_id=scenario_id,
             role_assignment=role_assignment_to_proto(role_assignment),
@@ -111,6 +116,8 @@ class EnvironmentServiceClient:
             purpose=purpose,
             client_driven_slot=client_driven_slot,
         )
+        if episode_id is not None:
+            cs.episode_id = episode_id
         self._send_q.put(pb2.ClientMessage(create_session=cs))
         first = self._next_msg()
         kind = first.WhichOneof("payload")
@@ -127,7 +134,7 @@ class EnvironmentServiceClient:
         self._scenario_id = scenario_id
         self._role_assignment = role_assignment
         self._client_slot = client_driven_slot
-        self._episode_id = f"ep-{self._session_id}"
+        self._episode_id = episode_id if episode_id is not None else f"ep-{self._session_id}"
         self._opening_turns = self._await_client_turn()
         return self._session_id
 

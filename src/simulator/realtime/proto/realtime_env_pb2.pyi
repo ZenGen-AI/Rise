@@ -62,7 +62,7 @@ class TurnRecordProto(_message.Message):
     def __init__(self, turn_index: _Optional[int] = ..., speaker_slot: _Optional[str] = ..., utterance: _Optional[str] = ..., inner_thought: _Optional[str] = ..., activation_trace: _Optional[_Union[_struct_pb2.Struct, _Mapping]] = ...) -> None: ...
 
 class CreateSession(_message.Message):
-    __slots__ = ("scenario_id", "role_assignment", "personas", "purpose", "client_driven_slot")
+    __slots__ = ("scenario_id", "role_assignment", "personas", "purpose", "client_driven_slot", "episode_id")
     class PersonasEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
@@ -75,12 +75,14 @@ class CreateSession(_message.Message):
     PERSONAS_FIELD_NUMBER: _ClassVar[int]
     PURPOSE_FIELD_NUMBER: _ClassVar[int]
     CLIENT_DRIVEN_SLOT_FIELD_NUMBER: _ClassVar[int]
+    EPISODE_ID_FIELD_NUMBER: _ClassVar[int]
     scenario_id: str
     role_assignment: RoleAssignmentProto
     personas: _containers.MessageMap[str, PersonaProto]
     purpose: str
     client_driven_slot: str
-    def __init__(self, scenario_id: _Optional[str] = ..., role_assignment: _Optional[_Union[RoleAssignmentProto, _Mapping]] = ..., personas: _Optional[_Mapping[str, PersonaProto]] = ..., purpose: _Optional[str] = ..., client_driven_slot: _Optional[str] = ...) -> None: ...
+    episode_id: str
+    def __init__(self, scenario_id: _Optional[str] = ..., role_assignment: _Optional[_Union[RoleAssignmentProto, _Mapping]] = ..., personas: _Optional[_Mapping[str, PersonaProto]] = ..., purpose: _Optional[str] = ..., client_driven_slot: _Optional[str] = ..., episode_id: _Optional[str] = ...) -> None: ...
 
 class SessionReady(_message.Message):
     __slots__ = ("session_id",)

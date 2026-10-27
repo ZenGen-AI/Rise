@@ -111,6 +111,30 @@ def test_unexpected_message_mid_session_raises_and_releases_request_stream():
     _assert_request_stream_released(stub)
 
 
+def test_create_session_sends_the_episode_id_and_names_the_local_episode_after_it():
+    stub = _FakeStub([_ready("sess-fake")])
+    client = EnvironmentServiceClient(stub)
+    client.create_session(
+        scenario_id="s1", role_assignment=_assignment(), personas=_personas(),
+        purpose="training", client_driven_slot="a", episode_id="run-1-grpo_opd-s1-r0",
+    )
+    assert next(stub.request_gen).create_session.episode_id == "run-1-grpo_opd-s1-r0"
+    client.abort()
+    assert client.drain_until_end().id == "run-1-grpo_opd-s1-r0"
+
+
+def test_without_an_episode_id_the_request_leaves_it_empty_and_the_local_id_stays_ep_session():
+    stub = _FakeStub([_ready("sess-fake")])
+    client = EnvironmentServiceClient(stub)
+    client.create_session(
+        scenario_id="s1", role_assignment=_assignment(), personas=_personas(),
+        purpose="training", client_driven_slot="a",
+    )
+    assert next(stub.request_gen).create_session.episode_id == ""
+    client.abort()
+    assert client.drain_until_end().id == "ep-sess-fake"
+
+
 @pytest.fixture
 def serve():
     resources = []
