@@ -458,7 +458,7 @@ class SessionResources:
 
 - `simulator/realtime/backend_timeout.py` 新增两个基类 `RoleMemoryUnavailableError`（瞬态）与 `RoleMemoryFailureError`（确定性），驱动器按它们分出两个终止原因。
 - 组合根造的每个 Actio 实例（训练位与对手位）外面套一层转换后端：接住 `actio.MemoryFailureError`，按 `transient` 改抛 `factory` 里继承了上面两个基类之一的异常。`actio` 的依赖不变。
-- 训练位的轨迹源接的是同样两个 `simulator` 基类，所以 `mindtrainer` 也不需要导入 `actio`。
+- 训练位的轨迹源接的是同样两个 `simulator` 基类，所以 `mindtrainer` 也不需要导入 `actio`。瞬态的在 `_attempt` 里译成按条重跑。确定性的不接，让它照现状原样穿出轨迹源（`trajectory_source.py:259`）；编排器的 `_DETERMINISTIC` 元组加上 `RoleMemoryFailureError`，于是训练记录写 `failed` 后重抛（`orchestrator.py:315`）。不加的话，它落不进任何确定性分支，记录保持 `pending`，被当成可续训而反复延后。训练位副本 `close()` 最多等 60 秒（与服务端 `join` 同值），超时按确定性处理。
 - MindAgent 自己造部署实例、本来就导入 `actio`，直接接 `actio.MemoryFailureError`；对手位的记忆失败经 `EndSession` 的终止原因字符串到达，按字符串分类。
 
 `MemoryFailureError.transient` 由适配器按穷举映射给出（M21）：
