@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -181,6 +182,9 @@ def _check_event_row(row: object) -> dict:
         raise ActioDataError(f"{what}.statement_ids: expected a list, got {ids!r}")
     for i, v in enumerate(ids):
         _check.text(v, f"{what}.statement_ids[{i}]")
+    if bool(ids) != (row["state"] == "committed"):  # commit 才写语句 id;pending 与 abandoned 行里没有
+        raise ActioDataError(f"{what}.statement_ids: a {row['state']} row must "
+                             f"{'have' if row['state'] == 'committed' else 'not have'} statement ids, got {ids!r}")
     _check.optional_text(row["failure_category"], f"{what}.failure_category")
     return dict(row)
 
@@ -199,7 +203,7 @@ class _Ledger:
             raise ActioDataError(f"entries: expected a tuple or list, got {type(entries).__name__}")
         snapshot(entries)  # 逐条查类型,并让同 id 同版本的冲突在构造时就抛
         self.entries: list[MemoryEntry] = list(entries)
-        self.events: dict[str, dict] = {} if events is None else events
+        self.events: dict[str, dict] = {} if events is None else deepcopy(events)  # 不与调用方共享行
         self.next_seq: int = next_seq
 
     # ---- 召回 ----
@@ -301,7 +305,7 @@ class _Ledger:
     def to_json(self) -> dict:
         return {
             "entries": [e.to_dict() for e in self.entries],
-            "events": [dict(r) for r in sorted(self.events.values(), key=lambda r: r["seq"])],
+            "events": [deepcopy(r) for r in sorted(self.events.values(), key=lambda r: r["seq"])],
             "next_seq": self.next_seq,
         }
 
@@ -317,6 +321,8 @@ class _Ledger:
             if row["key"] in events:
                 raise ActioDataError(f"memory ledger: duplicate event key {row['key']!r}")
             events[row["key"]] = row
+        if len({r["seq"] for r in events.values()}) != len(events):
+            raise ActioDataError("memory ledger: duplicate event seq")
         next_seq = _check.integer(obj["next_seq"], "memory ledger.next_seq")
         if next_seq < 0 or any(r["seq"] >= next_seq for r in events.values()):
             raise ActioDataError(f"memory ledger.next_seq: {next_seq!r} does not exceed every event seq")
