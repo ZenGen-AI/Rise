@@ -2,6 +2,7 @@ import ast
 from pathlib import Path
 
 import pytest
+from google.protobuf import json_format, struct_pb2
 
 from actio.errors import ActioDataError
 from actio.experience import ReasoningExperience
@@ -9,7 +10,9 @@ from actio.instance import IgnoreGuidance, as_guided, instantiate, render_guidan
 from actio.memory import MemoryEntry
 from actio.signals import default_registry
 from actio.skills import Skill
-from actio.trace import TIE_BREAK_RULE, TRACE_SCHEMA, build_trace, normalize_library_version, validate_trace
+from actio.trace import (
+    TIE_BREAK_RULE, TRACE_SCHEMA_V1, TRACE_SCHEMA_V2, build_trace, normalize_library_version, validate_trace,
+)
 from simulator.backends import ScriptedBackend
 from simulator.datamodel import Persona, RoleAssignment, RoleBinding, RoleSlot, Scenario, TurnRecord
 from simulator.runner import run_episode
@@ -52,12 +55,12 @@ def test_build_trace_exact_shape_with_a_conflict():
     t = build_trace(signals=["emotion_high"], candidates=["skill-a", "skill-b"], selected="skill-a",
                     memory_hits=["mem-1"], experience=("e1", "primary"), library_version=LV)
     assert t == {
-        "schema": TRACE_SCHEMA, "signals": ["emotion_high"], "candidates": ["skill-a", "skill-b"],
+        "schema": TRACE_SCHEMA_V1, "signals": ["emotion_high"], "candidates": ["skill-a", "skill-b"],
         "selected": "skill-a", "conflict": {"skills": ["skill-a", "skill-b"], "rule": TIE_BREAK_RULE},
         "memory_hits": ["mem-1"], "experience": {"id": "e1", "tier": "primary"},
         "library_version": {"skill": "lib-2", "memory": "lib-1"},
     }
-    assert TRACE_SCHEMA == "actio.trace.v1" and TIE_BREAK_RULE == "priority_desc,version_desc,id_asc"
+    assert TRACE_SCHEMA_V1 == "actio.trace.v1" and TIE_BREAK_RULE == "priority_desc,version_desc,id_asc"
 
 
 def test_build_trace_without_hits():
@@ -110,6 +113,62 @@ def test_normalize_library_version():
                 {"skill": "", "memory": 0}, {"skill": 1.0, "memory": 0}, [1, 2]):
         with pytest.raises(ActioDataError):
             normalize_library_version(bad)
+
+
+MEM = {"digest_before": "ab" * 32, "remembered": "2", "extraction_failed": "0"}
+
+
+def test_build_trace_with_memory_is_v2_with_nine_keys():
+    t = build_trace(signals=[], candidates=[], selected=None, memory_hits=["mem-a"], experience=None,
+                    library_version=LV, memory=MEM)
+    assert TRACE_SCHEMA_V2 == "actio.trace.v2"
+    assert t["schema"] == TRACE_SCHEMA_V2 and len(t) == 9 and t["memory"] == MEM
+    assert t["memory"] is not MEM
+    assert all(v is None or type(v) in (str, bool) for v in _walk_leaves(t))
+    validate_trace(t)
+
+
+def test_a_v2_trace_survives_a_struct_round_trip():
+    t = build_trace(signals=["first_turn"], candidates=["skill-a"], selected="skill-a", memory_hits=[],
+                    experience=None, library_version=LV, memory={**MEM, "remembered": "12"})
+    s = struct_pb2.Struct()
+    s.update(t)
+    back = json_format.MessageToDict(s)
+    assert back == t and back["memory"]["remembered"] == "12"
+    validate_trace(back)
+
+
+V2_GOOD = dict(signals=[], candidates=[], selected=None, memory_hits=[], experience=None, library_version=LV)
+
+
+@pytest.mark.parametrize("patch", [
+    {"memory": None}, {"memory": {}}, {"memory": {**MEM, "extra": "1"}},
+    {"memory": {k: v for k, v in MEM.items() if k != "remembered"}},
+    {"memory": {**MEM, "digest_before": ""}}, {"memory": {**MEM, "remembered": 2}},
+    {"memory": {**MEM, "remembered": "2.0"}}, {"memory": {**MEM, "extraction_failed": "-1"}},
+    {"memory": {**MEM, "remembered": "\u0663"}},          # 阿拉伯-印度数字:str.isdecimal() 为真,但不是 ASCII
+    {"memory": {**MEM, "remembered": "02"}}, {"memory": {**MEM, "remembered": ""}},
+])
+def test_validate_trace_rejects_a_bad_v2_memory_block(patch):
+    good = build_trace(**V2_GOOD, memory=MEM)
+    with pytest.raises(ActioDataError, match=r"trace\.memory"):
+        validate_trace({**good, **patch})
+
+
+def test_the_schema_decides_the_key_set():
+    v1 = build_trace(**V2_GOOD)
+    v2 = build_trace(**V2_GOOD, memory=MEM)
+    with pytest.raises(ActioDataError, match="expected exactly keys"):
+        validate_trace({**v1, "memory": MEM})                      # v1 带 memory 键
+    with pytest.raises(ActioDataError, match="expected exactly keys"):
+        validate_trace({k: v for k, v in v2.items() if k != "memory"})  # v2 缺 memory 键
+    with pytest.raises(ActioDataError, match=r"trace\.schema"):
+        validate_trace({**v2, "schema": "actio.trace.v3"})
+
+
+def test_build_trace_rejects_a_bad_memory_block():
+    with pytest.raises(ActioDataError, match=r"trace\.memory"):
+        build_trace(**V2_GOOD, memory={**MEM, "remembered": 3})
 
 
 # ---------------- 指导语与适配器 ----------------
