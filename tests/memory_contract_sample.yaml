@@ -1,0 +1,26 @@
+# 记忆端口规范样例(设计二 4.1 节、M17)。替身与 Starling 跑同一份,比较命中顺序与摘要变化曲线。
+empty_recall: 预算
+steps:
+  - remember: {key: "ep-sample#0", text: "pb：我担心预算超支", interlocutor: pb}
+    digest: changed
+    recall:
+      - {query: 预算超支怎么办, limit: 3, hits: ["ep-sample#0"]}
+  - remember: {key: "ep-sample#2", text: "pb：人手也不够", interlocutor: pb}
+    digest: changed
+    recall:
+      - {query: 人手不够预算呢, limit: 3, hits: ["ep-sample#2", "ep-sample#0"]}
+      - {query: 人手不够预算呢, limit: 1, hits: ["ep-sample#2"]}
+  - remember: {key: "ep-sample#4", text: "pc：天气很好", interlocutor: pc}
+    digest: changed
+    recall:
+      - {query: 天气, limit: 3, hits: ["ep-sample#4"]}
+  - remember: {key: "ep-sample#0", text: "pb：我担心预算超支", interlocutor: pb}
+    idempotent: true
+    digest: same
+    recall:
+      - {query: 预算超支怎么办, limit: 3, hits: ["ep-sample#0"]}
+  - remember: {key: "ep-sample#2", text: "pb：换了一句", interlocutor: pb}
+    raises: MemoryEventConflict
+    digest: same
+    recall:
+      - {query: 人手不够预算呢, limit: 3, hits: ["ep-sample#2", "ep-sample#0"]}
