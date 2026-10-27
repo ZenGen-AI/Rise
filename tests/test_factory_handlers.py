@@ -268,7 +268,7 @@ def test_without_a_factory_every_opponent_is_the_same_unlooped_scripted_backend_
     backends = _backends_of(runtime, _scenario_with({"b": ["剧本"]}), _assignment(*bindings), {}, "a")
     assert set(backends) == {"b", "c"}
     for slot in ("b", "c"):
-        assert isinstance(backends[slot], ScriptedBackend)
+        assert isinstance(backends[slot].instance.backend.inner, ScriptedBackend)
         assert _says(backends[slot], slot, 3) == ["全局甲", "全局乙", "(无更多发言)"]
 
 
@@ -341,7 +341,7 @@ def test_with_the_factory_set_an_unregistered_session_never_judges_its_bindings(
     bindings = [RoleBinding("a", "p", "self_play"),
                 RoleBinding("b", "p", backend, model_ref=None if backend == "self_play" else "x")]
     backends = _backends_of(runtime, _scenario_with({"b": ["剧本"]}), _assignment(*bindings), {}, "a")
-    assert set(backends) == {"b"} and isinstance(backends["b"], ScriptedBackend)
+    assert set(backends) == {"b"} and isinstance(backends["b"].instance.backend.inner, ScriptedBackend)
     assert _says(backends["b"], "b", 3) == ["全局甲", "全局乙", "(无更多发言)"]     # 不循环,剧本也不生效
 
 
@@ -441,6 +441,95 @@ def test_a_scripted_driver_survives_the_grpc_hop_and_loops_the_scenario_script(s
     finally:
         runtime.close()
     assert heard == ["剧本一", "剧本二", "剧本一", "剧本二"]
+
+
+def _slot_info(scenario, assignment, *, session_id="sess-1", episode_id="run-1-grpo0-s1-r0", client_slot="a"):
+    from simulator.realtime.resources import SessionInfo
+    return SessionInfo(scenario, assignment, {}, client_slot, session_id, episode_id)
+
+
+def _two_slots():
+    from simulator.datamodel import RoleBinding
+    return _assignment(RoleBinding("a", "pa", "self_play"),
+                       RoleBinding("b", "pb", "frozen_reference", model_ref="zengen-v1", driver="scripted"))
+
+
+def test_every_opponent_slot_is_an_actio_instance_with_its_own_empty_memory(store):
+    from actio.memory import TupleMemory
+    from factory.memory_translate import MemoryTranslatingBackend
+    runtime = AgentRuntime(store, ("全局",))
+    runtime.register_session("s1", "run-1")
+    first = runtime._backends(_slot_info(_scenario_with(), _two_slots()))
+    second = runtime._backends(_slot_info(_scenario_with(), _two_slots(), session_id="sess-2"))
+    backend = first.backends["b"]
+    assert isinstance(backend, MemoryTranslatingBackend)
+    inst = backend.instance
+    assert inst.episode_id == "run-1-grpo0-s1-r0"
+    assert inst.interlocutors == {"a": "pa", "b": "pb"}
+    assert isinstance(inst.memory, TupleMemory) and inst.memory.digest() == TupleMemory().digest()
+    assert inst.memory is not second.backends["b"].instance.memory
+    assert inst.skills == () and inst.library_version == {"skill": "0", "memory": "0"}
+    first.close()
+    second.close()
+
+
+def test_the_opponent_lines_are_unchanged_and_each_turn_carries_a_v2_trace(store):
+    runtime = AgentRuntime(store, ("全局",))
+    resources = runtime._backends(_slot_info(_scenario_with({"b": ["剧本乙"]}), _two_slots()))
+    utterance, thought, trace = resources.backends["b"].respond(None, _scenario_with(), [], "b")
+    assert (utterance, thought) == ("剧本乙", None)
+    assert trace["schema"] == "actio.trace.v2" and trace["memory_hits"] == []
+    resources.close()
+
+
+def test_a_deployment_session_gets_actio_opponents_too_and_no_route(store):
+    """部署会话(没登记)的对手位也换成 Actio 实例,底座仍是原来的 ScriptedBackend(设计源 7.4 节)。"""
+    from simulator.datamodel import RoleBinding
+    runtime = AgentRuntime(store, ("全局甲", "全局乙"))
+    bindings = [RoleBinding("a", "p", "self_play"), RoleBinding("b", "p", "frozen_reference", model_ref="x")]
+    resources = runtime._backends(_slot_info(_scenario_with(), _assignment(*bindings), episode_id="deploy-m-s1-0"))
+    assert isinstance(resources.backends["b"].instance.backend.inner, ScriptedBackend)
+    assert runtime._session_runs == {}
+    resources.close()
+
+
+def test_closing_the_session_closes_every_opponent_instance(store):
+    from factory.memory_translate import FactoryMemoryFailureError
+    runtime = AgentRuntime(store, ("全局",))
+    runtime.register_session("s1", "run-1")
+    resources = runtime._backends(_slot_info(_scenario_with(), _two_slots()))
+    resources.close()
+    with pytest.raises(FactoryMemoryFailureError, match="MemoryClosedError"):
+        resources.backends["b"].respond(None, _scenario_with(), [], "b")
+    assert runtime._session_runs == {}
+
+
+def test_a_factory_failure_closes_the_instances_already_built(store, monkeypatch):
+    import factory.agent as agent_mod
+    from factory.memory_translate import FactoryMemoryFailureError
+    from simulator.datamodel import RoleBinding
+    made = []
+    real = agent_mod.memory_role_backend
+
+    def recording(*args, **kwargs):
+        made.append(real(*args, **kwargs))
+        return made[-1]
+
+    def factory(binding, scenario):
+        raise RuntimeError("factory exploded")
+
+    monkeypatch.setattr(agent_mod, "memory_role_backend", recording)
+    runtime = AgentRuntime(store, ("全局",), opponent_backend_factory=factory)
+    runtime.register_session("s1", "run-1")
+    bindings = [RoleBinding("a", "p", "self_play"),
+                RoleBinding("b", "p", "frozen_reference", model_ref="x", driver="scripted"),
+                RoleBinding("c", "p", "frozen_reference", model_ref="x")]
+    with pytest.raises(RuntimeError, match="factory exploded"):
+        runtime._backends(_slot_info(_scenario_with(), _assignment(*bindings)))
+    assert len(made) == 1
+    with pytest.raises(FactoryMemoryFailureError):
+        made[0].respond(None, _scenario_with(), [], "b")
+    assert runtime._session_runs == {}
 
 
 # ---------------- AgentRuntime 的会话登记与 episode 落盘(--interact 与部署共用一个运行时) ----------------

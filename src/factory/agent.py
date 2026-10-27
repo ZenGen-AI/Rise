@@ -16,10 +16,12 @@ from dataclasses import fields
 
 import grpc
 
+from actio.memory import TupleMemory
 from controlplane.gitstore import GitStore
 from controlplane.paths import CONTROL_PLANE_ROOT
 from factory.configio import describe, key_names, read_tree_config
 from factory.errors import FactoryConfigError
+from factory.memory_translate import MemoryTranslatingBackend, memory_role_backend
 from factory.opponents import driver_for
 from mindagent.config import AgentConfig
 from simulator.backends import ModelBackend, ScriptedBackend
@@ -110,7 +112,8 @@ class DeadlineStub:
 
 class AgentRuntime:
     """进程内的 loopback 实时服务端,第一次 client_factory() 时才启动;close() 关通道、停服务端并等它停完。
-    对手位的后端按各自绑定的驱动分派(见 _backends);情境从树里读(scenario_resolver)。
+    对手位的底座后端按各自绑定的驱动分派(见 _backends),再一律包成带记忆的 Actio 实例(每个位一份各自的空 TupleMemory,
+    外套记忆异常的转换后端);情境从树里读(scenario_resolver)。
     每条 Interact 流带 interact_deadline_s 的 deadline(DeadlineStub);stub_factory 只为测试注入。
 
     opponent_backend_factory(binding, scenario) 给 vllm 与 external_api 驱动的对手位造后端,只服务登记给训练 run 的会话;
@@ -219,9 +222,14 @@ class AgentRuntime:
         其余会话(没传工厂,或没登记):显式 scripted 同上,别的一律是原来的 ScriptedBackend(不循环,全局台词),
         不碰工厂、不调 driver_for。
 
+        上面得到的只是底座。每个对手位的底座都再包成带记忆的 Actio 实例(memory_role_backend):每个位一份各自的空
+        TupleMemory(替身没有种子,训练会话的起点就是空库,与部署会话同一写法),情境对话方取自绑定表
+        (槽位 -> 角色卡 id)。对话台词不变,每轮多一份 v2 轨迹。closers 依次是每个已造后端的 close、最后是删路由;
+        造到一半抛异常时,先关已造好的后端(关失败只记类名)、再删路由、原样重抛。
+
         落盘路由:情境 id 已登记时,在读登记表的同一次持 _lock 里(再取 _routes_lock)记 session_id -> run id,
         "删这条"放进资源的 closers,随会话资源一起关;造后端抛异常时先删再把原异常抛出去(工厂不留半开状态)。
-        没登记的会话不记路由。删路由跑在处理器线程的收尾里,只取 _routes_lock,不取 _lock(见类 docstring)。"""
+        没登记的会话不记路由。关后端与删路由跑在处理器线程的收尾里,都不取 _lock(见类 docstring)。"""
         scenario, assignment, client_slot = info.scenario, info.assignment, info.client_slot
         with self._lock:                                     # 持锁只读登记表并记路由,判驱动与造后端都在锁外
             run_id = self._sessions.get(scenario.id)
@@ -234,7 +242,8 @@ class AgentRuntime:
                 self._session_runs.pop(info.session_id, None)
 
         judged = run_id is not None and self._opponent_backend_factory is not None
-        backends = {}
+        interlocutors = {b.slot_id: b.persona_id for b in assignment.bindings}
+        backends: dict[str, MemoryTranslatingBackend] = {}
         try:
             for binding in assignment.bindings:
                 slot = binding.slot_id
@@ -242,15 +251,24 @@ class AgentRuntime:
                     continue
                 if self._driver_of(binding, judged=judged) == "scripted":
                     lines = scenario.opponent_script.get(slot) or self._lines
-                    backends[slot] = ScriptedBackend({slot: list(lines)}, loop=True)
+                    base = ScriptedBackend({slot: list(lines)}, loop=True)
                 elif judged:
-                    backends[slot] = self._opponent_backend_factory(binding, scenario)
+                    base = self._opponent_backend_factory(binding, scenario)
                 else:
-                    backends[slot] = ScriptedBackend({slot: list(self._lines)})
+                    base = ScriptedBackend({slot: list(self._lines)})
+                backends[slot] = memory_role_backend(
+                    base, memory=TupleMemory(), episode_id=info.episode_id, interlocutors=interlocutors,
+                )
         except Exception:
+            for built in backends.values():
+                try:
+                    built.close()
+                except Exception as exc:
+                    logger.warning("opponent backend close failed: %s", type(exc).__name__)
             drop()
             raise
-        return SessionResources(backends=backends, closers=(drop,) if run_id is not None else ())
+        closers = tuple(built.close for built in backends.values())
+        return SessionResources(backends=backends, closers=(*closers, drop) if run_id is not None else closers)
 
     def client_factory(self) -> EnvironmentServiceClient:
         with self._lock:

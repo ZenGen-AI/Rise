@@ -197,23 +197,29 @@ def _opponent_section(store: GitStore, run_id: str) -> Mapping[str, str]:
 
 def _external_backend(
     run_id: str, cfg: TrainingConfig, store: GitStore, env: Mapping[str, str], timeout_s: float,
-) -> ExternalApiBackend | None:
-    """本 run 有 external_api 对手位时造那唯一的一个后端,否则 None(这时不读 opponent 段:
-    一个不相干的 run 不该被坏掉的 opponent 段拖垮)。密钥现在才从环境变量读。"""
+) -> Callable[[], ExternalApiBackend] | None:
+    """本 run 有 external_api 对手位时返回造外部后端的零参函数,否则 None(这时不读 opponent 段:
+    一个不相干的 run 不该被坏掉的 opponent 段拖垮)。密钥现在才从环境变量读。
+
+    进入时照旧先造一个,让凭证与配置错误照旧在进入时抛出;这一个只用来校验,不交给任何会话。
+    之后每个会话的每个外部对手位调一次返回的函数,各拿一个新造的后端,不跨会话共享。"""
     if not any(driver == "external_api" for _, driver in _opponent_bindings(cfg)):
         return None
     opponent = _opponent_section(store, run_id)
     name = opponent["api_key_env"]
+    base_url, model, api_key = opponent["base_url"], opponent["model"], env.get(name, "")
+
+    def make() -> ExternalApiBackend:
+        return ExternalApiBackend(base_url, model, api_key=api_key, api_key_env=name, timeout_s=timeout_s)
+
     try:
-        return ExternalApiBackend(
-            opponent["base_url"], opponent["model"],
-            api_key=env.get(name, ""), api_key_env=name, timeout_s=timeout_s,
-        )
+        make()
     except ValueError as exc:
         # 构造器的 ValueError 文字里会带 base_url;只报类型,配置里的地址不进指令的失败原因
         raise DirectiveFailedError(
             f"directive {run_id}: the opponent API settings in training_defaults.yaml are unusable ({type(exc).__name__})"
         ) from None
+    return make
 
 
 def _deployment_overlap(store: GitStore, run_id: str, cfg: TrainingConfig) -> list[str]:
@@ -252,16 +258,16 @@ def _scripted_gaps(store: GitStore, runtime: AgentRuntime, cfg: TrainingConfig) 
     return gaps
 
 
-def _dispatching(vllm_make: OpponentFactory, external: ExternalApiBackend | None) -> OpponentFactory:
-    """按驱动分派:vllm 走同一服务上的适配器,external_api 走那唯一的外部后端。scripted 不会来到这里
+def _dispatching(vllm_make: OpponentFactory, make_external: Callable[[], ExternalApiBackend] | None) -> OpponentFactory:
+    """按驱动分派:vllm 走同一服务上的适配器,external_api 每个会话新造一个外部后端。scripted 不会来到这里
     (运行时自己用 ScriptedBackend 处理)。"""
 
     def make(binding: RoleBinding, scenario: Scenario) -> ModelBackend:
         driver = driver_for(binding)
         if driver == "vllm":
             return vllm_make(binding, scenario)
-        if driver == "external_api" and external is not None:
-            return external
+        if driver == "external_api" and make_external is not None:
+            return make_external()
         raise ModelRefError(f"slot {binding.slot_id!r} uses the {driver} driver, which this run did not set up")
 
     return make
@@ -305,7 +311,7 @@ def make_policy_factory(
         except ModelRefError as exc:
             raise _failed(run_id, exc) from exc
         try:
-            external = _external_backend(run_id, cfg, store, env, opponent_timeout_s)
+            make_external = _external_backend(run_id, cfg, store, env, opponent_timeout_s)
         except OpponentCredentialError as exc:
             raise _failed(run_id, exc) from exc          # 文字里只有环境变量名
         try:
@@ -323,7 +329,7 @@ def make_policy_factory(
                     raise          # 租约被占、服务起不来:守护进程退避重试,指令仍是 pending
                 except (ComputeError, ModelRefError, OpponentCredentialError) as exc:
                     raise _failed(run_id, exc) from exc
-                stack.enter_context(switch.bound(_dispatching(vllm_make, external)))
+                stack.enter_context(switch.bound(_dispatching(vllm_make, make_external)))
                 registered: list[str] = []
                 previous: float | None = None
                 try:

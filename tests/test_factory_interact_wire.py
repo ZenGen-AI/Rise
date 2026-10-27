@@ -257,7 +257,7 @@ from controlplane.paths import (
 )
 from factory.agent import AgentRuntime
 from factory.interact_policy import OpponentSwitch, make_policy_factory
-from factory.opponents import EXPORT_FORMAT
+from factory.opponents import EXPORT_FORMAT, ExternalApiBackend
 from mindtrainer.training_config import RewardConfig, TrainingConfig
 from simulator.datamodel import Persona, RoleBinding, RoleSlot, Scenario
 from simulator.store_adapter import write_persona, write_scenario
@@ -764,6 +764,19 @@ def test_the_external_opponent_gets_the_timeout_that_make_policy_factory_was_giv
     with factory(RUN, _cfg(bindings=bindings)):
         backend = switch(bindings[1], scenario)
         assert backend._timeout == 0.7 != ip.OPPONENT_TIMEOUT_S
+
+
+def test_each_session_gets_its_own_external_backend(world, tmp_path, stub):
+    """F4:外部对手后端不再跨会话共享,每次工厂调用新造一个,超时取 opponent_timeout_s。"""
+    opponent = {"base_url": stub.base_url, "model": "ext-model", "api_key_env": OPP_KEY_ENV}
+    _, switch, factory, _ = _unit(world, tmp_path, stub, opponent=opponent, env={OPP_KEY_ENV: OPP_KEY})
+    bindings = [RoleBinding("a", "pa", "self_play"),
+                _opponent_binding(model_ref="gpt-x", driver="external_api", backend="external_api")]
+    scenario = Scenario("t1", "bg", [RoleSlot("a", "a"), RoleSlot("b", "b")], "c", ["n"], "training")
+    with factory(RUN, _cfg(bindings=bindings)):
+        first, second = switch(bindings[1], scenario), switch(bindings[1], scenario)
+    assert isinstance(first, ExternalApiBackend) and isinstance(second, ExternalApiBackend)
+    assert first is not second
 
 
 def test_an_external_opponent_without_an_opponent_section_fails_the_directive(world, tmp_path, stub):
