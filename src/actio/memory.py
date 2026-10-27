@@ -1,5 +1,6 @@
 """显式记忆:条目、按时间点取快照、按主体与关键词的词面重叠检索(闭环集成设计 §8.1),
-以及记忆端口的内存替身 TupleMemory 与两个替身共用的账本 _Ledger(场景二记忆设计 §4.1)。"""
+以及记忆端口的两个替身与它们共用的账本 _Ledger:内存里的 TupleMemory,落盘的 FileTupleStore
+(场景二记忆设计 §4.1)。"""
 from __future__ import annotations
 
 import hashlib
@@ -7,6 +8,8 @@ import json
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Callable
 
 from actio import _check
 from actio.errors import ActioDataError
@@ -16,6 +19,7 @@ from actio.memory_port import (
     MemoryEventConflict,
     MemoryFailureError,
     MemoryHit,
+    PERSONA_ID_PATTERN,
     RememberOutcome,
 )
 from actio.text import tokens
@@ -361,3 +365,162 @@ class TupleMemory:
 
     def close(self) -> None:
         self._closed = True
+
+
+# ---------------- 记忆端口的落盘替身与部署管理面 ----------------
+
+def _read_ledger(path: Path) -> _Ledger:
+    """读并校验一份账本 JSON。读不了、不是 JSON、结构不合法一律是永久失败,异常信息只报类名
+    (校验信息里带着记忆正文,不外传)。"""
+    try:
+        return _Ledger.from_json(json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, ValueError) as exc:  # JSONDecodeError、UnicodeDecodeError、ActioDataError 都是 ValueError
+        raise MemoryFailureError(type(exc).__name__, transient=False) from None
+
+
+def _write_ledger(path: Path, ledger: _Ledger) -> None:
+    """先写 <path>.tmp 再 replace 到正式文件,中途崩溃不会留下半个库。"""
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(ledger.to_json(), ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+                       encoding="utf-8")
+        tmp.replace(path)
+    except OSError as exc:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise MemoryFailureError(type(exc).__name__, transient=False) from None
+
+
+class FileTupleStore:
+    """DeploymentMemoryStore 的落盘替身:<root>/<persona_id>.json 存一份 _Ledger.to_json(),
+    人格还没有文件时等同空库。每个操作都是"读整份、改、写整份"。
+
+    不加锁:替身只在单线程里用(每个部署 episode 一条线程)。
+    extraction_failure 是故障注入口:对一条事件返回非 None 的字符串,就当这次抽取以该
+    failure_category 失败;缺省从不失败。"""
+
+    def __init__(
+        self,
+        root: Path,
+        *,
+        extraction_failure: Callable[[MemoryEvent], str | None] | None = None,
+    ) -> None:
+        self._root = Path(root)
+        self._root.mkdir(parents=True, exist_ok=True)
+        self._extraction_failure = extraction_failure
+        self._open: dict[str, int] = {}  # 每个人格打开着的端口数
+
+    # ---- 读写 ----
+
+    def _path(self, persona_id: str) -> Path:
+        """persona_id 直接拼进文件名:用 fullmatch(模式以 $ 结尾,match 会放过 "p1\n"),
+        '/' 与开头的 '.' 都不许。"""
+        if not isinstance(persona_id, str) or not PERSONA_ID_PATTERN.fullmatch(persona_id):
+            raise ActioDataError(f"persona_id: expected 1 to 128 characters of [A-Za-z0-9._-] "
+                                 f"starting with a letter or digit, got {persona_id!r}")
+        return self._root / f"{persona_id}.json"
+
+    def _load(self, persona_id: str) -> _Ledger:
+        path = self._path(persona_id)
+        return _read_ledger(path) if path.exists() else _Ledger()
+
+    def _save(self, persona_id: str, ledger: _Ledger) -> None:
+        _write_ledger(self._path(persona_id), ledger)
+
+    # ---- DeploymentMemoryStore ----
+
+    def open(self, persona_id: str) -> "_FilePort":
+        self._path(persona_id)
+        return _FilePort(self, persona_id)
+
+    def remember_event(self, persona_id: str, key: str, text: str, *, interlocutor: str) -> RememberOutcome:
+        """三段写入:① 登记 pending 行并落盘(行与 seq 在抽取之前就在库里);② 抽取;
+        ③ 成功就重新读库、commit、落盘,失败就记下类别、落盘,返回 failed 而不抛。
+        已 committed 的同文本事件直接返回存下的语句 id,不调抽取。pending 行重调一律重新抽取:
+        替身的语句在 ③ 之前不进库,没有"补收据"的分支。"""
+        event = MemoryEvent(key, text, interlocutor)
+        ledger = self._load(persona_id)
+        ids = ledger.begin(event)
+        if ids is not None:
+            return RememberOutcome(ids, False, None)
+        self._save(persona_id, ledger)
+        category = None if self._extraction_failure is None else self._extraction_failure(event)
+        ledger = self._load(persona_id)
+        if category is None:
+            ids = ledger.commit(key)
+            self._save(persona_id, ledger)
+            return RememberOutcome(ids, False, None)
+        ledger.fail(key, category)
+        self._save(persona_id, ledger)
+        return RememberOutcome((), True, category)
+
+    def abandon_event(self, persona_id: str, key: str) -> None:
+        ledger = self._load(persona_id)
+        ledger.abandon(key)
+        self._save(persona_id, ledger)
+
+    def pending_events(self, persona_id: str) -> list[str]:
+        rows = [r for r in self._load(persona_id).events.values() if r["state"] == "pending"]
+        return [r["key"] for r in sorted(rows, key=lambda r: r["seq"])]
+
+    def digest(self, persona_id: str) -> str:
+        return self._load(persona_id).digest()
+
+    def backup_to(self, persona_id: str, path: Path) -> str:
+        """把账本规范化写到 path(人格还没有文件时写空账本,所以起点副本总是存在),
+        返回读回的副本的逻辑摘要。"""
+        path = Path(path)
+        _write_ledger(path, self._load(persona_id))
+        return _read_ledger(path).digest()
+
+    def restore_from(self, persona_id: str, path: Path) -> str:
+        """用 path 的内容覆盖该人格的库,返回恢复后的逻辑摘要。该人格还有打开的端口时拒绝;
+        坏备份在覆盖之前就被拒,库原样不动。"""
+        self._path(persona_id)
+        if self._open.get(persona_id, 0) > 0:
+            raise MemoryFailureError("restore_from: persona has an open port", transient=False)
+        ledger = _read_ledger(Path(path))
+        self._save(persona_id, ledger)
+        return ledger.digest()
+
+
+class _FilePort:
+    """FileTupleStore 发出的端口:每次调用都经 store 读写磁盘上的库,所以端口与管理面看到同一份。"""
+
+    def __init__(self, store: FileTupleStore, persona_id: str) -> None:
+        self._store = store
+        self._persona_id = persona_id
+        self._closed = False
+        store._open[persona_id] = store._open.get(persona_id, 0) + 1
+
+    def _live(self) -> FileTupleStore:
+        if self._closed:
+            raise MemoryClosedError("memory port is closed")
+        return self._store
+
+    def recall(self, query: str, *, limit: int) -> list[MemoryHit]:
+        return self._live()._load(self._persona_id).recall(query, limit=limit)
+
+    def remember(self, event: MemoryEvent) -> RememberOutcome:
+        return self._live().remember_event(
+            self._persona_id, event.key, event.text, interlocutor=event.interlocutor)
+
+    def embed_pending(self) -> int:
+        self._live()
+        return 0
+
+    def digest(self) -> str:
+        return self._live().digest(self._persona_id)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        left = self._store._open[self._persona_id] - 1
+        if left > 0:
+            self._store._open[self._persona_id] = left
+        else:
+            del self._store._open[self._persona_id]

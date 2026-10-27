@@ -6,13 +6,14 @@ from pathlib import Path
 import pytest
 import yaml
 
-from actio.memory import TupleMemory
+from actio.memory import FileTupleStore, TupleMemory
 from actio.memory_port import MemoryClosedError, MemoryEvent, MemoryEventConflict, MemoryHit
 
 SAMPLE = yaml.safe_load(Path(__file__).with_name("memory_contract_sample.yaml").read_text(encoding="utf-8"))
 
 PORT_FACTORIES = {
     "tuple": lambda fresh_dir: TupleMemory(),
+    "file": lambda fresh_dir: FileTupleStore(fresh_dir).open("pa"),
 }
 
 
