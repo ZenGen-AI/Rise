@@ -118,8 +118,10 @@ class AgentRuntime:
     部署会话的绑定多是 frozen_reference,没有真模型可加载,行为必须原样不变。
 
     会话登记(register_session / unregister_session):--interact 与 MindAgent 部署共用这一个服务端。登记表按情境 id
-    记该会话属于哪个 run;落盘钩子只写登记过的会话,把 episode 写进对应 run。没登记的(部署会话)钩子不碰,
-    仍由 MindAgent 驱动器自己落盘,两边的 episode 不混写、不重复写。落盘失败先把描述记进 episode_write_failures(只含类名与 id,有上限的 deque,只留最近 100 条),
+    记该情境属于哪个 run,只用来判定新开的会话归谁:工厂造资源时情境 id 已登记,就按 session_id 记一条路由(_session_runs),
+    并把"删这条路由"放进资源的 closers。落盘钩子只查 session_id 的路由:登记过的会话把 episode 写进开会话时的那个 run,
+    注销情境不影响已经在跑的会话;没登记的(部署会话)没有路由,钩子不碰,仍由 MindAgent 驱动器自己落盘,
+    两边的 episode 不混写、不重复写。落盘失败先把描述记进 episode_write_failures(只含类名与 id,有上限的 deque,只留最近 100 条),
     再把原异常抛回 servicer:servicer 据此给客户端报 persistence_failed、不给 episode_id,轨迹源把它当瞬时失败重跑。"""
 
     def __init__(self, store: GitStore, opponent_lines: tuple[str, ...], *, turn_timeout_s: float = 5.0,
@@ -136,7 +138,8 @@ class AgentRuntime:
         # (客户端, 通道) 成对记下:会话结束的客户端,通道在下一次发客户端时关掉(见 client_factory)
         self._channels: list = []
         self._lock = threading.Lock()
-        self._sessions: dict[str, str] = {}              # 情境 id -> run id,只有训练登记过的会话落盘
+        self._sessions: dict[str, str] = {}              # 情境 id -> run id,只用来判定新会话归属
+        self._session_runs: dict[str, str] = {}          # session_id -> run id,落盘钩子只查它;随会话资源关闭而删
         # 每条一句描述,只含类名与 id,不含异常文字;只留最近 MAX_WRITE_FAILURES_KEPT 条(最早的先丢)
         self.episode_write_failures: deque[str] = deque(maxlen=MAX_WRITE_FAILURES_KEPT)
 
@@ -160,20 +163,22 @@ class AgentRuntime:
             self._deadline = value
 
     def register_session(self, scenario_id: str, run_id: str) -> None:
-        """登记:该情境 id 的会话属于 run_id,会话结束时钩子把 episode 写进这个 run。同 id 再登记则覆盖。"""
+        """登记:此后新开的该情境 id 的会话属于 run_id,会话结束时钩子把 episode 写进这个 run。同 id 再登记则覆盖
+        (只影响之后新开的会话,已经在跑的会话仍按它开会话时的 run 落盘)。"""
         with self._lock:
             self._sessions[scenario_id] = run_id
 
     def unregister_session(self, scenario_id: str) -> None:
-        """注销;没登记过也不报错。此后该情境 id 的 episode 不再被钩子写。"""
+        """注销;没登记过也不报错。此后新开的该情境 id 的会话不再被钩子写;已经在跑的会话不受影响。"""
         with self._lock:
             self._sessions.pop(scenario_id, None)
 
     def _on_session_closed(self, session_id: str, episode: Episode) -> None:
-        """服务端的落盘钩子,跑在 gRPC 线程池的线程里。持锁只查登记表,写文件在锁外:
-        close() 持同一把锁停服务端并等它停完,钩子若持锁写文件,两边会互相等。写失败记录后原样再抛。"""
+        """服务端的落盘钩子,跑在 gRPC 线程池的线程里。持锁只查 session_id 的路由,写文件在锁外:
+        close() 持同一把锁停服务端并等它停完,钩子若持锁写文件,两边会互相等。写失败记录后原样再抛。
+        钩子在 servicer 收尾关资源之前调用,所以路由在落盘时一定还在。"""
         with self._lock:
-            run_id = self._sessions.get(episode.scenario_id)
+            run_id = self._session_runs.get(session_id)
         if run_id is None:
             return
         try:
@@ -206,24 +211,38 @@ class AgentRuntime:
         scripted 驱动:ScriptedBackend(loop=True),台词取情境剧本里该角色位的一份,没有或为空取全局台词;
         其余驱动:交给工厂。
         其余会话(没传工厂,或没登记):显式 scripted 同上,别的一律是原来的 ScriptedBackend(不循环,全局台词),
-        不碰工厂、不调 driver_for。"""
+        不碰工厂、不调 driver_for。
+
+        落盘路由:情境 id 已登记时,在读登记表的同一次持锁里记 session_id -> run id,"删这条"放进资源的 closers,
+        随会话资源一起关;造后端抛异常时先删再把原异常抛出去(工厂不留半开状态)。没登记的会话不记路由。"""
         scenario, assignment, client_slot = info.scenario, info.assignment, info.client_slot
-        with self._lock:
-            registered = scenario.id in self._sessions       # 持锁只读登记表,判驱动与造后端都在锁外
-        judged = registered and self._opponent_backend_factory is not None
+        with self._lock:                                     # 持锁只读登记表并记路由,判驱动与造后端都在锁外
+            run_id = self._sessions.get(scenario.id)
+            if run_id is not None:
+                self._session_runs[info.session_id] = run_id
+
+        def drop() -> None:
+            with self._lock:
+                self._session_runs.pop(info.session_id, None)
+
+        judged = run_id is not None and self._opponent_backend_factory is not None
         backends = {}
-        for binding in assignment.bindings:
-            slot = binding.slot_id
-            if slot == client_slot:
-                continue
-            if self._driver_of(binding, judged=judged) == "scripted":
-                lines = scenario.opponent_script.get(slot) or self._lines
-                backends[slot] = ScriptedBackend({slot: list(lines)}, loop=True)
-            elif judged:
-                backends[slot] = self._opponent_backend_factory(binding, scenario)
-            else:
-                backends[slot] = ScriptedBackend({slot: list(self._lines)})
-        return SessionResources(backends=backends)
+        try:
+            for binding in assignment.bindings:
+                slot = binding.slot_id
+                if slot == client_slot:
+                    continue
+                if self._driver_of(binding, judged=judged) == "scripted":
+                    lines = scenario.opponent_script.get(slot) or self._lines
+                    backends[slot] = ScriptedBackend({slot: list(lines)}, loop=True)
+                elif judged:
+                    backends[slot] = self._opponent_backend_factory(binding, scenario)
+                else:
+                    backends[slot] = ScriptedBackend({slot: list(self._lines)})
+        except Exception:
+            drop()
+            raise
+        return SessionResources(backends=backends, closers=(drop,) if run_id is not None else ())
 
     def client_factory(self) -> EnvironmentServiceClient:
         with self._lock:

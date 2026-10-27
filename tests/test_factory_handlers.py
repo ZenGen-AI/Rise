@@ -509,6 +509,80 @@ def test_unregistering_stops_later_episodes_of_that_scenario_from_being_written(
         runtime.close()
 
 
+def test_a_session_started_before_unregistering_is_still_written_to_its_run(store):
+    """落盘按 session_id 路由:策略上下文注销情境时,已经在跑的会话照样落到自己的 run(设计源 6.1 节)。"""
+    from simulator.datamodel import Persona, RoleAssignment, RoleBinding, RoleSlot, Scenario
+    from simulator.store_adapter import write_scenario
+    write_scenario(store, Scenario("s-int", "bg", [RoleSlot("b", "b"), RoleSlot("a", "a")], "c", ["n"], "training"))
+    runtime = AgentRuntime(store, ("hi",))
+    try:
+        runtime.register_session("s-int", "run-int")
+        client = runtime.client_factory()
+        client.create_session(
+            scenario_id="s-int", personas={pid: Persona(pid, ["t"], "m", "s", ["v"]) for pid in ("pa", "pb")},
+            role_assignment=RoleAssignment("s-int", [RoleBinding("a", "pa", "self_play"),
+                                                     RoleBinding("b", "pb", "frozen_reference")], 2),
+            purpose="training", client_driven_slot="a")
+        runtime.unregister_session("s-int")                  # 会话已经开了
+        while not client.closed:
+            client.submit_turn("嗯")
+        episode = client.drain_until_end()
+        assert _stored_episode_ids(store, "run-int") == [episode.id]
+    finally:
+        runtime.close()
+
+
+def _info(session_id):
+    from simulator.datamodel import RoleBinding
+    from simulator.realtime.resources import SessionInfo
+    assignment = _assignment(RoleBinding("a", "p", "self_play"), RoleBinding("b", "q", "frozen_reference"))
+    return SessionInfo(_scenario_with(), assignment, {}, "a", session_id, f"ep-{session_id}")
+
+
+def test_the_session_route_is_dropped_when_the_resources_close(store):
+    runtime = AgentRuntime(store, ("hi",))
+    runtime.register_session("s1", "run-1")
+    resources = runtime._backends(_info("sess-route"))
+    assert runtime._session_runs == {"sess-route": "run-1"}
+    resources.close()
+    assert runtime._session_runs == {}
+
+
+def test_no_route_is_recorded_for_a_scenario_that_is_not_registered(store):
+    """没登记的(部署会话)不记路由,也就没有收尾要做的事。"""
+    runtime = AgentRuntime(store, ("hi",))
+    resources = runtime._backends(_info("sess-deploy"))
+    assert runtime._session_runs == {}
+    resources.close()
+    assert runtime._session_runs == {}
+
+
+def test_a_failure_while_building_the_backends_leaves_no_route_behind(store):
+    """工厂不留半开状态(设计源 6.2 节):造后端抛异常时,已记的路由要先撤掉再把原异常抛出去。"""
+    def boom(binding, scenario):
+        raise RuntimeError("no model")
+
+    runtime = AgentRuntime(store, ("hi",), opponent_backend_factory=boom)
+    runtime.register_session("s1", "run-1")
+    with pytest.raises(RuntimeError, match="no model"):
+        runtime._backends(_info("sess-fail"))
+    assert runtime._session_runs == {}
+
+
+def test_each_session_keeps_its_own_route_even_when_the_scenario_is_registered_to_a_new_run(store):
+    """同一个情境 id 先后登记给两个 run:先开的会话仍按开会话时的 run 落盘。"""
+    runtime = AgentRuntime(store, ("hi",))
+    runtime.register_session("s1", "run-old")
+    old = runtime._backends(_info("sess-old"))
+    runtime.register_session("s1", "run-new")
+    new = runtime._backends(_info("sess-new"))
+    assert runtime._session_runs == {"sess-old": "run-old", "sess-new": "run-new"}
+    old.close()
+    assert runtime._session_runs == {"sess-new": "run-new"}
+    new.close()
+    assert runtime._session_runs == {}
+
+
 def test_a_failing_write_is_recorded_and_surfaces_to_the_client_as_persistence_failed(store, monkeypatch):
     """钩子必须把异常再抛出去:servicer 看到钩子抛错,才会把结束原因改报 persistence_failed 并清空 episode_id,
     轨迹源据此把它当作可重跑的瞬时失败。钩子若吞掉异常,客户端会收到正常的结束原因与 episode id,
@@ -563,8 +637,8 @@ def test_the_write_failure_list_is_bounded_and_keeps_the_latest(store, monkeypat
     monkeypatch.setattr(agent_mod, "write_episode", boom)
     runtime = AgentRuntime(store, ("hi",))
     try:
-        runtime.register_session("s-int", "run-int")
         for i in range(150):
+            runtime._session_runs[f"sess-{i}"] = "run-int"       # 钩子只查 session_id 的路由表
             with pytest.raises(OSError):
                 runtime._on_session_closed(f"sess-{i}", SimpleNamespace(scenario_id="s-int", id=f"ep-{i}"))
         kept = list(runtime.episode_write_failures)
