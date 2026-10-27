@@ -440,7 +440,7 @@ class DeploymentMemoryStore(Protocol):   # 只给 MindAgent 用,按人格 id 操
 | 入口 | 行为 | 状态 |
 |---|---|---|
 | `instantiate` | 校验技能库、记忆与经验类型、经验 id 不重复、信号已注册;库版本规范成字符串;`profile` 深拷贝 | [已落地] |
-| `instantiate` 的记忆参数 | `memory` 与 `memories` 恰好给一个,`memories` 保留为 TupleMemory 的简写。`episode_id` 是调用方在构造时给出的逻辑 episode id,一个实例对应一条 episode,事件 key 以它为前缀。`memory` 可写(`replay_read_only` 为假)而没给 `episode_id` 时,`instantiate` 抛 `ActioDataError`(它是 `ValueError` 的子类):没有 key 就写不了事件,静默跳过会让训练少写记忆而不自知 | [计划中] |
+| `instantiate` 的记忆参数 | `memory` 与 `memories` 恰好给一个,`memories` 保留为 TupleMemory 的简写,只给它时默认只读。`interlocutors` 是角色位到人格 id 的映射,事件文本用它写说话方 [计划中]。`episode_id` 是调用方在构造时给出的逻辑 episode id,一个实例对应一条 episode,事件 key 以它为前缀。`memory` 可写(`replay_read_only` 为假)而没给 `episode_id` 时,`instantiate` 抛 `ActioDataError`(它是 `ValueError` 的子类):没有 key 就写不了事件,静默跳过会让训练少写记忆而不自知 | [计划中] |
 | `ActioInstance.respond` | 七步流程,返回三元组 | [已落地] |
 | `ActioInstance.respond` 的记忆步 | 在后端回复与组装轨迹之间加写记忆,成八步。自己上一次发言之后的每句他人发言按顺序 remember,再 `embed_pending` 一次。`replay_read_only` 为真时整步跳过 | [计划中] |
 | `ActioInstance.decide` | 只做路由、经验、记忆,不调后端 | [已落地] |

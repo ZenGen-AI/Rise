@@ -184,7 +184,7 @@ class DeploymentMemoryStore(Protocol):     # 一个人格一个库,按人格 id 
 | 字段 | `memories: tuple[MemoryEntry, ...]` | `memory: MemoryBackend`、`replay_read_only: bool`（只给 MindAgent 的验证重放用，训练路永远为假） |
 | `decide` | `retrieve(self.memories, q, limit)` | `self.memory.recall(q, limit=self.memory_limit)` |
 | `respond` 之后 | 无 | 对新近的对方发言逐条 `remember`，再 `embed_pending`；`replay_read_only` 为真时跳过 |
-| `instantiate` | `memories=` | `memory=`、`replay_read_only=`、`episode_id=`（逻辑 episode id，事件 key 的前缀）；保留 `memories=` 作为 `TupleMemory` 的简写，与 `memory=` 恰好给一个。只给 `memories=` 时 `replay_read_only` 默认为真：今天的调用方都是这样构造的，它们不期望实例往记忆里写东西，也给不出 `episode_id`。给了 `memory=` 且 `replay_read_only` 为假而缺 `episode_id`，抛 `ActioDataError`（`ValueError` 的子类） |
+| `instantiate` | `memories=` | `memory=`、`replay_read_only=`、`episode_id=`（逻辑 episode id，事件 key 的前缀）；另收 `interlocutors=`：`{角色位 id: 人格 id}`，事件文本与 `interlocutor` 都用它把说话方的角色位换成人格 id，缺省为空映射、查不到时用角色位 id 本身；调用方都持有角色分配（服务端工厂有 `SessionInfo.assignment`，训练位有 `cfg.bindings`，MindAgent 有 `config.bindings`）。保留 `memories=` 作为 `TupleMemory` 的简写，与 `memory=` 恰好给一个。只给 `memories=` 时 `replay_read_only` 默认为真：今天的调用方都是这样构造的，它们不期望实例往记忆里写东西，也给不出 `episode_id`。给了 `memory=` 且 `replay_read_only` 为假而缺 `episode_id`，抛 `ActioDataError`（`ValueError` 的子类） |
 | `close` | 无 | 转发给 `memory.close()` |
 
 `render_guidance` 改收 `list[MemoryHit]`，记忆行写成 `[memory:<id>] <text>`。
@@ -522,22 +522,22 @@ class SessionResources:
 
 | 步 | 内容 | 依赖 Starling PR |
 |---|---|---|
-| 1 | 记忆端口与契约测试、`TupleMemory`、实例改持端口、每轮读写、轨迹 v2 | 否 |
+| 1 | 记忆端口与契约测试、`TupleMemory`、`FileTupleStore`、实例改持端口、每轮读写、轨迹 v2 | 否 |
 | 2 | `respond_guided`；后端工厂加 `session_id`；`SessionResources` 与 `TimeoutBackend` 登记；驱动器与 servicer 的终态收尾；`role_memory_failure` | 否 |
 | 3 | 训练路换成 Actio：`policy_for_rollout`、对手工厂包 Actio、轨迹上行、时间预算 | 否 |
 | 4 | `TrainingConfig.memory`、运行时身份、`config_hash`、`policy_backend.memory`、清扫 | 否（替身） |
-| 5 | Starling PR：第 8 节七个接口 | 是（在 Starling 仓库） |
-| 6 | `StarlingMemory`、树外记忆配置、`memory` extra | 是 |
-| 7 | MindAgent：部署记忆、轮次摘要、快照重放、门② 改路 | 是 |
+| 5 | MindAgent：部署记忆、轮次摘要、快照重放、门② 改路（经 `DeploymentMemoryStore`，先在 `FileTupleStore` 上跑通） | 否（替身） |
+| 6 | Starling PR：第 8 节的接口 | 是（在 Starling 仓库） |
+| 7 | `StarlingMemory`、`StarlingDeploymentStore`、树外记忆配置、`memory` extra | 是 |
 | 8 | 文档与图的收尾 | 否 |
 
-第 1 到 4 步只用替身就能跑通，可以先合。第 5 步合入后再做 6、7。
+第 1 到 5 步只用替身就能跑通，可以先合：管理面有了落盘的 `FileTupleStore`，MindAgent 一侧不再等 Starling。第 6 步合入后再做第 7 步。
 
 接口变更清单（每一项都在上面的某一步里，列在一处便于对照）：
 
 | 接口 | 变更 | 步 |
 |---|---|---|
-| `actio.instance.instantiate` | `memories=` 之外加 `memory=`、`replay_read_only=`、`episode_id=`；`ActioInstance.close()` | 1 |
+| `actio.instance.instantiate` | `memories=` 之外加 `memory=`、`replay_read_only=`、`episode_id=`、`interlocutors=`；`ActioInstance.close()` | 1 |
 | `actio.trace` | 新增 `actio.trace.v2`，`validate_trace` 接受 v1 与 v2 | 1 |
 | `CreateSession` proto | 新增可选 `episode_id` | 2 |
 | `BackendsFactory` | `(SessionInfo) -> SessionResources` | 2 |
@@ -549,7 +549,7 @@ class SessionResources:
 | `simulator.realtime.resources` | 新模块：`SessionInfo`、`SessionResources`、`SessionClosingError` | 2 |
 | `simulator.realtime.backend_timeout` | 新增 `RoleMemoryUnavailableError`、`RoleMemoryFailureError` 两个基类 | 2 |
 | `factory` 的 interact 装配 | `turn_timeout_s` 改传 90 秒；每个 Actio 实例外套记忆异常转换后端 | 3 |
-| `InteractTrajectorySource`、`mindagent.deployment` | 创建被拒按终止原因查瞬态集合，不再一律不可重跑 | 3、7 |
+| `InteractTrajectorySource`、`mindagent.deployment` | 创建被拒按终止原因查瞬态集合，不再一律不可重跑 | 3、5 |
 | `VllmPolicy`、`ExternalApiBackend` | 新增 `respond_guided` | 2 |
 | `InteractTrajectorySource` | `policy` 改为 `policy_for_rollout`；三元组上行 | 3 |
 | `make_policy_factory` | 返回 `policy_for_rollout` 工厂 | 3 |
@@ -558,10 +558,10 @@ class SessionResources:
 | `TrainingConfig` | interact 必填 `memory` | 4 |
 | `training_defaults.interact` | 必填 `memory` | 4 |
 | `TrainingRun.policy_backend` | `memory` 块 | 4 |
-| `controlplane.states` | `approved → rejected`，只许收录处理器走 | 7 |
-| `cli/src/commands.ts` 的 `REVIEW_TRANSITIONS` | 不加这条边：命令行的 `reject` 仍只能从 `pending_review` 出发，人不能把已批准的提案改回拒绝。两份迁移表从此有意不同，`controlplane.states` 里写明这一条是 Python 独有的 | 7 |
-| `agent_round` 载荷 | `memory_runtime`、`episode_digests` | 7 |
-| 记忆提案 `definition` | 必填 `persona_id` | 7 |
+| `controlplane.states` | `approved → rejected`，只许收录处理器走 | 5 |
+| `cli/src/commands.ts` 的 `REVIEW_TRANSITIONS` | 不加这条边：命令行的 `reject` 仍只能从 `pending_review` 出发，人不能把已批准的提案改回拒绝。两份迁移表从此有意不同，`controlplane.states` 里写明这一条是 Python 独有的 | 5 |
+| `agent_round` 载荷 | `memory_runtime`、`episode_digests` | 5 |
+| 记忆提案 `definition` | `{persona_id, text, interlocutor}` 三个必填键 | 5 |
 
 ## 13. 已定与未核实
 
