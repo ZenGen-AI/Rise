@@ -140,9 +140,9 @@ mindtrainer（只认 ModelBackend）· mindagent · factory（组合根，构造
 class MemoryBackend(Protocol):
     def recall(self, query: str, *, limit: int) -> list[MemoryHit]: ...
     def remember(self, event: MemoryEvent) -> RememberOutcome: ...
-    def embed_pending(self) -> int: ...          # 只做嵌入,返回条数
+    def embed_pending(self) -> int: ...          # 只做嵌入,返回成功条数;有失败就抛
     def digest(self) -> str: ...                 # 逻辑摘要,sha256 十六进制
-    def close(self) -> None: ...                 # 先放弃本实例留下的 pending 事件,再关库
+    def close(self) -> None: ...                 # 只关库,不放弃事件
 ```
 
 | 类型 | 字段 | 说明 |
@@ -153,11 +153,11 @@ class MemoryBackend(Protocol):
 | `MemoryClosedError` | 异常 | 端口关闭后再调任何方法时抛出；是 `MemoryFailureError` 的子类，`transient` 为假 |
 | `RememberOutcome` | `stored`、`failed`、`category` | `category` 取 Starling 的 `failure_category`（S13） |
 
-一个端口实例只属于一个智能体，所以签名里没有 holder。`pending` 事件的放弃不进端口签名：`close()` 先对本实例写过、仍在 `pending` 的 key 逐个 `abandon_event`，再关库。训练副本随后被删，放不放弃都一样；部署库靠它满足"episode 结束后库里没有它的 `pending` 行"。门② 不经 Actio 实例，直接调 Starling 的 `remember_event` 与 `abandon_event`。
+一个端口实例只属于一个智能体，所以签名里没有 holder。`pending` 事件的放弃不进端口签名，也不在 `close()` 里做：放弃要等调用方知道这条 episode 最终是成功还是失败（4.3 节"谁放弃"）。训练副本随后被删，从不放弃；部署库由 MindAgent 经管理面放弃。门② 不经 Actio 实例，直接调 Starling 的 `remember_event` 与 `abandon_event`。
 
 | 实现 | 文件 | 用途 |
 |---|---|---|
-| `TupleMemory` | `actio/memory.py` | 包现有 `MemoryEntry` 元组与 `retrieve`；`remember` 追加一条 `MemoryEntry`，`subject` 是 `interlocutor`。`recall` 返回的 `MemoryHit.id` 是条目自己的 `id`：调用方传进来的条目已带内容稳定的 id，替身自己追加的条目 id 取 `mem-` 加 `subject`、`content` 的 sha256 前 16 位。所以 `memories=` 简写构造的实例，轨迹里的 `memory_hits` 与今天逐字相同 |
+| `TupleMemory` | `actio/memory.py` | 包现有 `MemoryEntry` 元组与 `retrieve`；`remember` 追加一条 `MemoryEntry`，`subject` 是 `interlocutor`。`recall` 返回的 `MemoryHit.id` 一律是内容 id：`mem-` 加 `subject`、`content` 规范化后 sha256 的前 16 位，不用条目自带的 `id`。所以同一内容换个 `id` 进来，prompt 与轨迹不变，与 Starling 一侧的内容 id 约束一致。代价是 `memories=` 简写实例的 `memory_hits` 与今天不同；既有断言 `mem-1` 之类字面量的测试随第 1 步改写 |
 | `StarlingMemory` | `actio/memory_starling.py` | 包一个 `starling.Memory`；唯一导入 `starling` 的文件 |
 
 部署记忆另有一个管理面，只给 MindAgent 用，训练路不碰。它与端口同在 `actio`，所以 MindAgent 不导入 `starling`：
@@ -193,12 +193,13 @@ class DeploymentMemoryStore(Protocol):     # 一个人格一个库,按人格 id 
 
 - **读**：每次 `respond` 前，查询词是对方最后一句（现有 `_memory_query`），`limit` 默认 3。
 - **写**：每次 `respond` 后，把上次回复之后对方说的每句话按顺序交给 `remember`，然后 `embed_pending` 一次。不调 `tick`：后台维护的随机性与负载门控会让同一起点得到不同状态（S12）。
-- **事件身份**：`key` 是 `<逻辑 episode id>#<turn_index>`，`text` 是 `<说话方人格 id>：<utterance>`。逻辑 episode id 由客户端定（F21）：训练是 `{run}-{stage}-{scenario}-r{k}`，部署是 `deploy-{model}-{scenario}-{k}`，重试不变；它经 `CreateSession` 新增的 `episode_id` 字段传给服务端，服务端落盘的 episode 也用它当 id。`key` 作为前缀写进 Starling 的文本：`[<key>] <text>`，所以不同 episode 的同一句话是不同事件；同 key 的重写由 `events` 表拦下，不再调 `remember`。
+- **事件身份**：`key` 是 `<逻辑 episode id>#<turn_index>`；部署的逻辑 episode id 前面再加轮次 id（`<round_id>/deploy-...`），因为部署库跨轮次持久，而 `deploy-{model}-{scenario}-{k}` 在下一轮会重复出现，不加就撞上上一轮已 `committed` 的同 key。`text` 是 `<说话方人格 id>：<utterance>`。逻辑 episode id 由客户端定（F21）：训练是 `{run}-{stage}-{scenario}-r{k}`，部署是 `deploy-{model}-{scenario}-{k}`，重试不变；它经 `CreateSession` 新增的 `episode_id` 字段传给服务端，服务端落盘的 episode 也用它当 id。`key` 作为前缀写进 Starling 的文本：`[<key>] <text>`，所以不同 episode 的同一句话是不同事件；同 key 的重写由 `events` 表拦下，不再调 `remember`。
 - **时钟**：`now` 由 `seq` 推出：`2026-01-01T00:00:00Z` 加 `seq` 秒。`seq` 存在 `events` 表所在的同一个 SQLite 库里，与写事件同一事务递增；训练副本从 0 起，部署库跨轮次单调。
 - **自己的话**：不写。它已在对话历史里。
-- **episode 内重试**：`remember` 的抽取失败在同一次 `respond` 里不重试；同一 episode 的下一次 `respond` 会把上次失败的那几句连同新发言一起再交给 `remember_event`（同 key 同文本，`pending` 行被推进）。episode 结束时 `close()` 放弃仍未推进的。
+- **episode 内重试**：`remember` 的抽取失败在同一次 `respond` 里不重试；同一 episode 的下一次 `respond` 会把上次失败的那几句连同新发言一起再交给 `remember_event`（同 key 同文本，`pending` 行被推进）。`close()` 只关库，不放弃任何事件：放弃是终态，同 key 再写会抛 `EventConflict`，放早了就堵死重试。
+- **谁放弃**：训练副本用完即弃，从不放弃。部署库由 MindAgent 在一条 episode **最终**结束时放弃：成功提交后对这条 episode 留下的 `pending` 行逐个 `abandon_event`；最终失败（重试用尽）前先用起点副本 `restore_from`，回滚后库里本来就没有这条 episode 的事件行。尝试之间的重试也先 `restore_from`，所以下一次尝试面对的是起点状态，同 key 不会撞上上一次尝试留下的行。
 - **哪些失败只计数、哪些抛**：`remember` 返回 `failed` 为真（Starling 给了 `failure_category`）一律只计数、不抛，不论类别是不是 `timeout`；`recall` 与 `embed_pending` 的任何失败、`remember` 本身抛出的异常都包成 `MemoryFailureError` 上抛。理由：写失败只少一条记忆，回复照样成立；读失败或库坏了，这一轮的指导语已经不可信。
-- **抽取失败**：`RememberOutcome.failed` 为真时这一轮不留该条记忆，实例计数加一，不抛到 `respond` 之外；计数在激活轨迹里（第 4.6 节）。事件行只在抽取成功后才变成 `committed`（第 8 节 `remember_event`），所以失败的事件下次重试还会再抽一次，不会被当成幂等丢掉。训练副本用完即弃，不会带着 `pending` 事件行进下一条 rollout。部署库里的 `pending` 行各有主人：对话事件的主人是产生它的 episode，门② 事件的主人是提案；谁写的谁处理，没有"开始前统一补齐"。对话事件在 episode 内重试一次就算（重试仍失败则留 `pending`，计数进轨迹），episode 结束时对自己留下的 `pending` 行调 `abandon_event`；所以部署 episode 结束后库里没有它的 `pending` 行，起点快照也不会带着别人的 `pending` 行。
+- **抽取失败**：`RememberOutcome.failed` 为真时这一轮不留该条记忆，实例计数加一，不抛到 `respond` 之外；计数在激活轨迹里（第 4.6 节）。事件行只在抽取成功后才变成 `committed`（第 8 节 `remember_event`），所以失败的事件下次重试还会再抽一次，不会被当成幂等丢掉。训练副本用完即弃，不会带着 `pending` 事件行进下一条 rollout。部署库里的 `pending` 行各有主人：对话事件的主人是产生它的 episode，门② 事件的主人是提案；谁写的谁处理，没有"开始前统一补齐"。对话事件在 episode 内重试一次就算（重试仍失败则留 `pending`，计数进轨迹）。放弃由 MindAgent 在 episode 最终结束时做（见"谁放弃"），不由实例的 `close()` 做；所以部署 episode 结束后库里没有它的 `pending` 行，起点快照也不会带着别人的 `pending` 行。
 - **`recall`、`remember`、`embed_pending` 抛异常**：包成 `MemoryFailureError` 上抛，由调用方按第 9 节分类。
 
 ### 4.4 渲染（S6）
@@ -269,7 +270,7 @@ class DeploymentMemoryStore(Protocol):     # 一个人格一个库,按人格 id 
 
 库文件名用人格 id，因为人格才是个体。同一个人格在两个角色位同时出现时，两个位各开一份副本，互不可见。
 
-一个记忆根目录只属于一个控制面仓库：根目录下的 `.owner` 文件记该仓库的绝对路径，首次使用时写入；装配期读到的路径与当前仓库不同就退出码 2。否则两个仓库共用一个根目录时，部署记忆会混写，启动清扫会删掉对方在途会话的副本。
+一个记忆根目录只属于一个控制面仓库：根目录下的 `.owner` 文件记该仓库的绝对路径，首次使用时以 `O_CREAT | O_EXCL` 原子创建，`FileExistsError` 时读回再比；读到的路径与当前仓库不同就退出码 2。两个仓库同时首次使用，只有一个能创建，另一个读到对方的路径而退出。否则两个仓库共用一个根目录时，部署记忆会混写，启动清扫会删掉对方在途会话的副本。
 
 ### 5.4 部署形态
 
@@ -337,7 +338,7 @@ class SessionResources:
 
 一轮对手发言的最坏耗时是 HTTP 25 秒加记忆 20 秒，约 45 秒，低于服务端 60 秒；训练位一轮的最坏耗时是 HTTP 60 秒加记忆 20 秒，约 80 秒，低于服务端等提交的 90 秒。两个 90 秒方向相反、互不嵌套：服务端等的是客户端的一次提交，客户端等的是相邻两条服务端消息之间的间隔，每条对手发言都是一条消息，所以一轮里有几个对手都不叠加。
 
-部署路（MindAgent，`--enable agent`）的口径同样要随记忆放宽。它今天用 `AgentRuntime` 的默认值：服务端等提交 5 秒、整条流 15 秒（`agent.py:93,124`），是按罐头后端定的。部署实例接上记忆后每轮最坏多 20 秒，所以：记忆配置在场时，部署会话的服务端等提交改为 40 秒、整条流按 `max_turns × 40` 秒折算；罐头后端在 1 秒内返回，40 秒只放宽、不会让现有测试变慢。不设记忆配置（替身，本地文件）时保持现值。`--interact` 与 `--enable agent` 同开时两路共用一个 `AgentRuntime`（`wire.py:140-160`），服务端等提交只有一份取值：取两者较大的 90 秒。部署会话只是多等，不会被误判超时；它的整条流 deadline 仍按 `max_turns × 40` 由部署驱动器自己设，不受影响。真实模型接进部署路时再按它的延迟加。
+部署路（MindAgent，`--enable agent`）的口径同样要随记忆放宽。它今天用 `AgentRuntime` 的默认值：服务端等提交 5 秒、整条流 15 秒（`agent.py:93,124`），是按罐头后端定的。部署实例接上记忆后每轮最坏多 20 秒，所以：记忆配置在场时，部署会话的服务端等提交改为 40 秒、整条流按 `max_turns × 40` 秒折算；罐头后端在 1 秒内返回，40 秒只放宽、不会让现有测试变慢。不设记忆配置（替身，本地文件）时保持现值。`--interact` 与 `--enable agent` 同开时两路共用一个 `AgentRuntime`（`wire.py:140-160`），服务端等提交只有一份取值：取两者较大的 90 秒，部署会话只是多等。整条流的 deadline 今天也只有一份（`agent.py:245` 的 `DeadlineStub` 用运行时属性），所以改为按调用方给：`AgentRuntime.client_factory(*, deadline_s: float | None = None)`，没给时用运行时的值。轨迹源与部署驱动器各自按自己的 `max_turns × 90` 与 `max_turns × 40` 传；运行时属性 `interact_deadline_s` 保留给既有调用。真实模型接进部署路时再按它的延迟加。
 
 现在客户端只有整条流的 deadline（F22），没有逐轮限时。改法：客户端收消息的 `_next_msg` 加等待上限 90 秒，计的是相邻两条服务端消息之间的间隔（在接收线程里用带超时的队列取消息），超时视作 `timeout`（T1，按条重跑）并 abort 会话；整条流的 deadline 仍按 `max_turns × 90` 折算当兜底。
 
@@ -410,10 +411,10 @@ class SessionResources:
 
 | 接口 | 作用 |
 |---|---|
-| `Memory.recall(..., holder=None)` | 转发到 `MemoryCore.recall` 的 `holder` |
+| `Memory.recall(..., holder=None)` | 转发到 `MemoryCore.recall` 的 `holder`；另加 `strict=False` 参数，为真时 `SemanticResult.degraded`（嵌入查询词失败，`semantic_retriever.cpp:19-31` 今天吞掉异常、返回空结果）改为抛 `RecallDegradedError`。本仓库的适配器永远传 `strict=True` |
 | `Memory.open(..., embedder=None)` | 注入嵌入器；`None` 维持现状（stub） |
 | `make_openai_embedder(*, model, base_url, dim, timeout_ms)` | 构造 `OpenAIEmbeddingAdapter`，与 `make_openai_llm` 同形 |
-| `Memory.embed_pending(now) -> int` | 只跑嵌入阶段（`EmbeddingWorker.tick_one_batch`），不跑后台维护 |
+| `Memory.embed_pending(now) -> EmbedStats` | 只跑嵌入阶段（`EmbeddingWorker.tick_one_batch`），不跑后台维护。返回 `embedded` 与 `failed` 两个计数：嵌入失败今天只在向量表里标 `failed` 并计数（`embedding_worker.cpp:287-293`），不抛 |
 | `Memory.digest() -> str` | 第 4.5 节的逻辑摘要，覆盖语句行、向量行与事件表 |
 | `Memory.backup_to(path)` | `VACUUM INTO` 加 `PRAGMA integrity_check`，得到自洽的单文件副本 |
 | `Memory.close()` | 关闭 SQLite 连接并等待自己的工作线程退出 |
@@ -468,7 +469,7 @@ class SessionResources:
 
 | 来源 | `transient` |
 |---|---|
-| `recall`、`embed_pending` 的嵌入请求超时或连不上 | 真 |
+| `recall` 抛 `RecallDegradedError`；`embed_pending` 返回的 `failed` 大于 0 | 真（嵌入端点暂时不可用是最常见的原因；一轮里查询词嵌不出就没有可信的指导语，嵌入失败就让下一轮召回少一条，两者都不能静默） |
 | Starling 抛的其余异常、`sqlite3` 异常、`OSError`、任何其他异常 | 假 |
 | `MemoryEventConflict`、`MemoryClosedError`（都是 `MemoryFailureError` 的子类） | 假 |
 
@@ -497,6 +498,11 @@ class SessionResources:
 | 集成 | 服务端会话终态（正常、超时、断开）都走 quiesce、join、close；副本被删 | loopback 服务端 |
 | 集成 | 滞留数达上限时 `CreateSession` 被拒为 `role_backend_unavailable`；滞留线程退出后名额释放 | loopback 服务端、可解除阻塞的假后端 |
 | 集成 | 部署 episode 重试：第二次尝试前部署库被回滚到起点，摘要相同 | 真 Starling 或替身 |
+| 集成 | 部署 episode 第一次尝试留下 `pending` 行后失败，第二次尝试（先 `restore_from`）用同一逻辑 id 成功，不抛 `EventConflict`；成功后库里没有这条 episode 的 `pending` 行 | 替身 `FileTupleStore`、抽取失败注入 |
+| 集成 | 第二轮部署用同一 `deploy-{model}-{scenario}-{k}`，事件 key 带轮次前缀，不撞上一轮已 committed 的 key | 替身 `FileTupleStore` |
+| 单元 | 嵌入查询词失败时 `StarlingMemory.recall` 抛瞬态 `MemoryFailureError`，不返回空命中；`embed_pending` 有失败也抛 | 假 Starling、真 Starling 各一 |
+| 单元 | 两个仓库并发首次使用同一记忆根目录，只有一个创建 `.owner`，另一个以退出码 2 结束 | 两个子进程 |
+| 单元 | 部署驱动器与轨迹源同时从一个 `AgentRuntime` 取客户端，各自的流 deadline 是自己传的值 | loopback 服务端 |
 | 集成 | 部署实例按 episode 新造：第二条 episode 的事件 key 前缀是它自己的逻辑 id；`restore_from` 在端口未关时抛错 | 替身 `FileTupleStore` |
 | 集成 | 门② 与在途轮次：该人格有未提交起点副本时收录抛 `DeferredError`、库不变；副本删掉后下一 tick 收录成功 | 替身 `FileTupleStore`、故障注入 |
 | 集成 | 同一逻辑 episode id 仍有活动会话时，第二个 `CreateSession` 以 `role_backend_unavailable` 被拒、客户端按条重跑成功 | loopback 服务端 |
