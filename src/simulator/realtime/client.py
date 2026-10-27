@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import math
 import queue
+import threading
 from copy import deepcopy
 
 from simulator.datamodel import Episode, Persona, RoleAssignment, TurnRecord
@@ -8,6 +10,9 @@ from simulator.realtime.codec import (
     persona_to_proto, role_assignment_to_proto, turn_record_from_proto,
 )
 from simulator.realtime.proto import realtime_env_pb2 as pb2
+
+# 接收线程放进 _recv_q 的"响应流正常结束"哨兵;异常则直接放异常对象本身。
+_STREAM_END = object()
 
 
 class SessionRejectedError(Exception):
@@ -24,8 +29,9 @@ class SessionRejectedError(Exception):
 
 class EnvironmentServiceClient:
     """EnvironmentService 的同步客户端包装器（未来 MindTrainer InteractTrain /
-    MindAgent 经验采集直接复用的接口）。用直接 next() 拉取响应，不起消费者
-    线程。逐轮累积 TurnRecord，在 EndSession 到达时于本地重建完整 Episode
+    MindAgent 经验采集直接复用的接口）。默认用直接 next() 拉取响应，不起消费者
+    线程；给了 message_timeout_s 才起一个 daemon 接收线程（见 __init__）。
+    逐轮累积 TurnRecord，在 EndSession 到达时于本地重建完整 Episode
     （§2.6.2："最终Episode摘要引用"，协议不重复内联整个 Episode）。
 
     轮次感知：服务端按 bindings[turn_index % n] 轮转发言，所以客户端知道
@@ -49,15 +55,34 @@ class EnvironmentServiceClient:
 
     重建出的 Episode.terminated_reason 就是服务端 EndSession.reason。正常结束：max_turns、goal_reached、
     client_terminated。失败的几种里，调用方要分 T1（整条重跑有望成功）与 T2（重跑无益）：
-    T1 是 timeout、role_backend_timeout、role_backend_unavailable（对手 API 限流、5xx、连不上）、
-    persistence_failed；T2 是 invalid_session、role_backend_rejected（对手 API 明确拒绝，4xx 且非 429）；
+    T1 是 timeout（含客户端相邻消息等待超时，见 message_timeout_s）、role_backend_timeout、
+    role_backend_unavailable（对手 API 限流、5xx、连不上）、persistence_failed；T2 是 invalid_session、role_backend_rejected（对手 API 明确拒绝，4xx 且非 429）；
     role_backend_failure 分不出 T1 与 T2（后端抛了说不清的异常，或工厂/解析器出错），调用方保守地不重跑；
     client_disconnected 是客户端自己断开。"""
 
-    def __init__(self, stub) -> None:
+    def __init__(self, stub, *, message_timeout_s: float | None = None) -> None:
+        """message_timeout_s:相邻两条服务端消息的最长间隔(秒),必须是有限正数;None 表示
+        不设限,此时直接 next() 拉取,不起接收线程,行为与加这个参数之前完全一致。
+
+        给了它就起一个 daemon 接收线程把响应流搬进队列,读取端带超时地取。间隔超限时客户端
+        **不抛异常**,而是在本地合成一条 EndSession(reason="timeout"),走既有的收尾路径:
+        closed 为真、请求流被释放(服务端按断连判 FAILED,不落盘),drain_until_end() 的
+        terminated_reason 是 "timeout";等 session_ready 时超时则抛 SessionRejectedError。
+        这样调用方把它当成服务端报的 T1 失败重跑;若抛 RuntimeError,轨迹源会把它判成
+        不可重跑的 client_protocol_error。"""
+        if message_timeout_s is not None and not (
+            math.isfinite(message_timeout_s) and message_timeout_s > 0
+        ):
+            raise ValueError(
+                f"message_timeout_s must be a finite positive number or None, "
+                f"got {message_timeout_s!r}"
+            )
         self._stub = stub
+        self._message_timeout_s = message_timeout_s
         self._send_q: "queue.Queue[pb2.ClientMessage | None]" = queue.Queue()
         self._resp_iter = stub.Interact(self._request_gen())
+        self._recv_q: "queue.Queue[object]" = queue.Queue()
+        self._recv_thread: threading.Thread | None = None
         self._session_id = ""
         self._scenario_id = ""
         self._role_assignment: RoleAssignment | None = None
@@ -67,6 +92,11 @@ class EnvironmentServiceClient:
         self._opening_turns: list[TurnRecord] = []
         self._closed = False
         self._last_reason = ""
+        if message_timeout_s is not None:
+            self._recv_thread = threading.Thread(
+                target=self._receive_loop, name="realtime-client-recv", daemon=True,
+            )
+            self._recv_thread.start()
 
     @property
     def closed(self) -> bool:
@@ -202,17 +232,49 @@ class EnvironmentServiceClient:
         不改写已有的终止原因。放弃之后不要使用 drain_until_end() 的结果。"""
         self._abandon("client_aborted")
 
+    def _receive_loop(self) -> None:
+        """接收线程:把响应流的每条消息放进 _recv_q;正常结束放 _STREAM_END,抛异常就把
+        异常对象本身放进去。响应流被取消或服务端关流后 next() 返回/抛出,线程随之退出。"""
+        try:
+            for msg in self._resp_iter:
+                self._recv_q.put(msg)
+        except BaseException as exc:
+            self._recv_q.put(exc)
+            return
+        self._recv_q.put(_STREAM_END)
+
     def _next_msg(self):
         """读一条服务端消息；传输层出错或流意外结束时放弃会话再抛出，避免
-        请求生成器永远阻塞在 send_q.get()（gRPC 的请求消费线程会泄漏）。"""
+        请求生成器永远阻塞在 send_q.get()（gRPC 的请求消费线程会泄漏）。
+
+        设了 message_timeout_s 时从接收线程的队列带超时地取,超时合成 timeout 的 EndSession。"""
+        if self._message_timeout_s is None:
+            try:
+                return next(self._resp_iter)
+            except StopIteration:
+                self._abandon("stream_ended_without_end_session")
+                raise RuntimeError("server closed the stream without sending EndSession") from None
+            except BaseException:
+                self._abandon("client_transport_error")
+                raise
         try:
-            return next(self._resp_iter)
-        except StopIteration:
+            item = self._recv_q.get(timeout=self._message_timeout_s)
+        except queue.Empty:
+            # 真 gRPC 流有 cancel():取消它让接收线程尽快退出;裸迭代器没有,就只合成收尾。
+            cancel = getattr(self._resp_iter, "cancel", None)
+            if callable(cancel):
+                cancel()
+            return pb2.ServerMessage(end_session=pb2.EndSession(
+                reason="timeout",
+                failure_detail=f"no server message within {self._message_timeout_s}s",
+            ))
+        if item is _STREAM_END:
             self._abandon("stream_ended_without_end_session")
-            raise RuntimeError("server closed the stream without sending EndSession") from None
-        except BaseException:
+            raise RuntimeError("server closed the stream without sending EndSession")
+        if isinstance(item, BaseException):
             self._abandon("client_transport_error")
-            raise
+            raise item
+        return item
 
     def _pump_one(self) -> TurnRecord | None:
         """读一条服务端消息：turn_update → 累积并返回该轮；end_session →

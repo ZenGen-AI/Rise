@@ -189,3 +189,172 @@ def test_server_fault_at_create_raises_session_rejected_with_role_backend_failur
     assert exc.value.reason == "role_backend_failure"  # 可按 T1 重试，区别于 invalid_session
     assert "factory-exploded" in exc.value.detail
     assert client.closed
+
+
+# ---- message_timeout_s:客户端相邻服务端消息的等待上限 ----
+
+
+class _PacedReplies:
+    """带 cancel() 的响应流,像真 gRPC 的流:cancel 让挂住的读取尽快结束。"""
+
+    def __init__(self, replies, cancelled):
+        self._replies = replies
+        self._cancelled = cancelled
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return next(self._replies)
+
+    def cancel(self):
+        self._cancelled.set()
+
+
+class _PacedStub:
+    """按 (delay_s, msg) 回放;msg 为 _SILENT 时一直不回(最多 5 秒),模拟挂住的服务端。
+    cancellable=True 时响应流带 cancel()(像真 gRPC),False 时是裸生成器(没有 cancel)。"""
+    _SILENT = object()
+
+    def __init__(self, script, *, cancellable=True):
+        self._script = list(script)
+        self._cancellable = cancellable
+        self.request_gen = None
+        self.cancelled = threading.Event()
+
+    def Interact(self, request_gen):
+        self.request_gen = request_gen
+
+        def _replies():
+            for delay_s, msg in self._script:
+                if msg is _PacedStub._SILENT:
+                    self.cancelled.wait(5)
+                    return
+                time.sleep(delay_s)
+                yield msg
+
+        replies = _replies()
+        return _PacedReplies(replies, self.cancelled) if self._cancellable else replies
+
+
+def _paced_client(script, timeout_s, **stub_kwargs):
+    stub = _PacedStub(script, **stub_kwargs)
+    client = EnvironmentServiceClient(stub, message_timeout_s=timeout_s)
+    return client, stub
+
+
+def _assert_receiver_exits(client):
+    """接收线程必须能在有限时间内退出,否则客户端泄漏了后台线程。"""
+    client._recv_thread.join(2.0)
+    assert not client._recv_thread.is_alive(), "接收线程仍在运行:客户端泄漏了后台线程"
+
+
+def test_a_silent_server_mid_session_ends_the_episode_as_timeout_and_releases_the_stream():
+    client, stub = _paced_client([(0, _ready()), (0, _PacedStub._SILENT)], timeout_s=0.2)
+    client.create_session(scenario_id="s1", role_assignment=_assignment(), personas=_personas(),
+                          purpose="training", client_driven_slot="a")
+    started = time.monotonic()
+    assert client.submit_turn("hi") == []
+    assert time.monotonic() - started < 2.0
+    assert client.closed
+    assert client.drain_until_end().terminated_reason == "timeout"
+    _assert_request_stream_released(stub)
+    assert stub.cancelled.is_set()  # 超时时取消了响应流
+    _assert_receiver_exits(client)
+
+
+def test_the_limit_is_per_gap_not_per_session():
+    # 每条间隔 0.15 秒,低于上限 0.3;合计 0.45 秒高于上限,仍不超时
+    end = pb2.ServerMessage(end_session=pb2.EndSession(reason="max_turns", episode_id="ep-sess-fake"))
+    client, _ = _paced_client([(0, _ready()), (0.15, _turn(0, "a", "hi")), (0.15, _turn(1, "b", "yo")),
+                               (0.15, end)], timeout_s=0.3)
+    client.create_session(scenario_id="s1", role_assignment=_assignment(max_turns=2), personas=_personas(),
+                          purpose="training", client_driven_slot="a")
+    client.submit_turn("hi")
+    assert client.drain_until_end().terminated_reason == "max_turns"
+    _assert_receiver_exits(client)
+
+
+def test_a_silent_server_before_session_ready_is_a_timeout_rejection():
+    client, stub = _paced_client([(0, _PacedStub._SILENT)], timeout_s=0.2)
+    with pytest.raises(SessionRejectedError) as info:
+        client.create_session(scenario_id="s1", role_assignment=_assignment(), personas=_personas(),
+                              purpose="training", client_driven_slot="a")
+    assert info.value.reason == "timeout"
+    assert "no server message" in info.value.detail
+    assert client.closed
+    _assert_request_stream_released(stub)
+    _assert_receiver_exits(client)
+
+
+def test_a_timeout_on_a_stream_without_cancel_still_ends_as_timeout():
+    # 响应流不一定有 cancel()(裸迭代器):超时照样合成 timeout 收尾,只是不取消流
+    client, stub = _paced_client([(0, _ready()), (0, _PacedStub._SILENT)], timeout_s=0.1,
+                                 cancellable=False)
+    client.create_session(scenario_id="s1", role_assignment=_assignment(), personas=_personas(),
+                          purpose="training", client_driven_slot="a")
+    try:
+        assert client.submit_turn("hi") == []
+        assert client.drain_until_end().terminated_reason == "timeout"
+        _assert_request_stream_released(stub)
+        assert not stub.cancelled.is_set()
+    finally:
+        stub.cancelled.set()  # 放走挂住的生成器,让接收线程退出
+    _assert_receiver_exits(client)
+
+
+@pytest.mark.parametrize("bad", [0, -1.0, float("nan"), float("inf")])
+def test_message_timeout_must_be_a_finite_positive_number_and_opens_no_stream(bad):
+    stub = _PacedStub([])
+    with pytest.raises(ValueError):
+        EnvironmentServiceClient(stub, message_timeout_s=bad)
+    assert stub.request_gen is None  # 校验在开流之前,不留悬空的流
+
+
+def test_without_a_message_timeout_there_is_no_receiver_thread():
+    client = EnvironmentServiceClient(_FakeStub([_ready()]))
+    assert client._message_timeout_s is None
+    assert client._recv_thread is None
+
+
+def test_the_message_timeout_is_kept_on_the_client():
+    client = EnvironmentServiceClient(_FakeStub([]), message_timeout_s=90)
+    assert client._message_timeout_s == 90
+    _assert_receiver_exits(client)  # 空脚本:流立刻结束,接收线程随之退出
+
+
+def test_with_a_message_timeout_a_normal_session_runs_to_its_end_and_the_receiver_exits():
+    end = pb2.ServerMessage(end_session=pb2.EndSession(reason="goal_reached"))
+    client, _ = _fake_client_with_timeout([_ready(), _turn(0, "a", "hi"), end])
+    client.submit_turn("hi")
+    assert client.closed
+    assert client.drain_until_end().terminated_reason == "goal_reached"
+    _assert_receiver_exits(client)
+
+
+def _fake_client_with_timeout(script, message_timeout_s=5.0):
+    stub = _FakeStub(script)
+    client = EnvironmentServiceClient(stub, message_timeout_s=message_timeout_s)
+    client.create_session(
+        scenario_id="s1", role_assignment=_assignment(), personas=_personas(),
+        purpose="training", client_driven_slot="a",
+    )
+    return client, stub
+
+
+def test_with_a_message_timeout_a_transport_error_still_closes_and_reraises():
+    client, stub = _fake_client_with_timeout([_ready(), _RpcBoom()])
+    with pytest.raises(grpc.RpcError):
+        client.submit_turn("x")
+    assert client.closed
+    _assert_request_stream_released(stub)
+    _assert_receiver_exits(client)
+
+
+def test_with_a_message_timeout_a_stream_ending_without_end_session_still_raises():
+    client, stub = _fake_client_with_timeout([_ready()])
+    with pytest.raises(RuntimeError, match="without sending EndSession"):
+        client.submit_turn("x")
+    assert client.closed
+    _assert_request_stream_released(stub)
+    _assert_receiver_exits(client)
