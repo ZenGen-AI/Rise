@@ -31,6 +31,7 @@
 - **门② 与在途轮次落在同一个 tick**:reconcile 先收录、后跑轮次。收录写库前若该人格有未提交的起点副本,应抛 `DeferredError` 延后,否则轮次重入的覆盖会抹掉刚收录的记忆。见第 5 步。
 - **替身下 `memory.seed` 非 null**:替身没有种子库。应在派发时判 T2,原因写明种子需要记忆配置,不能静默当空库跑。见 Task 26。
 - **本设计落地前写下的 pending interact run 没有 `memory` 段**:应在派发器算哈希之前判 T2,原因是 `interact config has no memory section (written before memory support)`,不能续上旧 run 跑出记忆不一致的实验。见 Task 28。
+- **门② 部分收录后抽取一直失败**:前几条已提交、后一条反复抽取失败时,动作一直按退避重试,不写树,也不会收敛。现在只能等抽取恢复,或由人手工经管理面放弃那条事件并处置提案;本计划不提供这条命令。Task 34 的测试只钉住"抽取恢复后收敛",一直失败的人工出口留给后续。
 - **生成路产出的人格 id 不符合 `PERSONA_ID_PATTERN`**:人格 id 现在会拼进库文件名。现有生成器产出 `pers-auto-<n>`,符合;但仓库没有对人格 id 的入口校验,手写的人格可能含其他字符。`FileTupleStore` 遇到不合法 id 应抛 `ActioDataError`,派发与部署按 T2 失败,不能拼出越界路径。见 Task 4。
 
 ---
@@ -4182,13 +4183,15 @@ else:
     start = memory_store.backup_to(persona, snap)
     on_episode_start(eid, {persona: start})        # 轮次产物先记下起点摘要,再开第一次尝试
 for attempt in 1..budget:
-    if attempt > 1: _restore(memory_store, persona, snap, start, eid)
     instance = make_instance(f"{round_id}/{eid}", memory_store.open(persona))
+    failure = None
     try:   raw = _attempt(instance, ..., episode_id=eid, deadline_s=stream_deadline_s)
-    except _AttemptFailed:
-        记 failed_attempts;不可重跑或用尽 → 先 _restore(..., start, eid) 再抛 DeploymentFailedError
-        (起点副本保留:瞬态用尽时轮次留 pending、重入再覆盖;T3 时由 Task 33 回滚并删副本)
-    finally: instance.close()                      # 端口随之关闭,之后才能 restore_from
+    except _AttemptFailed as exc: failure = exc   # 记 failed_attempts
+    finally: instance.close()                      # 先关实例与端口:restore_from 要求该人格没有打开的端口
+    if failure is None: break
+    _restore(memory_store, persona, snap, start, eid)   # 端口已关,回到起点;下一次尝试或最终失败都从这里出发
+    if not failure.transient or attempt == budget:
+        raise DeploymentFailedError(...)           # 起点副本保留:瞬态用尽时轮次留 pending、重入再覆盖;T3 时由 Task 33 删副本
     write_episode(store, run_id, Episode(id=eid, ...))
     for key in memory_store.pending_events(persona):
         if key.startswith(f"{round_id}/{eid}#"): memory_store.abandon_event(persona, key)
@@ -4198,6 +4201,7 @@ for attempt in 1..budget:
 几处取舍:
 
 - 带后缀的 id 只在"已提交的 base 用的是旧技能版本"时出现,新轮次的第一次运行一律用不带后缀的 base,所以 `tests/test_ma_e2e.py` 断言的 `deploy-...` id 不变。base 已落盘、技能版本相同但 `_reusable` 为假(旧的 v1 轨迹没有 `memory` 块,或 `episode_digests` 里没记)时,按同一 id 重跑:设计二之前的 episode 没写过记忆,不会撞 key;若它其实写过,重跑会撞 `MemoryEventConflict`,经上面的映射成 `role_memory_failure`,轮次 T3,不静默。
+- 每一次 `restore_from` 都在该次尝试的 `instance.close()` 之后(`restore_from` 遇到打开的端口会抛错);重试、最终失败与 Task 33 的 T3 回滚都走"先关、再覆盖"这一个顺序。测试 `test_a_failed_attempt_is_rolled_back_after_its_port_is_closed` 用一个记录调用顺序的 `FileTupleStore` 包装,断言每次 `restore_from` 之前该人格的打开端口数为 0。
 - `pending` 行在删副本**之前**放弃:崩在两者之间时副本还在,重入先覆盖(被放弃的行随之回滚掉)再重跑,同 key 不会撞终态行;反过来的顺序崩在中间会留下无主的 `pending` 行。设计源 4.3 节写的是"成功提交后",这里按崩溃安全取前者。
 - 过滤 `f"{round_id}/{eid}#"` 前缀,门② 的 `proposal-...#k` 行归提案,不碰(4.3 节"谁写的谁处理")。
 - `snap.unlink()` 的 `OSError` 原样上抛,不吞:副本留着就是"未提交",轮次留 pending,重入时只有这一条在途(episode 顺序跑),覆盖不会抹掉后面 episode 的记忆。第 10 节"副本删除失败只记日志"说的是会话副本(`runs/` 下,有清扫兜底),不是起点副本。
@@ -4339,7 +4343,7 @@ Expected: FAIL,`TypeError: make_start_round_handler() got an unexpected keyword 
 - `_binding_payload(..., memory_runtime: dict)` 加 `"memory_runtime": copy.deepcopy(memory_runtime)`、`"episode_digests": {}`。
 - `handle`:`existing` 是 pending 时,新信封除 `created_at` 外还继承 `existing.payload.get("episode_digests", {})`。不继承的话重入时 `_reusable` 拿不到起点摘要,已提交的 episode 会按同一 id 重跑而撞上自己 committed 的 key(`test_a_pending_round_resumes_without_regenerating_persisted_episodes` 钉住这一点)。
 - 锁:`_check_inputs` 之后、`_run` 之前,`ExitStack` 按排序后的绑定人格 id 逐个 `memory_layout.persona_lock(pid)`;`FileLockBusyError` 改抛 `AgentRoundFailedError(f"persona library locked: {exc}", point="mindagent.rounds.lock")`(M20)。锁一直持到 `handle` 返回或抛出,所以下面的回滚也在锁里做。
-- T3 回滚:`_run` 外包一层 `try`;接到 `DeploymentFailedError`(`transient` 为假)、`ProposalParseError`、`BridgeError`、`MindAgentDataError`、`ActioDataError`、以及 `AgentRoundFailedError` 但**不是** `RestoreFailedError` 时,先 `_rollback(env.id)` 再重抛给既有的 `except` 链写失败记录。`_rollback` 对每个绑定人格,取 `memory_layout.round_snapshots(round_id)` 里以 `f"-{pid}{memory_layout.suffix}"` 结尾的副本,`memory_store.restore_from(pid, snap)` 后 `snap.unlink()`;`restore_from` 抛 `MemoryFailureError`/`OSError` 时改抛 `RestoreFailedError(..., point="mindagent.deployment.restore")`,副本与库都不动(第 9 节"覆盖失败时库与副本都保留")。瞬态的 `DeploymentFailedError` 与其余异常不回滚:轮次留 pending,重入时由 Task 32 的"副本在就先覆盖"处理。
+- T3 回滚:`_run` 外包一层 `try`;接到 `DeploymentFailedError`(`transient` 为假)、`ProposalParseError`、`BridgeError`、`MindAgentDataError`、`ActioDataError`、以及 `AgentRoundFailedError` 但**不是** `RestoreFailedError` 时,先 `_rollback(env.id)` 再重抛给既有的 `except` 链写失败记录。`_rollback` 运行时 `run_deployment_episodes` 已经返回或抛出,它每次尝试的 `finally` 已关掉实例与端口(Task 32),所以 `restore_from` 不会撞上打开的端口;`_rollback` 开头再断言一次该人格的打开端口数为 0,不为 0 就抛 `RestoreFailedError`("port still open"),不去覆盖。`_rollback` 对每个绑定人格,取 `memory_layout.round_snapshots(round_id)` 里以 `f"-{pid}{memory_layout.suffix}"` 结尾的副本,`memory_store.restore_from(pid, snap)` 后 `snap.unlink()`;`restore_from` 抛 `MemoryFailureError`/`OSError` 时改抛 `RestoreFailedError(..., point="mindagent.deployment.restore")`,副本与库都不动(第 9 节"覆盖失败时库与副本都保留")。瞬态的 `DeploymentFailedError` 与其余异常不回滚:轮次留 pending,重入时由 Task 32 的"副本在就先覆盖"处理。
 - `_run`:
   - `interlocutors = {b.slot_id: b.persona_id for b in config.bindings}`;`make_instance(episode_id, memory)` = `instantiate(backend_factory(model_id, ckpt), skills=lib.skills, memory=memory, episode_id=episode_id, interlocutors=interlocutors, library_version=lib.version, profile={"model_id": model_id, "round_id": env.id})`。
   - `on_episode_start(eid, by_persona)`:`env.payload["episode_digests"][eid] = dict(by_persona)`,`store.write_product(agent_round_file(model_id), env, f"mindagent: {env.id} start {eid}")`(第 9 节"每条 episode 开始前写回一次")。
@@ -4433,21 +4437,25 @@ def test_a_failed_extraction_abandons_the_event_and_rejects_the_proposal(store, 
     assert not store.exists(library_state_file())
 
 
-def test_a_later_extraction_failure_after_an_earlier_commit_keeps_the_proposal_approved(store, mem):
-    # 第 1 条记忆增量抽取成功并 committed,第 2 条失败。已提交的事件放弃不了,转 rejected 会留下
-    # "提案被拒、库里却有它的记忆";所以提案留 approved,失败记录写明部分收录
+def test_a_later_extraction_failure_after_an_earlier_commit_defers_and_then_converges(store, mem):
+    # 第 1 条记忆增量 committed、第 2 条抽取失败:不能转 rejected(已提交的放弃不了),也不能放弃第 2 条
+    # (放弃后提案留 approved,每个 tick 重入都撞 EventConflict,永不收敛)。所以第 2 条留 pending、动作延后
     second = {"persona_id": "pa", "text": "对方养了一只猫", "interlocutor": "pb"}
     mem.failing.add(f"{PID}#2")
     _put(store, increments=[{"kind": "memory", "definition": MEMORY}, {"kind": "memory", "definition": second}])
-    _admit(store, mem)
+    with pytest.raises(DeferredError, match="partial admission"):
+        _admit(store, mem)
     assert store.read_product(proposal_file(PID)).status == "approved"
     fr = store.read_product(failure_record_file("run-003", f"admit-{PID}"))
     assert fr.payload["category"] == "T2" and "partial admission" in fr.payload["reason"]
-    assert mem.store.remember_event("pa", KEY, "对方住在北京", interlocutor="pb").stored   # 第 1 条仍 committed
-    assert mem.store.pending_events("pa") == []                                           # 第 2 条已 abandoned
-    with pytest.raises(MemoryEventConflict):
-        mem.store.remember_event("pa", f"{PID}#2", "对方养了一只猫", interlocutor="pb")
-    assert not store.exists(library_state_file())                                          # 库版本不递增
+    assert mem.store.pending_events("pa") == [f"{PID}#2"]              # 留 pending,不放弃
+    assert not store.exists(library_state_file())
+    mem.failing.clear()                                                # 抽取恢复后重入
+    _admit(store, mem)
+    proposal = store.read_product(proposal_file(PID))
+    assert proposal.status == "effective"
+    assert set(proposal.payload["admitted_statements"]) == {KEY, f"{PID}#2"}
+    assert mem.store.pending_events("pa") == []
 
 
 def test_a_store_error_leaves_the_proposal_approved_and_reentry_completes_the_receipt(store, mem, monkeypatch):
@@ -4524,7 +4532,7 @@ Expected: FAIL,`ImportError: cannot import name 'make_admit_proposal_handler' fr
 2. 记忆增量所涉人格(排序去重)逐个进 `ExitStack`:`memory_layout.persona_lock(pid)`,`FileLockBusyError` 改抛 `DeferredError(f"persona library locked: {exc}")`;拿到锁后 `memory_layout.uncommitted_snapshots(pid)` 非空抛 `DeferredError(f"persona {pid} has an uncommitted deployment episode: {names}")`。锁持到处理器返回。
 3. 记忆增量按位置逐个 `memory_store.remember_event(pid, key, text, interlocutor=...)`:
    - 抛 `MemoryFailureError` 或 `OSError`:`fail_once(... category="T1" if getattr(exc, "transient", False) else "T2", point="mindagent.admit.memory", reason=f"remember {key}: {type(exc).__name__}")`,返回,不改提案、不放弃事件(第 9 节:留在 `approved` 让下一 tick 重入)。
-   - `outcome.failed`:先查本提案在它之前的记忆增量是否已有 `committed` 的(前几条成功、这一条失败)。有就**不**转 `rejected`(已提交的事件不能放弃,转了会留下"提案被拒、库里却有它的记忆"):这一条 `abandon_event`,写 T2 失败记录(原因 `partial admission: {key} extraction failed after {n} committed`),提案留 `approved` 等人处理,返回。一条都没提交时才走下面的整份拒绝:`memory_store.abandon_event(pid, key)`,`fail_once(... "T2", point="mindagent.admit.memory", reason=f"extraction failed for {key}: {outcome.category}")`,`assert_transition("review", "approved", "rejected")`,载荷写 `reject_reason`(同一句),写回,返回。
+   - `outcome.failed`:先查本提案在它之前的记忆增量是否已有 `committed` 的(前几条成功、这一条失败)。有就**不**转 `rejected`(已提交的事件放弃不了,转了就是"提案被拒、库里却有它的记忆"),也**不**放弃这一条:让它留在 `pending`。写一条 T2 失败记录(原因 `partial admission: {key} extraction failed after {n} committed`,`fail_once` 只写一次),然后抛 `DeferredError(f"partial admission of {proposal_id}: {key} pending")`:守护进程不写树、按退避重试这一条动作。重入时前几条 `remember_event` 幂等返回原收据,失败的那条按 `pending` 行再抽一次;抽成功就照常收录完、转 `effective`,所以这条路径会收敛。抽取一直失败时动作一直按退避重试,不写树;失败记录与 `pending` 行让人看得到。本计划不加"人工放弃部分收录"的命令(见 Review Focus)。一条都没提交时才走下面的整份拒绝:`memory_store.abandon_event(pid, key)`,`fail_once(... "T2", point="mindagent.admit.memory", reason=f"extraction failed for {key}: {outcome.category}")`,`assert_transition("review", "approved", "rejected")`,载荷写 `reject_reason`(同一句),写回,返回。
    - 成功:记下 `statements[key] = list(outcome.stored)`。
 4. 技能条目照旧写 `skill_file`(只写 `kind == "skill"` 的)。
 5. `library_state` 照旧递增(`entries` 里记忆是 key)。
