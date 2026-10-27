@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import re
+
 from simulator.datamodel import Persona, RoleAssignment
+
+# 逻辑 episode id 的字符集只含 ASCII,所以字符数就是字节数。
+_EPISODE_ID = re.compile(r"[A-Za-z0-9._-]{1,128}")
 
 
 def validate_create_session(
@@ -49,4 +54,17 @@ def validate_create_session(
     if role_assignment.max_turns > max_turns_cap:
         return f"max_turns {role_assignment.max_turns} exceeds cap {max_turns_cap}"
 
+    return None
+
+
+def validate_episode_id(episode_id: str) -> str | None:
+    """CreateSession.episode_id 的格式校验（纯函数）。合格返回 None，否则返回可读原因。
+
+    episode_id 会被用作落盘路径的一段，所以只许 [A-Za-z0-9._-]、1 到 128 字符，
+    且不是 "." 或 ".."。必须用 fullmatch：re.match 加 `$` 会放行末尾的换行。
+    空串在这里也是不合格；调用方把空串当作"没给"，只对非空的 id 调本函数。"""
+    if not _EPISODE_ID.fullmatch(episode_id):
+        return "must be 1 to 128 characters from [A-Za-z0-9._-]"
+    if episode_id in (".", ".."):
+        return f"{episode_id!r} is not allowed"
     return None

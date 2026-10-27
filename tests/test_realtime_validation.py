@@ -1,7 +1,7 @@
 import pytest
 
 from simulator.datamodel import Persona, RoleBinding, RoleAssignment
-from simulator.realtime.validation import validate_create_session
+from simulator.realtime.validation import validate_create_session, validate_episode_id
 
 
 def _ra(bindings, max_turns=4):
@@ -77,3 +77,16 @@ def test_duplicate_slot_id_in_bindings_rejected():
     assert reason is not None
     assert "duplicate" in reason
     assert "'a'" in reason
+
+
+@pytest.mark.parametrize("good", ["x", "x" * 128, "a.b", "deploy-zengen-v1-s1-1", "_-.", "...", "ep-sess-0123456789ab"])
+def test_well_formed_episode_id_passes(good):
+    assert validate_episode_id(good) is None
+
+
+@pytest.mark.parametrize(
+    "bad", ["", "a/b", ".", "..", "x" * 129, "ep\n", "\nep", "回合-1", "a b", "a\\b", "a\x00b"],
+)
+def test_malformed_episode_id_returns_a_reason(bad):
+    reason = validate_episode_id(bad)
+    assert isinstance(reason, str) and reason
