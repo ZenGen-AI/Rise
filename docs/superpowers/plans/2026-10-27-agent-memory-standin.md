@@ -4182,25 +4182,30 @@ else:
     snap.parent.mkdir(parents=True, exist_ok=True)
     start = memory_store.backup_to(persona, snap)
     on_episode_start(eid, {persona: start})        # 轮次产物先记下起点摘要,再开第一次尝试
+raw = None
 for attempt in 1..budget:
     instance = make_instance(f"{round_id}/{eid}", memory_store.open(persona))
     failure = None
     try:   raw = _attempt(instance, ..., episode_id=eid, deadline_s=stream_deadline_s)
     except _AttemptFailed as exc: failure = exc   # 记 failed_attempts
     finally: instance.close()                      # 先关实例与端口:restore_from 要求该人格没有打开的端口
-    if failure is None: break
-    _restore(memory_store, persona, snap, start, eid)   # 端口已关,回到起点;下一次尝试或最终失败都从这里出发
+    if failure is None:
+        break                                      # 成功:跳出循环,到下面的提交段
+    _restore(memory_store, persona, snap, start, eid)   # 端口已关,回到起点
     if not failure.transient or attempt == budget:
         raise DeploymentFailedError(...)           # 起点副本保留:瞬态用尽时轮次留 pending、重入再覆盖;T3 时由 Task 33 删副本
-    write_episode(store, run_id, Episode(id=eid, ...))
-    for key in memory_store.pending_events(persona):
-        if key.startswith(f"{round_id}/{eid}#"): memory_store.abandon_event(persona, key)
-    snap.unlink()                                  # 提交点
+    continue                                       # 可重试:从起点再试一次,不碰提交段
+# 只有某次尝试成功(failure is None)才走到这里;raw 是那次尝试的结果
+write_episode(store, run_id, Episode(id=eid, ...raw...))
+for key in memory_store.pending_events(persona):
+    if key.startswith(f"{round_id}/{eid}#"): memory_store.abandon_event(persona, key)
+snap.unlink()                                      # 提交点
 ```
 
 几处取舍:
 
 - 带后缀的 id 只在"已提交的 base 用的是旧技能版本"时出现,新轮次的第一次运行一律用不带后缀的 base,所以 `tests/test_ma_e2e.py` 断言的 `deploy-...` id 不变。base 已落盘、技能版本相同但 `_reusable` 为假(旧的 v1 轨迹没有 `memory` 块,或 `episode_digests` 里没记)时,按同一 id 重跑:设计二之前的 episode 没写过记忆,不会撞 key;若它其实写过,重跑会撞 `MemoryEventConflict`,经上面的映射成 `role_memory_failure`,轮次 T3,不静默。
+- 提交段(落盘、放弃 pending、删副本)在循环外,只在某次尝试成功后执行;可重试的失败覆盖回起点后 `continue`,不会落进提交段。测试 `test_a_transient_failure_then_success_commits_once` 断言:第一次尝试失败、第二次成功时,`write_episode` 只调一次、用的是第二次的结果,起点副本在第二次之后才删。
 - 每一次 `restore_from` 都在该次尝试的 `instance.close()` 之后(`restore_from` 遇到打开的端口会抛错);重试、最终失败与 Task 33 的 T3 回滚都走"先关、再覆盖"这一个顺序。测试 `test_a_failed_attempt_is_rolled_back_after_its_port_is_closed` 用一个记录调用顺序的 `FileTupleStore` 包装,断言每次 `restore_from` 之前该人格的打开端口数为 0。
 - `pending` 行在删副本**之前**放弃:崩在两者之间时副本还在,重入先覆盖(被放弃的行随之回滚掉)再重跑,同 key 不会撞终态行;反过来的顺序崩在中间会留下无主的 `pending` 行。设计源 4.3 节写的是"成功提交后",这里按崩溃安全取前者。
 - 过滤 `f"{round_id}/{eid}#"` 前缀,门② 的 `proposal-...#k` 行归提案,不碰(4.3 节"谁写的谁处理")。
