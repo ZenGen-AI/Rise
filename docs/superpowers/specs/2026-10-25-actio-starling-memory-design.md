@@ -315,7 +315,7 @@ class SessionResources:
 - `TimeoutBackend` 改为登记在途线程：`respond` 开始时加入 `SessionResources` 的在途集合，结束时移出；超时只是调用方放弃等待，线程本身仍在集合里。
 - 驱动器进入终态（`CLOSED` 或 `FAILED`，含断开）后，由 servicer 在流结束的 `finally` 里按顺序调 `quiesce`、`join(timeout_s=60)`、`close`。
 - `join` 超时：**不 close、不删**。资源对象移交给 servicer 的滞留表（`EnvironmentServicer` 持有，准入检查就在 servicer 里做，回环服务端不经组合根就能测），并继续占住一个会话名额：servicer 的准入检查“活动会话数加滞留数小于 `max_workers`”不过就拒绝 `CreateSession`，终止原因 `role_backend_unavailable`（T1，客户端按条重跑）。滞留表每 60 秒重试一次 `join(0)`，成功后 close 并删目录。
-- 清扫：`run` 与 `reconcile` 取到仓库排他锁之后、构造实时服务端之前，删掉记忆根目录下 `runs/` 的所有子目录；`deploy/`、`seeds/`、`snapshots/` 不碰。`reconcile` 在装配前取锁，清扫放在装配里即可；`run` 现在是装配之后才在 `run_daemon` 里取锁（`wire.py:383`、`daemon.py:517`），所以清扫不放进装配，而是作为 `run_daemon` 取锁之后、第一个 tick 之前调用的启动钩子。实时服务端本来就在第一次需要会话时才起（`AgentRuntime.client_factory`），晚于这个钩子。此时本进程还没有会话，别的进程被仓库锁挡在外面，根目录又只属于这个仓库（5.3 节），所以没有在途副本会被误删。运行中只删滞留表 join 成功的目录，不扫目录。
+- 清扫：`run` 与 `reconcile` 取到仓库排他锁之后、构造实时服务端之前，删掉记忆根目录下 `runs/` 的所有子目录；`deploy/`、`seeds/`、`snapshots/` 不碰。`reconcile` 在装配前取锁，清扫放在装配里即可；`run` 现在是装配之后才在 `run_daemon` 里取锁（`wire.py:383`、`daemon.py:517`），所以清扫不放进装配，而是作为 `run_daemon` 取锁之后、第一个 tick 之前调用的启动钩子：`run_daemon` 新增 keyword-only 参数 `on_locked: Callable[[], None] | None = None`，取到锁后、建退避表之前调一次，抛异常则守护进程不进第一个 tick、带原因退出。实时服务端本来就在第一次需要会话时才起（`AgentRuntime.client_factory`），晚于这个钩子。此时本进程还没有会话，别的进程被仓库锁挡在外面，根目录又只属于这个仓库（5.3 节），所以没有在途副本会被误删。运行中只删滞留表 join 成功的目录，不扫目录。
 - 在途集合的操作持一把锁；`join` 不持锁等待。
 
 ### 6.3 并发上限
@@ -336,7 +336,7 @@ class SessionResources:
 
 一轮对手发言的最坏耗时是 HTTP 25 秒加记忆 20 秒，约 45 秒，低于服务端 60 秒；训练位一轮的最坏耗时是 HTTP 60 秒加记忆 20 秒，约 80 秒，低于服务端等提交的 90 秒。两个 90 秒方向相反、互不嵌套：服务端等的是客户端的一次提交，客户端等的是相邻两条服务端消息之间的间隔，每条对手发言都是一条消息，所以一轮里有几个对手都不叠加。
 
-部署路（MindAgent，`--enable agent`）的口径同样要随记忆放宽。它今天用 `AgentRuntime` 的默认值：服务端等提交 5 秒、整条流 15 秒（`agent.py:93,124`），是按罐头后端定的。部署实例接上记忆后每轮最坏多 20 秒，所以：记忆配置在场时，部署会话的服务端等提交改为 40 秒、整条流按 `max_turns × 40` 秒折算；罐头后端在 1 秒内返回，40 秒只放宽、不会让现有测试变慢。不设记忆配置（替身，本地文件）时保持现值。真实模型接进部署路时再按它的延迟加。
+部署路（MindAgent，`--enable agent`）的口径同样要随记忆放宽。它今天用 `AgentRuntime` 的默认值：服务端等提交 5 秒、整条流 15 秒（`agent.py:93,124`），是按罐头后端定的。部署实例接上记忆后每轮最坏多 20 秒，所以：记忆配置在场时，部署会话的服务端等提交改为 40 秒、整条流按 `max_turns × 40` 秒折算；罐头后端在 1 秒内返回，40 秒只放宽、不会让现有测试变慢。不设记忆配置（替身，本地文件）时保持现值。`--interact` 与 `--enable agent` 同开时两路共用一个 `AgentRuntime`（`wire.py:140-160`），服务端等提交只有一份取值：取两者较大的 90 秒。部署会话只是多等，不会被误判超时；它的整条流 deadline 仍按 `max_turns × 40` 由部署驱动器自己设，不受影响。真实模型接进部署路时再按它的延迟加。
 
 现在客户端只有整条流的 deadline（F22），没有逐轮限时。改法：客户端收消息的 `_next_msg` 加等待上限 90 秒，计的是相邻两条服务端消息之间的间隔（在接收线程里用带超时的队列取消息），超时视作 `timeout`（T1，按条重跑）并 abort 会话；整条流的 deadline 仍按 `max_turns × 90` 折算当兜底。
 
@@ -458,7 +458,7 @@ class SessionResources:
 跨层传递：`simulator` 与 `mindtrainer` 都不导入 `actio`，所以它们不认 `actio.MemoryFailureError`。接缝与现有的对手 API 异常同一做法：
 
 - `simulator/realtime/backend_timeout.py` 新增两个基类 `RoleMemoryUnavailableError`（瞬态）与 `RoleMemoryFailureError`（确定性），驱动器按它们分出两个终止原因。
-- 组合根造的每个 Actio 实例（训练位与对手位）外面套一层转换后端：接住 `actio.MemoryFailureError`，按 `transient` 改抛 `factory` 里继承了上面两个基类之一的异常。`actio` 的依赖不变。
+- 组合根造的每个 Actio 实例（训练位与对手位）外面套一层转换后端（新模块 `factory/memory_translate.py`）：接住 `actio.MemoryFailureError`，按 `transient` 改抛 `FactoryMemoryUnavailableError`（继承 `RoleMemoryUnavailableError`）或 `FactoryMemoryFailureError`（继承 `RoleMemoryFailureError`）。`actio` 的依赖不变。
 - 训练位的轨迹源接的是同样两个 `simulator` 基类，所以 `mindtrainer` 也不需要导入 `actio`。瞬态的在 `_attempt` 里译成按条重跑。确定性的不接，让它照现状原样穿出轨迹源（`trajectory_source.py:259`）；编排器的 `_DETERMINISTIC` 元组加上 `RoleMemoryFailureError`，于是训练记录写 `failed` 后重抛（`orchestrator.py:315`）。不加的话，它落不进任何确定性分支，记录保持 `pending`，被当成可续训而反复延后。训练位副本 `close()` 最多等 60 秒（与服务端 `join` 同值），超时按确定性处理。
 - MindAgent 自己造部署实例、本来就导入 `actio`，直接接 `actio.MemoryFailureError`；对手位的记忆失败经 `EndSession` 的终止原因字符串到达，按字符串分类。
 
@@ -552,6 +552,7 @@ class SessionResources:
 | `InteractTrajectorySource` | `policy` 改为 `policy_for_rollout`；三元组上行 | 3 |
 | `make_policy_factory` | 返回 `policy_for_rollout` 工厂 | 3 |
 | `make_mindtrainer_dispatcher` | 新增 keyword-only 参数 `memory_resolver` | 4 |
+| `controlplane.daemon.run_daemon` | 新增 keyword-only 参数 `on_locked`，取锁后调一次 | 3 |
 | `TrainingConfig` | interact 必填 `memory` | 4 |
 | `training_defaults.interact` | 必填 `memory` | 4 |
 | `TrainingRun.policy_backend` | `memory` 块 | 4 |
