@@ -687,6 +687,35 @@ def test_the_episode_is_written_outside_the_runtime_lock(store, monkeypatch):
         runtime.close()
 
 
+def test_closing_a_session_and_routing_its_episode_never_wait_for_the_runtime_lock(store, monkeypatch):
+    """runtime.close() 持 _lock 停服务端并等在途处理器退出;处理器收尾时跑的 drop 与钩子里的路由查询若也取 _lock,
+    两边互相等,关停就挂住。路由表有自己的锁:主线程持着 _lock,另一个线程里关资源、查路由都要在限时内做完。"""
+    import threading
+    from types import SimpleNamespace
+    import factory.agent as agent_mod
+
+    written = []
+    monkeypatch.setattr(agent_mod, "write_episode", lambda store_, run_id, episode: written.append((run_id, episode.id)))
+    runtime = AgentRuntime(store, ("hi",))
+    runtime.register_session("s1", "run-1")
+    resources = runtime._backends(_info("sess-lock"))
+    assert runtime._session_runs == {"sess-lock": "run-1"}
+
+    def wind_down():
+        runtime._on_session_closed("sess-lock", SimpleNamespace(scenario_id="s1", id="ep-lock"))   # 路由查询
+        resources.close()                                                                           # 跑 drop
+
+    worker = threading.Thread(target=wind_down, daemon=True)
+    with runtime._lock:                                   # 模拟 runtime.close() 正持着锁等处理器退出
+        worker.start()
+        worker.join(timeout=2.0)
+        finished = not worker.is_alive()
+    worker.join(timeout=5.0)                              # 放锁后无论如何让线程收尾,不把线程留给后面的用例
+    assert finished, "session wind-down blocked on the runtime lock"
+    assert written == [("run-1", "ep-lock")]
+    assert runtime._session_runs == {}
+
+
 def test_the_interact_deadline_is_settable_and_read_when_a_client_is_built(store):
     """调和循环一次只派一条指令,所以一个可变值够用。设值之后新造的客户端用新值;已造好的 stub 不回头改。"""
     from factory.agent import INTERACT_DEADLINE_S
