@@ -768,12 +768,12 @@ def load_library(store) -> LibraryState: ...
 | 部署、分析、提案、验证、打包 | [已落地] | 工作包 7 |
 | 轮次处理器与收录处理器 | [已落地] | 工作包 7 |
 | 调和循环触发与注入、组合根装配与端到端 | [已落地] | 工作包 8、工作包 9 |
-| 记忆端口、部署记忆管理面 DeploymentMemoryStore 与 Starling 适配器(Actio 一侧) | [计划中] | 设计二第 1、6 步;本包依赖它们,不实现它们 |
-| 部署记忆:人格库、文件锁、起点快照、摘要、episode 复用新判据 | [计划中] | 设计二第 7 步 |
-| 部署实例按 episode 新造、轮次失败先回滚、已提交 episode 不随记忆收录重跑、部署路时间预算 | [计划中] | 设计二第 7 步 |
-| 验证重放在快照副本上只读 | [计划中] | 设计二第 7 步 |
-| 门② 记忆增量改走 `remember_event`、写前拿库锁并在锁被占时抛 `DeferredError`、抽取失败 `approved → rejected` | [计划中] | 设计二第 7 步,同时改 `controlplane.states`;命令行的迁移表不改 |
-| 轮次载荷加 `memory_runtime`、`episode_digests`;记忆增量的 `definition` 改为 `persona_id`、`text`、`interlocutor` 三个必填键 | [计划中] | 设计二第 7 步 |
+| 记忆端口、部署记忆管理面 DeploymentMemoryStore 与 Starling 适配器(Actio 一侧) | [计划中] | 设计二第 1 步(端口与落盘替身)、第 7 步(Starling 适配器);本包依赖它们,不实现它们 |
+| 部署记忆:人格库、文件锁、起点快照、摘要、episode 复用新判据 | [计划中] | 设计二第 5 步 |
+| 部署实例按 episode 新造、轮次失败先回滚、已提交 episode 不随记忆收录重跑、部署路时间预算 | [计划中] | 设计二第 5 步 |
+| 验证重放在快照副本上只读 | [计划中] | 设计二第 5 步 |
+| 门② 记忆增量改走 `remember_event`、写前拿库锁并在锁被占时抛 `DeferredError`、抽取失败 `approved → rejected` | [计划中] | 设计二第 5 步,同时改 `controlplane.states`;命令行的迁移表不改 |
+| 轮次载荷加 `memory_runtime`、`episode_digests`;记忆增量的 `definition` 改为 `persona_id`、`text`、`interlocutor` 三个必填键 | [计划中] | 设计二第 5 步 |
 
 **三条必须知道的设计取舍**
 
