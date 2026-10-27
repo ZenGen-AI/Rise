@@ -157,7 +157,7 @@ class MemoryBackend(Protocol):
 
 | 实现 | 文件 | 用途 |
 |---|---|---|
-| `TupleMemory` | `actio/memory.py` | 包现有 `MemoryEntry` 元组与 `retrieve`；`remember` 追加一条 `MemoryEntry`，`subject` 是 `interlocutor` |
+| `TupleMemory` | `actio/memory.py` | 包现有 `MemoryEntry` 元组与 `retrieve`；`remember` 追加一条 `MemoryEntry`，`subject` 是 `interlocutor`。`recall` 返回的 `MemoryHit.id` 是条目自己的 `id`：调用方传进来的条目已带内容稳定的 id，替身自己追加的条目 id 取 `mem-` 加 `subject`、`content` 的 sha256 前 16 位。所以 `memories=` 简写构造的实例，轨迹里的 `memory_hits` 与今天逐字相同 |
 | `StarlingMemory` | `actio/memory_starling.py` | 包一个 `starling.Memory`；唯一导入 `starling` 的文件 |
 
 部署记忆另有一个管理面，只给 MindAgent 用，训练路不碰。它与端口同在 `actio`，所以 MindAgent 不导入 `starling`：
@@ -184,7 +184,7 @@ class DeploymentMemoryStore(Protocol):     # 一个人格一个库,按人格 id 
 | 字段 | `memories: tuple[MemoryEntry, ...]` | `memory: MemoryBackend`、`replay_read_only: bool`（只给 MindAgent 的验证重放用，训练路永远为假） |
 | `decide` | `retrieve(self.memories, q, limit)` | `self.memory.recall(q, limit=self.memory_limit)` |
 | `respond` 之后 | 无 | 对新近的对方发言逐条 `remember`，再 `embed_pending`；`replay_read_only` 为真时跳过 |
-| `instantiate` | `memories=` | `memory=`、`replay_read_only=`、`episode_id=`（逻辑 episode id，事件 key 的前缀；可写端口不给就抛 `ValueError`）；保留 `memories=` 作为 `TupleMemory` 的简写，与 `memory=` 恰好给一个 |
+| `instantiate` | `memories=` | `memory=`、`replay_read_only=`、`episode_id=`（逻辑 episode id，事件 key 的前缀）；保留 `memories=` 作为 `TupleMemory` 的简写，与 `memory=` 恰好给一个。只给 `memories=` 时 `replay_read_only` 默认为真：今天的调用方都是这样构造的，它们不期望实例往记忆里写东西，也给不出 `episode_id`。给了 `memory=` 且 `replay_read_only` 为假而缺 `episode_id`，抛 `ActioDataError`（`ValueError` 的子类） |
 | `close` | 无 | 转发给 `memory.close()` |
 
 `render_guidance` 改收 `list[MemoryHit]`，记忆行写成 `[memory:<id>] <text>`。
