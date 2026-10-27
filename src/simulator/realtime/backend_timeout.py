@@ -4,6 +4,7 @@ import threading
 
 from simulator.backends import ModelBackend
 from simulator.datamodel import Persona, Scenario, TurnRecord
+from simulator.realtime.resources import SessionResources
 
 
 class RoleBackendTimeoutError(Exception):
@@ -26,6 +27,25 @@ class RoleBackendUnavailableError(Exception):
     轨迹源分不出 T1 与 T2，所以保守地不重跑；这一个则能确定是瞬态。"""
 
 
+class RoleMemoryUnavailableError(Exception):
+    """角色位的记忆暂时不可用：对应 Starling 的 failure_category 为 timeout 或 transport_failure
+    （抽取/嵌入端点超时、连不上）。过一会儿可能就好，是 T1。驱动器把它归终止原因
+    role_memory_unavailable，轨迹源与部署按条重跑。
+
+    simulator 不认识 actio.MemoryFailureError（依赖方向不允许导入 actio）。组合根给每个 Actio 实例
+    外面套一层转换后端，接住 MemoryFailureError，按 transient 改抛本类的子类；simulator 只认这个基类。
+    与三个 RoleBackend*Error 互不继承，与 RoleMemoryFailureError 也互不继承。"""
+
+
+class RoleMemoryFailureError(Exception):
+    """角色位的记忆确定性失败：Starling 的 failure_category 为 timeout 与 transport_failure 之外的
+    其余类别。同样的输入再来一遍还是同样的结果，重试无益，是 T2。驱动器把它归终止原因
+    role_memory_failure，轨迹源不重跑，编排器把训练记录写成 failed。
+
+    不并入 role_backend_failure：后者在服务端同时覆盖工厂/解析器故障，会被译成延后反复重试。
+    与 RoleMemoryUnavailableError 的分工、转换后端的位置同上；本类同样由组合根的转换后端改抛子类。"""
+
+
 class TimeoutBackend:
     """给任意 ModelBackend 套一层调用期限：每次 respond() 在一个 daemon 线程里
     执行被包装的后端，超过 timeout_s 未返回即抛 RoleBackendTimeoutError。
@@ -37,11 +57,23 @@ class TimeoutBackend:
     工作线程不是 daemon，挂死的后端调用会在解释器退出时被 join，从而拖住
     进程退出。超时后底层线程无法被安全强杀，会跑到自然结束、结果被丢弃；
     因为是 daemon，它不会阻止进程退出。一次调用一个线程的开销相对于模型
-    推理延迟可以忽略。"""
+    推理延迟可以忽略。
 
-    def __init__(self, inner: ModelBackend, timeout_s: float) -> None:
+    给了 resources 时，每次调用在途期间登记在 SessionResources 里：在调用方线程里先
+    enter_call（quiesce 之后在这里抛 SessionClosingError，不起线程），后端线程在 finally
+    里 exit_call。登记在起线程之前，所以没有"线程已起、尚未登记、被 quiesce 之后的 join 漏掉"
+    的窗口。超时只是调用方不再等，线程仍在计数里，直到它自然结束。resources 为 None 时
+    不登记，行为不变。"""
+
+    def __init__(
+        self,
+        inner: ModelBackend,
+        timeout_s: float,
+        resources: SessionResources | None = None,
+    ) -> None:
         self._inner = inner
         self._timeout_s = timeout_s
+        self._resources = resources
 
     def respond(
         self,
@@ -50,6 +82,9 @@ class TimeoutBackend:
         history: list[TurnRecord],
         speaker_slot: str,
     ) -> tuple[str, str | None]:
+        resources = self._resources
+        if resources is not None:
+            resources.enter_call()
         outcome: dict = {}
 
         def _call() -> None:
@@ -59,9 +94,18 @@ class TimeoutBackend:
                 )
             except BaseException as exc:  # 跨线程搬运：原样在调用方线程重抛
                 outcome["error"] = exc
+            finally:
+                if resources is not None:
+                    resources.exit_call()
 
         worker = threading.Thread(target=_call, daemon=True, name="timeout-backend-call")
-        worker.start()
+        try:
+            worker.start()
+        except BaseException:
+            # 线程没起来，_call 不会跑，登记要在这里撤掉，否则 join 永远等不到归零。
+            if resources is not None:
+                resources.exit_call()
+            raise
         worker.join(self._timeout_s)
         if worker.is_alive():
             raise RoleBackendTimeoutError(
