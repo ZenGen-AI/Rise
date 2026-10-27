@@ -195,6 +195,39 @@ def test_every_interact_stream_carries_a_deadline(store):
     assert not default.started and not short.started
 
 
+def test_a_caller_given_deadline_overrides_the_runtime_value_for_that_client_only(store):
+    calls = []
+
+    class FakeStub:
+        def __init__(self, channel):
+            pass
+
+        def Interact(self, request_iterator, **kw):
+            calls.append(kw)
+            return iter(())
+
+    runtime = AgentRuntime(store, ("hi",), stub_factory=FakeStub, interact_deadline_s=2.5)
+    try:
+        # 客户端构造时就开流(EnvironmentServiceClient.__init__ 调一次 stub.Interact),所以每个客户端恰好记一条
+        runtime.client_factory(deadline_s=360.0)
+        runtime.client_factory()
+        assert calls == [{"timeout": 360.0}, {"timeout": 2.5}]
+        assert runtime.interact_deadline_s == 2.5            # 调用方给的值不回写运行时
+    finally:
+        runtime.close()
+
+
+def test_the_message_timeout_reaches_every_client_and_defaults_to_none(store):
+    with_limit = AgentRuntime(store, ("hi",), message_timeout_s=90.0)
+    plain = AgentRuntime(store, ("hi",))
+    try:
+        assert with_limit.client_factory()._message_timeout_s == 90.0
+        assert plain.client_factory()._message_timeout_s is None
+    finally:
+        with_limit.close()
+        plain.close()
+
+
 def test_the_canned_backend_echoes_guidance():
     assert CannedGuidedBackend().respond_guided(None, None, [], "agent", ["[skill:x] a", "b"]) == \
         ("[skill:x] a|b", "saw 0")

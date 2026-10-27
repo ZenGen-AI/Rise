@@ -114,7 +114,9 @@ class AgentRuntime:
     """进程内的 loopback 实时服务端,第一次 client_factory() 时才启动;close() 关通道、停服务端并等它停完。
     对手位的底座后端按各自绑定的驱动分派(见 _backends),再一律包成带记忆的 Actio 实例(每个位一份各自的空 TupleMemory,
     外套记忆异常的转换后端);情境从树里读(scenario_resolver)。
-    每条 Interact 流带 interact_deadline_s 的 deadline(DeadlineStub);stub_factory 只为测试注入。
+    每条 Interact 流带 deadline(DeadlineStub);流 deadline 可由调用方逐个给(client_factory(deadline_s=...)),
+    interact_deadline_s 只是没给时的缺省。message_timeout_s 是客户端相邻两条服务端消息的最长间隔,运行时级,
+    给每个客户端(None 即不设,与过去相同)。stub_factory 只为测试注入。
 
     opponent_backend_factory(binding, scenario) 给 vllm 与 external_api 驱动的对手位造后端,只服务登记给训练 run 的会话;
     没传(None)或会话没登记(MindAgent 部署会话)时,这两种也和过去一样用 ScriptedBackend 说 opponent_lines:
@@ -132,12 +134,14 @@ class AgentRuntime:
 
     def __init__(self, store: GitStore, opponent_lines: tuple[str, ...], *, turn_timeout_s: float = 5.0,
                  interact_deadline_s: float = INTERACT_DEADLINE_S,
+                 message_timeout_s: float | None = None,
                  stub_factory=pb2_grpc.EnvironmentServiceStub,
                  opponent_backend_factory: Callable[[RoleBinding, Scenario], ModelBackend] | None = None) -> None:
         self._store = store
         self._lines = list(opponent_lines)
         self._timeout = turn_timeout_s
         self._deadline = interact_deadline_s
+        self._message_timeout = message_timeout_s
         self._stub_factory = stub_factory
         self._opponent_backend_factory = opponent_backend_factory
         self._server = None
@@ -270,7 +274,9 @@ class AgentRuntime:
         closers = tuple(built.close for built in backends.values())
         return SessionResources(backends=backends, closers=(*closers, drop) if run_id is not None else closers)
 
-    def client_factory(self) -> EnvironmentServiceClient:
+    def client_factory(self, *, deadline_s: float | None = None) -> EnvironmentServiceClient:
+        """deadline_s 是这一个客户端的整条流 deadline;None 取运行时的 interact_deadline_s。
+        只在持锁的临界区里读一次,不写任何属性:部署驱动器与轨迹源同时从一个运行时取客户端时各用各的值。"""
         with self._lock:
             if self._server is None:
                 self._server = create_server(
@@ -289,7 +295,10 @@ class AgentRuntime:
                 else:
                     still_open.append((client, channel))
             channel = grpc.insecure_channel(f"127.0.0.1:{self._server.bound_port}")
-            client = EnvironmentServiceClient(DeadlineStub(self._stub_factory(channel), self._deadline))
+            client = EnvironmentServiceClient(
+                DeadlineStub(self._stub_factory(channel), self._deadline if deadline_s is None else deadline_s),
+                message_timeout_s=self._message_timeout,
+            )
             self._channels = [*still_open, (client, channel)]
         return client
 
