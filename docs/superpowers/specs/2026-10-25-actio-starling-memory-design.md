@@ -72,7 +72,7 @@ MindAgent 是另一条线：底座不动参数，演化技能库与记忆库。�
 | S1 | 从源码 `uv pip install` 可装：scikit-build-core 构建，本机一次 179 秒（环境测量，不作预算依据） | 实测 |
 | S2 | 公开 `Memory.recall` 不收 `holder`；私有 `MemoryCore.recall` 收 | `python/starling/memory.py:168`、`_memory_core.py:250` |
 | S3 | `remember` 要求注入 LLM，否则抛 `LLMNotConfigured`；`make_openai_llm` 的密钥由 C++ 读 `OPENAI_API_KEY` | `_memory_core.py:183-187`、`memory.py:48-70` |
-| S4 | `remember` 写入的语句要等嵌入后才能被 `recall` 命中；嵌入由 `tick` 或 `EmbeddingWorker.tick_one_batch(now_iso)` 执行 | 实测；`bindings/python/bind_10_embedding.cpp:132-138` |
+| S4 | `remember` 写入的语句是 `volatile`，嵌入后仍不会被向量召回命中：候选只取 `consolidated` 与 `archived`（`sqlite_blob_vector_index.cpp:67`），只有 `tick` 的回放会把它巩固。嵌入本身由 `tick` 或 `EmbeddingWorker.tick_one_batch(now_iso)` 执行。所以不跑 `tick` 时，召回要显式放宽到 `volatile`（第 8 节 `recall(include_volatile=True)`），review 与 holder 守卫不变 | 实测（施工计划第 6 步的探针：只嵌入召回 0 条，改成 `consolidated` 后 1 条）；`bindings/python/bind_10_embedding.cpp:132-138` |
 | S5 | 门面固定用 8 维 stub 嵌入器；真嵌入器是 `OpenAIEmbeddingAdapter`，密钥同样读 `OPENAI_API_KEY` | `memory.py:147-148`、`src/embedding/openai_embedding_adapter.cpp:35` |
 | S6 | `StatementRow` 暴露 `id`（UUID）、`tenant_id`、`holder_id`、`holder_perspective`、`subject_kind`、`subject_id`、`predicate`、`object_kind`、`object_value`、`modality`（小写）、`polarity`、`confidence`、`observed_at`、`valid_from`、`valid_to`、`consolidation_state`、`review_status`、`evidence_json`、`affect_json`、`semantic_claim_json`；没有 `nesting_depth`（表里有该列） | 实测 |
 | S7 | `remember` 的幂等只看文本：同文再写返回 `outcome="idempotent"`，不新增原文记录；但 `should_extract` 仍为真，抽取会再跑一次 | 实测；`src/memory/memory_ops.cpp:88` |
@@ -411,7 +411,7 @@ class SessionResources:
 
 | 接口 | 作用 |
 |---|---|
-| `Memory.recall(..., holder=None)` | 转发到 `MemoryCore.recall` 的 `holder`；另加 `strict=False` 参数，为真时 `SemanticResult.degraded`（嵌入查询词失败，`semantic_retriever.cpp:19-31` 今天吞掉异常、返回空结果）改为抛 `RecallDegradedError`。本仓库的适配器永远传 `strict=True` |
+| `Memory.recall(..., holder=None)` | 转发到 `MemoryCore.recall` 的 `holder`；另加 `include_volatile=False` 参数，为真时候选含 `volatile` 行（S4：本仓库只嵌入不 `tick`，不放宽就召回不到本轮写的记忆；代价是这些行没经回放去重，召回里可能有近重复）；再加 `strict=False` 参数，为真时 `SemanticResult.degraded`（嵌入查询词失败，`semantic_retriever.cpp:19-31` 今天吞掉异常、返回空结果）改为抛 `RecallDegradedError`。本仓库的适配器永远传 `strict=True, include_volatile=True` |
 | `Memory.open(..., embedder=None)` | 注入嵌入器；`None` 维持现状（stub） |
 | `make_openai_embedder(*, model, base_url, dim, timeout_ms)` | 构造 `OpenAIEmbeddingAdapter`，与 `make_openai_llm` 同形 |
 | `Memory.embed_pending(now) -> EmbedStats` | 只跑嵌入阶段（`EmbeddingWorker.tick_one_batch`），不跑后台维护。返回 `embedded` 与 `failed` 两个计数：嵌入失败今天只在向量表里标 `failed` 并计数（`embedding_worker.cpp:287-293`），不抛 |
