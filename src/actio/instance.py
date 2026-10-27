@@ -1,18 +1,22 @@
-"""ActioInstance:绑定模型后端、技能、记忆、推理经验与库版本的智能体实例(闭环集成设计 §8.1)。
+"""ActioInstance:绑定模型后端、技能、记忆端口、推理经验与库版本的智能体实例(闭环集成设计 §8.1,
+场景二记忆设计 §4)。
 
 respond 的参数与 ModelBackend 相同、返回三元组 (utterance, inner_thought, trace),
 所以 runner 可以直接把它当后端用(R12),MindAgent 的客户端循环也直接调用它。
 本模块不导入 simulator.backends:后端协议在这里按结构重新声明。
+记忆经 MemoryBackend 端口读(召回)与摘要;每次 respond 的轨迹都是 v2,带 memory 块。
 """
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from dataclasses import dataclass, field
+from typing import Callable, Protocol, TypeVar, runtime_checkable
 
+from actio import _check
 from actio.errors import ActioDataError
 from actio.experience import ExperienceActivation, ReasoningExperience, activate
-from actio.memory import MemoryEntry, retrieve
+from actio.memory import MemoryEntry, TupleMemory
+from actio.memory_port import MemoryBackend, MemoryEvent, MemoryFailureError, MemoryHit
 from actio.signals import SignalRegistry, default_registry
 from actio.skills import RouteResult, Skill, check_library, route
 from actio.trace import build_trace, normalize_library_version
@@ -71,9 +75,9 @@ def as_guided(backend: object) -> GuidedBackend:
 def render_guidance(
     selected: Skill | None,
     experience: ExperienceActivation | None,
-    memory_hits: list[MemoryEntry],
+    memory_hits: list[MemoryHit],
 ) -> list[str]:
-    """指导语的固定顺序:选中技能的策略、推理经验的当前一级、检索到的记忆。"""
+    """指导语的固定顺序:选中技能的策略、推理经验的当前一级、召回的记忆。"""
     lines: list[str] = []
     if selected is not None:
         lines += [f"[skill:{selected.id}] {text}" for text in selected.policy_instructions]
@@ -82,39 +86,77 @@ def render_guidance(
             f"[experience:{experience.experience_id}/{experience.tier}] {text}"
             for text in experience.instructions
         ]
-    lines += [f"[memory:{m.id}] {m.subject}: {m.content}" for m in memory_hits]
+    lines += [f"[memory:{h.id}] {h.text}" for h in memory_hits]
     return lines
 
 
 def _memory_query(history: list[TurnRecord], speaker_slot: str) -> str:
-    """V1 的记忆查询词:对方最后一句;对方还没说话时为空串(检索不到任何条目)。"""
+    """V1 的记忆查询词:对方最后一句;对方还没说话时为空串(此时 decide 不调 recall)。"""
     for t in reversed(history):
         if t.speaker_slot != speaker_slot:
             return t.utterance
     return ""
 
 
+_T = TypeVar("_T")
+
+
+def _guard(call: Callable[[], _T]) -> _T:
+    """读路径上的端口调用:MemoryFailureError 原样上抛(transient 不被改写);其余异常一律按永久失败
+    改抛 MemoryFailureError,只报类名,不带可能含端点或密钥的原文(Starling 之外的异常都非瞬态)。"""
+    try:
+        return call()
+    except MemoryFailureError:
+        raise
+    except Exception as exc:
+        raise MemoryFailureError(type(exc).__name__, transient=False) from None
+
+
+@dataclass
+class _MemoryState:
+    """每条 episode 的可变计数。配置字段不可变、这些计数可变,所以分开放。
+    seen_turn:写路径已处理到的回合序号;retry:上一轮没写成、要在下一轮重试的事件;
+    remembered / extraction_failed:本实例累计的记住条数与抽取失败次数。"""
+
+    seen_turn: int = -1
+    retry: tuple[MemoryEvent, ...] = ()
+    remembered: int = 0
+    extraction_failed: int = 0
+
+
 @dataclass(frozen=True)
 class ActioInstance:
+    """配置不可变,每 episode 的计数在 _state 里。一个带写入的实例(replay_read_only 为假)只服务
+    一条 episode(episode_id 在构造时定),并且只许一条线程用;只读实例没有这两条限制。"""
+
     backend: GuidedBackend
     skills: tuple[Skill, ...]
-    memories: tuple[MemoryEntry, ...]
+    memory: MemoryBackend
     experiences: tuple[ReasoningExperience, ...]
     library_version: dict
     profile: dict | None
     registry: SignalRegistry
     memory_limit: int
+    replay_read_only: bool
+    episode_id: str | None
+    interlocutors: dict[str, str]
+    _state: _MemoryState = field(default_factory=_MemoryState, repr=False, compare=False)
 
-    def decide(self, history: list[TurnRecord], speaker_slot: str) -> tuple[RouteResult, ExperienceActivation | None, list[MemoryEntry]]:
-        """只做路由、经验与记忆,不调模型后端。纯函数(给定实例与输入)。"""
+    def decide(
+        self, history: list[TurnRecord], speaker_slot: str,
+    ) -> tuple[RouteResult, ExperienceActivation | None, list[MemoryHit]]:
+        """路由、经验与记忆召回,不调模型后端、不写库;召回经端口,所以不再是纯函数。
+        对方还没开口时查询词为空,不调 recall。"""
         routed = route(self.skills, history, speaker_slot, self.registry)
         exp = activate(self.experiences, history, speaker_slot, self.registry)
-        hits = retrieve(self.memories, _memory_query(history, speaker_slot), limit=self.memory_limit)
+        query = _memory_query(history, speaker_slot)
+        hits = _guard(lambda: self.memory.recall(query, limit=self.memory_limit)) if query else []
         return routed, exp, hits
 
     def respond(
         self, persona: Persona, scenario: Scenario, history: list[TurnRecord], speaker_slot: str,
     ) -> tuple[str, str | None, dict]:
+        digest_before = _guard(self.memory.digest)
         routed, exp, hits = self.decide(history, speaker_slot)
         guidance = render_guidance(routed.selected, exp, hits)
         reply = self.backend.respond_guided(persona, scenario, deepcopy(history), speaker_slot, guidance)
@@ -124,34 +166,72 @@ class ActioInstance:
             signals=routed.signals,
             candidates=routed.candidates,
             selected=routed.selected.id if routed.selected is not None else None,
-            memory_hits=[m.id for m in hits],
+            memory_hits=[h.id for h in hits],
             experience=None if exp is None else (exp.experience_id, exp.tier),
             library_version=self.library_version,
+            memory={
+                "digest_before": digest_before,
+                "remembered": str(self._state.remembered),
+                "extraction_failed": str(self._state.extraction_failed),
+            },
         )
         return reply[0], reply[1], trace
+
+    def close(self) -> None:
+        """关掉记忆端口。不放弃任何事件:放弃由 MindAgent 在 episode 最终结束时经部署管理面做。"""
+        self.memory.close()
 
 
 def instantiate(
     model_backend: object,
     *,
     skills: list[Skill] | tuple[Skill, ...],
-    memories: list[MemoryEntry] | tuple[MemoryEntry, ...],
     library_version: dict,
     profile: dict | None,
+    memories: list[MemoryEntry] | tuple[MemoryEntry, ...] | None = None,
+    memory: MemoryBackend | None = None,
+    episode_id: str | None = None,
+    interlocutors: dict[str, str] | None = None,
+    replay_read_only: bool | None = None,
     experiences: list[ReasoningExperience] | tuple[ReasoningExperience, ...] = (),
     registry: SignalRegistry | None = None,
     memory_limit: int = 3,
 ) -> ActioInstance:
-    """组装实例。Actio 不决定用哪个库版本:skills、memories、experiences 由调用方按
+    """组装实例。Actio 不决定用哪个库版本:skills、记忆、experiences 由调用方按
     library_version 读好传进来(补充 A.4)。registry 缺省为 default_registry()。
-    profile 是调用方的画像元数据,V1 只随实例保存(深拷贝),不参与路由与指导语。"""
+    profile 是调用方的画像元数据,V1 只随实例保存(深拷贝),不参与路由与指导语。
+
+    记忆二选一:memories= 是简写,包成内存替身 TupleMemory,默认只读;memory= 直接给一个
+    MemoryBackend 端口,默认会写库。replay_read_only 显式给出时以它为准。会写库的实例必须有
+    episode_id(事件 key 的前缀),不论记忆是怎么给的。interlocutors 是 slot -> 对话者人格 id。"""
     reg = registry if registry is not None else default_registry()
     skills = tuple(skills)
     check_library(skills, reg)
-    memories = tuple(memories)
-    for m in memories:
-        if not isinstance(m, MemoryEntry):
-            raise ActioDataError(f"expected MemoryEntry, got {type(m).__name__}")
+    if (memories is None) == (memory is None):
+        raise ActioDataError("exactly one of memories= and memory= is required")
+    if memories is not None:
+        port: MemoryBackend = TupleMemory(tuple(memories))  # 条目类型与同版本冲突在这里查
+    else:
+        if not isinstance(memory, MemoryBackend):
+            raise ActioDataError(f"memory: expected a MemoryBackend, got {type(memory).__name__}")
+        port = memory
+    if replay_read_only is None:
+        replay_read_only = memories is not None
+    elif not isinstance(replay_read_only, bool):
+        raise ActioDataError(f"replay_read_only: expected a bool or None, got {replay_read_only!r}")
+    if episode_id is not None:
+        _check.text(episode_id, "episode_id")
+    elif not replay_read_only:
+        raise ActioDataError("episode_id: required when the instance writes memory")
+    if interlocutors is None:
+        interlocutors = {}
+    elif not isinstance(interlocutors, dict):
+        raise ActioDataError(f"interlocutors: expected a dict or None, got {type(interlocutors).__name__}")
+    else:
+        for slot, persona_id in interlocutors.items():
+            _check.text(slot, "interlocutors key")
+            _check.text(persona_id, f"interlocutors[{slot!r}]")
+        interlocutors = dict(interlocutors)
     experiences = tuple(experiences)
     seen: set[str] = set()
     for e in experiences:
@@ -172,10 +252,13 @@ def instantiate(
     return ActioInstance(
         backend=as_guided(model_backend),
         skills=skills,
-        memories=memories,
+        memory=port,
         experiences=experiences,
         library_version=normalize_library_version(library_version),
         profile=deepcopy(profile),
         registry=reg,
         memory_limit=memory_limit,
+        replay_read_only=replay_read_only,
+        episode_id=episode_id,
+        interlocutors=interlocutors,
     )

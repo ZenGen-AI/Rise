@@ -4,7 +4,7 @@ import grpc
 import pytest
 
 from actio.instance import instantiate
-from actio.memory import MemoryEntry
+from actio.memory import MemoryEntry, content_id
 from actio.skills import Skill
 from actio.trace import validate_trace
 from controlplane.gitstore import GitStore
@@ -16,6 +16,7 @@ from simulator.realtime.server import create_server
 from simulator.store_adapter import read_episode, read_scenario, write_episode, write_scenario
 
 RUN = "run-actio"
+TEMPER = content_id("pb", "对方一急就会生气")
 
 
 class EchoGuidance:
@@ -110,11 +111,11 @@ def test_client_turns_carry_traces_and_opponent_turns_do_not(env):
     assert first["candidates"] == ["skill-calm", "skill-firm"]  # 同优先级,版本 2 先于版本 1
     assert first["selected"] == "skill-calm"
     assert first["conflict"]["skills"] == ["skill-calm", "skill-firm"]
-    assert first["memory_hits"] == ["mem-temper"]
+    assert first["memory_hits"] == [TEMPER]
     assert first["library_version"] == {"skill": "4", "memory": "mem-lib-1"}
     assert client_traces[1]["selected"] is None  # "好吧" 不触发 emotion_high
 
-    assert persisted.turns[1].utterance == "[skill:skill-calm] 先回应对方的情绪|[memory:mem-temper] pb: 对方一急就会生气"
+    assert persisted.turns[1].utterance == f"[skill:skill-calm] 先回应对方的情绪|[memory:{TEMPER}] pb: 对方一急就会生气"
     assert persisted.turns[1].inner_thought == "saw 1 turns"
     # 客户端本地重建的 episode 与服务端落盘的一致(客户端自己的轮次带轨迹回显)
     assert [t.to_dict() for t in episode.turns] == [t.to_dict() for t in persisted.turns]
@@ -124,6 +125,6 @@ def test_without_skills_the_wire_output_differs_and_traces_select_nothing(env):
     store, stored, channel = env
     _, sent = _play(store, channel, _instance([]))
     persisted = _stored(store, stored)
-    assert persisted.turns[1].utterance == "[memory:mem-temper] pb: 对方一急就会生气"
+    assert persisted.turns[1].utterance == f"[memory:{TEMPER}] pb: 对方一急就会生气"
     assert [t["selected"] for t in sent] == [None, None]
     assert [t.activation_trace for t in persisted.turns if t.speaker_slot == "a"] == sent

@@ -7,7 +7,8 @@ from google.protobuf import json_format, struct_pb2
 from actio.errors import ActioDataError
 from actio.experience import ReasoningExperience
 from actio.instance import IgnoreGuidance, as_guided, instantiate, render_guidance
-from actio.memory import MemoryEntry
+from actio.memory import FileTupleStore, MemoryEntry, TupleMemory, content_id
+from actio.memory_port import MemoryClosedError, MemoryFailureError, MemoryHit, RememberOutcome
 from actio.signals import default_registry
 from actio.skills import Skill
 from actio.trace import (
@@ -171,6 +172,61 @@ def test_build_trace_rejects_a_bad_memory_block():
         build_trace(**V2_GOOD, memory={**MEM, "remembered": 3})
 
 
+class RecordingPort:
+    """记录调用顺序的假端口。log 可与 LoggingBackend 共用,于是能断言 recall/后端/remember 的先后。
+    fail_keys:key -> 还要以 timeout 失败的次数;raise_on:方法名 -> 要抛的异常。"""
+
+    def __init__(self, log=None, *, hits=(), fail_keys=None, raise_on=None):
+        self.log = [] if log is None else log
+        self.hits = list(hits)
+        self.fail_keys = dict(fail_keys or {})
+        self.raise_on = dict(raise_on or {})
+        self.stored = 0
+        self.closed = 0
+
+    def _call(self, entry):
+        self.log.append(entry)
+        if entry[0] in self.raise_on:
+            raise self.raise_on[entry[0]]
+
+    def recall(self, query, *, limit):
+        self._call(("recall", query, limit))
+        return self.hits[:limit]
+
+    def remember(self, event):
+        self._call(("remember", event))
+        if self.fail_keys.get(event.key, 0) > 0:
+            self.fail_keys[event.key] -= 1
+            return RememberOutcome((), True, "timeout")
+        self.stored += 1
+        return RememberOutcome((f"mem-{self.stored}",), False, None)
+
+    def embed_pending(self):
+        self._call(("embed_pending",))
+        return 0
+
+    def digest(self):
+        self._call(("digest",))
+        return f"{self.stored:064x}"
+
+    def close(self):
+        self.closed += 1
+
+
+class LoggingBackend:
+    def __init__(self, log):
+        self.log = log
+
+    def respond_guided(self, persona, scenario, history, speaker_slot, guidance):
+        self.log.append(("backend", list(guidance)))
+        return ("回复", None)
+
+
+def _ported(port, backend=None, **kw):
+    kw.setdefault("episode_id", "ep")
+    return instantiate(backend or EchoGuidance(), skills=[], memory=port, library_version=LV, profile=None, **kw)
+
+
 # ---------------- 指导语与适配器 ----------------
 
 def test_render_guidance_order_and_format():
@@ -182,8 +238,8 @@ def test_render_guidance_order_and_format():
     })
     from actio.experience import select_tier
     act = select_tier(exp, [], "a", default_registry())
-    mem = MemoryEntry("mem-1", 1, "pb", "担心预算", "2026-01-01T00:00:00Z", 0.5)
-    assert render_guidance(_calm_skill(), act, [mem]) == [
+    hit = MemoryHit("mem-1", "pb: 担心预算")
+    assert render_guidance(_calm_skill(), act, [hit]) == [
         "[skill:skill-calm] 先回应对方的情绪",
         "[experience:e1/secondary] 提问",
         "[memory:mem-1] pb: 担心预算",
@@ -225,16 +281,112 @@ def test_the_skill_does_not_fire_when_its_trigger_is_false():
 def test_conflicts_and_memory_hits_are_in_the_trace():
     skills = [_calm_skill(), _calm_skill(id="skill-firm", priority=5, policy_instructions=("坚持立场",))]
     mem = MemoryEntry("mem-angry", 1, "pb", "对方容易生气", "2026-01-01T00:00:00Z", 0.9)
+    cid = content_id("pb", "对方容易生气")
     echo = EchoGuidance()
     inst = instantiate(echo, skills=skills, memories=[mem], library_version={"skill": 7, "memory": 2}, profile={"name": "x"})
     _, _, trace = inst.respond(_persona(), _scenario(), [TurnRecord(0, "b", "我很生气")], "a")
     assert trace["candidates"] == ["skill-firm", "skill-calm"]
     assert trace["selected"] == "skill-firm"
     assert trace["conflict"] == {"skills": ["skill-firm", "skill-calm"], "rule": TIE_BREAK_RULE}
-    assert trace["memory_hits"] == ["mem-angry"]
+    assert trace["memory_hits"] == [cid]
     assert trace["library_version"] == {"skill": "7", "memory": "2"}
-    assert echo.calls == [["[skill:skill-firm] 坚持立场", "[memory:mem-angry] pb: 对方容易生气"]]
+    assert trace["schema"] == TRACE_SCHEMA_V2
+    assert trace["memory"] == {"digest_before": TupleMemory((mem,)).digest(), "remembered": "0", "extraction_failed": "0"}
+    assert echo.calls == [["[skill:skill-firm] 坚持立场", f"[memory:{cid}] pb: 对方容易生气"]]
     validate_trace(trace)
+
+
+def test_renaming_an_entry_changes_neither_the_prompt_nor_the_trace():
+    def run(mid):
+        echo = EchoGuidance()
+        mem = MemoryEntry(mid, 1, "pb", "对方容易生气", "2026-01-01T00:00:00Z", 0.9)
+        inst = instantiate(echo, skills=[], memories=[mem], library_version=LV, profile=None)
+        return echo.calls, inst.respond(_persona(), _scenario(), [TurnRecord(0, "b", "我很生气")], "a")[2]
+    assert run("mem-angry") == run("mem-renamed")
+
+
+def test_digest_then_recall_then_the_reply():
+    log = []
+    port = RecordingPort(log, hits=[MemoryHit("mem-a", "pb: 预算"), MemoryHit("mem-b", "pb: 人手")])
+    inst = _ported(port, LoggingBackend(log), replay_read_only=True, memory_limit=1)
+    history = [TurnRecord(0, "b", "钱不够"), TurnRecord(1, "a", "嗯"), TurnRecord(2, "b", "预算呢")]
+    _, _, trace = inst.respond(_persona(), _scenario(), history, "a")
+    assert log == [("digest",), ("recall", "预算呢", 1), ("backend", ["[memory:mem-a] pb: 预算"])]
+    assert trace["memory_hits"] == ["mem-a"]
+    assert trace["memory"]["digest_before"] == "0" * 64
+
+
+def test_no_recall_before_the_opponent_has_spoken():
+    log = []
+    inst = _ported(RecordingPort(log), LoggingBackend(log), replay_read_only=True)
+    _, _, trace = inst.respond(_persona(), _scenario(), [], "a")
+    assert log == [("digest",), ("backend", [])] and trace["memory_hits"] == []
+
+
+def test_decide_recalls_but_never_writes():
+    port = RecordingPort(hits=[MemoryHit("mem-a", "pb: 预算")])
+    routed, exp, hits = _ported(port).decide([TurnRecord(0, "b", "预算")], "a")
+    assert port.log == [("recall", "预算", 3)] and hits == [MemoryHit("mem-a", "pb: 预算")]
+
+
+@pytest.mark.parametrize("method", ["digest", "recall"])
+def test_read_failures_become_memory_failures_before_the_backend_is_called(method):
+    log = []
+    port = RecordingPort(log, raise_on={method: RuntimeError("https://endpoint.example/v1 sk-secret")})
+    with pytest.raises(MemoryFailureError) as info:
+        _ported(port, LoggingBackend(log)).respond(_persona(), _scenario(), [TurnRecord(0, "b", "预算")], "a")
+    assert info.value.transient is False and str(info.value) == "RuntimeError"  # 只报类名
+    assert not any(entry[0] == "backend" for entry in log)
+    original = MemoryFailureError("RecallDegradedError", transient=True)
+    port = RecordingPort(raise_on={method: original})
+    with pytest.raises(MemoryFailureError) as info:
+        _ported(port).respond(_persona(), _scenario(), [TurnRecord(0, "b", "预算")], "a")
+    assert info.value is original  # 已是 MemoryFailureError 的原样上抛,transient 不被改写
+
+
+def test_instantiate_memory_arguments():
+    base = dict(skills=[], library_version=LV, profile=None)
+    with pytest.raises(ActioDataError, match="exactly one of"):
+        instantiate(EchoGuidance(), **base)
+    with pytest.raises(ActioDataError, match="exactly one of"):
+        instantiate(EchoGuidance(), **base, memories=[], memory=TupleMemory())
+    with pytest.raises(ActioDataError, match="episode_id"):
+        instantiate(EchoGuidance(), **base, memory=TupleMemory())
+    with pytest.raises(ActioDataError, match="episode_id"):
+        instantiate(EchoGuidance(), **base, memories=[], replay_read_only=False)
+    with pytest.raises(ActioDataError, match="memory"):
+        instantiate(EchoGuidance(), **base, memory=object(), episode_id="ep")
+    for bad in ({"episode_id": ""}, {"episode_id": 3}, {"interlocutors": {"b": ""}},
+                {"interlocutors": [("b", "pb")]}, {"replay_read_only": "yes"}):
+        with pytest.raises(ActioDataError):
+            instantiate(EchoGuidance(), **base, memory=TupleMemory(), **{"episode_id": "ep", **bad})
+    short = instantiate(EchoGuidance(), **base, memories=[])
+    assert short.replay_read_only is True and short.episode_id is None and short.interlocutors == {}
+    ported = instantiate(EchoGuidance(), **base, memory=TupleMemory(), episode_id="ep", interlocutors={"b": "pb"})
+    assert ported.replay_read_only is False and ported.interlocutors == {"b": "pb"}
+    assert instantiate(EchoGuidance(), **base, memory=TupleMemory(), replay_read_only=True).episode_id is None
+
+
+def test_close_forwards_to_the_port():
+    port = RecordingPort()
+    inst = _ported(port)
+    inst.close()
+    assert port.closed == 1
+
+
+def test_an_instance_over_a_file_port_reads_the_same_store_the_management_plane_writes(tmp_path):
+    store = FileTupleStore(tmp_path)
+    store.remember_event("pa", "ep0:1", "对方担心预算", interlocutor="pb")
+    inst = _ported(store.open("pa"), EchoGuidance())
+    _, _, trace = inst.respond(_persona(), _scenario(), [TurnRecord(0, "b", "预算呢")], "a")
+    assert len(trace["memory_hits"]) == 1 and trace["memory_hits"][0].startswith("mem-")
+    assert trace["memory"]["digest_before"] == store.digest("pa")
+    validate_trace(trace)
+    inst.close()
+    inst.close()  # 再关一次是空操作
+    with pytest.raises(MemoryClosedError) as info:
+        inst.respond(_persona(), _scenario(), [TurnRecord(0, "b", "预算呢")], "a")
+    assert info.value.transient is False  # MemoryFailureError 原样上抛,不被 _guard 改写类型
 
 
 def test_a_plain_backend_still_gets_a_trace():
