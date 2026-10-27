@@ -263,7 +263,8 @@ class DeploymentMemoryStore(Protocol):     # 一个人格一个库,按人格 id 
   seeds/<seed_id>/<persona_id>.db                   训练起点种子库,只读
   runs/<run_id>/<session_id>/<slot_id>.db           服务端对手位的私有副本,会话终态即删
   runs/<run_id>/client/<episode_id>/<slot_id>.db    客户端训练位的私有副本,rollout 结束即删
-  snapshots/<round_id>/<persona_id>.db              部署轮次的验证快照,轮次结束即删
+  snapshots/<round_id>/<episode_id>-<persona_id>.db 部署 episode 的起点副本,跨重启保留,删除即提交
+  snapshots/<round_id>/verify-<persona_id>.db       部署轮次的验证快照,轮次结束即删
 ```
 
 库文件名用人格 id，因为人格才是个体。同一个人格在两个角色位同时出现时，两个位各开一份副本，互不可见。
@@ -360,6 +361,7 @@ class SessionResources:
 - 派发器进入策略上下文之前，按 `seed` 打开每个绑定人格的起点库、算摘要、取运行时身份，写回 `memory.digests` 与 `memory.runtime`。之后才算 `config_hash`。`mindtrainer` 不导入 `actio` 与 `starling`，所以这一步靠组合根注入的可调用对象：`make_mindtrainer_dispatcher` 新增 keyword-only 参数 `memory_resolver: Callable[[str | None, tuple[str, ...]], tuple[dict[str, str], dict]]`，入参是种子 id 与绑定人格 id，返回每个人格的起点摘要与运行时身份。interact 指令没注入它时判 T2，原因点名 `--interact`；它抛的异常一律 T2。
 - 续训时重新算摘要与身份；种子库、Starling 版本、抽取或嵌入模型任一变了，`config_hash` 不同，升 T3（F13）。
 - 替身路径的 `digests` 是替身摘要、`runtime.backend` 是 `stand-in`，所以换成真 Starling 也会改哈希。
+- 替身没有记忆根目录，也就没有种子库：未设 `RISMFORGE_MEMORY_CONFIG` 时 `memory.seed` 必须是 `null`，否则 `memory_resolver` 抛错、指令 T2，原因写明种子需要记忆配置。
 
 ### 7.2 每条 rollout 的私有副本（M9）
 
@@ -378,7 +380,7 @@ class SessionResources:
 | 部件 | 改动 |
 |---|---|
 | `VllmPolicy`、`ExternalApiBackend` | 新增 `respond_guided(persona, scenario, history, slot, guidance)`：指导语非空时追加到唯一的 system 消息末尾，以“当前要点：”起头，一行一条（M16） |
-| 策略工厂 | 交给编排器的不再是一个后端，而是 `policy_for_rollout(session_id) -> ContextManager[ModelBackend]`：每条 rollout 造一个 Actio 实例，退出时关实例 |
+| 策略工厂 | 交给编排器的不再是一个后端，而是 `policy_for_rollout(episode_id) -> ContextManager[ModelBackend]`（入参是逻辑 episode id）：每条 rollout 造一个 Actio 实例，退出时关实例 |
 | `InteractTrajectorySource` | 参数 `policy` 改为 `policy_for_rollout(episode_id) -> ContextManager[ModelBackend]`；`_attempt` 在 `create_session` 之前进入上下文（副本目录按逻辑 episode id 命名），`finally` 里退出。现有测试里的固定后端改用 `nullcontext` 包一层传入 |
 | 提交 | 策略返回三元组时，第三项作为 `activation_trace` 随 `submit_turn` 上行；二元组照旧 |
 | 续训 | 不变：`make_sources(start)` 每次构造轨迹源，`policy_for_rollout` 在每条 rollout 内进出，和 `start` 无关 |
