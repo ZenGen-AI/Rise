@@ -8,6 +8,7 @@ from actio.memory import MemoryEntry, content_id
 from actio.skills import Skill
 from actio.trace import validate_trace
 from controlplane.gitstore import GitStore
+from realtime_fixtures import plain_factory, plain_hook
 from simulator.backends import ScriptedBackend
 from simulator.datamodel import Persona, RoleAssignment, RoleBinding, RoleSlot, Scenario
 from simulator.realtime.client import EnvironmentServiceClient
@@ -62,7 +63,7 @@ def env(tmp_path):
     def factory(scenario, assignment, personas, client_slot):
         return {s: ScriptedBackend({s: ["我真的很生气!!", "好吧"]}) for s in assignment.slot_ids() - {client_slot}}
 
-    server = create_server(factory, port=0, turn_timeout_s=2.0, on_session_closed=on_closed,
+    server = create_server(plain_factory(factory), port=0, turn_timeout_s=2.0, on_session_closed=plain_hook(on_closed),
                            scenario_resolver=lambda sid: read_scenario(store, sid))
     server.start()
     channel = grpc.insecure_channel(f"127.0.0.1:{server.bound_port}")

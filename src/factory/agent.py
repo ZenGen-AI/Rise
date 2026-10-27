@@ -26,6 +26,7 @@ from simulator.backends import ModelBackend, ScriptedBackend
 from simulator.datamodel import Episode, RoleBinding, Scenario
 from simulator.realtime.client import EnvironmentServiceClient
 from simulator.realtime.proto import realtime_env_pb2_grpc as pb2_grpc
+from simulator.realtime.resources import SessionInfo, SessionResources
 from simulator.realtime.server import create_server
 from simulator.store_adapter import read_persona, read_scenario, write_episode
 
@@ -168,7 +169,7 @@ class AgentRuntime:
         with self._lock:
             self._sessions.pop(scenario_id, None)
 
-    def _on_session_closed(self, episode: Episode) -> None:
+    def _on_session_closed(self, session_id: str, episode: Episode) -> None:
         """服务端的落盘钩子,跑在 gRPC 线程池的线程里。持锁只查登记表,写文件在锁外:
         close() 持同一把锁停服务端并等它停完,钩子若持锁写文件,两边会互相等。写失败记录后原样再抛。"""
         with self._lock:
@@ -197,7 +198,7 @@ class AgentRuntime:
             return driver_for(binding)
         return "scripted" if binding.driver == "scripted" else None
 
-    def _backends(self, scenario, assignment, personas, client_slot):
+    def _backends(self, info: SessionInfo) -> SessionResources:
         """每个非客户端角色位一个全新的后端(服务端要求每次调用返回新实例,游标不能跨会话共享)。
         严格判驱动只用于"传了工厂、且该情境 id 登记给了某个训练 run"的会话(Ruling 28):--interact 下运行时的工厂
         一直是 OpponentSwitch,部署会话(没登记)若也被判,agent.yaml 里 self_play 或未知 model_backend 的非客户端位
@@ -206,6 +207,7 @@ class AgentRuntime:
         其余驱动:交给工厂。
         其余会话(没传工厂,或没登记):显式 scripted 同上,别的一律是原来的 ScriptedBackend(不循环,全局台词),
         不碰工厂、不调 driver_for。"""
+        scenario, assignment, client_slot = info.scenario, info.assignment, info.client_slot
         with self._lock:
             registered = scenario.id in self._sessions       # 持锁只读登记表,判驱动与造后端都在锁外
         judged = registered and self._opponent_backend_factory is not None
@@ -221,7 +223,7 @@ class AgentRuntime:
                 backends[slot] = self._opponent_backend_factory(binding, scenario)
             else:
                 backends[slot] = ScriptedBackend({slot: list(self._lines)})
-        return backends
+        return SessionResources(backends=backends)
 
     def client_factory(self) -> EnvironmentServiceClient:
         with self._lock:

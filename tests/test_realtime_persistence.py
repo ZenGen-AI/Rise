@@ -3,6 +3,7 @@ import pytest
 
 from controlplane.gitstore import GitStore
 from controlplane.paths import episode_file
+from realtime_fixtures import plain_factory, plain_hook
 from simulator.backends import ScriptedBackend
 from simulator.datamodel import Persona, RoleBinding, RoleAssignment
 from simulator.realtime.codec import persona_to_proto, role_assignment_to_proto
@@ -25,7 +26,8 @@ def test_on_session_closed_hook_persists_episode_to_controlplane(tmp_path):
     def persist(episode):
         write_episode(store, run_id, episode)
 
-    server = create_server(_opponent_factory, port=0, turn_timeout_s=2.0, on_session_closed=persist)
+    server = create_server(plain_factory(_opponent_factory), port=0, turn_timeout_s=2.0,
+                           on_session_closed=plain_hook(persist))
     server.start()
     channel = grpc.insecure_channel(f"127.0.0.1:{server.bound_port}")
     stub = pb2_grpc.EnvironmentServiceStub(channel)

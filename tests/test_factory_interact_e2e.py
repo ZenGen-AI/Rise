@@ -93,9 +93,9 @@ def sessions(monkeypatch):
         seen["registered"].append((scenario_id, run_id))
         return real_register(self, scenario_id, run_id)
 
-    def hook(self, episode):
+    def hook(self, session_id, episode):
         seen["closed"].append(episode.id)
-        return real_hook(self, episode)
+        return real_hook(self, session_id, episode)
 
     monkeypatch.setattr(AgentRuntime, "register_session", register)
     monkeypatch.setattr(AgentRuntime, "_on_session_closed", hook)

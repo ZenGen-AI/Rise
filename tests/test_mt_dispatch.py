@@ -18,6 +18,7 @@ from mindtrainer.resume import NeedsHumanError
 from mindtrainer.roll_converter import EXPORT_FORMAT
 from mindtrainer.reward_pipeline import AttributionError
 from mindtrainer.training_config import InvalidTrainingConfigError, RewardConfig, TrainingConfig
+from realtime_fixtures import plain_factory, plain_hook
 from simulator.backends import ScriptedBackend
 from simulator.datamodel import Persona, RoleAssignment, RoleBinding, RoleSlot, Scenario
 from simulator.dataset import DatasetIntegrityError, produce_grouped_dataset, read_manifest
@@ -456,7 +457,7 @@ def live(store):
             }
 
         server = create_server(
-            backends, port=0, turn_timeout_s=2.0, on_session_closed=closed.append,
+            plain_factory(backends), port=0, turn_timeout_s=2.0, on_session_closed=plain_hook(closed.append),
             scenario_resolver=lambda sid: read_scenario(store, sid),
         )
         server.start()

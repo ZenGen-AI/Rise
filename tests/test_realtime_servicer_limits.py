@@ -4,6 +4,7 @@ import time
 import grpc
 import pytest
 
+from realtime_fixtures import plain_factory
 from simulator.backends import ScriptedBackend
 from simulator.datamodel import Persona, RoleAssignment, RoleBinding, RoleSlot, Scenario
 from simulator.realtime.codec import persona_to_proto, role_assignment_to_proto
@@ -68,7 +69,7 @@ def start_server():
 
     def _start(factory=_opp_factory, **kwargs):
         kwargs.setdefault("turn_timeout_s", 2.0)
-        server = create_server(factory, port=0, **kwargs)
+        server = create_server(plain_factory(factory), port=0, **kwargs)
         server.start()
         servers.append(server)
         return f"127.0.0.1:{server.bound_port}"
@@ -172,7 +173,7 @@ def test_duplicate_create_session_winds_down_first_driver_with_invalid_session(
     # turn_timeout_s 取大：若第一个 driver 是靠自身超时才结束，就等不到 failed
     # 事件，测试会失败——以此证明它是被 request_abort 主动收尾的。
     address = start_server(
-        on_session_closed=lambda ep: closed.append(ep.id), turn_timeout_s=30.0,
+        on_session_closed=lambda _sid, ep: closed.append(ep.id), turn_timeout_s=30.0,
     )
     stream = _Stream(address)
     stream.send(_create_msg(max_turns=100))

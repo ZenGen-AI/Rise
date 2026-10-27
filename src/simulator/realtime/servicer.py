@@ -11,8 +11,7 @@ from typing import Callable
 import grpc
 from google.protobuf.json_format import MessageToDict
 
-from simulator.datamodel import Persona, RoleAssignment, Scenario, RoleSlot
-from simulator.backends import ModelBackend
+from simulator.datamodel import Episode, RoleAssignment, Scenario, RoleSlot
 from simulator.realtime.backend_timeout import TimeoutBackend
 from simulator.realtime.codec import (
     persona_from_proto, role_assignment_from_proto, turn_record_to_proto,
@@ -20,13 +19,13 @@ from simulator.realtime.codec import (
 from simulator.realtime.driver import SessionDriver
 from simulator.realtime.proto import realtime_env_pb2 as pb2
 from simulator.realtime.proto import realtime_env_pb2_grpc as pb2_grpc
+from simulator.realtime.resources import SessionInfo, SessionResources
 from simulator.realtime.validation import validate_create_session
 
 logger = logging.getLogger(__name__)
 
-BackendsFactory = Callable[
-    [Scenario, RoleAssignment, dict[str, Persona], str], dict[str, ModelBackend]
-]
+BackendsFactory = Callable[[SessionInfo], SessionResources]
+SessionClosedHook = Callable[[str, Episode], None]
 ScenarioResolver = Callable[[str], Scenario]
 
 _CLIENT_CLOSED = object()
@@ -39,11 +38,14 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
     的 SessionDriver 实例外不共享任何可变状态（§2.6.4）。
 
     调用方约定：
-    - on_session_closed 若提供，须自行保证线程安全——多个并发会话可能几乎
-      同时调用它（例如都写同一个 ControlPlane GitStore）。
-    - backends_factory 每次调用必须返回**全新**的后端实例。若多个会话共享
-      同一个有状态后端（如带游标的 ScriptedBackend），就会出现 §2.6.4
-      明确禁止的跨会话串话。
+    - on_session_closed 若提供，以 (session_id, episode) 调用，须自行保证线程
+      安全——多个并发会话可能几乎同时调用它（例如都写同一个 ControlPlane
+      GitStore）。
+    - backends_factory 收一个 SessionInfo（情境、角色分配、人格、客户端位、
+      session_id、episode_id），返回这条会话自己的 SessionResources。每次调用
+      必须返回**全新**的 SessionResources 与后端实例。若多个会话共享同一个
+      有状态后端（如带游标的 ScriptedBackend），就会出现 §2.6.4 明确禁止的
+      跨会话串话。
     - scenario_resolver 若提供，按 CreateSession.scenario_id 返回完整
       Scenario（此时其 purpose 以解析结果为准）；不提供则退回空 Scenario。
       未知 id 应抛 LookupError（含 KeyError）；返回的 Scenario 须是每次新建
@@ -58,7 +60,7 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
         backends_factory: BackendsFactory,
         *,
         turn_timeout_s: float = 30.0,
-        on_session_closed=None,
+        on_session_closed: SessionClosedHook | None = None,
         scenario_resolver: ScenarioResolver | None = None,
         max_turns_cap: int = 200,
         create_timeout_s: float = 10.0,
@@ -162,7 +164,8 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
                             )
                             return
                         session_id = f"sess-{uuid.uuid4().hex[:12]}"
-                        driver, out = self._handle_create(msg.create_session, session_id)
+                        # resources 先留在局部变量里：收尾（quiesce、join、close）由后续任务接上。
+                        driver, resources, out = self._handle_create(msg.create_session, session_id)
                         yield out
                         if driver is None:
                             return  # 校验/解析/factory 失败：未启动任何 driver
@@ -195,7 +198,7 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
 
                 if driver is not None:
                     terminal = False
-                    for out in self._drain_ready_events(driver):
+                    for out in self._drain_ready_events(driver, session_id):
                         yield out
                         if out.WhichOneof("payload") == "end_session":
                             terminal = True
@@ -216,9 +219,9 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
                 driver.request_abort("client_disconnected")
 
     def _handle_create(self, create_session, session_id: str):
-        """校验并启动会话。返回 (driver, 要 yield 的消息)：成功为
-        (driver, SessionReady)，任何校验/解析/factory 失败为
-        (None, EndSession(invalid_session))，且此时绝不启动 driver——
+        """校验并启动会话。返回 (driver, resources, 要 yield 的消息)：成功为
+        (driver, SessionResources, SessionReady)，任何校验/解析/factory 失败为
+        (None, None, EndSession(...))，且此时绝不启动 driver——
         校验必须先于 ACTIVE（§2.6.1"校验通过即直接进入 ACTIVE"）。"""
         role_assignment = role_assignment_from_proto(create_session.role_assignment)
         personas = {
@@ -230,14 +233,14 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
             role_assignment, personas, client_slot, max_turns_cap=self._max_turns_cap,
         )
         if reason is not None:
-            return None, self._invalid_session(reason)
+            return None, None, self._invalid_session(reason)
 
         if self._scenario_resolver is not None:
             try:
                 scenario = self._scenario_resolver(create_session.scenario_id)
             except LookupError as exc:
                 # 未知 scenario_id 是客户端输入错误（T2）
-                return None, self._invalid_session(
+                return None, None, self._invalid_session(
                     f"unknown scenario {create_session.scenario_id!r}: {exc!r}"
                 )
             except Exception as exc:
@@ -245,12 +248,12 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
                 logger.exception(
                     "scenario_resolver raised for scenario %r", create_session.scenario_id
                 )
-                return None, self._server_fault(
+                return None, None, self._server_fault(
                     f"scenario_resolver failed for {create_session.scenario_id!r}: {exc!r}"
                 )
             missing = role_assignment.slot_ids() - {s.slot_id for s in scenario.role_slots}
             if missing:
-                return None, self._invalid_session(
+                return None, None, self._invalid_session(
                     f"scenario {create_session.scenario_id!r} lacks role slots "
                     f"required by bindings: {sorted(missing)}"
                 )
@@ -265,27 +268,27 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
             )
 
         try:
-            raw_backends = self._backends_factory(
-                scenario, role_assignment, personas, client_slot,
-            )
+            resources = self._backends_factory(SessionInfo(
+                scenario, role_assignment, personas, client_slot, session_id, f"ep-{session_id}",
+            ))
         except Exception as exc:
             logger.exception(
                 "backends_factory raised for scenario %r", create_session.scenario_id
             )
-            return None, self._server_fault(f"backends_factory failed: {exc!r}")
+            return None, None, self._server_fault(f"backends_factory failed: {exc!r}")
 
         # 工厂契约：必须为每个非客户端角色位返回后端。漏返回会在会话中途
         # （已发 SessionReady、甚至已有客户端轮次之后）才在 run_episode 里
         # KeyError，所以在启动 driver 之前就拦下。
-        missing_backends = (role_assignment.slot_ids() - {client_slot}) - set(raw_backends)
+        missing_backends = (role_assignment.slot_ids() - {client_slot}) - set(resources.backends)
         if missing_backends:
-            return None, self._server_fault(
+            return None, None, self._server_fault(
                 f"backends_factory returned no backend for slots {sorted(missing_backends)}"
             )
 
         server_backends = {
-            slot: TimeoutBackend(backend, self._backend_timeout_s)
-            for slot, backend in raw_backends.items()
+            slot: TimeoutBackend(backend, self._backend_timeout_s, resources)
+            for slot, backend in resources.backends.items()
         }
         driver = SessionDriver(
             scenario, role_assignment, personas,
@@ -296,9 +299,9 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
         )
         driver.start()
         ready = pb2.ServerMessage(session_ready=pb2.SessionReady(session_id=session_id))
-        return driver, ready
+        return driver, resources, ready
 
-    def _drain_ready_events(self, driver: SessionDriver):
+    def _drain_ready_events(self, driver: SessionDriver, session_id: str):
         """把驱动器 outbox 里已就绪的事件全部转发出去（非阻塞轮询，
         一次 poll_event(0) 抽干当前积压，避免每条 ClientMessage 只对应
         恰好一条 ServerMessage 的强绑定——TurnUpdate 需要在轮次完成后
@@ -326,7 +329,7 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
                 )
                 if self._on_session_closed is not None:
                     try:
-                        self._on_session_closed(episode)
+                        self._on_session_closed(session_id, episode)
                     except Exception as exc:
                         # 持久化钩子失败不应把整条流也跟着弄挂——客户端仍需
                         # 拿到收尾消息;钩子异常记日志,不向上传播。但不能照报

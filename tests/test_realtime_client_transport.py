@@ -4,6 +4,7 @@ import time
 import grpc
 import pytest
 
+from realtime_fixtures import plain_factory
 from simulator.datamodel import Persona, RoleAssignment, RoleBinding
 from simulator.realtime.client import EnvironmentServiceClient, SessionRejectedError
 from simulator.realtime.proto import realtime_env_pb2 as pb2
@@ -140,7 +141,7 @@ def serve():
     resources = []
 
     def _serve(factory, **kwargs):
-        server = create_server(factory, port=0, **kwargs)
+        server = create_server(plain_factory(factory), port=0, **kwargs)
         server.start()
         channel = grpc.insecure_channel(f"127.0.0.1:{server.bound_port}")
         client = EnvironmentServiceClient(pb2_grpc.EnvironmentServiceStub(channel))

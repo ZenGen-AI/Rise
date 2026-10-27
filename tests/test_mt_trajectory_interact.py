@@ -12,6 +12,7 @@ from mindtrainer.training_config import (
 from mindtrainer.trajectory_source import (
     InteractTrajectorySource, RolloutFailedError,
 )
+from realtime_fixtures import plain_factory, plain_hook
 from simulator.backends import ScriptedBackend
 from simulator.dataset import episode_group_id
 from simulator.datamodel import (
@@ -93,7 +94,7 @@ def live(store):
             }
 
         server = create_server(
-            factory, port=0, turn_timeout_s=turn_timeout_s, on_session_closed=closed.append,
+            plain_factory(factory), port=0, turn_timeout_s=turn_timeout_s, on_session_closed=plain_hook(closed.append),
             scenario_resolver=lambda sid: read_scenario(store, sid),
         )
         server.start()

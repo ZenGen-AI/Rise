@@ -1,6 +1,7 @@
 import grpc
 import pytest
 
+from realtime_fixtures import plain_factory, plain_hook
 from simulator.backends import ScriptedBackend
 from simulator.datamodel import Persona, RoleAssignment, RoleBinding, RoleSlot, Scenario
 from simulator.realtime.backend import ClientDrivenBackend
@@ -106,7 +107,8 @@ def live():
                 return {s: TracingOpponent() for s in assignment.slot_ids() - {client_slot}}
             return {s: ScriptedBackend({s: ["b1", "b2", "b3"]}) for s in assignment.slot_ids() - {client_slot}}
 
-        server = create_server(factory, port=0, turn_timeout_s=2.0, on_session_closed=closed.append)
+        server = create_server(plain_factory(factory), port=0, turn_timeout_s=2.0,
+                               on_session_closed=plain_hook(closed.append))
         server.start()
         channel = grpc.insecure_channel(f"127.0.0.1:{server.bound_port}")
         made.append((server, channel))

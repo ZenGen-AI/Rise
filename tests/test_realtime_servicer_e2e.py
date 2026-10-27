@@ -3,6 +3,7 @@ import queue
 import grpc
 import pytest
 
+from realtime_fixtures import plain_factory, plain_hook
 from simulator.backends import ScriptedBackend
 from simulator.realtime.proto import realtime_env_pb2 as pb2
 from simulator.realtime.proto import realtime_env_pb2_grpc as pb2_grpc
@@ -20,7 +21,7 @@ def _opponent_backends_factory(scenario, assignment, personas, client_driven_slo
 
 @pytest.fixture
 def server_address():
-    server = create_server(_opponent_backends_factory, port=0, turn_timeout_s=2.0)
+    server = create_server(plain_factory(_opponent_backends_factory), port=0, turn_timeout_s=2.0)
     server.start()
     yield f"127.0.0.1:{server.bound_port}"
     server.stop(0)
@@ -98,7 +99,7 @@ def test_full_session_happy_path(server_address):
 
 
 def test_timeout_ends_session_with_explicit_reason():
-    server = create_server(_opponent_backends_factory, port=0, turn_timeout_s=0.1)
+    server = create_server(plain_factory(_opponent_backends_factory), port=0, turn_timeout_s=0.1)
     server.start()
     address = f"127.0.0.1:{server.bound_port}"
     channel = grpc.insecure_channel(address)
@@ -134,7 +135,7 @@ def test_role_backend_failure_ends_session_with_explicit_reason():
         other = assignment.slot_ids() - {client_driven_slot}
         return {slot: BoomBackend() for slot in other}
 
-    server = create_server(boom_factory, port=0, turn_timeout_s=2.0)
+    server = create_server(plain_factory(boom_factory), port=0, turn_timeout_s=2.0)
     server.start()
     address = f"127.0.0.1:{server.bound_port}"
     channel = grpc.insecure_channel(address)
@@ -199,8 +200,8 @@ def test_abrupt_disconnect_does_not_hang_server():
     # on_session_closed 探针。
     closed_episodes = []
     server = create_server(
-        _opponent_backends_factory, port=0, turn_timeout_s=2.0,
-        on_session_closed=lambda ep: closed_episodes.append(ep.id),
+        plain_factory(_opponent_backends_factory), port=0, turn_timeout_s=2.0,
+        on_session_closed=plain_hook(lambda ep: closed_episodes.append(ep.id)),
     )
     server.start()
     address = f"127.0.0.1:{server.bound_port}"
@@ -261,8 +262,8 @@ def test_persistence_hook_exception_does_not_break_stream():
         raise RuntimeError("simulated persistence failure")
 
     server = create_server(
-        _opponent_backends_factory, port=0, turn_timeout_s=2.0,
-        on_session_closed=boom_hook,
+        plain_factory(_opponent_backends_factory), port=0, turn_timeout_s=2.0,
+        on_session_closed=plain_hook(boom_hook),
     )
     server.start()
     address = f"127.0.0.1:{server.bound_port}"

@@ -12,6 +12,7 @@ from controlplane.paths import episode_file, episodes_dir
 from mindagent.deployment import (
     PURPOSE, DeploymentFailedError, deployment_episode_id, run_deployment_episodes,
 )
+from realtime_fixtures import plain_factory, plain_hook
 from simulator.backends import ScriptedBackend
 from simulator.datamodel import Episode, Persona, RoleBinding, RoleSlot, Scenario, TurnRecord
 from simulator.realtime.client import EnvironmentServiceClient, SessionRejectedError
@@ -77,7 +78,8 @@ def live(store):
         def factory(scenario, assignment, personas, client_slot):
             return {s: ScriptedBackend({s: list(lines)}) for s in assignment.slot_ids() - {client_slot}}
 
-        server = create_server(factory, port=0, turn_timeout_s=2.0, on_session_closed=closed.append,
+        server = create_server(plain_factory(factory), port=0, turn_timeout_s=2.0,
+                               on_session_closed=plain_hook(closed.append),
                                scenario_resolver=lambda sid: read_scenario(store, sid))
         server.start()
         servers.append(server)

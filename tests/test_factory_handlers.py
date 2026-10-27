@@ -227,6 +227,13 @@ def _assignment(*bindings):
     return RoleAssignment("s1", list(bindings), 4)
 
 
+def _backends_of(runtime, scenario, assignment, personas, client_slot):
+    """用一份固定的会话标识调运行时的后端工厂,取回各角色位的后端。"""
+    from simulator.realtime.resources import SessionInfo
+    info = SessionInfo(scenario, assignment, personas, client_slot, "sess-test", "ep-sess-test")
+    return runtime._backends(info).backends
+
+
 def _says(backend, slot, times):
     return [backend.respond(None, None, [], slot)[0] for _ in range(times)]
 
@@ -235,8 +242,8 @@ def test_a_scripted_driver_loops_the_scenario_script_for_its_slot(store):
     from simulator.datamodel import RoleBinding
     runtime = AgentRuntime(store, ("全局",))
     opponent = RoleBinding("b", "p", "frozen_reference", model_ref="zengen-v1", driver="scripted")
-    backends = runtime._backends(_scenario_with({"b": ["一", "二"]}),
-                                 _assignment(RoleBinding("a", "p", "self_play"), opponent), {}, "a")
+    backends = _backends_of(runtime, _scenario_with({"b": ["一", "二"]}),
+                             _assignment(RoleBinding("a", "p", "self_play"), opponent), {}, "a")
     assert set(backends) == {"b"}
     assert _says(backends["b"], "b", 5) == ["一", "二", "一", "二", "一"]
 
@@ -246,8 +253,8 @@ def test_a_scripted_driver_falls_back_to_the_global_lines_when_the_slot_has_no_s
     from simulator.datamodel import RoleBinding
     runtime = AgentRuntime(store, ("全局甲", "全局乙"))
     opponent = RoleBinding("b", "p", "external_api", model_ref="gpt-x", driver="scripted")
-    backends = runtime._backends(_scenario_with(script),
-                                 _assignment(RoleBinding("a", "p", "self_play"), opponent), {}, "a")
+    backends = _backends_of(runtime, _scenario_with(script),
+                             _assignment(RoleBinding("a", "p", "self_play"), opponent), {}, "a")
     assert _says(backends["b"], "b", 3) == ["全局甲", "全局乙", "全局甲"]
 
 
@@ -258,7 +265,7 @@ def test_without_a_factory_every_opponent_is_the_same_unlooped_scripted_backend_
     bindings = [RoleBinding("a", "p", "self_play"),
                 RoleBinding("b", "p", "frozen_reference", model_ref="zengen-v1"),
                 RoleBinding("c", "p", "external_api", model_ref="gpt-x")]
-    backends = runtime._backends(_scenario_with({"b": ["剧本"]}), _assignment(*bindings), {}, "a")
+    backends = _backends_of(runtime, _scenario_with({"b": ["剧本"]}), _assignment(*bindings), {}, "a")
     assert set(backends) == {"b", "c"}
     for slot in ("b", "c"):
         assert isinstance(backends[slot], ScriptedBackend)
@@ -269,9 +276,9 @@ def test_every_call_builds_fresh_backends(store):
     from simulator.datamodel import RoleBinding
     runtime = AgentRuntime(store, ("甲", "乙"))
     assignment = _assignment(RoleBinding("a", "p", "self_play"), RoleBinding("b", "p", "frozen_reference", model_ref="m"))
-    first = runtime._backends(_scenario_with(), assignment, {}, "a")
+    first = _backends_of(runtime, _scenario_with(), assignment, {}, "a")
     assert _says(first["b"], "b", 1) == ["甲"]
-    assert _says(runtime._backends(_scenario_with(), assignment, {}, "a")["b"], "b", 1) == ["甲"]
+    assert _says(_backends_of(runtime, _scenario_with(), assignment, {}, "a")["b"], "b", 1) == ["甲"]
 
 
 def test_a_factory_supplies_the_non_scripted_drivers_and_never_the_scripted_ones(store):
@@ -288,7 +295,7 @@ def test_a_factory_supplies_the_non_scripted_drivers_and_never_the_scripted_ones
                 RoleBinding("b", "p", "frozen_reference", model_ref="zengen-v1"),
                 RoleBinding("c", "p", "external_api", model_ref="gpt-x"),
                 RoleBinding("d", "p", "frozen_reference", model_ref="zengen-v1", driver="scripted")]
-    backends = runtime._backends(_scenario_with({"d": ["剧本丁"]}), _assignment(*bindings), {}, "a")
+    backends = _backends_of(runtime, _scenario_with({"d": ["剧本丁"]}), _assignment(*bindings), {}, "a")
     assert sorted(made) == [("b", "s1"), ("c", "s1")]   # 剧本驱动的 d 不经工厂
     assert _says(backends["b"], "b", 1) == ["来自工厂-b"] and _says(backends["c"], "c", 1) == ["来自工厂-c"]
     assert _says(backends["d"], "d", 3) == ["剧本丁"] * 3
@@ -304,7 +311,7 @@ def test_a_factory_error_surfaces_instead_of_being_swallowed(store):
     runtime.register_session("s1", "run-1")
     assignment = _assignment(RoleBinding("a", "p", "self_play"), RoleBinding("b", "p", "frozen_reference", model_ref="m"))
     with pytest.raises(RuntimeError, match="model not served"):
-        runtime._backends(_scenario_with(), assignment, {}, "a")
+        _backends_of(runtime, _scenario_with(), assignment, {}, "a")
 
 
 def test_without_a_factory_the_legacy_path_does_not_judge_the_binding_at_all(store):
@@ -315,7 +322,7 @@ def test_without_a_factory_the_legacy_path_does_not_judge_the_binding_at_all(sto
     bindings = [RoleBinding("a", "p", "self_play"),
                 RoleBinding("b", "p", "self_play"),
                 RoleBinding("c", "p", "scripted_user", model_ref="x")]
-    backends = runtime._backends(_scenario_with({"b": ["剧本"]}), _assignment(*bindings), {}, "a")
+    backends = _backends_of(runtime, _scenario_with({"b": ["剧本"]}), _assignment(*bindings), {}, "a")
     assert set(backends) == {"b", "c"}
     for slot in ("b", "c"):
         assert _says(backends[slot], slot, 3) == ["全局甲", "全局乙", "(无更多发言)"]
@@ -333,7 +340,7 @@ def test_with_the_factory_set_an_unregistered_session_never_judges_its_bindings(
     runtime = AgentRuntime(store, ("全局甲", "全局乙"), opponent_backend_factory=_never_called)
     bindings = [RoleBinding("a", "p", "self_play"),
                 RoleBinding("b", "p", backend, model_ref=None if backend == "self_play" else "x")]
-    backends = runtime._backends(_scenario_with({"b": ["剧本"]}), _assignment(*bindings), {}, "a")
+    backends = _backends_of(runtime, _scenario_with({"b": ["剧本"]}), _assignment(*bindings), {}, "a")
     assert set(backends) == {"b"} and isinstance(backends["b"], ScriptedBackend)
     assert _says(backends["b"], "b", 3) == ["全局甲", "全局乙", "(无更多发言)"]     # 不循环,剧本也不生效
 
@@ -342,8 +349,8 @@ def test_with_the_factory_set_an_unregistered_scripted_binding_still_loops_its_s
     from simulator.datamodel import RoleBinding
     runtime = AgentRuntime(store, ("全局",), opponent_backend_factory=_never_called)
     opponent = RoleBinding("b", "p", "frozen_reference", model_ref="zengen-v1", driver="scripted")
-    backends = runtime._backends(_scenario_with({"b": ["一", "二"]}),
-                                 _assignment(RoleBinding("a", "p", "self_play"), opponent), {}, "a")
+    backends = _backends_of(runtime, _scenario_with({"b": ["一", "二"]}),
+                             _assignment(RoleBinding("a", "p", "self_play"), opponent), {}, "a")
     assert _says(backends["b"], "b", 5) == ["一", "二", "一", "二", "一"]
 
 
@@ -353,8 +360,8 @@ def test_with_the_factory_set_an_unregistered_explicit_scripted_driver_is_not_ju
     from simulator.datamodel import RoleBinding
     runtime = AgentRuntime(store, ("全局",), opponent_backend_factory=_never_called)
     opponent = RoleBinding("b", "p", backend, model_ref=None if backend == "self_play" else "x", driver="scripted")
-    backends = runtime._backends(_scenario_with({"b": ["一", "二"]}),
-                                 _assignment(RoleBinding("a", "p", "self_play"), opponent), {}, "a")
+    backends = _backends_of(runtime, _scenario_with({"b": ["一", "二"]}),
+                             _assignment(RoleBinding("a", "p", "self_play"), opponent), {}, "a")
     assert _says(backends["b"], "b", 3) == ["一", "二", "一"]
 
 
@@ -365,7 +372,7 @@ def test_a_registered_session_with_an_invalid_driver_still_fails(store, backend,
     runtime.register_session("s1", "run-1")
     bad = RoleBinding("b", "p", backend, model_ref=None if backend == "self_play" else "x", driver=driver)
     with pytest.raises(ValueError, match="slot 'b'"):
-        runtime._backends(_scenario_with(), _assignment(RoleBinding("a", "p", "self_play"), bad), {}, "a")
+        _backends_of(runtime, _scenario_with(), _assignment(RoleBinding("a", "p", "self_play"), bad), {}, "a")
 
 
 def _open_and_finish(runtime, scenario_id, bindings):
@@ -559,7 +566,7 @@ def test_the_write_failure_list_is_bounded_and_keeps_the_latest(store, monkeypat
         runtime.register_session("s-int", "run-int")
         for i in range(150):
             with pytest.raises(OSError):
-                runtime._on_session_closed(SimpleNamespace(scenario_id="s-int", id=f"ep-{i}"))
+                runtime._on_session_closed(f"sess-{i}", SimpleNamespace(scenario_id="s-int", id=f"ep-{i}"))
         kept = list(runtime.episode_write_failures)
         assert len(kept) == 100
         assert "ep-149" in kept[-1] and "ep-50" in kept[0]          # 丢的是最早的 50 条

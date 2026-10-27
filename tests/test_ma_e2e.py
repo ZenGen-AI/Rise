@@ -14,6 +14,7 @@ from mindagent.admit import handle_admit_proposal
 from mindagent.config import AgentConfig
 from mindagent.library import load_library
 from mindagent.rounds import make_start_round_handler
+from realtime_fixtures import plain_factory
 from simulator.backends import ScriptedBackend
 from simulator.datamodel import Persona, RoleBinding, RoleSlot, Scenario
 from simulator.realtime.client import EnvironmentServiceClient
@@ -73,7 +74,7 @@ def world(tmp_path):
     def factory(scenario, assignment, personas, client_slot):
         return {s: ScriptedBackend({s: list(OPP_LINES)}) for s in assignment.slot_ids() - {client_slot}}
 
-    server = create_server(factory, port=0, turn_timeout_s=2.0,
+    server = create_server(plain_factory(factory), port=0, turn_timeout_s=2.0,
                            scenario_resolver=lambda sid: read_scenario(store, sid))
     server.start()
     channels = []

@@ -1,6 +1,7 @@
 import grpc
 import pytest
 
+from realtime_fixtures import plain_factory
 from simulator.datamodel import (
     Scenario, RoleSlot, Persona, RoleBinding, RoleAssignment,
 )
@@ -42,7 +43,7 @@ def _opponent_factory(opponent_lines):
 @pytest.fixture
 def client_and_server():
     opponent_lines = ["opp1", "opp2"]
-    server = create_server(_opponent_factory(opponent_lines), port=0, turn_timeout_s=2.0)
+    server = create_server(plain_factory(_opponent_factory(opponent_lines)), port=0, turn_timeout_s=2.0)
     server.start()
     channel = grpc.insecure_channel(f"127.0.0.1:{server.bound_port}")
     stub = pb2_grpc.EnvironmentServiceStub(channel)

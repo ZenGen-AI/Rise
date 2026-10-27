@@ -18,6 +18,7 @@ from mindtrainer.data_spec import DataSynthesisError, parse_data_spec
 from mindtrainer.dispatch import make_mindtrainer_dispatcher
 from mindtrainer.orchestrator import NotEnoughGroupsError
 from mindtrainer.training_config import RewardConfig, TrainingConfig
+from realtime_fixtures import plain_factory
 from simulator.backends import ScriptedBackend
 from simulator.datamodel import RoleBinding
 from simulator.dataset import DatasetIntegrityError, read_manifest, verify_manifest
@@ -451,7 +452,7 @@ def live(store):
             }
 
         server = create_server(
-            backends, port=0, turn_timeout_s=2.0,
+            plain_factory(backends), port=0, turn_timeout_s=2.0,
             scenario_resolver=lambda sid: read_scenario(store, sid),
         )
         server.start()

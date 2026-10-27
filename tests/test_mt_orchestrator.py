@@ -22,6 +22,7 @@ from mindtrainer.training_config import InvalidTrainingConfigError, RewardConfig
 from mindtrainer.trajectory_source import (
     BatchTrajectorySource, InteractTrajectorySource, RolloutFailedError,
 )
+from realtime_fixtures import plain_factory, plain_hook
 from simulator.backends import ScriptedBackend
 from simulator.dataset import DatasetIntegrityError, produce_grouped_dataset, read_manifest
 from simulator.datamodel import Persona, RoleAssignment, RoleBinding, RoleSlot, Scenario
@@ -468,7 +469,7 @@ def live(store):
             }
 
         server = create_server(
-            factory, port=0, turn_timeout_s=2.0, on_session_closed=closed.append,
+            plain_factory(factory), port=0, turn_timeout_s=2.0, on_session_closed=plain_hook(closed.append),
             scenario_resolver=lambda sid: read_scenario(store, sid),
         )
         server.start()

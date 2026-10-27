@@ -4,6 +4,7 @@ import time
 import grpc
 import pytest
 
+from realtime_fixtures import plain_factory, plain_hook
 from simulator.backends import ScriptedBackend
 from simulator.datamodel import Persona, RoleAssignment, RoleBinding
 from simulator.realtime.client import EnvironmentServiceClient
@@ -34,8 +35,8 @@ def _factory(scenario, assignment, personas, client_slot):
 def env():
     closed: list[str] = []
     server = create_server(
-        _factory, port=0, turn_timeout_s=2.0,
-        on_session_closed=lambda ep: closed.append(ep.id),
+        plain_factory(_factory), port=0, turn_timeout_s=2.0,
+        on_session_closed=plain_hook(lambda ep: closed.append(ep.id)),
     )
     server.start()
     channel = grpc.insecure_channel(f"127.0.0.1:{server.bound_port}")

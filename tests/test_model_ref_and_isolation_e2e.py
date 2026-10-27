@@ -4,6 +4,7 @@ import queue
 import grpc
 import pytest
 
+from realtime_fixtures import plain_factory, plain_hook
 from simulator.datamodel import Persona, RoleAssignment, RoleBinding
 from simulator.realtime.codec import persona_to_proto, role_assignment_to_proto
 from simulator.realtime.proto import realtime_env_pb2 as pb2
@@ -79,8 +80,8 @@ def serve():
     def _serve():
         history_log, closed = [], []
         server = create_server(
-            _factory(history_log), port=0, turn_timeout_s=2.0,
-            on_session_closed=closed.append,
+            plain_factory(_factory(history_log)), port=0, turn_timeout_s=2.0,
+            on_session_closed=plain_hook(closed.append),
         )
         server.start()
         servers.append(server)
