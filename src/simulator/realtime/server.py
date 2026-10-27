@@ -21,6 +21,8 @@ def create_server(
     max_turns_cap: int = 200,
     create_timeout_s: float = 10.0,
     backend_timeout_s: float = 60.0,
+    resource_join_timeout_s: float = 60.0,
+    linger_retry_s: float = 60.0,
     keepalive_time_ms: int = 30_000,
     keepalive_timeout_ms: int = 10_000,
 ) -> grpc.Server:
@@ -34,6 +36,10 @@ def create_server(
     - keepalive：让服务端能在客户端进程崩溃/网络中断时主动发现死连接，
       而不是依赖客户端配合（§2.6.5 客户端侧异常由服务端自行检测）。
     - max_turns_cap / create_timeout_s / backend_timeout_s 透传给 servicer。
+    - resource_join_timeout_s / linger_retry_s 也透传给 servicer：会话终态收尾时
+      join 在途后端调用的上限，以及滞留表每隔多久重试一次 join(0)。默认值取自设计源
+      6.2 节（60 秒、60 秒），参数只为测试能用小值。
+    - server.servicer 指向 servicer，调用方可读 lingering_count()。
     """
     server = grpc.server(
         ThreadPoolExecutor(max_workers=max_workers),
@@ -53,8 +59,11 @@ def create_server(
         max_turns_cap=max_turns_cap,
         create_timeout_s=create_timeout_s,
         backend_timeout_s=backend_timeout_s,
+        resource_join_timeout_s=resource_join_timeout_s,
+        linger_retry_s=linger_retry_s,
     )
     pb2_grpc.add_EnvironmentServiceServicer_to_server(servicer, server)
     bound_port = server.add_insecure_port(f"127.0.0.1:{port}")
     server.bound_port = bound_port
+    server.servicer = servicer
     return server

@@ -56,7 +56,15 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
       造成跨会话串话（§2.6.4）。
 
     资源边界：max_turns_cap 限制单会话轮次；create_timeout_s 限制连接建立
-    后等待 CreateSession 的时长；backend_timeout_s 限制单次服务端后端调用。"""
+    后等待 CreateSession 的时长；backend_timeout_s 限制单次服务端后端调用。
+
+    会话资源的收尾：工厂返回的 SessionResources 由 Interact 的 finally 统一收尾——
+    quiesce（拒绝新调用）、join(resource_join_timeout_s)（等在途后端线程退出）、
+    close（跑 closers）。每份资源的 close 只有一个驱动者，不会有两个线程同时关它：
+    join 成功就是 finally 自己关；join 等不到则不关、不删，资源移交滞留表，此后
+    只由唯一的回收线程每 linger_retry_s 秒 join(0) 重试，成功才 close 并从表里删掉。
+    滞留的资源仍占一个会话名额（设计源 6.2、6.3 节）。quiesce、join、close 抛异常只记日志（类名），
+    不让 finally 抛出 gRPC 线程。"""
 
     def __init__(
         self,
@@ -68,6 +76,8 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
         max_turns_cap: int = 200,
         create_timeout_s: float = 10.0,
         backend_timeout_s: float = 60.0,
+        resource_join_timeout_s: float = 60.0,
+        linger_retry_s: float = 60.0,
     ) -> None:
         self._backends_factory = backends_factory
         self._turn_timeout_s = turn_timeout_s
@@ -76,6 +86,12 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
         self._max_turns_cap = max_turns_cap
         self._create_timeout_s = create_timeout_s
         self._backend_timeout_s = backend_timeout_s
+        self._resource_join_timeout_s = resource_join_timeout_s
+        self._linger_retry_s = linger_retry_s
+        # 一把锁守护滞留表与回收线程句柄。准入检查（后续任务）读 _lingering，用的也是这把锁。
+        self._lock = threading.Lock()
+        self._lingering: dict[str, SessionResources] = {}
+        self._reaper: threading.Thread | None = None
 
     @staticmethod
     def _invalid_session(detail: str) -> pb2.ServerMessage:
@@ -142,6 +158,8 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
 
         started_at = time.monotonic()
         driver: SessionDriver | None = None
+        session_id: str | None = None
+        resources: SessionResources | None = None
         client_closed = False
         explicit_end_requested = False
         disconnect_handled = False
@@ -167,7 +185,8 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
                             )
                             return
                         session_id = f"sess-{uuid.uuid4().hex[:12]}"
-                        # resources 先留在局部变量里：收尾（quiesce、join、close）由后续任务接上。
+                        # 工厂返回之后的失败也会带着 resources 回来（driver 为 None），
+                        # 由下面同一个 finally 收尾；工厂自己抛异常时 resources 是 None。
                         driver, resources, out = self._handle_create(msg.create_session, session_id)
                         yield out
                         if driver is None:
@@ -218,14 +237,22 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
                     # 等驱动器真正产出 closed/failed 事件，由上面的 drain
                     # 转发并 return，避免旁路读 driver.state 的竞态。
         finally:
-            if driver is not None and driver.state not in ("CLOSED", "FAILED"):
-                driver.request_abort("client_disconnected")
+            try:
+                if driver is not None and driver.state not in ("CLOSED", "FAILED"):
+                    driver.request_abort("client_disconnected")
+            finally:
+                # 无论正常结束、客户端断连、流被取消还是工厂之后的启动失败，都走这一处。
+                if resources is not None:
+                    self._wind_down(session_id, resources)
 
     def _handle_create(self, create_session, session_id: str):
         """校验并启动会话。返回 (driver, resources, 要 yield 的消息)：成功为
-        (driver, SessionResources, SessionReady)，任何校验/解析/factory 失败为
-        (None, None, EndSession(...))，且此时绝不启动 driver——
-        校验必须先于 ACTIVE（§2.6.1"校验通过即直接进入 ACTIVE"）。"""
+        (driver, SessionResources, SessionReady)；工厂调用之前的失败（校验、解析、
+        工厂自己抛异常）为 (None, None, EndSession(...))，此时没有资源可收尾；工厂
+        返回之后的失败（缺后端、SessionDriver 构造或 start 抛）为
+        (None, resources, EndSession(...))，资源交给调用方的 finally 收尾，这里不自己
+        关。任何失败都绝不让 driver 跑起来——校验必须先于 ACTIVE
+        （§2.6.1"校验通过即直接进入 ACTIVE"）。"""
         role_assignment = role_assignment_from_proto(create_session.role_assignment)
         personas = {
             pid: persona_from_proto(p) for pid, p in create_session.personas.items()
@@ -294,24 +321,131 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
         # KeyError，所以在启动 driver 之前就拦下。
         missing_backends = (role_assignment.slot_ids() - {client_slot}) - set(resources.backends)
         if missing_backends:
-            return None, None, self._server_fault(
+            return None, resources, self._server_fault(
                 f"backends_factory returned no backend for slots {sorted(missing_backends)}"
             )
 
-        server_backends = {
-            slot: TimeoutBackend(backend, self._backend_timeout_s, resources)
-            for slot, backend in resources.backends.items()
-        }
-        driver = SessionDriver(
-            scenario, role_assignment, personas,
-            server_backends=server_backends,
-            client_driven_slot=client_slot,
-            episode_id=episode_id,
-            turn_timeout_s=self._turn_timeout_s,
-        )
-        driver.start()
+        try:
+            server_backends = {
+                slot: TimeoutBackend(backend, self._backend_timeout_s, resources)
+                for slot, backend in resources.backends.items()
+            }
+            driver = SessionDriver(
+                scenario, role_assignment, personas,
+                server_backends=server_backends,
+                client_driven_slot=client_slot,
+                episode_id=episode_id,
+                turn_timeout_s=self._turn_timeout_s,
+            )
+            driver.start()
+        except Exception as exc:
+            # 服务端自身故障（起不了线程等），可能瞬态（T1）。detail 只放类名，细节在服务端日志。
+            logger.exception("session driver could not be started for session %s", session_id)
+            return None, resources, self._server_fault(
+                f"session driver failed to start: {type(exc).__name__}"
+            )
         ready = pb2.ServerMessage(session_ready=pb2.SessionReady(session_id=session_id))
         return driver, resources, ready
+
+    def _wind_down(self, session_id: str, resources: SessionResources) -> None:
+        """会话终态收尾：quiesce → join(有界) → close。只在 Interact 的 finally 里调用，
+        所以每份资源的 close 只有一个驱动者；绝不向调用方（gRPC 线程）抛异常，日志只记类名。
+
+        join 在 RPC 的 worker 线程里同步进行：客户端在这之前已收到 EndSession，不受影响；
+        这段时间该会话仍占 gRPC 的并发名额（设计源 6.3 节）。join 等不到（或 join 自己
+        抛了，无法确认在途调用已退出）就不 close：关库不能压在还在跑的调用下面，
+        资源转入滞留表，由回收线程重试。"""
+        try:
+            resources.quiesce()
+        except Exception as exc:
+            logger.warning(
+                "session %s resources quiesce failed: %s", session_id, type(exc).__name__,
+            )
+        try:
+            quiesced = resources.join(self._resource_join_timeout_s)
+        except Exception as exc:
+            logger.warning(
+                "session %s resources join failed: %s; lingering", session_id, type(exc).__name__,
+            )
+        else:
+            if not quiesced:
+                logger.warning(
+                    "session %s resources did not quiesce within %ss; lingering",
+                    session_id, self._resource_join_timeout_s,
+                )
+            else:
+                self._close_resources(session_id, resources)
+                return
+        self._linger(session_id, resources)
+
+    @staticmethod
+    def _close_resources(session_id: str, resources: SessionResources) -> None:
+        try:
+            resources.close()
+        except Exception as exc:
+            logger.warning(
+                "session %s resources close failed: %s", session_id, type(exc).__name__,
+            )
+
+    def _linger(self, session_id: str, resources: SessionResources) -> None:
+        """把等不到退出的资源放进滞留表，没有活着的回收线程就起一个。回收线程句柄由回收线程
+        自己在持锁时清空，所以这里看到 None 就一定要起新的，不会出现"线程刚决定退出、
+        新条目被漏掉"。"""
+        with self._lock:
+            self._lingering[session_id] = resources
+            if self._reaper is not None:
+                return
+            reaper = threading.Thread(
+                target=self._reap_lingering, name="session-reaper", daemon=True,
+            )
+            try:
+                reaper.start()
+            except Exception as exc:
+                # 起不来也不能让异常穿出 finally。句柄不赋值，下一次有会话滞留时会再试。
+                logger.warning("session reaper could not start: %s", type(exc).__name__)
+                return
+            self._reaper = reaper
+
+    def lingering_count(self) -> int:
+        """滞留表里的资源数（持锁读）。"""
+        with self._lock:
+            return len(self._lingering)
+
+    def _reap_lingering(self) -> None:
+        """回收线程:每 linger_retry_s 秒对滞留的资源各 join(0) 一次,成功的锁外 close,
+        关完才从表里删(名额在目录删掉之后才释放)。仍有滞留就报一次数量(设计源 6.3 节
+        "日志每分钟报一次滞留数",间隔就是 linger_retry_s)。表空了线程退出,下次有新滞留再起。"""
+        try:
+            while True:
+                time.sleep(self._linger_retry_s)
+                with self._lock:
+                    snapshot = list(self._lingering.items())
+                for session_id, resources in snapshot:
+                    self._retry_lingering(session_id, resources)
+                with self._lock:
+                    remaining = len(self._lingering)
+                    if remaining == 0:
+                        self._reaper = None
+                        return
+                logger.warning("%d session resources still lingering", remaining)
+        finally:
+            with self._lock:
+                if self._reaper is threading.current_thread():
+                    self._reaper = None
+
+    def _retry_lingering(self, session_id: str, resources: SessionResources) -> None:
+        try:
+            quiesced = resources.join(0)
+        except Exception as exc:
+            logger.warning(
+                "session %s lingering resources join failed: %s", session_id, type(exc).__name__,
+            )
+            return
+        if not quiesced:
+            return
+        self._close_resources(session_id, resources)
+        with self._lock:
+            self._lingering.pop(session_id, None)
 
     def _drain_ready_events(self, driver: SessionDriver, session_id: str):
         """把驱动器 outbox 里已就绪的事件全部转发出去（非阻塞轮询，
