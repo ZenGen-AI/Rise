@@ -11,7 +11,7 @@ from typing import Callable
 import grpc
 from google.protobuf.json_format import MessageToDict
 
-from simulator.datamodel import Episode, RoleAssignment, Scenario, RoleSlot
+from simulator.datamodel import Episode, Scenario, RoleSlot
 from simulator.realtime.backend_timeout import TimeoutBackend
 from simulator.realtime.codec import (
     persona_from_proto, role_assignment_from_proto, turn_record_to_proto,
@@ -20,7 +20,7 @@ from simulator.realtime.driver import SessionDriver
 from simulator.realtime.proto import realtime_env_pb2 as pb2
 from simulator.realtime.proto import realtime_env_pb2_grpc as pb2_grpc
 from simulator.realtime.resources import SessionInfo, SessionResources
-from simulator.realtime.validation import validate_create_session
+from simulator.realtime.validation import validate_create_session, validate_episode_id
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +46,9 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
       必须返回**全新**的 SessionResources 与后端实例。若多个会话共享同一个
       有状态后端（如带游标的 ScriptedBackend），就会出现 §2.6.4 明确禁止的
       跨会话串话。
+    - CreateSession.episode_id 非空时，格式过 validate_episode_id 就成为这条
+      会话的 episode id（SessionInfo.episode_id 与落盘的 Episode.id 都用它），
+      不过则以 invalid_session 拒绝且不调工厂；空串当作没给，用 ep-<session_id>。
     - scenario_resolver 若提供，按 CreateSession.scenario_id 返回完整
       Scenario（此时其 purpose 以解析结果为准）；不提供则退回空 Scenario。
       未知 id 应抛 LookupError（含 KeyError）；返回的 Scenario 须是每次新建
@@ -235,6 +238,15 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
         if reason is not None:
             return None, None, self._invalid_session(reason)
 
+        # proto3 分不出空串与"没给"：空串一律当没给，服务端用 ep-<session_id> 命名。
+        # 非空的 id 要过格式校验；它在工厂调用之前拒绝，所以坏 id 不会造出任何资源。
+        requested = create_session.episode_id
+        if requested:
+            id_reason = validate_episode_id(requested)
+            if id_reason is not None:
+                return None, None, self._invalid_session(f"invalid episode_id: {id_reason}")
+        episode_id = requested or f"ep-{session_id}"
+
         if self._scenario_resolver is not None:
             try:
                 scenario = self._scenario_resolver(create_session.scenario_id)
@@ -269,7 +281,7 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
 
         try:
             resources = self._backends_factory(SessionInfo(
-                scenario, role_assignment, personas, client_slot, session_id, f"ep-{session_id}",
+                scenario, role_assignment, personas, client_slot, session_id, episode_id,
             ))
         except Exception as exc:
             logger.exception(
@@ -294,7 +306,7 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
             scenario, role_assignment, personas,
             server_backends=server_backends,
             client_driven_slot=client_slot,
-            episode_id=f"ep-{session_id}",
+            episode_id=episode_id,
             turn_timeout_s=self._turn_timeout_s,
         )
         driver.start()

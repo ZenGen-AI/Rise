@@ -76,14 +76,14 @@ def test_the_factory_gets_a_session_info_and_the_hook_gets_the_session_id(serve)
 
     _, connect = serve(factory, on_session_closed=lambda sid, ep: closed.append((sid, ep.id)))
     client = connect()
-    session_id = _open(client)
+    session_id = _open(client, episode_id="run-1-grpo_opd-s1-r0")
     episode = _play(client)
     (info,) = infos
     assert isinstance(info, SessionInfo)
-    assert (info.session_id, info.episode_id, info.client_slot) == (session_id, f"ep-{session_id}", "a")
+    assert (info.session_id, info.episode_id, info.client_slot) == (session_id, "run-1-grpo_opd-s1-r0", "a")
     assert info.scenario.id == "s1" and set(info.personas) == {"pa", "pb"}
-    assert episode.id == f"ep-{session_id}"
-    assert closed == [(session_id, f"ep-{session_id}")]
+    assert episode.id == "run-1-grpo_opd-s1-r0"
+    assert closed == [(session_id, "run-1-grpo_opd-s1-r0")]
 
 
 def test_without_an_episode_id_the_server_keeps_ep_session_id(serve):
@@ -93,3 +93,21 @@ def test_without_an_episode_id_the_server_keeps_ep_session_id(serve):
     session_id = _open(client)
     assert _play(client).id == f"ep-{session_id}"
     assert infos[0].episode_id == f"ep-{session_id}"
+
+
+@pytest.mark.parametrize("bad", ["a/b", ".", "..", "x" * 129, "ep\n", "回合-1", "a b"])
+def test_a_malformed_episode_id_is_invalid_session_and_the_factory_is_never_called(serve, bad):
+    calls = []
+    _, connect = serve(lambda info: calls.append(info) or _scripted(info))
+    with pytest.raises(SessionRejectedError) as info:
+        _open(connect(), episode_id=bad)
+    assert info.value.reason == "invalid_session"
+    assert calls == []
+
+
+@pytest.mark.parametrize("good", ["x" * 128, "a.b", "deploy-zengen-v1-s1-1", "_-.", "..."])
+def test_a_well_formed_episode_id_names_the_episode(serve, good):
+    _, connect = serve(_scripted)
+    client = connect()
+    _open(client, episode_id=good)
+    assert _play(client).id == good
