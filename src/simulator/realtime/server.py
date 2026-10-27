@@ -39,6 +39,9 @@ def create_server(
     - resource_join_timeout_s / linger_retry_s 也透传给 servicer：会话终态收尾时
       join 在途后端调用的上限，以及滞留表每隔多久重试一次 join(0)。默认值取自设计源
       6.2 节（60 秒、60 秒），参数只为测试能用小值。
+    - max_workers 同时传给 servicer：它在建会话前的一把锁里检查"活动数加滞留数小于
+      max_workers"，所以没有滞留时 gRPC 先挡住第 N+1 条流，有滞留时由 servicer 以
+      role_backend_unavailable 拒绝；同一 episode_id 已有活动会话时也以它拒绝。
     - server.servicer 指向 servicer，调用方可读 lingering_count()。
     """
     server = grpc.server(
@@ -61,6 +64,7 @@ def create_server(
         backend_timeout_s=backend_timeout_s,
         resource_join_timeout_s=resource_join_timeout_s,
         linger_retry_s=linger_retry_s,
+        max_workers=max_workers,
     )
     pb2_grpc.add_EnvironmentServiceServicer_to_server(servicer, server)
     bound_port = server.add_insecure_port(f"127.0.0.1:{port}")

@@ -423,3 +423,220 @@ def test_a_reaper_that_cannot_start_does_not_break_the_rpc_and_the_resources_sta
     stuck.release.set()
     assert "close" not in events and (tmp_path / session_id).exists()      # 没有回收线程,不关、不删
     assert _SECRET not in caplog.text
+
+
+# ---------------- Task 14:准入——一把锁里查名额与同 episode_id 的活动会话 ----------------
+
+def _try_open(connect, **kw):
+    client = connect()
+    try:
+        _open(client, **kw)
+    except SessionRejectedError as exc:
+        return exc.reason, client
+    except grpc.RpcError as exc:
+        # 上一条 RPC 刚收尾、gRPC 的并发计数还没放开时会得到 RESOURCE_EXHAUSTED;与准入拒绝分开报
+        return f"rpc_{exc.code().name.lower()}", client
+    return "ready", client
+
+
+def test_a_second_session_with_an_active_episode_id_is_unavailable_until_the_first_winds_down(serve):
+    _, connect = serve(_scripted)
+    first = connect()
+    _open(first, episode_id="deploy-zengen-v1-s1-1", max_turns=4)
+    reason, _ = _try_open(connect, episode_id="deploy-zengen-v1-s1-1")
+    assert reason == "role_backend_unavailable"
+    assert _try_open(connect, episode_id="deploy-zengen-v1-s1-2")[0] == "ready"   # 别的 id 不受影响
+    first.abort()
+    assert _eventually(lambda: _try_open(connect, episode_id="deploy-zengen-v1-s1-1")[0] == "ready")
+
+
+def test_the_duplicate_check_applies_to_the_effective_id_including_the_server_named_one(serve):
+    _, connect = serve(_scripted)
+    first = connect()
+    session_id = _open(first, max_turns=4)                  # 没给 id:服务端命名为 ep-<session_id>
+    with pytest.raises(SessionRejectedError) as info:       # 格式合法,但撞上了那个有效 id
+        _open(connect(), episode_id=f"ep-{session_id}")
+    assert info.value.reason == "role_backend_unavailable"
+    assert info.value.detail == f"episode 'ep-{session_id}' already has an active session"
+    first.abort()
+
+
+def test_lingering_resources_hold_a_slot_until_their_thread_exits(serve, tmp_path):
+    events, stuck = [], _Stuck()
+    server, connect = serve(_recording_factory(tmp_path, events, backend_for=lambda: stuck), max_workers=1,
+                            backend_timeout_s=0.1, resource_join_timeout_s=0.2, linger_retry_s=0.05)
+    client = connect()
+    _open(client)
+    client.submit_turn("嗯")
+    client.drain_until_end()
+    assert _eventually(lambda: server.servicer.lingering_count() == 1)
+    assert _eventually(lambda: _try_open(connect)[0] == "role_backend_unavailable")
+    stuck.release.set()
+    assert _eventually(lambda: server.servicer.lingering_count() == 0)
+    assert _eventually(lambda: _try_open(connect)[0] == "ready")
+
+
+def test_concurrent_creates_with_one_episode_id_admit_exactly_one(serve):
+    gate = threading.Event()
+
+    def slow(info):
+        gate.wait(0.5)                     # 工厂在锁外慢跑:登记必须先于它,否则两条都会通过检查
+        return _scripted(info)
+
+    _, connect = serve(slow)
+    results = []
+    workers = [threading.Thread(target=lambda: results.append(_try_open(connect, episode_id="same")))
+               for _ in range(2)]
+    for w in workers:
+        w.start()
+    for w in workers:
+        w.join(5)
+    assert sorted(r for r, _ in results) == ["ready", "role_backend_unavailable"]
+    for _, client in results:
+        client.abort()
+
+
+def test_concurrent_creates_do_not_exceed_the_cap_with_a_lingering_session(serve, tmp_path):
+    stuck, gate, calls = _Stuck(), threading.Event(), []
+
+    def factory(info):
+        calls.append(info.session_id)
+        if len(calls) == 1:
+            return SessionResources(backends={"b": stuck})
+        gate.wait(0.5)
+        return _scripted(info)
+
+    server, connect = serve(factory, max_workers=2, backend_timeout_s=0.1,
+                            resource_join_timeout_s=0.2, linger_retry_s=0.05)
+    first = connect()
+    _open(first)
+    first.submit_turn("嗯")
+    first.drain_until_end()
+    assert _eventually(lambda: server.servicer.lingering_count() == 1)
+    results = []
+
+    def _open_retrying():
+        # 上一条 RPC 的 worker 退出 gRPC 并发计数要一点时间;只对 rpc_resource_exhausted 重试,最长 3 秒;固定 sleep 在慢机器上会偶发失败
+        deadline = time.monotonic() + 3.0
+        while True:
+            reason, client = _try_open(connect)
+            if reason != "rpc_resource_exhausted" or time.monotonic() > deadline:
+                return reason, client
+            client.abort()
+            time.sleep(0.02)
+
+    workers = [threading.Thread(target=lambda: results.append(_open_retrying())) for _ in range(2)]
+    for w in workers:
+        w.start()
+    for w in workers:
+        w.join(5)
+    assert sorted(r for r, _ in results) == ["ready", "role_backend_unavailable"]   # 1 活动 + 1 滞留 = 上限
+    for _, client in results:
+        client.abort()
+    stuck.release.set()
+
+
+def test_a_factory_that_raises_releases_its_admission(serve):
+    calls = []
+
+    def flaky(info):
+        calls.append(info)
+        if len(calls) == 1:
+            raise OSError("first one fails")
+        return _scripted(info)
+
+    _, connect = serve(flaky, max_workers=1)
+    assert _try_open(connect, episode_id="e1")[0] == "role_backend_failure"
+    assert _eventually(lambda: _try_open(connect, episode_id="e1")[0] == "ready")   # 名额与 id 都已放回
+
+
+def test_a_failure_after_the_factory_returned_releases_its_admission(serve, tmp_path):
+    events, calls = [], []
+
+    def incomplete_once(info):
+        calls.append(info)
+        copy_dir = tmp_path / info.session_id
+        copy_dir.mkdir()
+        backends = {} if len(calls) == 1 else {"b": ScriptedBackend({"b": ["一", "二"]})}   # 第一次漏了 b 位
+        return _Recording(events, copy_dir, backends)
+
+    _, connect = serve(incomplete_once, max_workers=1)
+    assert _try_open(connect, episode_id="e1")[0] == "role_backend_failure"
+    assert _eventually(lambda: "close" in events)
+    assert _eventually(lambda: _try_open(connect, episode_id="e1")[0] == "ready")   # finally 收尾后名额与 id 放回
+
+
+def test_an_admission_refusal_carries_fixed_text_never_an_exception_body(serve, tmp_path):
+    events, stuck = [], _Stuck()
+    server, connect = serve(_recording_factory(tmp_path, events, backend_for=lambda: stuck), max_workers=1,
+                            backend_timeout_s=0.1, resource_join_timeout_s=0.2, linger_retry_s=60.0)
+    client = connect()
+    _open(client, episode_id="e1")
+    client.submit_turn("嗯")
+    client.drain_until_end()
+    assert _eventually(lambda: server.servicer.lingering_count() == 1)
+    details = []
+
+    def refused():
+        probe = connect()
+        try:
+            _open(probe)
+        except SessionRejectedError as exc:
+            details.append((exc.reason, exc.detail))
+            return True
+        except grpc.RpcError:
+            return False                  # gRPC 自己的并发计数还没放开,再试
+        return False
+
+    assert _eventually(refused)
+    reason, detail = details[0]
+    assert reason == "role_backend_unavailable"
+    assert detail == "0 active and 1 lingering sessions reach the cap 1"
+    stuck.release.set()
+
+
+def test_a_create_restarts_a_reaper_that_could_not_start_so_the_lingering_slot_is_reclaimed(
+        serve, tmp_path, monkeypatch, caplog):
+    real_start = threading.Thread.start
+    can_start, started = threading.Event(), []
+
+    def start(self):
+        if self.name == "session-reaper":
+            if not can_start.is_set():
+                raise RuntimeError(_SECRET)
+            started.append(self)
+        return real_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", start)
+    events, stuck = [], _Stuck()
+    server, connect = serve(_recording_factory(tmp_path, events, backend_for=lambda: stuck), max_workers=1,
+                            backend_timeout_s=0.1, resource_join_timeout_s=0.2, linger_retry_s=0.05)
+    client = connect()
+    session_id = _open(client)
+    with caplog.at_level(logging.WARNING, logger="simulator.realtime.servicer"):
+        client.submit_turn("嗯")
+        assert client.drain_until_end().terminated_reason == "role_backend_timeout"
+        assert _eventually(lambda: server.servicer.lingering_count() == 1)
+        assert _eventually(lambda: any("could not start" in r.getMessage() for r in caplog.records))
+        stuck.release.set()                       # 后端已经退出了,只差回收线程来收
+        assert started == [] and server.servicer.lingering_count() == 1 and "close" not in events
+        can_start.set()                           # 线程现在起得来
+        # 再发一次 create:准入路径见"滞留表非空而没有回收线程"就起一个;此刻名额仍被占,这次创建被拒也要起
+        assert _eventually(lambda: _try_open(connect)[0] == "role_backend_unavailable")
+        assert len(started) == 1
+        assert _eventually(lambda: server.servicer.lingering_count() == 0)
+    assert _eventually(lambda: events[-1:] == ["close"] and not (tmp_path / session_id).exists())
+    assert _eventually(lambda: _try_open(connect)[0] == "ready")      # 名额放开
+    assert _SECRET not in caplog.text
+
+
+def test_a_factory_that_returns_garbage_releases_its_admission(serve):
+    calls = []
+
+    def garbage_once(info):
+        calls.append(info)
+        return None if len(calls) == 1 else _scripted(info)       # 第一次返回 None:契约被破坏
+
+    _, connect = serve(garbage_once, max_workers=1)
+    assert _try_open(connect, episode_id="e1")[0] != "ready"       # 第一条不会成功,具体怎么失败不是本用例要钉的
+    assert _eventually(lambda: _try_open(connect, episode_id="e1")[0] == "ready")   # 登记没有漏

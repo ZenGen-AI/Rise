@@ -64,7 +64,14 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
     join 成功就是 finally 自己关；join 等不到则不关、不删，资源移交滞留表，此后
     只由唯一的回收线程每 linger_retry_s 秒 join(0) 重试，成功才 close 并从表里删掉。
     滞留的资源仍占一个会话名额（设计源 6.2、6.3 节）。quiesce、join、close 抛异常只记日志（类名），
-    不让 finally 抛出 gRPC 线程。"""
+    不让 finally 抛出 gRPC 线程。
+
+    准入（设计源 M19）：_handle_create 在解析情境之后、调工厂之前，在 self._lock 这一把锁里
+    检查"活动数加滞留数小于 max_workers"且 episode_id 没有活动会话，并登记进 _active。
+    两步在同一次持锁里完成，并发的两条 create 不会都通过。不过则以 role_backend_unavailable
+    （T1，瞬态）拒绝，不调工厂。登记在 Interact 的 finally 里释放：收尾关完就删，
+    join 等不到则在移交滞留表的同一次持锁里从 _active 删掉，名额计数不出现空档。
+    max_workers 应与 gRPC 的 maximum_concurrent_rpcs 同值。"""
 
     def __init__(
         self,
@@ -78,6 +85,7 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
         backend_timeout_s: float = 60.0,
         resource_join_timeout_s: float = 60.0,
         linger_retry_s: float = 60.0,
+        max_workers: int = 16,
     ) -> None:
         self._backends_factory = backends_factory
         self._turn_timeout_s = turn_timeout_s
@@ -88,8 +96,10 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
         self._backend_timeout_s = backend_timeout_s
         self._resource_join_timeout_s = resource_join_timeout_s
         self._linger_retry_s = linger_retry_s
-        # 一把锁守护滞留表与回收线程句柄。准入检查（后续任务）读 _lingering，用的也是这把锁。
+        self._max_workers = max_workers
+        # 一把锁守护活动登记、滞留表与回收线程句柄；准入检查在这把锁里读写三者。
         self._lock = threading.Lock()
+        self._active: dict[str, str] = {}          # session_id -> episode_id，已准入且未收尾的会话
         self._lingering: dict[str, SessionResources] = {}
         self._reaper: threading.Thread | None = None
 
@@ -110,6 +120,17 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
         return pb2.ServerMessage(
             end_session=pb2.EndSession(
                 reason="role_backend_failure", episode_id="", failure_detail=detail,
+            )
+        )
+
+    @staticmethod
+    def _unavailable(detail: str) -> pb2.ServerMessage:
+        """准入被拒（名额满、同 episode_id 已有活动会话）。与 _server_fault 同形，原因是
+        role_backend_unavailable：瞬态（T1），名额或 id 过一会儿会放开，调用方可按条重跑。
+        detail 只放固定文案、计数与已过白名单的 episode_id，不放异常正文。"""
+        return pb2.ServerMessage(
+            end_session=pb2.EndSession(
+                reason="role_backend_unavailable", episode_id="", failure_detail=detail,
             )
         )
 
@@ -244,11 +265,16 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
                 # 无论正常结束、客户端断连、流被取消还是工厂之后的启动失败，都走这一处。
                 if resources is not None:
                     self._wind_down(session_id, resources)
+                elif session_id is not None:
+                    # 没有资源可收尾（被拒、工厂抛了，或 _handle_create 在登记之后意外抛出而没把
+                    # resources 带回来）：只把可能残留的准入登记放掉。没登记过则是空操作。
+                    self._release_admission(session_id)
 
     def _handle_create(self, create_session, session_id: str):
         """校验并启动会话。返回 (driver, resources, 要 yield 的消息)：成功为
-        (driver, SessionResources, SessionReady)；工厂调用之前的失败（校验、解析、
-        工厂自己抛异常）为 (None, None, EndSession(...))，此时没有资源可收尾；工厂
+        (driver, SessionResources, SessionReady)；工厂调用之前的失败（校验、解析、准入被拒、
+        工厂自己抛异常）为 (None, None, EndSession(...))，此时没有资源可收尾（准入登记在
+        工厂抛异常时由这里撤销）；工厂
         返回之后的失败（缺后端、SessionDriver 构造或 start 抛）为
         (None, resources, EndSession(...))，资源交给调用方的 finally 收尾，这里不自己
         关。任何失败都绝不让 driver 跑起来——校验必须先于 ACTIVE
@@ -306,6 +332,23 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
                 conflict="", norms=[], purpose=create_session.purpose,
             )
 
+        # 准入：名额与同 episode_id 的检查和登记在同一次持锁里完成，工厂在锁外跑（它可能很慢）。
+        # 先登记再调工厂，并发的第二条 create 才看得到第一条。拒绝的会话没有资源，不收尾。
+        with self._lock:
+            if self._lingering:
+                # 回收线程起不来时条目留在表里、名额一直被占；准入路径顺手补一次启动。
+                self._ensure_reaper_locked()
+            if len(self._active) + len(self._lingering) >= self._max_workers:
+                return None, None, self._unavailable(
+                    f"{len(self._active)} active and {len(self._lingering)} lingering "
+                    f"sessions reach the cap {self._max_workers}"
+                )
+            if episode_id in self._active.values():
+                return None, None, self._unavailable(
+                    f"episode {episode_id!r} already has an active session"
+                )
+            self._active[session_id] = episode_id
+
         try:
             resources = self._backends_factory(SessionInfo(
                 scenario, role_assignment, personas, client_slot, session_id, episode_id,
@@ -314,6 +357,7 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
             logger.exception(
                 "backends_factory raised for scenario %r", create_session.scenario_id
             )
+            self._release_admission(session_id)
             return None, None, self._server_fault(f"backends_factory failed: {exc!r}")
 
         # 工厂契约：必须为每个非客户端角色位返回后端。漏返回会在会话中途
@@ -350,6 +394,7 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
     def _wind_down(self, session_id: str, resources: SessionResources) -> None:
         """会话终态收尾：quiesce → join(有界) → close。只在 Interact 的 finally 里调用，
         所以每份资源的 close 只有一个驱动者；绝不向调用方（gRPC 线程）抛异常，日志只记类名。
+        准入登记（_active）在 close 之后释放，或在移交滞留表的同一次持锁里释放。
 
         join 在 RPC 的 worker 线程里同步进行：客户端在这之前已收到 EndSession，不受影响；
         这段时间该会话仍占 gRPC 的并发名额（设计源 6.3 节）。join 等不到（或 join 自己
@@ -375,6 +420,7 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
                 )
             else:
                 self._close_resources(session_id, resources)
+                self._release_admission(session_id)
                 return
         self._linger(session_id, resources)
 
@@ -387,24 +433,34 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
                 "session %s resources close failed: %s", session_id, type(exc).__name__,
             )
 
-    def _linger(self, session_id: str, resources: SessionResources) -> None:
-        """把等不到退出的资源放进滞留表，没有活着的回收线程就起一个。回收线程句柄由回收线程
-        自己在持锁时清空，所以这里看到 None 就一定要起新的，不会出现"线程刚决定退出、
-        新条目被漏掉"。"""
+    def _release_admission(self, session_id: str) -> None:
+        """放掉一条准入登记（持锁）。没登记过则是空操作。"""
         with self._lock:
+            self._active.pop(session_id, None)
+
+    def _linger(self, session_id: str, resources: SessionResources) -> None:
+        """把等不到退出的资源放进滞留表，没有活着的回收线程就起一个。从 _active 删和放进
+        _lingering 在同一次持锁里，名额计数不出现空档（准入检查同样持这把锁）。"""
+        with self._lock:
+            self._active.pop(session_id, None)
             self._lingering[session_id] = resources
-            if self._reaper is not None:
-                return
-            reaper = threading.Thread(
-                target=self._reap_lingering, name="session-reaper", daemon=True,
-            )
-            try:
-                reaper.start()
-            except Exception as exc:
-                # 起不来也不能让异常穿出 finally。句柄不赋值，下一次有会话滞留时会再试。
-                logger.warning("session reaper could not start: %s", type(exc).__name__)
-                return
-            self._reaper = reaper
+            self._ensure_reaper_locked()
+
+    def _ensure_reaper_locked(self) -> None:
+        """没有活着的回收线程就起一个；调用方须持 self._lock。回收线程句柄由回收线程自己在
+        持锁时清空，所以这里看到 None 就一定要起新的，不会出现"线程刚决定退出、新条目被漏掉"。
+        起不来也不抛：只记类名，句柄不赋值，下一次有会话滞留或下一次准入时会再试。"""
+        if self._reaper is not None:
+            return
+        reaper = threading.Thread(
+            target=self._reap_lingering, name="session-reaper", daemon=True,
+        )
+        try:
+            reaper.start()
+        except Exception as exc:
+            logger.warning("session reaper could not start: %s", type(exc).__name__)
+            return
+        self._reaper = reaper
 
     def lingering_count(self) -> int:
         """滞留表里的资源数（持锁读）。"""
