@@ -302,6 +302,7 @@ def test_create_session_gets_the_deployment_purpose_the_agent_slot_and_a_fresh_a
     ({"end_reason": "timeout"}, "timeout"),
     ({"end_reason": "role_backend_timeout"}, "role_backend_timeout"),
     ({"end_reason": "role_backend_unavailable"}, "role_backend_unavailable"),
+    ({"end_reason": "role_memory_unavailable"}, "role_memory_unavailable"),
     ({"end_reason": "persistence_failed"}, "persistence_failed"),
     ({"create_error": _Unavailable()}, "transport_unavailable"),
 ])
@@ -325,6 +326,7 @@ def test_transient_retries_are_bounded(store):
     ({"create_error": SessionRejectedError("invalid_session", "bad")}, "invalid_session"),
     ({"end_reason": "role_backend_failure"}, "role_backend_failure"),
     ({"end_reason": "role_backend_rejected"}, "role_backend_rejected"),
+    ({"end_reason": "role_memory_failure"}, "role_memory_failure"),
     ({"end_reason": "client_disconnected"}, "client_disconnected"),
 ])
 def test_non_transient_failures_are_not_rerun(store, plan, reason):

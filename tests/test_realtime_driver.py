@@ -1,8 +1,13 @@
+import pytest
+
 from simulator.datamodel import (
     Scenario, RoleSlot, Persona, RoleBinding, RoleAssignment,
 )
 from simulator.backends import ScriptedBackend
-from simulator.realtime.backend_timeout import RoleBackendRejectedError, RoleBackendUnavailableError
+from simulator.realtime.backend_timeout import (
+    RoleBackendRejectedError, RoleBackendUnavailableError,
+    RoleMemoryFailureError, RoleMemoryUnavailableError,
+)
 from simulator.realtime.driver import SessionDriver, DriverEvent
 from simulator.realtime.session import SessionState
 
@@ -127,6 +132,40 @@ def test_driver_role_backend_unavailable_transitions_to_failed_with_its_own_reas
     assert driver.poll_event(timeout_s=2.0).kind == "turn"
     ev = driver.poll_event(timeout_s=2.0)
     assert (ev.kind, ev.payload) == ("failed", "role_backend_unavailable")
+    assert driver.state == SessionState.FAILED
+
+
+class _TranslatedUnavailable(RoleMemoryUnavailableError):
+    """模拟第 3 步组合根的子类:驱动器只认 simulator 的基类。"""
+
+
+class _TranslatedFailure(RoleMemoryFailureError):
+    """同上,确定性一侧的子类。"""
+
+
+@pytest.mark.parametrize("error,reason", [
+    (RoleMemoryUnavailableError("embedding endpoint down"), "role_memory_unavailable"),
+    (_TranslatedUnavailable("embedding endpoint down"), "role_memory_unavailable"),
+    (RoleMemoryFailureError("store is corrupt"), "role_memory_failure"),
+    (_TranslatedFailure("store is corrupt"), "role_memory_failure"),
+])
+def test_driver_maps_memory_errors_to_their_own_reasons(error, reason):
+    """记忆异常不被通用异常分支吞成 role_backend_failure:T1 与 T2 各有自己的终止原因。"""
+    class MemoryBackend:
+        def respond(self, persona, scenario, history, speaker_slot):
+            raise error
+
+    scenario, assignment, personas = _fixture(max_turns=2)
+    driver = SessionDriver(
+        scenario, assignment, personas,
+        server_backends={"b": MemoryBackend()},
+        client_driven_slot="a", episode_id="ep-mem", turn_timeout_s=2.0,
+    )
+    driver.start()
+    driver.submit_turn("candidate turn 1", None)
+    assert driver.poll_event(timeout_s=2.0).kind == "turn"
+    ev = driver.poll_event(timeout_s=2.0)
+    assert (ev.kind, ev.payload) == ("failed", reason)
     assert driver.state == SessionState.FAILED
 
 

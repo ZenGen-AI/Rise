@@ -56,7 +56,8 @@ class EnvironmentServiceClient:
     重建出的 Episode.terminated_reason 就是服务端 EndSession.reason。正常结束：max_turns、goal_reached、
     client_terminated。失败的几种里，调用方要分 T1（整条重跑有望成功）与 T2（重跑无益）：
     T1 是 timeout（含客户端相邻消息等待超时，见 message_timeout_s）、role_backend_timeout、
-    role_backend_unavailable（对手 API 限流、5xx、连不上）、persistence_failed；T2 是 invalid_session、role_backend_rejected（对手 API 明确拒绝，4xx 且非 429）；
+    role_backend_unavailable（对手 API 限流、5xx、连不上）、role_memory_unavailable（对手位记忆暂时不可用）、persistence_failed；
+    T2 是 invalid_session、role_backend_rejected（对手 API 明确拒绝，4xx 且非 429）、role_memory_failure（对手位记忆确定性失败）；
     role_backend_failure 分不出 T1 与 T2（后端抛了说不清的异常，或工厂/解析器出错），调用方保守地不重跑；
     client_disconnected 是客户端自己断开。"""
 

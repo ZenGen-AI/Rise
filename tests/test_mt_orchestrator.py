@@ -655,9 +655,10 @@ class _RejectedSource:
         )
 
 
-@pytest.mark.parametrize("reason", ["invalid_session", "role_backend_rejected"])
+@pytest.mark.parametrize("reason", ["invalid_session", "role_backend_rejected", "role_memory_failure"])
 def test_a_deterministic_rejection_fails_the_run_and_is_never_retried(store, reason):
-    """invalid_session(请求本身有问题)与 role_backend_rejected(对手 API 明确拒绝)同属确定性:写 failed,不续训。"""
+    """invalid_session(请求本身有问题)、role_backend_rejected(对手 API 明确拒绝)与 role_memory_failure
+    (对手位记忆确定性失败)同属确定性:写 failed,不续训。"""
     source = _RejectedSource(reason)
     with pytest.raises(RolloutFailedError):
         _go(store, _interact_cfg(), MockExecutor(), make_sources=_stub_sources(store, source))

@@ -340,12 +340,13 @@ def test_a_goal_reached_episode_is_accepted_like_max_turns(store):
         ({"end_reason": "timeout"}, "timeout"),
         ({"end_reason": "role_backend_timeout"}, "role_backend_timeout"),
         ({"end_reason": "role_backend_unavailable"}, "role_backend_unavailable"),
+        ({"end_reason": "role_memory_unavailable"}, "role_memory_unavailable"),
         ({"end_reason": "persistence_failed"}, "persistence_failed"),
         ({"create_error": _Unavailable()}, "transport_unavailable"),
         ({"submit_error": _Unavailable()}, "transport_unavailable"),
     ],
-    ids=["timeout", "role_backend_timeout", "role_backend_unavailable", "persistence_failed",
-         "unavailable_on_create", "unavailable_on_submit"],
+    ids=["timeout", "role_backend_timeout", "role_backend_unavailable", "role_memory_unavailable",
+         "persistence_failed", "unavailable_on_create", "unavailable_on_submit"],
 )
 def test_a_transient_failure_is_retried_and_recorded_and_the_half_episode_is_not_kept(store, plan, reason):
     factory = _FakeFactory(plan)
@@ -386,12 +387,13 @@ def test_zero_retries_means_a_single_attempt(store):
         ({"create_error": SessionRejectedError("role_backend_failure", "factory exploded")}, "role_backend_failure"),
         ({"end_reason": "role_backend_failure"}, "role_backend_failure"),
         ({"end_reason": "role_backend_rejected"}, "role_backend_rejected"),
+        ({"end_reason": "role_memory_failure"}, "role_memory_failure"),
         ({"end_reason": "client_disconnected"}, "client_disconnected"),
         ({"create_error": _Exhausted()}, "transport_resource_exhausted"),
         ({"submit_error": RuntimeError("server closed the stream without sending EndSession")}, "client_protocol_error"),
     ],
-    ids=["invalid_session", "factory_fault", "backend_failure", "backend_rejected", "disconnected", "exhausted",
-         "protocol_error"],
+    ids=["invalid_session", "factory_fault", "backend_failure", "backend_rejected", "memory_failure",
+         "disconnected", "exhausted", "protocol_error"],
 )
 def test_non_transient_failures_are_not_retried(store, plan, reason):
     factory = _FakeFactory(plan)

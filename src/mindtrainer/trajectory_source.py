@@ -65,13 +65,15 @@ class BatchTrajectorySource:
 
 # 只有这两种终止原因的 episode 进 batch。超时、后端失败、断连产生的半截 episode 一律不进。
 _ACCEPTED_REASONS = frozenset({"max_turns", "goal_reached"})
-# T1 瞬态:服务端报告的两种超时、对手 API 暂时不可用(role_backend_unavailable:429、5xx、连不上),
-# 加上传输层 UNAVAILABLE(见 _classify_client_error)。
+# T1 瞬态:服务端报告的两种超时、对手 API 暂时不可用(role_backend_unavailable:429、5xx、连不上)、
+# 对手位记忆暂时不可用(role_memory_unavailable),加上传输层 UNAVAILABLE(见 _classify_client_error)。
+# role_memory_failure 是确定性的(T2),不在这里。
 # persistence_failed:会话跑完了,但服务端落盘钩子失败,树里没有这条 episode。整条重跑。
 # mindagent.deployment.TRANSIENT_REASONS 是这个集合的复制(mindagent 不导入 mindtrainer),
 # tests/test_interact_parity.py 钉住两边相等。
 _TRANSIENT_REASONS = frozenset({
-    "timeout", "role_backend_timeout", "role_backend_unavailable", "persistence_failed",
+    "timeout", "role_backend_timeout", "role_backend_unavailable", "role_memory_unavailable",
+    "persistence_failed",
 })
 
 
@@ -138,10 +140,11 @@ class InteractTrajectorySource:
 
     失败处理(补充 E.4:失败会话整条重跑,不续接):
     - 只有 terminated_reason ∈ {max_turns, goal_reached} 的 episode 进 batch。
-    - T1 瞬态(timeout、role_backend_timeout、role_backend_unavailable、persistence_failed、传输层 UNAVAILABLE)原样重跑,上限
-      max_retries_per_episode,每次失败记入 metadata["failed_attempts"]。
-    - 其余(invalid_session、role_backend_rejected、role_backend_failure 等)不重试,抛 RolloutFailedError。
+    - T1 瞬态(timeout、role_backend_timeout、role_backend_unavailable、role_memory_unavailable、persistence_failed、
+      传输层 UNAVAILABLE)原样重跑,上限 max_retries_per_episode,每次失败记入 metadata["failed_attempts"]。
+    - 其余(invalid_session、role_backend_rejected、role_memory_failure、role_backend_failure 等)不重试,抛 RolloutFailedError。
       role_backend_rejected 是对手 API 明确拒绝(4xx,429 除外),确定性,T2:重试无益,编排器据此写 failed。
+      role_memory_failure 是对手位记忆的确定性失败,同样是 T2,编排器同样据此写 failed。
       role_backend_failure 在服务端同时覆盖"后端确定性异常"和"工厂/解析器故障",
       光看 reason 分不出 T1 还是 T2,所以保守地不重试。
     - 策略自己抛的异常不重试、不包装:会话先 abort()(服务端按断连判 FAILED、不落盘),

@@ -11,6 +11,7 @@ from simulator.runner import run_episode
 from simulator.realtime.backend import ClientDrivenBackend, SessionEndRequested, TurnTimeoutError
 from simulator.realtime.backend_timeout import (
     RoleBackendRejectedError, RoleBackendTimeoutError, RoleBackendUnavailableError,
+    RoleMemoryFailureError, RoleMemoryUnavailableError,
 )
 from simulator.realtime.session import SessionState, assert_transition
 
@@ -20,7 +21,8 @@ class DriverEvent:
     """SessionDriver 经 outbox 转发给 gRPC 主循环的事件。
     kind="turn" → payload: TurnRecord；kind="closed" → payload: Episode；
     kind="failed" → payload: str（终止原因，如 "timeout"/"role_backend_failure"/
-    "role_backend_timeout"/"role_backend_unavailable"/"role_backend_rejected"/"client_disconnected"）。"""
+    "role_backend_timeout"/"role_backend_unavailable"/"role_backend_rejected"/
+    "role_memory_unavailable"/"role_memory_failure"/"client_disconnected"）。"""
 
     kind: str
     payload: Any
@@ -156,6 +158,21 @@ class SessionDriver:
             assert_transition(self.state, SessionState.FAILED)
             self.state = SessionState.FAILED
             self._outbox.put(DriverEvent(kind="failed", payload="role_backend_rejected"))
+            return
+        except RoleMemoryUnavailableError:
+            # 角色位的记忆暂时不可用（Starling 抽取/嵌入端点超时、连不上，T1）：调用方可以按条重跑。
+            # simulator 不认 actio.MemoryFailureError（依赖方向不允许），组合根的转换后端改抛本基类的子类，
+            # 这里按 isinstance 落进来；必须在下方通用 Exception 之前，否则会被吞成 role_backend_failure。
+            assert_transition(self.state, SessionState.FAILED)
+            self.state = SessionState.FAILED
+            self._outbox.put(DriverEvent(kind="failed", payload="role_memory_unavailable"))
+            return
+        except RoleMemoryFailureError:
+            # 角色位的记忆确定性失败（T2）：同样的输入再来还是同样的结果，重试无益。单独的终止原因，
+            # 不并入 role_backend_failure（后者在服务端同时覆盖工厂/解析器故障，会被译成延后反复重试）。
+            assert_transition(self.state, SessionState.FAILED)
+            self.state = SessionState.FAILED
+            self._outbox.put(DriverEvent(kind="failed", payload="role_memory_failure"))
             return
         except Exception:
             assert_transition(self.state, SessionState.FAILED)
