@@ -342,7 +342,11 @@ def test_an_empty_interlocutor_passes_validation_but_the_stand_in_refusal_is_t2_
     _admit(store, mem)
     assert store.read_product(proposal_file(PID)).status == "approved"
     fr = store.read_product(failure_record_file("run-003", f"admit-{PID}"))
-    assert (fr.payload["category"], fr.payload["reason"]) == ("T2", f"remember {KEY}: ActioDataError")
+    reason = fr.payload["reason"]
+    assert fr.payload["category"] == "T2" and reason.startswith(f"remember {KEY}: ActioDataError")
+    # 终审 M-6:点明替身收不了一般事实,否则人看不出提案为什么一直停在 approved;不带任何正文
+    assert "general fact" in reason and "interlocutor" in reason
+    assert MEMORY["text"] not in reason
     assert mem.store.digest("pa") == before and mem.store.pending_events("pa") == []
 
 

@@ -136,6 +136,19 @@ def test_without_an_episode_id_the_request_leaves_it_empty_and_the_local_id_stay
     assert client.drain_until_end().id == "ep-sess-fake"
 
 
+def test_an_empty_episode_id_is_refused_before_anything_is_sent():
+    # 空串在 proto3 里与"没给"分不出,服务端会悄悄改名为 ep-<session_id>,与本地 id 分叉
+    stub = _FakeStub([_ready("sess-fake")])
+    client = EnvironmentServiceClient(stub)
+    with pytest.raises(ValueError, match="episode_id"):
+        client.create_session(
+            scenario_id="s1", role_assignment=_assignment(), personas=_personas(),
+            purpose="training", client_driven_slot="a", episode_id="",
+        )
+    assert not client.closed
+    client.abort()
+
+
 @pytest.fixture
 def serve():
     resources = []

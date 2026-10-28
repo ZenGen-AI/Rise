@@ -574,6 +574,17 @@ def test_a_write_that_raises_leaves_the_state_alone_so_the_same_history_is_resen
     assert (t["memory"]["remembered"], t["memory"]["extraction_failed"]) == ("1", "0")  # 抛出那次不计数
 
 
+def test_a_shorter_history_does_not_move_the_written_turn_back_so_old_turns_are_not_resent():
+    # seen_turn 单调:调用方给了一份更短的 history(重连重建只到一半)之后,已写过的回合不再重发
+    port = RecordingPort()
+    inst = _ported(port, episode_id="ep")
+    inst.respond(_persona(), _scenario(), [B0, A1, B2], "a")
+    inst.respond(_persona(), _scenario(), [B0], "a")
+    port.log.clear()
+    inst.respond(_persona(), _scenario(), [B0, A1, B2, A3, B4], "a")
+    assert [e.key for e in _events(port.log)] == ["ep#4"]
+
+
 def test_with_the_file_store_the_round_prefixed_key_lands_and_close_abandons_nothing(tmp_path):
     store = FileTupleStore(tmp_path, extraction_failure=lambda event: "timeout")
     inst = instantiate(EchoGuidance(), skills=[], memory=store.open("pa"), episode_id="round-7/deploy-m-sc-0",

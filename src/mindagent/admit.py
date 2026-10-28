@@ -166,10 +166,13 @@ def make_admit_proposal_handler(*, memory_store: DeploymentMemoryStore, memory_l
                     # 不改提案、不放弃事件:留在 approved,下一 tick 重入同 key 补收据(只报类名)。
                     # ActioDataError:库拒收这条事件(替身要求 interlocutor 非空),登记之前就拒,库没动;
                     # 不接的话它从处理器漏出去打崩守护进程。冲突后 abandon_event 也抛(同 key 已提交)时落在这里
+                    why = f"remember {key}: {type(exc).__name__}"
+                    if isinstance(exc, ActioDataError) and d["interlocutor"] == "":
+                        # 终审 M-6:点明原因,否则人看不出提案为什么一直停在 approved(仍不带正文)
+                        why += " (the stand-in library cannot store a general fact: interlocutor is empty)"
                     fail_once(store, run_id, task_id=task_id,
                               category="T1" if getattr(exc, "transient", False) else "T2",
-                              point="mindagent.admit.memory", retries=0,
-                              reason=f"remember {key}: {type(exc).__name__}")
+                              point="mindagent.admit.memory", retries=0, reason=why)
                     return
                 if outcome.failed and statements:
                     fail_once(store, run_id, task_id=task_id, category="T2", point="mindagent.admit.memory",

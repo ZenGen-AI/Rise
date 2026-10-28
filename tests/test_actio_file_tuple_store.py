@@ -298,7 +298,7 @@ def test_every_management_call_validates_the_persona_id(tmp_path):
     for call in calls:
         with pytest.raises(ActioDataError, match="persona_id"):
             call()
-    assert not (tmp_path / "b.json").exists() and not list((tmp_path / "lib").iterdir())
+    assert not (tmp_path / "b.json").exists() and not (tmp_path / "lib").exists()   # 构造也不建目录(终审 M-1)
 
 
 def test_a_closed_file_port_raises_closed_on_every_method(tmp_path):
@@ -394,3 +394,14 @@ def test_two_ports_on_one_persona_both_have_to_close_before_a_restore(tmp_path):
         store.restore_from("pa", tmp_path / "start.json")
     second.close()
     assert store.restore_from("pa", tmp_path / "start.json") == TupleMemory().digest()
+
+
+def test_constructing_a_store_touches_no_disk_and_the_first_write_creates_the_root(tmp_path):
+    # 终审 M-1:装配在预检之前就构造替身;预检失败(退出码 2)时不能在 .git 里留下空目录
+    root = tmp_path / "git" / "rismforge-memory" / "deploy"
+    store = FileTupleStore(root)
+    assert not (tmp_path / "git").exists()
+    assert store.pending_events("pa") == [] and store.digest("pa") == FileTupleStore(tmp_path / "x").digest("pa")
+    assert not (tmp_path / "git").exists()                                # 读空库也不建
+    store.remember_event("pa", "k#0", "pb：一", interlocutor="pb")
+    assert (root / "pa.json").is_file()

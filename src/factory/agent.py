@@ -11,6 +11,7 @@ agent.yaml 是组合根自己的配置信封(control-plane/config/agent.yaml),�
 from __future__ import annotations
 
 import logging
+import math
 import threading
 from collections import deque
 from collections.abc import Callable
@@ -136,7 +137,8 @@ class AgentRuntime:
     并把"删这条路由"放进资源的 closers。落盘钩子只查 session_id 的路由:登记过的会话把 episode 写进开会话时的那个 run,
     注销情境不影响已经在跑的会话;没登记的(部署会话)没有路由,钩子不碰,仍由 MindAgent 驱动器自己落盘,
     两边的 episode 不混写、不重复写。两把锁:_lock 守护登记表、通道与服务端的启停(close() 持它停服务端并等在途处理器退出);
-    _routes_lock 只守护 _session_runs。处理器收尾时跑的"删路由"与钩子里的路由查询只取 _routes_lock、绝不取 _lock,
+    _routes_lock 只守护 _session_runs,_failures_lock 只守护 episode_write_failures 的追加。处理器收尾时跑的"删路由"、
+    钩子里的路由查询与失败追加只取各自的小锁、绝不取 _lock,
     否则 close() 持 _lock 等处理器、处理器等 _lock,关停就挂住;close() 不取 _routes_lock。取锁顺序只有一个方向:
     先 _lock 后 _routes_lock(工厂读登记表与记路由在同一次持 _lock 里完成)。落盘失败先把描述记进 episode_write_failures(只含类名与 id,有上限的 deque,只留最近 100 条),
     再把原异常抛回 servicer:servicer 据此给客户端报 persistence_failed、不给 episode_id,轨迹源把它当瞬时失败重跑。"""
@@ -146,6 +148,15 @@ class AgentRuntime:
                  message_timeout_s: float | None = None,
                  stub_factory=pb2_grpc.EnvironmentServiceStub,
                  opponent_backend_factory: Callable[[RoleBinding, Scenario], ModelBackend] | None = None) -> None:
+        # 与 EnvironmentServiceClient 同一判法,在这里先判:否则要到第一次 client_factory() 才抛,那时 channel 已造好、
+        # 还没进 _channels,每次失败漏一个
+        if message_timeout_s is not None and not (
+            isinstance(message_timeout_s, (int, float)) and not isinstance(message_timeout_s, bool)
+            and math.isfinite(message_timeout_s) and message_timeout_s > 0
+        ):
+            raise ValueError(
+                f"message_timeout_s must be a finite positive number or None, got {message_timeout_s!r}"
+            )
         self._store = store
         self._lines = list(opponent_lines)
         self._timeout = turn_timeout_s
@@ -162,7 +173,9 @@ class AgentRuntime:
         # 可能与持 _lock 停服务端的 close() 同时发生,所以不能取 _lock。取锁顺序:先 _lock 后 _routes_lock。
         self._routes_lock = threading.Lock()
         self._session_runs: dict[str, str] = {}
-        # 每条一句描述,只含类名与 id,不含异常文字;只留最近 MAX_WRITE_FAILURES_KEPT 条(最早的先丢)
+        # 每条一句描述,只含类名与 id,不含异常文字;只留最近 MAX_WRITE_FAILURES_KEPT 条(最早的先丢)。
+        # 追加在钩子(gRPC 处理器线程)里,有自己的小锁:不能取 _lock(见 _on_session_closed)
+        self._failures_lock = threading.Lock()
         self.episode_write_failures: deque[str] = deque(maxlen=MAX_WRITE_FAILURES_KEPT)
 
     @property
@@ -179,8 +192,9 @@ class AgentRuntime:
 
     @interact_deadline_s.setter
     def interact_deadline_s(self, value: float) -> None:
-        """改之后新造的客户端(client_factory 构造 DeadlineStub 时读)用新值,已造好的不回头改。
-        调和循环一次只派一条指令,同一时刻只有一个 run 在用这个运行时,所以一个可变值就够,不必按会话记。"""
+        """改之后新造的、没给 deadline_s 的客户端(client_factory 构造 DeadlineStub 时读)用新值,已造好的不回头改。
+        调用方要逐个给流 deadline 时用 client_factory(deadline_s=...),不改这个缺省;src 里已经没有调用方改它,
+        只为测试与手工调试保留。"""
         with self._lock:
             self._deadline = value
 
@@ -196,9 +210,9 @@ class AgentRuntime:
             self._sessions.pop(scenario_id, None)
 
     def _on_session_closed(self, session_id: str, episode: Episode) -> None:
-        """服务端的落盘钩子,跑在 gRPC 线程池的线程里。只取 _routes_lock 查 session_id 的路由,不取 _lock,写文件在锁外:
-        close() 持 _lock 停服务端并等它停完,钩子若取 _lock 或持锁写文件,两边会互相等。写失败记录后原样再抛。
-        钩子在 servicer 收尾关资源之前调用,所以路由在落盘时一定还在。"""
+        """服务端的落盘钩子,跑在 gRPC 线程池的线程里。查路由只取 _routes_lock,写失败时往清单追加只取 _failures_lock,
+        两处都不取 _lock,写文件在锁外:close() 持 _lock 停服务端并等它停完,钩子若取 _lock 或持锁写文件,两边会互相等。
+        写失败记录后原样再抛。钩子在 servicer 收尾关资源之前调用,所以路由在落盘时一定还在。"""
         with self._routes_lock:
             run_id = self._session_runs.get(session_id)
         if run_id is None:
@@ -209,7 +223,7 @@ class AgentRuntime:
             # 只记类名、episode id 与 run id:异常文字可能带远端地址或凭证。
             detail = f"{type(exc).__name__} writing episode {episode.id} for run {run_id}"
             logger.error("episode write failed: %s", detail)
-            with self._lock:
+            with self._failures_lock:
                 self.episode_write_failures.append(detail)
             # 必须再抛:servicer 看到钩子抛错才会把结束原因改报 persistence_failed 并清空 episode_id,
             # 轨迹源据此整条重跑。吞掉的话客户端收到正常的结束原因与 episode id,把树里没有的 episode 当成已落盘。

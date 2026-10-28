@@ -139,7 +139,10 @@ class EnvironmentServiceClient:
 
         episode_id 是逻辑 episode id:给了就随 CreateSession 发给服务端,本地重建的
         Episode.id 也用它;不给则服务端用 ep-<session_id>,本地同样如此。格式由服务端
-        判(invalid_session),客户端不校验。"""
+        判(invalid_session),客户端只拒空串:proto3 分不出空串与"没给",服务端会悄悄改用
+        ep-<session_id>,本地 id 就与服务端分叉了。空串抛 ValueError,什么都不发。"""
+        if episode_id == "":
+            raise ValueError("episode_id must be a non-empty string or None, got ''")
         cs = pb2.CreateSession(
             scenario_id=scenario_id,
             role_assignment=role_assignment_to_proto(role_assignment),

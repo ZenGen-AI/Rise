@@ -408,8 +408,9 @@ class FileTupleStore:
         *,
         extraction_failure: Callable[[MemoryEvent], str | None] | None = None,
     ) -> None:
+        # 构造不碰磁盘(终审 M-1):装配在预检之前就造替身,预检失败时不能在 .git 里留下空目录;
+        # 根目录由第一次写(_write_ledger)建
         self._root = Path(root)
-        self._root.mkdir(parents=True, exist_ok=True)
         self._extraction_failure = extraction_failure
         self._open: dict[str, int] = {}  # 每个人格打开着的端口数
 

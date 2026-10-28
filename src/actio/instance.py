@@ -224,7 +224,8 @@ class ActioInstance:
         state.extraction_failed += failed
         state.retry = tuple(retry)
         if history:
-            state.seen_turn = max(t.turn_index for t in history)
+            # 单调:调用方给了更短的 history(比如重连重建到一半)也不回退,已写过的回合不再重发
+            state.seen_turn = max(state.seen_turn, max(t.turn_index for t in history))
         _guard(self.memory.embed_pending)
 
     def close(self) -> None:

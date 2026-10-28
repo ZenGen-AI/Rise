@@ -1,6 +1,7 @@
 """六个处理器构造器(任务 107):每个键都接到计划 3、5、7 的真实处理器;开关值只有一个来源。"""
 import subprocess
 import sys
+import threading
 
 import pytest
 
@@ -768,6 +769,41 @@ def test_a_failing_write_is_recorded_and_surfaces_to_the_client_as_persistence_f
         runtime.close()
 
 
+def test_a_write_failure_is_recorded_without_taking_the_runtime_lock(store, monkeypatch):
+    """close() 持 _lock 等 server.stop().wait(),钩子的失败分支若也取 _lock 就会与之互等;它只取自己的小锁。"""
+    import factory.agent as agent_mod
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(agent_mod, "write_episode", lambda *a: (_ for _ in ()).throw(OSError("disk full")))
+    runtime = AgentRuntime(store, ("hi",))
+    runtime._session_runs["sess-1"] = "run-int"
+    done = threading.Event()
+
+    def hook():
+        with pytest.raises(OSError):
+            runtime._on_session_closed("sess-1", SimpleNamespace(scenario_id="s-int", id="ep-1"))
+        done.set()
+
+    with runtime._lock:                                      # 模拟 close() 持锁停服务端
+        worker = threading.Thread(target=hook, daemon=True)
+        worker.start()
+        assert done.wait(5.0), "the hook blocked on the runtime lock"
+    assert list(runtime.episode_write_failures) == ["OSError writing episode ep-1 for run run-int"]
+
+
+@pytest.mark.parametrize("bad", [0, -1.0, float("nan"), float("inf")])
+def test_an_invalid_message_timeout_is_refused_at_construction_before_any_channel(store, monkeypatch, bad):
+    """非法的 message_timeout_s 过去要到第一次 client_factory() 才由客户端抛,此时 gRPC channel 已造、没进 _channels,
+    每次失败漏一个。现在构造时就拒,不造任何 channel。"""
+    import factory.agent as agent_mod
+    made = []
+    real = agent_mod.grpc.insecure_channel
+    monkeypatch.setattr(agent_mod.grpc, "insecure_channel", lambda *a, **kw: made.append(a) or real(*a, **kw))
+    with pytest.raises(ValueError, match="message_timeout_s"):
+        AgentRuntime(store, ("hi",), message_timeout_s=bad)
+    assert made == []
+
+
 def test_the_write_failure_list_is_bounded_and_keeps_the_latest(store, monkeypatch):
     """守护进程长跑时每次落盘失败追加一条;不设上限就是慢性泄漏。只留最近的 100 条。"""
     import factory.agent as agent_mod
@@ -894,6 +930,8 @@ def test_a_non_empty_memory_library_exits_2_at_assembly(store, capsys, switch):
     (store.repo_root / rel).write_text("id: mem-a\n", encoding="utf-8")
     assert main(["reconcile", str(store.repo_root), "--once", "--enable", switch], env={}) == 2
     assert "memory_library/ must be empty" in capsys.readouterr().err
+    from controlplane.lock import git_dir
+    assert not (git_dir(store.repo_root) / "rismforge-memory").exists()   # 终审 M-1:预检失败不在 .git 里留目录
 
 
 def test_round_and_admit_handlers_share_one_stand_in_deployment_memory(store, monkeypatch):
