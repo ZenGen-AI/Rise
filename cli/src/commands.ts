@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { join, posix } from "node:path";
 import { readProduct, writeProduct, Envelope } from "./gittree.js";
 
-// spec §1.3 需审核类合法迁移，与 Python controlplane/states.py 保持一致
+// spec §1.3 需审核类合法迁移，与 Python 一侧相同，只少 approved → rejected 一条（那条只归收录处理器）
 const REVIEW_TRANSITIONS: Record<string, string[]> = {
   draft: ["pending_review"],
   pending_review: ["approved", "rejected"],
