@@ -188,7 +188,9 @@ def test_server_fault_at_create_raises_session_rejected_with_role_backend_failur
     with pytest.raises(SessionRejectedError) as exc:
         _client_first_create(client)
     assert exc.value.reason == "role_backend_failure"  # 可按 T1 重试，区别于 invalid_session
-    assert "factory-exploded" in exc.value.detail
+    # detail 只报类名:工厂异常的原文可能带端点或密钥,部署路上还会写进 git 树里的失败记录。
+    assert "ValueError" in exc.value.detail
+    assert "factory-exploded" not in exc.value.detail
     assert client.closed
 
 

@@ -78,16 +78,26 @@ def render_guidance(
     experience: ExperienceActivation | None,
     memory_hits: list[MemoryHit],
 ) -> list[str]:
-    """指导语的固定顺序:选中技能的策略、推理经验的当前一级、召回的记忆。"""
-    lines: list[str] = []
+    """指导语的固定顺序:选中技能的策略、推理经验的当前一级、召回的记忆。
+
+    后端把指导语一行一条拼进 system 消息,所以每条文本里的行界(str.splitlines 认的全集,不只 \\n)
+    各折成一个空格:记忆原文来自对方发言,否则一个换行就能伪造出一条 [skill:...] 要点。
+    折完只剩空白的条目整条丢掉,不产出空行。"""
+    candidates: list[tuple[str, str]] = []
     if selected is not None:
-        lines += [f"[skill:{selected.id}] {text}" for text in selected.policy_instructions]
+        candidates += [(f"[skill:{selected.id}]", text) for text in selected.policy_instructions]
     if experience is not None:
-        lines += [
-            f"[experience:{experience.experience_id}/{experience.tier}] {text}"
+        candidates += [
+            (f"[experience:{experience.experience_id}/{experience.tier}]", text)
             for text in experience.instructions
         ]
-    lines += [f"[memory:{h.id}] {h.text}" for h in memory_hits]
+    candidates += [(f"[memory:{h.id}]", h.text) for h in memory_hits]
+    lines: list[str] = []
+    for tag, text in candidates:
+        folded = " ".join(text.splitlines())
+        if folded.strip():
+            # 标签里的 id 也来自库或端口,整行一起折,保证一条就是一行。
+            lines.append(" ".join(f"{tag} {folded}".splitlines()))
     return lines
 
 

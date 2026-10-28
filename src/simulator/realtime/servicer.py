@@ -304,9 +304,10 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
             try:
                 scenario = self._scenario_resolver(create_session.scenario_id)
             except LookupError as exc:
-                # 未知 scenario_id 是客户端输入错误（T2）
+                # 未知 scenario_id 是客户端输入错误（T2）。detail 只放类名：它发给客户端，
+                # 部署路上还会写进 git 树里的失败记录，异常原文可能带端点或密钥。
                 return None, None, self._invalid_session(
-                    f"unknown scenario {create_session.scenario_id!r}: {exc!r}"
+                    f"unknown scenario {create_session.scenario_id!r}: {type(exc).__name__}"
                 )
             except Exception as exc:
                 # 其余异常（IO/网络等）是服务端依赖故障，可能瞬态（T1）
@@ -314,7 +315,8 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
                     "scenario_resolver raised for scenario %r", create_session.scenario_id
                 )
                 return None, None, self._server_fault(
-                    f"scenario_resolver failed for {create_session.scenario_id!r}: {exc!r}"
+                    f"scenario_resolver failed for {create_session.scenario_id!r}: "
+                    f"{type(exc).__name__}"
                 )
             missing = role_assignment.slot_ids() - {s.slot_id for s in scenario.role_slots}
             if missing:
@@ -358,7 +360,8 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
                 "backends_factory raised for scenario %r", create_session.scenario_id
             )
             self._release_admission(session_id)
-            return None, None, self._server_fault(f"backends_factory failed: {exc!r}")
+            # detail 只放类名(同上);细节在服务端日志。
+            return None, None, self._server_fault(f"backends_factory failed: {type(exc).__name__}")
 
         # 工厂契约：必须为每个非客户端角色位返回后端。漏返回会在会话中途
         # （已发 SessionReady、甚至已有客户端轮次之后）才在 run_episode 里

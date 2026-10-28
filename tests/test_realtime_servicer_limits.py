@@ -135,7 +135,7 @@ def test_backends_factory_exception_is_server_fault_not_invalid_session(start_se
     address = start_server(factory=exploding_factory)
     stream = _Stream(address)
     stream.send(_create_msg())
-    _expect_server_fault(stream, "factory-exploded")
+    _expect_server_fault(stream, "ValueError")  # 只报类名,原文见服务端日志
     stream.close()
 
 
@@ -499,7 +499,7 @@ def test_resolver_unknown_scenario_id_is_invalid_session(start_server):
     address = start_server(scenario_resolver=resolver)
     stream = _Stream(address)
     stream.send(_create_msg(scenario_id="no-such-scenario"))
-    _expect_invalid_session(stream, "no-such-scenario")
+    _expect_invalid_session(stream, "no-such-scenario", "KeyError")
     stream.close()
 
 
@@ -511,5 +511,46 @@ def test_resolver_infrastructure_error_is_server_fault_not_invalid_session(start
     address = start_server(scenario_resolver=resolver)
     stream = _Stream(address)
     stream.send(_create_msg())
-    _expect_server_fault(stream, "scenario-store-unreachable")
+    _expect_server_fault(stream, "OSError")
+    stream.close()
+
+
+_SECRET = "https://user:sk-live-0000@10.9.8.7:8000/v1"
+
+
+def _failure_detail_of_rejected(stream):
+    msg = stream.recv()
+    assert msg.WhichOneof("payload") == "end_session", msg
+    return msg.end_session.reason, msg.end_session.failure_detail
+
+
+@pytest.mark.parametrize("where", ["resolver_lookup", "resolver_other", "factory"])
+def test_create_rejections_report_exception_class_names_never_the_message(start_server, where):
+    """CreateSession 失败的 failure_detail 发给客户端,部署路上还会写进 git 树:只报异常类名。"""
+
+    def resolver(scenario_id):
+        if where == "resolver_lookup":
+            raise KeyError(_SECRET)
+        if where == "resolver_other":
+            raise ConnectionError(_SECRET)
+        return Scenario(
+            id=scenario_id, background="bg", role_slots=[RoleSlot("a", "x"), RoleSlot("b", "y")],
+            conflict="", norms=[], purpose="training",
+        )
+
+    def factory(scenario, assignment, personas, client_driven_slot):
+        raise RuntimeError(_SECRET)
+
+    address = start_server(factory=factory, scenario_resolver=resolver)
+    stream = _Stream(address)
+    stream.send(_create_msg())
+    reason, detail = _failure_detail_of_rejected(stream)
+    expected = {
+        "resolver_lookup": ("invalid_session", "KeyError"),
+        "resolver_other": ("role_backend_failure", "ConnectionError"),
+        "factory": ("role_backend_failure", "RuntimeError"),
+    }[where]
+    assert (reason, expected[1] in detail) == (expected[0], True), detail
+    for piece in ("sk-live-0000", "10.9.8.7", "user:"):
+        assert piece not in detail, detail
     stream.close()
