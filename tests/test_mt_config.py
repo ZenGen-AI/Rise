@@ -1,3 +1,4 @@
+import copy
 import dataclasses
 import json
 
@@ -5,6 +6,7 @@ import pytest
 import yaml
 
 from controlplane.envelope import BigRef, Envelope, OwnerRef
+from memory_fixtures import STAND_IN_RUNTIME, resolved_memory, unresolved_memory
 from mindtrainer.training_config import (
     InvalidTrainingConfigError, RewardConfig, TrainingConfig, config_hash,
     ensure_valid_config, load_config_from_directive, phase_at, total_steps,
@@ -811,3 +813,86 @@ def test_config_hash_keeps_the_formula_existing_records_were_hashed_with(build):
     cfg = build()
     legacy = json.dumps(cfg.to_dict(), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     assert config_hash(cfg) == hashlib.sha256(legacy.encode("utf-8")).hexdigest()
+
+
+# ---------------- memory 段(设计二 Plan A 第 4 步) ----------------
+
+def test_memory_is_written_only_when_present_so_batch_configs_stay_byte_identical():
+    assert "memory" not in _batch().to_dict()
+    assert TrainingConfig.from_dict(_batch().to_dict()).memory is None
+    mem = resolved_memory(["pa", "pb"])
+    cfg = _interact(memory=mem)
+    assert cfg.to_dict()["memory"] == mem
+    assert TrainingConfig.from_dict(cfg.to_dict()).memory == mem
+
+
+def test_to_dict_copies_memory_so_a_caller_cannot_mutate_the_config():
+    cfg = _interact(memory=resolved_memory(["pa", "pb"]))
+    cfg.to_dict()["memory"]["digests"]["pa"] = "x"
+    assert cfg.memory["digests"]["pa"] == "d0"
+
+
+@pytest.mark.parametrize("memory, needle", [
+    ("seed-1", "memory must be a dict"),
+    ({"seed": None, "digests": {}}, "memory must have exactly the keys"),
+    ({"seed": None, "digests": {}, "runtime": {}, "extra": 1}, "memory must have exactly the keys"),
+    ({"seed": "", "digests": {}, "runtime": {}}, "memory.seed must be null or a non-empty str"),
+    ({"seed": 3, "digests": {}, "runtime": {}}, "memory.seed must be null or a non-empty str"),
+    ({"seed": None, "digests": [], "runtime": {}}, "memory.digests must be a dict of str to non-empty str"),
+    ({"seed": None, "digests": {"pa": ""}, "runtime": {}}, "memory.digests must be a dict of str to non-empty str"),
+    ({"seed": None, "digests": {}, "runtime": []}, "memory.runtime must be a dict"),
+    ({"seed": None, "digests": {}, "runtime": {"x": object()}}, "memory must be JSON serializable"),
+])
+def test_a_malformed_memory_section_is_named_not_raised(memory, needle):
+    reason = validate_training_config(_interact(memory=memory))
+    assert reason is not None and needle in reason
+
+
+def test_an_unserializable_memory_is_named_by_config_hash():
+    with pytest.raises(InvalidTrainingConfigError, match="memory must be JSON serializable"):
+        config_hash(_interact(memory={"seed": None, "digests": {}, "runtime": {"x": object()}}))
+
+
+def test_a_batch_config_must_not_carry_memory():
+    assert validate_training_config(_batch(memory=unresolved_memory())) == "memory is only allowed in interact mode"
+
+
+def test_an_unresolved_memory_section_passes_the_strict_and_the_lenient_check():
+    # 调度器写进配置时 digests 与 runtime 留空;点名路在构造期走严格口径,所以严格口径也要放行未解析的段
+    assert validate_training_config(_interact(memory=unresolved_memory())) is None
+    assert validate_pending_interact(_pending(memory=unresolved_memory("seed-1"))) is None
+
+
+def test_a_resolved_memory_section_that_matches_the_bindings_passes():
+    assert validate_training_config(_interact(memory=resolved_memory(["pa", "pb"]))) is None
+
+
+@pytest.mark.parametrize("memory, needle", [
+    ({"seed": None, "digests": {"pa": "d", "pb": "d"}, "runtime": {}},
+     "memory.digests and memory.runtime must be filled together"),
+    ({"seed": None, "digests": {}, "runtime": dict(STAND_IN_RUNTIME)},
+     "memory.digests and memory.runtime must be filled together"),
+    ({"seed": None, "digests": {"pa": "d"}, "runtime": dict(STAND_IN_RUNTIME)},
+     "memory.digests must name exactly the bound personas"),
+    ({"seed": None, "digests": {"pa": "d", "pb": "d", "px": "d"}, "runtime": dict(STAND_IN_RUNTIME)},
+     "memory.digests must name exactly the bound personas"),
+    ({"seed": None, "digests": {"pa": "d", "pb": "d"}, "runtime": {"backend": "stand-in"}},
+     "memory.runtime must have exactly the keys"),
+])
+def test_a_resolved_memory_section_must_match_the_bindings(memory, needle):
+    reason = validate_training_config(_interact(memory=memory))
+    assert reason is not None and needle in reason
+
+
+@pytest.mark.parametrize("change", [
+    lambda m: m["digests"].update(pa="d1"),
+    lambda m: m["runtime"].update(backend="starling"),
+    lambda m: m["runtime"].update(starling_version="0.3.0+abc"),
+    lambda m: m["runtime"].update(embedding={"model": "e2"}),
+    lambda m: m.update(seed="seed-1"),
+], ids=["digest", "backend", "starling_version", "embedding", "seed"])
+def test_config_hash_changes_when_the_starting_memory_or_its_runtime_changes(change):
+    before = resolved_memory(["pa", "pb"])
+    after = copy.deepcopy(before)
+    change(after)
+    assert config_hash(_interact(memory=before)) != config_hash(_interact(memory=after))

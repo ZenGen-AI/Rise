@@ -16,6 +16,9 @@ ATTRIBUTIONS = ("outcome_split", "judge")
 COMBINATIONS = ("sum", "product")
 # interact 里非训练位允许的 model_backend(训练位只能是 self_play)。校验、测试里的对照表都引用这一份
 OPPONENT_MODEL_BACKENDS = ("frozen_reference", "external_api")
+# memory 段(TrainingConfig.memory)的键;runtime 的五个键是记忆运行时身份(设计 5.2 节)
+MEMORY_KEYS = ("digests", "runtime", "seed")
+MEMORY_RUNTIME_KEYS = ("backend", "embedding", "extraction", "starling_version", "trace_schema")
 
 
 class InvalidTrainingConfigError(ValueError):
@@ -107,9 +110,12 @@ class TrainingConfig:
     max_retries_per_episode: int = 2  # interact 专用
     min_group_size: int = 2
     max_resume_attempts: int = 3
+    # interact 专用的起点记忆:{"seed": str | None, "digests": {persona_id: digest}, "runtime": {...}}。
+    # digests 与 runtime 都空是"未解析";None 表示没有 memory 段,to_dict 不写这个键,所以哈希不变
+    memory: dict | None = None
 
     def to_dict(self) -> dict:
-        return {
+        out = {
             "mode": self.mode,
             "trained_slot": self.trained_slot,
             "base_checkpoint_ref": self.base_checkpoint_ref.to_dict(),
@@ -132,6 +138,9 @@ class TrainingConfig:
             "min_group_size": self.min_group_size,
             "max_resume_attempts": self.max_resume_attempts,
         }
+        if self.memory is not None:
+            out["memory"] = copy.deepcopy(self.memory)
+        return out
 
     @classmethod
     def from_dict(cls, d: dict) -> "TrainingConfig":
@@ -162,6 +171,7 @@ class TrainingConfig:
             max_retries_per_episode=d.get("max_retries_per_episode", 2),
             min_group_size=d.get("min_group_size", 2),
             max_resume_attempts=d.get("max_resume_attempts", 3),
+            memory=copy.deepcopy(d.get("memory")),
         )
 
 
@@ -242,6 +252,32 @@ def _check_bindings(bindings) -> str | None:
     return None
 
 
+def _check_memory_types(memory) -> str | None:
+    """memory 段的形状:None 放行;其余依次查 dict、键集合、seed、digests、runtime,最后查能否序列化。
+    只管形状与类型,与绑定对不对得上由 _validate_interact 查。"""
+    if memory is None:
+        return None
+    if not isinstance(memory, dict):
+        return "memory must be a dict"
+    if not all(isinstance(k, str) for k in memory) or sorted(memory) != list(MEMORY_KEYS):
+        return f"memory must have exactly the keys {list(MEMORY_KEYS)}"
+    seed = memory["seed"]
+    if seed is not None and not (isinstance(seed, str) and seed):
+        return "memory.seed must be null or a non-empty str"
+    digests = memory["digests"]
+    if not isinstance(digests, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) and v for k, v in digests.items()
+    ):
+        return "memory.digests must be a dict of str to non-empty str"
+    if not isinstance(memory["runtime"], dict):
+        return "memory.runtime must be a dict"
+    try:
+        _canonical_json(memory)
+    except (TypeError, ValueError, RecursionError) as exc:
+        return f"memory must be JSON serializable: {exc}"
+    return None
+
+
 def _check_types(cfg: TrainingConfig) -> str | None:
     """类型校验,在任何比较之前跑一遍。对 YAML 或 from_dict 能产出的值(内建的 str、int、float、bool、None、list、dict)
     永不抛异常;字段里若被塞进 __deepcopy__ 之类会抛任意异常的自定义对象,to_dict 的深拷贝仍可能穿透。错误类型绝不让后面的代码看到:
@@ -288,6 +324,9 @@ def _check_types(cfg: TrainingConfig) -> str | None:
     if not all(isinstance(k, str) and isinstance(v, str) for k, v in cfg.stage_manifest_refs.items()):
         return "stage_manifest_refs must be a dict of str to str"
     reason = _check_bindings(cfg.bindings)
+    if reason is not None:
+        return reason
+    reason = _check_memory_types(cfg.memory)
     if reason is not None:
         return reason
     try:
@@ -376,6 +415,23 @@ def _validate_interact(cfg: TrainingConfig) -> str | None:
         if not b.model_ref:
             # 事后追查 reward hacking 要靠它:不记对手是谁,就无法判断是不是练偏了
             return f"non-trained slot {b.slot_id!r} needs a non-empty model_ref"
+    return _validate_memory_against_bindings(cfg)
+
+
+def _validate_memory_against_bindings(cfg: TrainingConfig) -> str | None:
+    """memory 段与绑定的对应关系(形状已由 _check_memory_types 查过)。memory 为 None 在这一步仍放行。
+    digests 与 runtime 都空是"未解析"(调度器写进配置时的样子),放行;填了就要一起填、人格要对得上、
+    运行时身份要齐五个键。生成路 pending 时人格是空串、占位探针里是 "pending",digests 只能为空,这就是宽口径。"""
+    memory = cfg.memory
+    if memory is None:
+        return None
+    digests, runtime = memory["digests"], memory["runtime"]
+    if bool(digests) != bool(runtime):
+        return "memory.digests and memory.runtime must be filled together"
+    if digests and set(digests) != {b.persona_id for b in cfg.bindings}:
+        return "memory.digests must name exactly the bound personas"
+    if runtime and sorted(runtime) != list(MEMORY_RUNTIME_KEYS):
+        return f"memory.runtime must have exactly the keys {list(MEMORY_RUNTIME_KEYS)}"
     return None
 
 
@@ -432,6 +488,8 @@ def validate_training_config(cfg: TrainingConfig) -> str | None:
         return reason
     if cfg.mode == "interact":
         return _validate_interact(cfg)
+    if cfg.memory is not None:
+        return "memory is only allowed in interact mode"
     return None
 
 
