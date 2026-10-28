@@ -237,7 +237,7 @@ def _interact_section(kind):
     section = {"trained_slot": "a",
                "slots": [{"slot_id": "a", "model_backend": "self_play"},
                          {"slot_id": "b", "model_backend": "frozen_reference", "model_ref": "zengen-v1"}],
-               "max_turns_per_episode": 4}
+               "max_turns_per_episode": 4, "memory": {"seed": None}}
     if kind == "named":
         section.update(scenario_ids=["s1", "s2"], persona_ids={"a": "p1", "b": "p2"})
     else:

@@ -54,7 +54,7 @@ def check_perturbable_key(key: object) -> str | None:
     if rest and head not in NESTED_FIELDS:
         return f"perturbable key {key!r}: only {list(NESTED_FIELDS)} can be descended into"
     if head in ("mode", "trained_slot", "base_checkpoint_ref", "teacher_model_ref",
-                "stage_manifest_refs", "bindings", "scenario_ids"):
+                "stage_manifest_refs", "bindings", "scenario_ids", "memory"):
         return f"perturbable key {key!r}: {head!r} anchors the run and is never perturbable"
     return None
 
@@ -241,12 +241,16 @@ class InteractDefaults:
     scenario_ids: tuple[str, ...] = ()
     persona_ids: dict[str, str] = field(default_factory=dict)  # 角色位 id -> 人格 id
     data_spec: DataSpec | None = None
+    # 起点记忆的种子(None 为空起点)。不放整段 memory 映射:frozen dataclass 里放可变 dict 会破坏冻结与"不别名输入输出"。
+    # digests 与 runtime 是派发时算出来的,默认值里只有 seed
+    memory_seed: str | None = None
 
     def to_dict(self) -> dict:
         out: dict = {
             "trained_slot": self.trained_slot,
             "slots": [dict(s) for s in self.slots],
             "max_turns_per_episode": self.max_turns_per_episode,
+            "memory": {"seed": self.memory_seed},
         }
         if self.data_spec is not None:
             out["data_spec"] = self.data_spec.to_dict()
@@ -276,8 +280,9 @@ def _placeholder_refs(cfg: TrainingConfig) -> dict[str, str]:
     return {stage: f"dsm-run-000-{stage}" for stage in required_stages(cfg)}
 
 
-_INTERACT_REQUIRED = ("trained_slot", "slots", "max_turns_per_episode")
+_INTERACT_REQUIRED = ("trained_slot", "slots", "max_turns_per_episode", "memory")
 _INTERACT_OPTIONAL = ("scenario_ids", "persona_ids", "data_spec")
+_MEMORY_KEYS = ("seed",)
 _SLOT_REQUIRED = ("slot_id", "model_backend")
 _SLOT_OPTIONAL = ("model_ref", "driver")
 _OPPONENT_KEYS = ("base_url", "model", "api_key_env")
@@ -324,6 +329,20 @@ def _parse_interact_slots(raw: object, label: str) -> tuple[dict, ...]:
     return tuple(slots)
 
 
+def _parse_interact_memory(raw: object, label: str) -> str | None:
+    """memory 段只许 seed 一个键(None 为空起点,否则是非空 str)。digests 与 runtime 由派发器写,出现在这里即 unknown。"""
+    if not isinstance(raw, dict):
+        raise SchedulerConfigError(f"{label} must be a mapping, got {type(raw).__name__}")
+    missing = [k for k in _MEMORY_KEYS if k not in raw]
+    unknown = sorted(repr(k) for k in raw if k not in _MEMORY_KEYS)
+    if missing or unknown:
+        raise SchedulerConfigError(f"{label}: missing key(s) {missing}, unknown key(s) {unknown}")
+    seed = raw["seed"]
+    if seed is not None and not (isinstance(seed, str) and seed.strip()):
+        raise SchedulerConfigError(f"{label}.seed must be null or a non-empty str")
+    return seed
+
+
 def _parse_interact(raw: object, groups_per_step: int) -> InteractDefaults:
     """interact 段的严格解析。只看形状与自洽,不读树:点名的 id 在不在树里由装配期检查。"""
     label = "training_defaults.interact"
@@ -333,6 +352,7 @@ def _parse_interact(raw: object, groups_per_step: int) -> InteractDefaults:
     unknown = sorted(repr(k) for k in raw if k not in _INTERACT_REQUIRED + _INTERACT_OPTIONAL)
     if missing or unknown:
         raise SchedulerConfigError(f"{label}: missing key(s) {missing}, unknown key(s) {unknown}")
+    memory_seed = _parse_interact_memory(raw["memory"], f"{label}.memory")
     # 来源:先判成对,再判二选一。顺序决定"只写了一半"报哪条
     has_ids, has_personas, has_spec = "scenario_ids" in raw, "persona_ids" in raw, "data_spec" in raw
     if has_ids != has_personas:
@@ -365,7 +385,7 @@ def _parse_interact(raw: object, groups_per_step: int) -> InteractDefaults:
                 f"{label}.data_spec.scenario_count {spec.scenario_count} must be at least "
                 f"groups_per_step {groups_per_step} (one scenario per group)"
             )
-        return InteractDefaults(trained_slot, slots, turns, data_spec=spec)
+        return InteractDefaults(trained_slot, slots, turns, data_spec=spec, memory_seed=memory_seed)
 
     ids = raw["scenario_ids"]
     if not isinstance(ids, list) or not ids:
@@ -391,7 +411,9 @@ def _parse_interact(raw: object, groups_per_step: int) -> InteractDefaults:
             f"{label}.scenario_ids has {len(ids)} entries, must be at least "
             f"groups_per_step {groups_per_step} (one scenario per group)"
         )
-    return InteractDefaults(trained_slot, slots, turns, scenario_ids=tuple(ids), persona_ids=dict(personas))
+    return InteractDefaults(
+        trained_slot, slots, turns, scenario_ids=tuple(ids), persona_ids=dict(personas), memory_seed=memory_seed
+    )
 
 
 def _parse_opponent(raw: object) -> dict:

@@ -118,6 +118,7 @@ def _allow_interact_with_section(store):
             {"slot_id": "b", "model_backend": "frozen_reference", "model_ref": "zengen-v1"},
         ],
         "max_turns_per_episode": 4,
+        "memory": {"seed": None},
         "scenario_ids": ["s1", "s2"],
         "persona_ids": {"a": "p1", "b": "p2"},
     }

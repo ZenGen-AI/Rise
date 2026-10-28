@@ -127,10 +127,13 @@ def _interact_config(cfg: dict, section: InteractDefaults) -> tuple[dict, DataSp
     生成路:scenario_ids 留空,由派发器生成后回写;bindings 照点名路按段里 slots 的顺序展开,但 persona_id 一律为空串,
     由派发器配上生成出的人格后回写(角色位布局只能在这里留下,派发器读不到调度器的 interact 段)。
     sft_steps 保持默认,data_spec 取自段。
+    两条路都写未解析的 memory(只带段里的 seed,digests 与 runtime 为空),起点记忆由派发器解出。
     角色位的值照段里写的搬过来,不替人改正:训练位必须是 self_play 且不带 model_ref,写错由展开后的校验报出。"""
     cfg["mode"] = "interact"
     cfg["trained_slot"] = section.trained_slot
     cfg["max_turns_per_episode"] = section.max_turns_per_episode
+    # 未解析的起点记忆:只带种子,digests 与 runtime 由派发器解出后写进训练记录(指令不回写)
+    cfg["memory"] = {"seed": section.memory_seed, "digests": {}, "runtime": {}}
     if section.data_spec is not None:
         cfg["scenario_ids"] = []
         cfg["bindings"] = _bindings(section, {slot["slot_id"]: "" for slot in section.slots})

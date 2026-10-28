@@ -32,7 +32,7 @@ def check_interact_config(store: GitStore, environ: Mapping[str, str]):
     if section is None:
         raise FactoryConfigError(
             f"{_DEFAULTS} has no interact section; --interact needs it (trained_slot, slots, "
-            "max_turns_per_episode and either scenario_ids with persona_ids or a data_spec)"
+            "max_turns_per_episode, memory and either scenario_ids with persona_ids or a data_spec)"
         )
     _check_opponent(section, defaults.opponent, environ)                              # 第 3、9 条
     if section.scenario_ids:

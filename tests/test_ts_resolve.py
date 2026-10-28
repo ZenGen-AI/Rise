@@ -228,6 +228,7 @@ def _named_section():
             {"slot_id": "b", "model_backend": "frozen_reference", "model_ref": "zengen-v1"},
         ],
         "max_turns_per_episode": 4,
+        "memory": {"seed": None},
         "scenario_ids": ["s1", "s2"],
         "persona_ids": {"a": "p1", "b": "p2"},
     }
@@ -290,6 +291,20 @@ def test_named_path_forces_sft_steps_to_zero_and_keeps_the_other_defaults(store,
     assert DEFAULT_TRAINING_CONFIG["sft_steps"] == 2 and cfg["sft_steps"] == 0
     for key in ("grpo_steps", "group_size", "groups_per_step", "opd_coefficient", "reward", "teacher_model_ref"):
         assert cfg[key] == DEFAULT_TRAINING_CONFIG[key]
+
+
+@pytest.mark.parametrize("make", [_named_section, _generated_section], ids=["named", "generated"])
+@pytest.mark.parametrize("seed", [None, "seed-1"])
+def test_new_interact_carries_the_memory_seed_and_leaves_the_rest_to_the_dispatcher(store, make, seed):
+    section = make()
+    section["memory"] = {"seed": seed}
+    r = resolve_action(store, _d(mode="interact"), config=ALLOW, defaults=_defaults_with(section))
+    assert r.training_config["memory"] == {"seed": seed, "digests": {}, "runtime": {}}
+
+
+def test_a_new_batch_round_has_no_memory(store):
+    r = resolve_action(store, _d(), config=ALLOW, defaults=DEFAULTS)
+    assert "memory" not in r.training_config
 
 
 def test_a_named_path_config_passes_the_strict_validation(store, named):

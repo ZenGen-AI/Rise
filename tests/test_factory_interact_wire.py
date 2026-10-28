@@ -396,6 +396,7 @@ def _interact_defaults(**opponent):
                   {"slot_id": "b", "model_backend": "frozen_reference", "model_ref": "zengen-v1",
                    "driver": "scripted"}],
         "max_turns_per_episode": 4,
+        "memory": {"seed": None},
         "scenario_ids": ["t1", "t2"],
         "persona_ids": {"a": "pa", "b": "pb"},
     }

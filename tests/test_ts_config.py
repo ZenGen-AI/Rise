@@ -219,6 +219,7 @@ def _defaults_with_interact():
             {"slot_id": "b", "model_backend": "frozen_reference", "model_ref": "zengen-v1"},
         ],
         "max_turns_per_episode": 4,
+        "memory": {"seed": None},
         "scenario_ids": ["s1", "s2"],
         "persona_ids": {"a": "p1", "b": "p2"},
     }
@@ -235,7 +236,7 @@ def test_interact_section_parses_two_sources_and_rejects_halves():
             "interact": {"trained_slot": "a",
                          "slots": [{"slot_id": "a", "model_backend": "self_play"},
                                    {"slot_id": "b", "model_backend": "frozen_reference", "model_ref": "zengen-v1"}],
-                         "max_turns_per_episode": 4,
+                         "max_turns_per_episode": 4, "memory": {"seed": None},
                          "scenario_ids": ["s1", "s2"], "persona_ids": {"a": "p1", "b": "p2"}}}
     d = parse_training_defaults(full)
     assert d.interact.scenario_ids == ("s1", "s2") and d.interact.data_spec is None
@@ -259,6 +260,34 @@ def test_interact_section_is_strictly_parsed(mutate, reason):
     mutate(raw)
     with pytest.raises(SchedulerConfigError, match=reason):
         parse_training_defaults(raw)
+
+
+@pytest.mark.parametrize("mutate, reason", [
+    (lambda s: s["interact"].pop("memory"), "missing key\\(s\\) \\['memory'\\]"),
+    (lambda s: s["interact"].update(memory=None), "memory must be a mapping"),
+    (lambda s: s["interact"].update(memory={}), "memory: missing key\\(s\\) \\['seed'\\]"),
+    (lambda s: s["interact"].update(memory={"seed": None, "digests": {}}), "memory: missing key\\(s\\) \\[\\], unknown key\\(s\\)"),
+    (lambda s: s["interact"].update(memory={"seed": ""}), "memory.seed must be null or a non-empty str"),
+    (lambda s: s["interact"].update(memory={"seed": 7}), "memory.seed must be null or a non-empty str"),
+])
+def test_interact_section_requires_a_memory_seed(mutate, reason):
+    raw = _defaults_with_interact()
+    mutate(raw)
+    with pytest.raises(SchedulerConfigError, match=reason):
+        parse_training_defaults(raw)
+
+
+@pytest.mark.parametrize("seed", [None, "seed-1"])
+def test_the_memory_seed_parses_and_round_trips(seed):
+    raw = _defaults_with_interact()
+    raw["interact"]["memory"] = {"seed": seed}
+    d = parse_training_defaults(raw)
+    assert d.interact.memory_seed == seed
+    assert d.to_dict() == raw and parse_training_defaults(d.to_dict()) == d
+
+
+def test_memory_anchors_the_run_and_is_never_perturbable():
+    assert check_perturbable_key("memory") == "perturbable key 'memory': 'memory' anchors the run and is never perturbable"
 
 
 def _to_generated(raw):

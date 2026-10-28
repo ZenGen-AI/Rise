@@ -58,6 +58,7 @@ def _generated_defaults(base_ref: BigRef) -> dict:
                   {"slot_id": "b", "model_backend": "frozen_reference", "model_ref": "zengen-v1",
                    "driver": "scripted"}],
         "max_turns_per_episode": MAX_TURNS,
+        "memory": {"seed": None},
         "data_spec": {"scenario_count": 2, "seed": 0, "purpose": "training",
                       "stages": {"sft": {"group_size": 1}, "grpo_opd": {"group_size": 2}}},
     }
