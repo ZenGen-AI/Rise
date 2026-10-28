@@ -42,6 +42,10 @@ class RepoLockedError(Exception):
     """另一个进程已持有这棵树的写锁。str(exc) 恰好是锁文件的绝对路径。"""
 
 
+class FileLockBusyError(Exception):
+    """另一个持有者已占着这把文件锁。str(exc) 恰好是锁文件的绝对路径。"""
+
+
 def _git_dir(repo_root: Path) -> Path:
     """这个工作树的 git 目录。.git 是目录就用它;是文件(worktree、子模块)就按 git 的格式读
     `gitdir: <路径>`,相对路径相对 .git 文件所在目录。不起 git 子进程:取锁在入口处,要快且确定。"""
@@ -65,6 +69,26 @@ def acquire_repo_lock(repo_root: str | Path) -> Iterator[None]:
             _try_lock(fh)
         except _BUSY as exc:
             raise RepoLockedError(str(lock_path)) from exc
+        try:
+            yield
+        finally:
+            _unlock(fh)
+    finally:
+        fh.close()
+
+
+@contextmanager
+def hold_file_lock(path: Path) -> Iterator[None]:
+    """对调用方给定的锁文件取独占锁,非阻塞;被占用时立刻抛 FileLockBusyError,退出上下文时释放。
+    先建父目录。锁文件本身不删:删了会让另一个进程在新 inode 上拿到"同一把"锁。"""
+    lock_path = Path(path).absolute()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(lock_path, "a+b")
+    try:
+        try:
+            _try_lock(fh)
+        except _BUSY as exc:
+            raise FileLockBusyError(str(lock_path)) from exc
         try:
             yield
         finally:
