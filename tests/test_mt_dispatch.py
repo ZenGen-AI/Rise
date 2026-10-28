@@ -1109,3 +1109,19 @@ def test_a_batch_directive_never_calls_the_resolver(store):
     _directive(store, payload={"target_dimension": "tom", "recipe_ref": "", "training_config": _cfg_dict()})
     reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(memory_resolver=_recording_resolver(trace)))
     assert trace == [] and store.read_product(f"{run_dir(RUN)}/directive.yaml").status == "executed"
+
+
+def test_a_resolver_that_returns_malformed_digests_fails_the_directive_with_the_class_name_only(store, live):
+    """返回值形状不对是确定性的错:不能让转换时的 TypeError 逃出 dispatch,否则指令留在 pending 里每轮重派。"""
+    def malformed(seed, persona_ids):
+        return None, dict(STAND_IN_RUNTIME)
+
+    _interact_directive(store, memory=unresolved_memory())
+    trace = []
+    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
+        client_factory=live().client_factory, policy_factory=lambda run_id, cfg: _Scope(trace, None),
+        memory_resolver=malformed))
+    env = store.read_product(f"{run_dir(RUN)}/directive.yaml")
+    assert env.status == "failed" and env.payload["failure"]["category"] == "T2"
+    assert "memory resolver failed: TypeError" in env.payload["failure"]["reason"]
+    assert trace == [] and not store.exists(f"{run_dir(RUN)}/training_run.yaml")

@@ -281,13 +281,14 @@ def _resolve_memory(run_id: str, cfg: TrainingConfig, memory_resolver: MemoryRes
     persona_ids = tuple(dict.fromkeys(b.persona_id for b in cfg.bindings))
     try:
         digests, runtime = memory_resolver(cfg.memory["seed"], persona_ids)
+        # 返回值形状不对(摘要不是映射、身份拷不动)是确定性的错,与解析器自己抛错同样只报类名;
+        # 转换放在 try 里,免得 TypeError 逃出 dispatch,让指令留在 pending 里每轮重派
+        memory = {"seed": cfg.memory["seed"], "digests": dict(digests), "runtime": copy.deepcopy(runtime)}
     except DirectiveFailedError as exc:
         raise DirectiveFailedError(f"directive {run_id}: {exc.reason}") from exc
     except Exception as exc:
         raise DirectiveFailedError(f"directive {run_id}: memory resolver failed: {type(exc).__name__}") from exc
-    resolved = dataclasses.replace(
-        cfg, memory={"seed": cfg.memory["seed"], "digests": dict(digests), "runtime": copy.deepcopy(runtime)},
-    )
+    resolved = dataclasses.replace(cfg, memory=memory)
     reason = validate_training_config(resolved)
     if reason is not None:
         raise DirectiveFailedError(f"directive {run_id}: {reason}")
