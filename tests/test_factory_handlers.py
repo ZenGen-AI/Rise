@@ -124,6 +124,21 @@ def test_bad_agent_yaml_is_an_assembly_error(store, change, match):
         assemble(store, FactoryOptions(switches=("agent",)), env={})
 
 
+@pytest.mark.parametrize("bad", ["张三", "p/../x", ".hidden", "a" * 129])
+def test_a_bound_persona_id_the_memory_layout_refuses_exits_2_at_assembly(store, capsys, bad):
+    """人格 id 拼进部署库与锁的文件名(PERSONA_ID_PATTERN):不合法的在装配期就判 FactoryConfigError、
+    退出码 2,而不是让轮次处理器在取锁时抛 ActioDataError、守护进程每次重启都在同一处退出(终审 I-2)。"""
+    from factory.cli import main
+    payload = dict(DEFAULT_AGENT_CONFIG)
+    payload["bindings"] = [dict(b) for b in payload["bindings"]]
+    payload["bindings"][0]["persona_id"] = bad
+    write_config(store, AGENT_CONFIG, "agent", payload, "human: odd persona id")
+    with pytest.raises(FactoryConfigError, match="persona_id"):
+        read_agent_settings(store)
+    assert main(["reconcile", str(store.repo_root), "--once", "--enable", "agent"], env={}) == 2
+    assert "persona_id" in capsys.readouterr().err
+
+
 def test_the_agent_runtime_starts_lazily_and_closes(store):
     runtime = AgentRuntime(store, ("hi",))
     assert not runtime.started

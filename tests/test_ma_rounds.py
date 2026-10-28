@@ -714,3 +714,83 @@ def test_a_failed_rollback_still_fails_the_round_and_keeps_library_and_copy(stor
     assert env.status == "failed" and env.payload["failure"]["point"] == "mindagent.deployment.restore"
     assert "OSError" in env.payload["failure"]["reason"] and "disk" not in env.payload["failure"]["reason"]
     assert snap.exists() and mem.store.digest("pa") == before
+
+
+# ---------------- 终审 I-2:记忆层的确定性错误判 T3,不从处理器逃出 ----------------
+
+def _tick(store, handler):
+    """守护进程的一个 tick:只接 DeferredError,别的异常照样逃出(就是 I-2 说的守护进程退出)。"""
+    from controlplane.daemon import reconcile_once
+    return reconcile_once(store, handlers={"start_agent_round": handler})
+
+
+def test_a_corrupt_deployment_library_fails_the_round_t3_and_the_tick_does_not_raise(store, mem):
+    path = mem.layout.root / "deploy" / "pa.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{not json", encoding="utf-8")
+    _tick(store, _handler(mem=mem))
+    fr = _assert_failed(store, "mindagent.deployment.memory", "backup deploy-zengen-v1-s1-1 for pa: MemoryFailureError")
+    assert "not json" not in fr.payload["reason"]
+    _tick(store, _handler(mem=mem))                                      # 终态:下一 tick 不再触发
+    assert store.read_product(agent_round_file("zengen-v1")).status == "failed"
+
+
+def test_a_snapshot_directory_that_cannot_be_created_fails_the_round_t3(store, mem):
+    (mem.layout.root / "snapshots").parent.mkdir(parents=True, exist_ok=True)
+    (mem.layout.root / "snapshots").write_text("a file where the directory should be", encoding="utf-8")
+    _tick(store, _handler(mem=mem))
+    fr = _assert_failed(store, "mindagent.deployment.memory", "snapshot dir for deploy-zengen-v1-s1-1: NotADirectoryError")
+    assert "should be" not in fr.payload["reason"] and str(mem.layout.root) not in fr.payload["reason"]
+
+
+def test_a_failing_verify_snapshot_fails_the_round_t3(store, mem, monkeypatch):
+    real = mem.store.backup_to
+
+    def backup_to(pid, path):
+        if path.name.startswith("verify-"):
+            raise OSError("disk full at /secret/path")
+        return real(pid, path)
+
+    monkeypatch.setattr(mem.store, "backup_to", backup_to)
+    _tick(store, _handler(mem=mem))
+    fr = _assert_failed(store, "mindagent.rounds.verify", "OSError")
+    assert "/secret/path" not in fr.payload["reason"]
+    assert mem.layout.round_snapshots(ROUND) == []
+
+
+def test_a_persona_id_the_lock_refuses_fails_the_round_t3_without_rollback(store, mem):
+    # 装配期已拦(read_agent_settings);这里绕过装配直接造处理器,locks.hold 的 ActioDataError 不能逃出
+    bad = RoleBinding("a", "张三", "self_play")
+    _tick(store, _handler(mem=mem, bindings=(OPP, bad)))
+    env = store.read_product(agent_round_file("zengen-v1"))
+    assert env.status == "failed" and env.payload["failure"]["category"] == "T3"
+    assert env.payload["failure"]["point"] == "mindagent.rounds.persona"
+    assert "ActioDataError" in env.payload["failure"]["reason"]
+    fr = store.read_product(failure_record_file("run-001", "agent-zengen-v1"))
+    assert (fr.payload["category"], fr.payload["point"]) == ("T3", "mindagent.rounds.persona")
+
+
+def test_a_verify_copy_that_cannot_be_restored_fails_the_round_t3(store, mem):
+    # 验证重放的临时副本 restore_from 抛永久 MemoryFailureError:T3(失败点 mindagent.rounds.verify),只报类名
+    from actio.memory_port import MemoryFailureError
+
+    class BrokenScratch(FileTupleStore):
+        def restore_from(self, persona_id, path):
+            raise MemoryFailureError("JSONDecodeError at /secret", transient=False)
+
+    _skill(store, GOAL)                                                  # 有草案才会验证
+    h = make_start_round_handler(config=_cfg(), client_factory=_Factory(), backend_factory=lambda m, c: Echo(),
+                                 personas_loader=_loader, memory_store=mem.store, memory_layout=mem.layout,
+                                 memory_runtime=STAND_IN_MEMORY_RUNTIME, scratch_store_factory=BrokenScratch)
+    _tick(store, h)
+    fr = _assert_failed(store, "mindagent.rounds.verify", "verify snapshot: MemoryFailureError")
+    assert "/secret" not in fr.payload["reason"]
+    assert not (mem.layout.root / "snapshots" / ROUND).exists()          # 验证收尾照常清掉
+
+
+def test_an_executed_round_leaves_no_empty_snapshot_directory(store, mem):
+    # 终审 M-3:验证收尾之后 snapshots/<round_id>/ 已空就删掉,不每轮留一个空目录
+    _skill(store, GOAL)
+    env = _start(store, _handler(mem=mem))
+    assert env.status == "executed" and env.payload["proposals"]
+    assert not (mem.layout.root / "snapshots" / ROUND).exists()

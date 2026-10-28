@@ -444,10 +444,13 @@ def test_a_crash_mid_episode_is_rerun_from_the_restored_start(store, mem):
 
 
 def test_an_episode_written_but_not_committed_is_rerun(store, mem, monkeypatch):
+    class Crash(BaseException):
+        """进程在落盘与删副本之间被杀(不是 OSError:管理面的 OSError 现在判 T3,见下一条)。"""
+
     digests = {}
     real = mem.store.pending_events
-    monkeypatch.setattr(mem.store, "pending_events", lambda pid: (_ for _ in ()).throw(OSError("boom")))
-    with pytest.raises(OSError):
+    monkeypatch.setattr(mem.store, "pending_events", lambda pid: (_ for _ in ()).throw(Crash()))
+    with pytest.raises(Crash):
         _run(store, _Factory(), mem, digests=digests)                  # episode 已落盘、副本没删
     assert store.exists(episode_file(RUN, EID)) and mem.layout.snapshot(ROUND, EID, "pa").exists()
     monkeypatch.setattr(mem.store, "pending_events", real)
@@ -457,6 +460,41 @@ def test_an_episode_written_but_not_committed_is_rerun(store, mem, monkeypatch):
     f2 = _Factory()
     _run(store, f2, mem, digests=digests)                              # 已提交的被复用
     assert f2.clients == []
+
+
+@pytest.mark.parametrize("op", ["mkdir", "backup_to", "open", "pending_events", "abandon_event", "unlink"])
+def test_a_permanent_memory_management_failure_is_a_round_failure_reporting_only_the_class(store, mem, monkeypatch, op):
+    """终审 I-2:管理面与副本文件操作的 OSError 与非瞬态 MemoryFailureError 改抛 AgentRoundFailedError
+    (失败点 mindagent.deployment.memory,只报类名),轮次处理器据此判 T3 并回滚;不原样逃出。"""
+    from mindagent.errors import AgentRoundFailedError
+    secret = "/secret/endpoint"
+    boom = OSError(secret) if op in ("mkdir", "open", "unlink", "abandon_event") else MemoryFailureError(secret, transient=False)
+    if op == "abandon_event":
+        mem.failing.add(KEY0)                                          # 留一条本 episode 的 pending 行,才会调 abandon
+        f = _Factory({"end_reason": "timeout"}, {"opening": "我换个说法"})
+    else:
+        f = _Factory()
+    if op == "mkdir":
+        monkeypatch.setattr(deployment.Path, "mkdir", lambda self, *a, **kw: (_ for _ in ()).throw(boom))
+    elif op == "unlink":
+        real_unlink = deployment.Path.unlink
+        monkeypatch.setattr(deployment.Path, "unlink",
+                            lambda self, *a, **kw: (_ for _ in ()).throw(boom) if self.name.endswith("-pa.json")
+                            else real_unlink(self, *a, **kw))
+    else:
+        monkeypatch.setattr(mem.store, op, lambda *a, **kw: (_ for _ in ()).throw(boom))
+    with pytest.raises(AgentRoundFailedError) as exc:
+        _run(store, f, mem)
+    assert exc.value.point == "mindagent.deployment.memory"
+    assert type(boom).__name__ in exc.value.reason and secret not in exc.value.reason
+
+
+def test_a_transient_memory_management_failure_still_propagates_unchanged(store, mem, monkeypatch):
+    boom = MemoryFailureError("timeout", transient=True)
+    monkeypatch.setattr(mem.store, "backup_to", lambda *a: (_ for _ in ()).throw(boom))
+    with pytest.raises(MemoryFailureError) as exc:
+        _run(store, _Factory(), mem)
+    assert exc.value is boom
 
 
 def test_a_restore_whose_digest_disagrees_fails_and_keeps_library_and_copy(store, mem):

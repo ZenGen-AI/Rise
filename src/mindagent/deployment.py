@@ -17,6 +17,7 @@ import math
 import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
+from typing import TypeVar
 
 import grpc
 
@@ -25,7 +26,7 @@ from actio.trace import normalize_library_version
 from controlplane.gitstore import GitStore
 from controlplane.paths import episode_file
 from mindagent.config import agent_slot_of
-from mindagent.errors import RestoreFailedError
+from mindagent.errors import AgentRoundFailedError, RestoreFailedError
 from mindagent.memory_layout import MemoryLayout
 from simulator.datamodel import Episode, Persona, RoleAssignment, RoleBinding
 from simulator.realtime.client import EnvironmentServiceClient, SessionRejectedError
@@ -124,6 +125,25 @@ def _reusable(episode: Episode, agent_slot: str, skill_version: str, recorded_di
         return False
     memory = agent_turns[0].activation_trace.get("memory")
     return isinstance(memory, dict) and memory.get("digest_before") == recorded_digest
+
+
+MEMORY_POINT = "mindagent.deployment.memory"
+_T = TypeVar("_T")
+
+
+def _memory_op(what: str, call: Callable[[], _T]) -> _T:
+    """部署记忆管理面与副本文件操作(建副本目录、backup、open、pending、abandon、删副本):永久的
+    MemoryFailureError 与 OSError 改抛 AgentRoundFailedError(失败点 MEMORY_POINT,只报类名),轮次处理器据此
+    判 T3 并回滚(终审 I-2:坏库或磁盘问题不能从处理器逃出、让守护进程每次重启都在同一处退出)。
+    瞬态的 MemoryFailureError 原样上抛:轮次留 pending,下一 tick 重入。覆盖(restore_from)不走这里,见 _restore。"""
+    try:
+        return call()
+    except MemoryFailureError as exc:
+        if exc.transient:
+            raise
+        raise AgentRoundFailedError(f"{what}: {type(exc).__name__}", point=MEMORY_POINT) from exc
+    except OSError as exc:
+        raise AgentRoundFailedError(f"{what}: {type(exc).__name__}", point=MEMORY_POINT) from exc
 
 
 def _restore(memory_store: DeploymentMemoryStore, persona_id: str, snap: Path,
@@ -269,6 +289,9 @@ def run_deployment_episodes(
       覆盖失败(抛错或摘要对不上)抛 RestoreFailedError,库与副本都保留。
     - 实例自己的异常(记忆端口失败除外)与存储的 OSError:会话先 abort(服务端不落盘),实例已关,
       原异常原样上抛,不重试、不包装、不覆盖,与进程崩溃同效。
+    - 部署记忆管理面与副本文件操作(建副本目录、backup、open、pending、abandon、删副本)的永久失败
+      (MemoryFailureError 非瞬态、OSError)抛 AgentRoundFailedError(失败点 mindagent.deployment.memory,
+      只报类名),轮次处理器判 T3 并回滚(见 _memory_op)。
     - 创建被拒且原因是 role_backend_unavailable(同 id 的旧会话还在服务端收尾,或名额满)时,先在同一次
       尝试里退避重建(见 ADMISSION_WAIT_S),不计入重试次数、不记 failed_attempts;admission_wait_s 用完仍被拒
       才按上一条算一次 T1 失败。sleep 与 clock 只为测试注入。
@@ -318,8 +341,8 @@ def run_deployment_episodes(
                 if expected is None:  # 崩在 backup 与写回轮次产物之间
                     on_episode_start(eid, {persona_id: start})
             else:
-                snap.parent.mkdir(parents=True, exist_ok=True)
-                start = memory_store.backup_to(persona_id, snap)
+                _memory_op(f"snapshot dir for {eid}", lambda: snap.parent.mkdir(parents=True, exist_ok=True))
+                start = _memory_op(f"backup {eid} for {persona_id}", lambda: memory_store.backup_to(persona_id, snap))
                 on_episode_start(eid, {persona_id: start})
             budget = 1 + max_retries_per_episode
             raw = None
@@ -330,7 +353,7 @@ def run_deployment_episodes(
                     max_turns=max_turns,
                 )
                 failure: _AttemptFailed | None = None
-                port = memory_store.open(persona_id)
+                port = _memory_op(f"open {persona_id}", lambda: memory_store.open(persona_id))
                 try:
                     instance = make_instance(f"{round_id}/{eid}", port)
                     try:
@@ -363,9 +386,10 @@ def run_deployment_episodes(
             )
             write_episode(store, run_id, episode)
             prefix = f"{round_id}/{eid}#"
-            for key in memory_store.pending_events(persona_id):
+            pending = _memory_op(f"pending events of {persona_id}", lambda: memory_store.pending_events(persona_id))
+            for key in pending:
                 if key.startswith(prefix):
-                    memory_store.abandon_event(persona_id, key)
-            snap.unlink()
+                    _memory_op(f"abandon {key}", lambda: memory_store.abandon_event(persona_id, key))
+            _memory_op(f"commit {eid}", snap.unlink)
             out.append(episode)
     return out

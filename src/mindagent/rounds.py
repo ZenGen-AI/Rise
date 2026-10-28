@@ -21,7 +21,12 @@
   再写终态。覆盖失败时库与副本都保留,轮次照样写 failed(T3,失败点 mindagent.deployment.restore)并记
   失败记录。驱动器自己抛的覆盖失败不再回滚。瞬态失败与其余异常不回滚:轮次留 pending,重入时由驱动器
   "副本在就先覆盖"处理。
-- 验证重放在部署库的验证快照上做:基线与候选各从快照恢复一份临时副本,实例只读;轮次结束即删。
+- 验证重放在部署库的验证快照上做:基线与候选各从快照恢复一份临时副本,实例只读;轮次结束即删,
+  snapshots/<round_id>/ 空了也删。
+- 记忆层的确定性错误不从处理器逃出(终审 I-2):部署驱动器把管理面与副本文件操作的永久失败改抛
+  AgentRoundFailedError(失败点 mindagent.deployment.memory),验证快照段同样(mindagent.rounds.verify),都判 T3
+  并回滚;绑定人格 id 拼不出锁路径(ActioDataError)判 T3、不回滚(失败点 mindagent.rounds.persona)。
+  原因只报类名。模型后端的 OSError 不在其内,照旧原样上抛、轮次留 pending。
 """
 from __future__ import annotations
 
@@ -32,6 +37,7 @@ from collections.abc import Callable
 from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TypeVar
 
 from actio.errors import ActioDataError
 from actio.instance import instantiate
@@ -247,6 +253,31 @@ class _PersonaLocks:
             self._held.add(pid)
 
 
+_T = TypeVar("_T")
+
+
+def _verify_op(call: Callable[[], _T]) -> _T:
+    """验证快照与它的临时副本(建目录、backup、造临时库、restore、open):永久的 MemoryFailureError 与 OSError
+    判 T3(终审 I-2),失败点 mindagent.rounds.verify,只报类名;瞬态的原样上抛,轮次留 pending。
+    只包这些调用:验证重放里模型后端抛的 OSError 照旧原样上抛(与部署 episode 同一约定)。"""
+    try:
+        return call()
+    except MemoryFailureError as exc:
+        if exc.transient:
+            raise
+        raise AgentRoundFailedError(f"verify snapshot: {type(exc).__name__}", point="mindagent.rounds.verify") from exc
+    except OSError as exc:
+        raise AgentRoundFailedError(f"verify snapshot: {type(exc).__name__}", point="mindagent.rounds.verify") from exc
+
+
+def _rmdir_if_empty(path: Path) -> None:
+    """轮次结束时 snapshots/<round_id>/ 已空就删掉(终审 M-3:每轮留一个空目录);不空(在途副本)或删不了都不管。"""
+    try:
+        path.rmdir()
+    except OSError:
+        pass
+
+
 def _round_personas(env: Envelope, fallback: list[str]) -> list[str]:
     """轮次绑定的人格:载荷的 persona_ids;最小产物(没有这个字段)用当前配置的。不合法的 id 不会有库
     也不会有副本,跳过。"""
@@ -285,8 +316,24 @@ def make_start_round_handler(
         if existing is not None and existing.status != "pending":
             return  # executed 或 failed:终态,空操作
         with _PersonaLocks(memory_layout) as locks:
-            locks.hold(bound_personas)  # 写任何东西之前:被占就延后,树里什么都不写
+            try:
+                locks.hold(bound_personas)  # 写任何东西之前:被占就延后,树里什么都不写
+            except ActioDataError as exc:
+                # 人格 id 不合 PERSONA_ID_PATTERN,拼不出锁路径(装配期本已拦下,这里兜底):不能从处理器逃出,
+                # 否则守护进程每次重启都在同一处退出(终审 I-2)。一个锁都没拿到,所以不回滚:T3、只报类名。
+                _fail_bad_persona(store, model_id, existing, type(exc).__name__)
+                return
             _handle(store, model_id, rel, existing, _rollback_with(locks))
+
+    def _fail_bad_persona(store: GitStore, model_id: str, existing: Envelope | None, cls: str) -> None:
+        try:
+            _, run_id, _ = _read_model(store, model_id)
+        except (AgentRoundFailedError, *UNREADABLE):
+            run_id = ""
+        env = existing if existing is not None else _round_envelope(
+            model_id, {"model_id": model_id, "run_id": run_id, "failure": None})
+        _close_round(store, env, f"bound persona id refused by the memory layout: {cls}", category="T3",
+                     point="mindagent.rounds.persona", rollback=None, run_id=run_id, record=True)
 
     def _rollback_with(locks: _PersonaLocks) -> Rollback:
         def rollback(env: Envelope) -> None:
@@ -402,19 +449,20 @@ def make_start_round_handler(
 
         def instance_with(extra: tuple[Skill, ...] = ()):
             # episode_id 在只读重放下不产生事件 key;给它只是让"给 memory 时要 episode_id"的校验不分叉
-            scratch = scratch_store_factory(scratch_root / f"{len(built)}")
-            scratch.restore_from(agent_pid, verify_snap)
+            scratch = _verify_op(lambda: scratch_store_factory(scratch_root / f"{len(built)}"))
+            _verify_op(lambda: scratch.restore_from(agent_pid, verify_snap))
+            port = _verify_op(lambda: scratch.open(agent_pid))
             inst = instantiate(
                 backend_factory(model_id, ckpt), skills=lib.skills + tuple(extra),
-                memory=scratch.open(agent_pid), episode_id=f"{env.id}/verify", interlocutors=interlocutors,
+                memory=port, episode_id=f"{env.id}/verify", interlocutors=interlocutors,
                 replay_read_only=True, library_version=lib.version, profile=profile,
             )
             built.append(inst)
             return inst
 
-        verify_snap.parent.mkdir(parents=True, exist_ok=True)
-        memory_store.backup_to(agent_pid, verify_snap)
         try:
+            _verify_op(lambda: verify_snap.parent.mkdir(parents=True, exist_ok=True))
+            _verify_op(lambda: memory_store.backup_to(agent_pid, verify_snap))
             verifications = [
                 verify(d, findings, episodes, base_instance_factory=instance_with,
                        personas=personas, scenarios=scenarios)
@@ -425,6 +473,7 @@ def make_start_round_handler(
                 inst.close()
             verify_snap.unlink(missing_ok=True)
             shutil.rmtree(scratch_root, ignore_errors=True)
+            _rmdir_if_empty(verify_snap.parent)
         thresholds = Thresholds(config.min_fired_on_motivating, config.max_fired_elsewhere)
         written = package(store, env.id, findings, drafts, verifications, thresholds=thresholds,
                           run_id=run_id, bound_model_id=model_id)

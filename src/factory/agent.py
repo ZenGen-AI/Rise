@@ -5,6 +5,8 @@ agent.yaml 是组合根自己的配置信封(control-plane/config/agent.yaml),�
 - 可选 AgentConfig 的其余字段(max_turns、episodes_per_scenario、max_retries_per_episode、min_support、
   min_ratio、min_fired_on_motivating、max_fired_elsewhere、max_parse_retries),缺省用 AgentConfig 的默认值。
 未知键、类型错都抛 FactoryConfigError;AgentConfig 自己的校验错误也转成 FactoryConfigError。
+绑定的 persona_id 要合 PERSONA_ID_PATTERN:它拼进部署库与人格锁的文件名,不合法的在装配期就判 FactoryConfigError
+(退出码 2),不留到轮次处理器取锁时才抛。
 """
 from __future__ import annotations
 
@@ -17,6 +19,7 @@ from dataclasses import fields
 import grpc
 
 from actio.memory import TupleMemory
+from actio.memory_port import PERSONA_ID_PATTERN
 from controlplane.gitstore import GitStore
 from controlplane.paths import CONTROL_PLANE_ROOT
 from factory.configio import describe, key_names, read_tree_config
@@ -90,6 +93,12 @@ def read_agent_settings(store: GitStore) -> tuple[AgentConfig, tuple[str, ...]]:
         )
     except (KeyError, TypeError, ValueError, OverflowError) as exc:
         raise FactoryConfigError(f"{AGENT_CONFIG}: {describe(exc)}") from None
+    bad = sorted({b.persona_id for b in bindings if not PERSONA_ID_PATTERN.fullmatch(b.persona_id)})
+    if bad:
+        raise FactoryConfigError(
+            f"{AGENT_CONFIG}: bindings persona_id {bad} must be 1 to 128 characters of [A-Za-z0-9._-] "
+            "starting with a letter or digit (it names the deployment memory library and its lock)"
+        )
     return config, tuple(lines)
 
 
