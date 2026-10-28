@@ -151,6 +151,49 @@ def test_run_daemon_holds_the_lock_while_ticking_and_releases_it_afterwards(stor
         pass
 
 
+def test_on_locked_runs_once_while_the_lock_is_held_and_before_the_first_tick(store):
+    _put_directive(store)
+    seen = []
+
+    def on_locked():
+        try:
+            with acquire_repo_lock(store.repo_root):
+                seen.append("free")
+        except RepoLockedError:
+            seen.append("locked")
+
+    def dispatcher(s, directive):
+        seen.append("tick")
+        stub_dispatcher(s, directive)
+
+    run_daemon(store, 0, max_ticks=2, dispatcher=dispatcher, on_locked=on_locked)
+    assert seen[0] == "locked" and seen.count("locked") == 1
+    assert "tick" in seen[1:]
+
+
+def test_on_locked_is_not_called_when_the_lock_is_taken(store):
+    called = []
+    with acquire_repo_lock(store.repo_root):
+        with pytest.raises(RepoLockedError):
+            run_daemon(store, 0, max_ticks=1, on_locked=lambda: called.append(1))
+    assert called == []
+
+
+def test_an_on_locked_failure_stops_the_daemon_before_any_tick_and_releases_the_lock(store):
+    _put_directive(store)
+    commits = store._git("rev-list", "--count", "HEAD")
+
+    def boom():
+        raise OSError("sweep failed")
+
+    with pytest.raises(OSError, match="sweep failed"):
+        run_daemon(store, 0, max_ticks=1, on_locked=boom)
+    assert store.read_product(DIRECTIVE).status == "pending"
+    assert store._git("rev-list", "--count", "HEAD") == commits
+    with acquire_repo_lock(store.repo_root):
+        pass
+
+
 @pytest.mark.parametrize("entry", ["reconcile_once", "apply_action"])
 def test_reconcile_once_and_apply_action_do_not_take_the_lock(store, entry):
     _put_directive(store)

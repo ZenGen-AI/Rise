@@ -509,12 +509,17 @@ def run_daemon(
     handlers: Mapping[str, Handler] | None = None,
     evaluator: Evaluator | None = None,
     accept_mock_evidence: bool = False,
+    on_locked: Callable[[], None] | None = None,
 ) -> None:
     """轮询守护进程（spec 补充 B.1：轮询而非 inotify）。max_ticks 供测试限次。
     同一棵树只许一个守护进程写(控制面 CP-12):第一个 tick 之前取仓库文件锁,
-    已被占用就抛 RepoLockedError,一个产物都不写;退出(含异常)时释放。"""
+    已被占用就抛 RepoLockedError,一个产物都不写;退出(含异常)时释放。
+    on_locked 在持锁后、第一个 tick 之前调一次,用来清扫只有持锁者才能安全删除的东西(计划 B 的记忆副本目录);
+    清扫要等持锁,是因为另一个守护进程可能正在用那些副本。它抛出的异常不接,守护进程不带着半清的状态开跑。"""
     _check_handlers(handlers)
     with acquire_repo_lock(store.repo_root):
+        if on_locked is not None:
+            on_locked()
         deferrals = DeferralBook()  # 退避表归守护进程持有,只在内存里
         reported: set[str] = set()  # 已记过警告的读不出路径(CP-17),同样只在内存里
         ticks = 0
