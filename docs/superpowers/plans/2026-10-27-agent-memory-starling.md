@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.11+、pytest;Starling 侧另有 C++17、CMake ≥3.27、Ninja、pybind11、GoogleTest、SQLite ≥3.46。CMake 与 Ninja 是 pip 轮子(Starling 的 `requirements-build.txt`),不装系统包;系统只需要 C++ 编译器(本机 Apple Clang)。本仓库 `uv` 装 `memory` extra 时由 scikit-build-core 在构建隔离里自取 cmake 与 ninja。
 
-**Spec:** `docs/superpowers/specs/2026-10-25-actio-starling-memory-design.md`(已并入 `docs/design/` 的 00、20、30、40、50、90 六篇)。本计划是施工顺序的第 6 到 8 步,前提是 `docs/superpowers/plans/2026-10-27-agent-memory-standin.md`(第 1 到 5 步)已合入。
+**Spec:** `docs/superpowers/specs/2026-10-25-actio-starling-memory-design.md`(已并入 `docs/design/` 的 00、20、30、40、50、90 六篇)。本计划是施工顺序的第 6 到 8 步,前提是 `docs/superpowers/plans/2026-10-27-agent-memory-standin.md`(第 1 到 5 步)已合入。正文里的 `R1`、`R28` 之类编号指写计划时的裁定台账 `docs/superpowers/plans/2026-10-27-agent-memory-rulings.md`。
 
 ## Global Constraints
 
