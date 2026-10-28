@@ -348,3 +348,47 @@ def test_an_empty_interlocutor_passes_validation_but_the_stand_in_refusal_is_t2_
 
 def test_memory_definition_keys_are_the_three_required_keys():
     assert MEMORY_DEFINITION_KEYS == frozenset({"persona_id", "text", "interlocutor"})
+
+
+# ---------------- 修补第 1 轮 ----------------
+
+def test_a_skill_only_proposal_is_deferred_while_any_round_has_an_uncommitted_copy(store, mem):
+    # 在途轮次重入时会重读库:只收技能也会改技能版本,让已提交的 episode 换新 id 重跑、记下新记忆,
+    # 之后在途那条的起点副本覆盖回去就把它们抹掉。所以有任何未提交副本时门② 一律延后
+    _put(store)
+    snap = mem.layout.snapshot("agent-round-zengen-v3", "deploy-zengen-v3-s1-1", "pb")   # 别的人格的副本也算
+    snap.parent.mkdir(parents=True)
+    mem.store.backup_to("pb", snap)
+    head = store._git("rev-parse", "HEAD")
+    with pytest.raises(DeferredError, match="deploy-zengen-v3-s1-1-pb.json"):
+        _admit(store, mem)
+    assert store._git("rev-parse", "HEAD") == head and store.read_product(proposal_file(PID)).status == "approved"
+    snap.unlink()
+    _admit(store, mem)
+    assert store.read_product(proposal_file(PID)).status == "effective"
+
+
+def test_a_crash_after_abandoning_the_failed_event_converges_to_rejected(store, mem, monkeypatch):
+    # 抽取失败:先 abandon_event、再写 rejected。崩在两者之间时,下一 tick 的 remember_event 撞上已放弃的 key
+    mem.failing.add(KEY)
+    _put(store, increments=[{"kind": "memory", "definition": MEMORY}])
+    restore = _crash_on(monkeypatch, store, "proposal.yaml")
+    with pytest.raises(Crash):
+        _admit(store, mem)
+    restore()
+    assert store.read_product(proposal_file(PID)).status == "approved"
+    mem.failing.clear()
+    _admit(store, mem)
+    proposal = store.read_product(proposal_file(PID))
+    assert proposal.status == "rejected" and "abandoned" in proposal.payload["reject_reason"]
+    assert not store.exists(library_state_file())
+
+
+def test_a_conflict_on_a_committed_key_is_t2_and_leaves_the_proposal_approved(store, mem):
+    # 同 key 已以别的文本 committed:abandon_event 抛,提案不动,只记 T2
+    mem.store.remember_event("pa", KEY, "别的文本", interlocutor="pb")
+    _put(store, increments=[{"kind": "memory", "definition": MEMORY}])
+    _admit(store, mem)
+    assert store.read_product(proposal_file(PID)).status == "approved"
+    fr = store.read_product(failure_record_file("run-003", f"admit-{PID}"))
+    assert (fr.payload["category"], fr.payload["reason"]) == ("T2", f"remember {KEY}: MemoryEventConflict")

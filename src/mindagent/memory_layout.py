@@ -66,11 +66,9 @@ class MemoryLayout:
             key=lambda p: p.name,
         )
 
-    def uncommitted_snapshots(self, persona_id: str) -> list[Path]:
-        """`snapshots/*/` 下名字以 `deploy-` 起头、以 `-<persona_id><suffix>` 结尾的文件。只按文件名匹配:
-        人格 id 里允许 `-`,`deploy-m-s-1-x-pa.json` 对人格 `pa` 与 `x-pa` 都算命中。宁可多判:多判只让
-        门② 多延后一次,不会丢记忆。"""
-        tail = f"-{_check_persona(persona_id)}{self.suffix}"
+    def any_uncommitted_snapshots(self) -> list[Path]:
+        """`snapshots/*/` 下名字以 `deploy-` 起头、以 suffix 结尾的文件(任何人格、任何轮次),按路径排序。
+        验证快照(`verify-`)与验证副本目录不算。门② 有它们在就延后:在途轮次重入会重读库。"""
         base = self.root / "snapshots"
         if not base.is_dir():
             return []
@@ -78,8 +76,15 @@ class MemoryLayout:
             p
             for d in base.iterdir() if d.is_dir()
             for p in d.iterdir()
-            if p.is_file() and p.name.startswith(_DEPLOY_PREFIX) and p.name.endswith(tail)
+            if p.is_file() and p.name.startswith(_DEPLOY_PREFIX) and p.name.endswith(self.suffix)
         )
+
+    def uncommitted_snapshots(self, persona_id: str) -> list[Path]:
+        """any_uncommitted_snapshots 里以 `-<persona_id><suffix>` 结尾的那些。只按文件名匹配:
+        人格 id 里允许 `-`,`deploy-m-s-1-x-pa.json` 对人格 `pa` 与 `x-pa` 都算命中。宁可多判:多判只让
+        门② 多延后一次,不会丢记忆。"""
+        tail = f"-{_check_persona(persona_id)}{self.suffix}"
+        return [p for p in self.any_uncommitted_snapshots() if p.name.endswith(tail)]
 
     def persona_lock(self, persona_id: str) -> AbstractContextManager[None]:
         return hold_file_lock(self.deploy_lock(persona_id))

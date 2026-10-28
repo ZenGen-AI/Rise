@@ -47,3 +47,15 @@ def test_the_persona_lock_is_exclusive_and_released(tmp_path):
             pass
     with lay.persona_lock("pa"):
         pass
+
+
+def test_any_uncommitted_snapshots_lists_every_personas_deploy_copies_but_not_verify_ones(tmp_path):
+    lay = MemoryLayout(tmp_path)
+    assert lay.any_uncommitted_snapshots() == []                       # 没有 snapshots/ 目录
+    for p in (lay.snapshot("r1", "deploy-m-s-1", "pa"), lay.snapshot("r2", "deploy-m-s-2", "pb"),
+              lay.verify_snapshot("r1", "pa")):
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("{}")
+    (lay.verify_scratch("r1") / "0").mkdir(parents=True)
+    assert lay.any_uncommitted_snapshots() == [lay.snapshot("r1", "deploy-m-s-1", "pa"),
+                                               lay.snapshot("r2", "deploy-m-s-2", "pb")]

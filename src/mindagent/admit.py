@@ -4,6 +4,8 @@
 1. 读提案,不是 approved 就返回;增量与库版本先校验,不合法记一次 T2、提案留在 approved。
 2. 记忆增量所涉人格逐个拿部署库锁,并查该人格有没有未提交的部署起点副本:锁被占或有在途 episode
    就抛 DeferredError(守护进程不写树、按退避重试),否则轮次重入覆盖部署库时会抹掉刚收录的记忆。
+   任何人格有未提交的起点副本时,只含技能的提案也延后:在途轮次重入会重读库,技能版本一变,已提交的
+   episode 就换新 id 重跑、记下新记忆,随后在途那条的起点副本覆盖回去,把这些记忆悄悄抹掉。
 3. 记忆增量按位置逐个 remember_event 写进该人格的部署库,事件 key 是 <proposal_id>#<k>。记忆先于技能写:
    抽取失败要整份提案转 rejected,技能条目已写成 effective 就收不回了。
    - remember_event 抛错(库打不开、③ 写失败):记一次失败记录,提案留在 approved,不放弃事件;下一 tick
@@ -11,6 +13,9 @@
    - 抽取失败且本提案没有已提交的记忆:放弃该事件(终态),记 T2,提案转 rejected 并带 reject_reason。
    - 抽取失败但前面已有记忆提交:不转 rejected(已提交的放弃不了)、也不放弃这一条,记 T2(partial
      admission),抛 DeferredError;重入时失败的那条按 pending 行再抽一次,成功就照常收录完。
+   - remember_event 撞上 MemoryEventConflict 且本提案还没有已提交的记忆:多半是上一次放弃了事件、
+     没来得及写 rejected 就崩了。再调一次 abandon_event(已放弃的是空操作、已提交的会抛),成功就照常
+     转 rejected;它抛就按上面的"抛错"记一次失败记录,提案不动。
 4. 技能条目写 skill_file(effective);条目已在就不重写。
 5. library_state 版本 +1、记来源提案,entries 里记忆一项就是事件 key;已记过该提案就不再递增。
 6. 提案载荷加 admitted_statements(只作证据,真正的收据在部署库的事件表里),转 effective。
@@ -23,7 +28,7 @@ from contextlib import ExitStack
 from datetime import datetime, timezone
 
 from actio.errors import ActioDataError
-from actio.memory_port import PERSONA_ID_PATTERN, DeploymentMemoryStore, MemoryFailureError
+from actio.memory_port import PERSONA_ID_PATTERN, DeploymentMemoryStore, MemoryEventConflict, MemoryFailureError
 from actio.skills import Skill
 from controlplane.deferred import DeferredError
 from controlplane.envelope import Envelope, OwnerRef
@@ -128,18 +133,39 @@ def make_admit_proposal_handler(*, memory_store: DeploymentMemoryStore, memory_l
                 if in_flight:
                     names = ", ".join(p.name for p in in_flight)
                     raise DeferredError(f"persona {pid} has an uncommitted deployment episode: {names}")
+            in_flight = memory_layout.any_uncommitted_snapshots()
+            if in_flight:
+                # 只含技能的提案也延后:库版本在轮次在途时不许变(见模块 docstring 第 2 步)
+                names = ", ".join(f"{p.parent.name}/{p.name}" for p in in_flight)
+                raise DeferredError(f"admission waits for uncommitted deployment episodes: {names}")
+
+            def reject(reason: str) -> None:
+                fail_once(store, run_id, task_id=task_id, category="T2", point="mindagent.admit.memory",
+                          retries=0, reason=reason)
+                assert_transition("review", proposal.status, "rejected")
+                proposal.status = "rejected"
+                proposal.payload["reject_reason"] = reason
+                store.write_product(rel, proposal, f"mindagent: {proposal_id} rejected (memory extraction)")
 
             statements: dict[str, list[str]] = {}
             for key, d in memories:
                 pid = d["persona_id"]
                 try:
-                    outcome = memory_store.remember_event(pid, key, d["text"], interlocutor=d["interlocutor"])
+                    try:
+                        outcome = memory_store.remember_event(pid, key, d["text"], interlocutor=d["interlocutor"])
+                    except MemoryEventConflict:
+                        if statements:
+                            raise
+                        # 上一次放弃了这条、没写成 rejected 就崩了:再放弃一次(已放弃是空操作,已提交会抛)
+                        memory_store.abandon_event(pid, key)
+                        reject(f"extraction failed for {key}: event was abandoned earlier")
+                        return
                     if outcome.failed and not statements:
                         memory_store.abandon_event(pid, key)
                 except (MemoryFailureError, OSError, ActioDataError) as exc:
                     # 不改提案、不放弃事件:留在 approved,下一 tick 重入同 key 补收据(只报类名)。
                     # ActioDataError:库拒收这条事件(替身要求 interlocutor 非空),登记之前就拒,库没动;
-                    # 不接的话它从处理器漏出去打崩守护进程
+                    # 不接的话它从处理器漏出去打崩守护进程。冲突后 abandon_event 也抛(同 key 已提交)时落在这里
                     fail_once(store, run_id, task_id=task_id,
                               category="T1" if getattr(exc, "transient", False) else "T2",
                               point="mindagent.admit.memory", retries=0,
@@ -151,13 +177,7 @@ def make_admit_proposal_handler(*, memory_store: DeploymentMemoryStore, memory_l
                               reason=f"partial admission: {key} extraction failed after {len(statements)} committed")
                     raise DeferredError(f"partial admission of {proposal_id}: {key} pending")
                 if outcome.failed:
-                    reason = f"extraction failed for {key}: {outcome.category}"
-                    fail_once(store, run_id, task_id=task_id, category="T2", point="mindagent.admit.memory",
-                              retries=0, reason=reason)
-                    assert_transition("review", proposal.status, "rejected")
-                    proposal.status = "rejected"
-                    proposal.payload["reject_reason"] = reason
-                    store.write_product(rel, proposal, f"mindagent: {proposal_id} rejected (memory extraction)")
+                    reject(f"extraction failed for {key}: {outcome.category}")
                     return
                 statements[key] = list(outcome.stored)
 

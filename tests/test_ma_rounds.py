@@ -11,6 +11,7 @@ from controlplane.gitstore import GitStore
 from controlplane.lock import hold_file_lock
 from controlplane.paths import (
     CONTROL_PLANE_ROOT, run_dir, agent_round_file, episode_file, episodes_dir, failure_record_file, model_file, proposal_file, skill_file,
+    scenario_file,
 )
 from controlplane.reconcile import Action
 from factory.memory_runtime import STAND_IN_MEMORY_RUNTIME
@@ -544,11 +545,15 @@ def test_the_round_payload_gets_a_copy_of_the_memory_runtime(store, mem):
     assert _start(store, h).payload["memory_runtime"]["backend"] == "stand-in"
 
 
-def test_a_round_that_cannot_lock_a_persona_library_fails(store, mem):
+def test_a_round_that_cannot_lock_a_persona_library_is_deferred(store, mem):
+    # 修补第 1 轮:锁被占不判 T3,抛 DeferredError 让守护进程退避;拿锁在写任何东西之前
+    from controlplane.deferred import DeferredError
     with hold_file_lock(mem.layout.deploy_lock("pb")):                # 对手人格也要锁(第 9 节"每个绑定人格")
-        env = _start(store, _handler(mem=mem))
-    _assert_failed(store, "mindagent.rounds.lock", "pb.lock")
-    assert env.payload["episode_ids"] == []
+        with pytest.raises(DeferredError, match="pb.lock"):
+            _start(store, _handler(mem=mem))
+    assert not store.exists(agent_round_file("zengen-v1"))
+    assert not store.exists(failure_record_file("run-001", "agent-zengen-v1"))
+    assert _start(store, _handler(mem=mem)).status == "executed"     # 锁放了,下一 tick 照常跑
 
 
 def test_a_t3_round_rolls_back_the_in_flight_episode_and_drops_its_copy(store, mem):
@@ -625,3 +630,87 @@ def test_verification_replays_on_read_only_snapshot_copies(store, mem, monkeypat
     assert replays and len(replays) % 2 == 0                           # 每份草案基线与候选各一
     assert all(kw["memory"] is not None for kw in replays)
     assert mem.store.pending_events("pa") == []
+
+
+# ---------------- 修补第 1 轮:轮次写成终态之前先回滚 ----------------
+
+def _kept_copy(store, mem):
+    """造一个 pending 轮次,s1 在途时崩:起点副本留着,部署库里有半截记忆。返回 (起点摘要, 副本路径)。"""
+    class Crash(Exception):
+        pass
+
+    with pytest.raises(Crash):
+        _start(store, _handler(factory=_Factory(plans=[{"crash_on_submit": Crash}]), mem=mem))
+    (snap,) = mem.layout.round_snapshots(ROUND)
+    start = store.read_product(agent_round_file("zengen-v1")).payload["episode_digests"]["deploy-zengen-v1-s1-1"]["pa"]
+    mem.store.remember_event("pa", f"{ROUND}/deploy-zengen-v1-s1-1#0", "pb：我真的很生气!!", interlocutor="pb")
+    assert mem.store.digest("pa") != start
+    return start, snap
+
+
+def test_a_superseded_round_with_a_kept_copy_is_rolled_back_first(store, mem):
+    start, snap = _kept_copy(store, mem)
+    _model(store, 2, "run-002")
+    (store.repo_root / run_dir("run-002")).mkdir(parents=True)
+    env2 = _start(store, _handler(mem=mem), model="zengen-v2")
+    old = store.read_product(agent_round_file("zengen-v1"))
+    assert old.status == "failed" and old.payload["failure"]["category"] == "superseded"
+    assert not snap.exists()
+    # v1 的半截记忆在 v2 开跑之前就被覆盖回起点:v2 第一条 episode 的起点摘要就是 v1 那条的起点
+    assert env2.payload["episode_digests"]["deploy-zengen-v2-s1-1"]["pa"] == start
+
+
+def test_a_superseded_round_whose_persona_library_is_locked_is_deferred(store, mem):
+    from controlplane.deferred import DeferredError
+    start, snap = _kept_copy(store, mem)
+    _model(store, 2, "run-002")
+    with hold_file_lock(mem.layout.deploy_lock("pa")):
+        with pytest.raises(DeferredError, match="pa.lock"):
+            _start(store, _handler(mem=mem), model="zengen-v2")
+    assert store.read_product(agent_round_file("zengen-v1")).status == "pending"
+    assert snap.exists() and mem.store.digest("pa") != start
+
+
+def test_a_stale_action_for_a_round_with_a_kept_copy_rolls_it_back(store, mem):
+    # 旧模型自己的动作:supersede 先回滚并置 failed;处理器内 version < latest 那一支见到已是终态就不再迁移
+    start, snap = _kept_copy(store, mem)
+    _model(store, 2, "run-002")
+    _start(store, _handler(mem=mem))
+    assert store.read_product(agent_round_file("zengen-v1")).payload["failure"]["category"] == "superseded"
+    assert mem.store.digest("pa") == start and not snap.exists()
+
+
+def test_a_round_whose_model_disappeared_rolls_back_its_kept_copy(store, mem):
+    # _read_model 失败那一支
+    start, snap = _kept_copy(store, mem)
+    env = store.read_product(model_file(1))
+    env.status = "deprecated"
+    store.write_product(model_file(1), env, "human: deprecate")
+    _start(store, _handler(mem=mem))
+    assert store.read_product(agent_round_file("zengen-v1")).status == "failed"
+    assert mem.store.digest("pa") == start and not snap.exists()
+
+
+def test_a_round_that_fails_its_inputs_on_reentry_rolls_back_its_kept_copy(store, mem):
+    # _check_inputs 的 T3 那一支
+    start, snap = _kept_copy(store, mem)
+    (store.repo_root / scenario_file("s3")).unlink()
+    _start(store, _handler(mem=mem))
+    _assert_failed(store, "mindagent.rounds.inputs", "scenario 's3'")
+    assert mem.store.digest("pa") == start and not snap.exists()
+
+
+def test_a_failed_rollback_still_fails_the_round_and_keeps_library_and_copy(store, mem, monkeypatch):
+    start, snap = _kept_copy(store, mem)
+    before = mem.store.digest("pa")
+
+    def broken(pid, path):
+        raise OSError("disk")
+
+    monkeypatch.setattr(mem.store, "restore_from", broken)
+    _model(store, 2, "run-002")
+    _start(store, _handler(mem=mem))
+    env = store.read_product(agent_round_file("zengen-v1"))
+    assert env.status == "failed" and env.payload["failure"]["point"] == "mindagent.deployment.restore"
+    assert "OSError" in env.payload["failure"]["reason"] and "disk" not in env.payload["failure"]["reason"]
+    assert snap.exists() and mem.store.digest("pa") == before

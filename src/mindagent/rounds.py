@@ -12,12 +12,15 @@
   部署 episode 不重跑,提案按确定性 id 重写。
 
 部署记忆(设计二第 9 节):
-- 跑部署之前按排序后的绑定人格 id 逐个拿 deploy/<persona_id>.lock,拿不到判 T3(mindagent.rounds.lock);
-  锁持到处理器返回或抛出,下面的回滚也在锁里做。
+- 处理器一开始(写任何东西之前)按排序后的绑定人格 id 逐个拿 deploy/<persona_id>.lock,锁持到处理器
+  返回或抛出;拿不到就抛 DeferredError,轮次留在原状态,守护进程退避后重试。
 - 轮次产物带 memory_runtime(装配时给的运行时身份)与 episode_digests({部署 id: {persona_id: 起点摘要}}),
   每条 episode 开始前写回一次;pending 轮次重入时继承上一次记下的 episode_digests,已提交的才认得出来。
-- 判 T3 时(覆盖失败除外)先用起点副本把在途 episode 覆盖回起点、删副本,再写失败记录;覆盖失败时库与
-  副本都保留。瞬态失败与其余异常不回滚:轮次留 pending,重入时由驱动器"副本在就先覆盖"处理。
+- 把 pending 轮次写成终态的每条路径(T3、被取代、模型读不出、轮次产物读不出)都先走同一步 _close_round:
+  拿该轮次绑定人格的锁(被占抛 DeferredError,不写终态),用起点副本把在途 episode 覆盖回起点、删副本,
+  再写终态。覆盖失败时库与副本都保留,轮次照样写 failed(T3,失败点 mindagent.deployment.restore)并记
+  失败记录。驱动器自己抛的覆盖失败不再回滚。瞬态失败与其余异常不回滚:轮次留 pending,重入时由驱动器
+  "副本在就先覆盖"处理。
 - 验证重放在部署库的验证快照上做:基线与候选各从快照恢复一份临时副本,实例只读;轮次结束即删。
 """
 from __future__ import annotations
@@ -32,8 +35,9 @@ from pathlib import Path
 
 from actio.errors import ActioDataError
 from actio.instance import instantiate
-from actio.memory_port import DeploymentMemoryStore, MemoryFailureError
+from actio.memory_port import PERSONA_ID_PATTERN, DeploymentMemoryStore, MemoryFailureError
 from actio.skills import Skill
+from controlplane.deferred import DeferredError
 from controlplane.envelope import BigRef, Envelope, InvalidBigRefError, OwnerRef
 from controlplane.gitstore import GitStore
 from controlplane.lock import FileLockBusyError
@@ -61,6 +65,7 @@ _ROUND_FILE = re.compile(r"agent-round-(zengen-v(\d+))\.yaml$")
 BackendFactory = Callable[[str, "BigRef | None"], object]
 PersonasLoader = Callable[[GitStore, list[str]], dict[str, Persona]]
 Handler = Callable[[GitStore, Action], None]
+Rollback = Callable[[Envelope], None]
 
 
 def _now() -> str:
@@ -122,8 +127,30 @@ def _fail_round(store: GitStore, env: Envelope, reason: str, *, category: str, p
     store.write_product(agent_round_file(env.payload["model_id"]), env, f"mindagent: {env.id} failed ({category})")
 
 
-def supersede_stale_rounds(store: GitStore, latest_version: int) -> list[str]:
-    """把绑定模型版本低于 latest_version、仍为 pending 的轮次置 failed(superseded)。返回被置的轮次 id。"""
+def _close_round(store: GitStore, env: Envelope, reason: str, *, category: str, point: str,
+                 rollback: Rollback | None, run_id: object = None, retries: int = 0, record: bool = False) -> None:
+    """把一个 pending 轮次写成终态的唯一入口(设计二第 9 节"轮次失败收尾"):先 rollback(env)(拿锁、
+    在途 episode 覆盖回起点、删副本),再 _fail_round,record 为真时再记一次 T3 失败记录。
+    rollback 抛 DeferredError(锁被占)时原样上抛,什么都不写;抛 RestoreFailedError 时库与副本保留,
+    轮次改记覆盖失败(T3)并记失败记录。轮次已是终态(同一 tick 里 supersede 刚置过)时什么都不做。"""
+    if env.status != "pending":
+        return
+    if rollback is not None:
+        try:
+            rollback(env)
+        except RestoreFailedError as exc:
+            reason = f"{exc.reason} (while failing the round: {reason})"
+            category, point, record = "T3", exc.point, True
+    _fail_round(store, env, reason, category=category, point=point)
+    if record:
+        fail_once(store, env.payload.get("run_id") if run_id is None else run_id,
+                  task_id=task_id_for(env.payload["model_id"]), category="T3",
+                  point=point, retries=max(retries, 0), reason=reason)
+
+
+def supersede_stale_rounds(store: GitStore, latest_version: int, *, rollback: Rollback | None = None) -> list[str]:
+    """把绑定模型版本低于 latest_version、仍为 pending 的轮次置 failed(superseded),置之前先 rollback
+    (见 _close_round)。返回被置的轮次 id。"""
     out: list[str] = []
     for rel in store.list_products(f"{CONTROL_PLANE_ROOT}/agent_rounds"):
         match = _ROUND_FILE.search(rel)
@@ -133,8 +160,8 @@ def supersede_stale_rounds(store: GitStore, latest_version: int) -> list[str]:
         if env is None:
             continue  # 读不出:留给它自己那个模型的 start_agent_round 判损坏(计划 8 视它为可触发)
         if env.status == "pending":
-            _fail_round(store, env, f"superseded by zengen-v{latest_version}",
-                        category="superseded", point="mindagent.rounds.supersede")
+            _close_round(store, env, f"superseded by zengen-v{latest_version}",
+                         category="superseded", point="mindagent.rounds.supersede", rollback=rollback)
             out.append(env.id)
     return out
 
@@ -196,6 +223,39 @@ def _check_inputs(store: GitStore, config: AgentConfig) -> None:
             raise AgentRoundFailedError(f"persona {b.persona_id!r} not in the tree", point="mindagent.rounds.inputs")
 
 
+class _PersonaLocks:
+    """一次处理器调用里拿到的人格库锁。同一个人格只拿一次:flock 按打开的文件算,同一进程再开一次去拿
+    也会被拒。被占就抛 DeferredError(原因只有锁文件路径)。"""
+
+    def __init__(self, layout: MemoryLayout) -> None:
+        self._layout = layout
+        self._stack = ExitStack()
+        self._held: set[str] = set()
+
+    def __enter__(self) -> "_PersonaLocks":
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        return self._stack.__exit__(*exc)
+
+    def hold(self, persona_ids) -> None:
+        for pid in sorted(set(persona_ids) - self._held):
+            try:
+                self._stack.enter_context(self._layout.persona_lock(pid))
+            except FileLockBusyError as exc:
+                raise DeferredError(f"persona library locked: {exc}") from exc
+            self._held.add(pid)
+
+
+def _round_personas(env: Envelope, fallback: list[str]) -> list[str]:
+    """轮次绑定的人格:载荷的 persona_ids;最小产物(没有这个字段)用当前配置的。不合法的 id 不会有库
+    也不会有副本,跳过。"""
+    ids = env.payload.get("persona_ids")
+    if not isinstance(ids, list):
+        ids = fallback
+    return sorted({p for p in ids if isinstance(p, str) and PERSONA_ID_PATTERN.fullmatch(p)})
+
+
 def make_start_round_handler(
     *,
     config: AgentConfig,
@@ -222,23 +282,56 @@ def make_start_round_handler(
         model_id = action.target_id
         rel = agent_round_file(model_id)
         existing = read_or_none(store, rel)
-        if existing is None and store.exists(rel):
-            _fail_unreadable(store, model_id)
-            return
         if existing is not None and existing.status != "pending":
             return  # executed 或 failed:终态,空操作
+        with _PersonaLocks(memory_layout) as locks:
+            locks.hold(bound_personas)  # 写任何东西之前:被占就延后,树里什么都不写
+            _handle(store, model_id, rel, existing, _rollback_with(locks))
+
+    def _rollback_with(locks: _PersonaLocks) -> Rollback:
+        def rollback(env: Envelope) -> None:
+            """该轮次每个还在的起点副本覆盖回它的人格库,再删副本(第 9 节"轮次失败收尾")。先拿该轮次
+            绑定人格的锁(被占抛 DeferredError)。驱动器每次尝试的 finally 已关掉实例与端口;restore_from
+            遇到仍打开的端口会拒绝覆盖,这里把它与文件系统错误一起改抛 RestoreFailedError,库与副本都不动。
+            副本按最长的人格 id 后缀认领:人格 id 里允许 '-',`...-x-pa` 不能被当成 `pa` 的副本。"""
+            personas = _round_personas(env, bound_personas)
+            locks.hold(personas)
+            by_length = sorted(personas, key=len, reverse=True)
+            for snap in memory_layout.round_snapshots(env.id):
+                pid = next((p for p in by_length if snap.name.endswith(f"-{p}{memory_layout.suffix}")), None)
+                if pid is None:
+                    continue
+                try:
+                    memory_store.restore_from(pid, snap)
+                except (MemoryFailureError, OSError) as exc:
+                    raise RestoreFailedError(f"rollback {snap.name} for {pid}: {type(exc).__name__}",
+                                             point="mindagent.deployment.restore") from exc
+                snap.unlink()
+
+        return rollback
+
+    def _handle(store: GitStore, model_id: str, rel: str, existing: Envelope | None, rollback: Rollback) -> None:
+        if existing is None and store.exists(rel):
+            _fail_unreadable(store, model_id, rollback)
+            return
         latest = _latest_effective_version(store)
-        supersede_stale_rounds(store, latest)
+        supersede_stale_rounds(store, latest, rollback=rollback)
 
         try:
             version, run_id, ckpt = _read_model(store, model_id)
         except AgentRoundFailedError as exc:
-            _fail_round(store, _existing_or_new(store, model_id, ""), exc.reason, category="T3", point=exc.point)
+            _close_round(store, _existing_or_new(store, model_id, ""), exc.reason, category="T3",
+                         point=exc.point, rollback=rollback)
             return  # 没有 run 可挂失败记录;原因写在轮次产物里
         if version < latest:
-            _fail_round(store, _existing_or_new(store, model_id, run_id), f"superseded by zengen-v{latest}",
-                        category="superseded", point="mindagent.rounds.supersede")
+            _close_round(store, _existing_or_new(store, model_id, run_id), f"superseded by zengen-v{latest}",
+                         category="superseded", point="mindagent.rounds.supersede", rollback=rollback)
             return
+
+        def record(reason: str, point: str, retries: int, *, roll_back: bool = True) -> None:
+            # 读库失败时轮次产物还没写:先补一份最小的 pending 产物再置 failed
+            _close_round(store, _existing_or_new(store, model_id, run_id), reason, category="T3", point=point,
+                         rollback=rollback if roll_back else None, run_id=run_id, retries=retries, record=True)
 
         lib: LibraryState | None = None
         try:
@@ -251,54 +344,22 @@ def make_start_round_handler(
                 env.payload["episode_digests"] = copy.deepcopy(existing.payload.get("episode_digests", {}))
             store.write_product(rel, env, f"mindagent: {env.id} pending")
             _check_inputs(store, config)
-            with ExitStack() as locks:
-                for pid in bound_personas:
-                    try:
-                        locks.enter_context(memory_layout.persona_lock(pid))
-                    except FileLockBusyError as exc:
-                        raise AgentRoundFailedError(f"persona library locked: {exc}",
-                                                    point="mindagent.rounds.lock") from exc
-                try:
-                    _run(store, env, lib, run_id, model_id, ckpt)
-                except (DeploymentFailedError, BridgeError, AgentRoundFailedError,
-                        MindAgentDataError, ActioDataError) as exc:
-                    # 判 T3 的这几类先把在途 episode 覆盖回起点;瞬态与覆盖失败不回滚
-                    transient = isinstance(exc, DeploymentFailedError) and exc.transient
-                    if not transient and not isinstance(exc, RestoreFailedError):
-                        _rollback(env.id)
-                    raise
+            _run(store, env, lib, run_id, model_id, ckpt)
         except DeploymentFailedError as exc:
             if exc.transient:
-                raise
-            _record(store, rel, run_id, model_id, f"deployment: {exc}", "mindagent.deployment", exc.attempts - 1)
+                raise  # 瞬态:不回滚,轮次留 pending,重入时驱动器"副本在就先覆盖"
+            record(f"deployment: {exc}", "mindagent.deployment", exc.attempts - 1)
         except ProposalParseError as exc:
-            _record(store, rel, run_id, model_id, str(exc), "mindagent.proposals", exc.attempts - 1)
+            record(str(exc), "mindagent.proposals", exc.attempts - 1)
         except BridgeError as exc:
             # R18:桥接已经自己退避重试过,T1 也升级为 T3,不留 pending 让守护循环无限空转外部推理
             # retries 是已重试次数(计划 1):attempts 是总尝试次数
-            _record(store, rel, run_id, model_id, f"bridge {exc.category}: {exc.reason}",
-                    "mindagent.proposals", max(exc.attempts - 1, 0))
+            record(f"bridge {exc.category}: {exc.reason}", "mindagent.proposals", max(exc.attempts - 1, 0))
         except AgentRoundFailedError as exc:
-            _record(store, rel, run_id, model_id, exc.reason, exc.point, 0)
+            # 驱动器自己抛的覆盖失败:库与副本都保留,不再回滚
+            record(exc.reason, exc.point, 0, roll_back=not isinstance(exc, RestoreFailedError))
         except (MindAgentDataError, ActioDataError) as exc:
-            _record(store, rel, run_id, model_id, f"{type(exc).__name__}: {exc}", "mindagent.rounds", 0)
-
-    def _rollback(round_id: str) -> None:
-        """T3 收尾(第 9 节"轮次失败收尾"):该轮次每个还在的起点副本覆盖回它的人格库,再删副本。
-        驱动器每次尝试的 finally 已关掉实例与端口;restore_from 遇到仍打开的端口会拒绝覆盖,这里把它
-        与文件系统错误一起改抛 RestoreFailedError,库与副本都不动。副本按最长的人格 id 后缀认领:
-        人格 id 里允许 '-',`...-x-pa` 不能被当成 `pa` 的副本。"""
-        by_length = sorted(bound_personas, key=len, reverse=True)
-        for snap in memory_layout.round_snapshots(round_id):
-            pid = next((p for p in by_length if snap.name.endswith(f"-{p}{memory_layout.suffix}")), None)
-            if pid is None:
-                continue
-            try:
-                memory_store.restore_from(pid, snap)
-            except (MemoryFailureError, OSError) as exc:
-                raise RestoreFailedError(f"rollback {snap.name} for {pid}: {type(exc).__name__}",
-                                         point="mindagent.deployment.restore") from exc
-            snap.unlink()
+            record(f"{type(exc).__name__}: {exc}", "mindagent.rounds", 0)
 
     def _run(store: GitStore, env: Envelope, lib: LibraryState, run_id: str, model_id: str,
              ckpt: BigRef | None) -> None:
@@ -379,13 +440,7 @@ def make_start_round_handler(
         env.status = "executed"
         store.write_product(agent_round_file(model_id), env, f"mindagent: {env.id} executed")
 
-    def _record(store: GitStore, rel: str, run_id: str, model_id: str, reason: str, point: str, retries: int) -> None:
-        # 读库失败时轮次产物还没写:先补一份最小的 pending 产物再置 failed
-        _fail_round(store, _existing_or_new(store, model_id, run_id), reason, category="T3", point=point)
-        fail_once(store, run_id, task_id=task_id_for(model_id), category="T3",
-                  point=point, retries=max(retries, 0), reason=reason)
-
-    def _fail_unreadable(store: GitStore, model_id: str) -> None:
+    def _fail_unreadable(store: GitStore, model_id: str, rollback: Rollback) -> None:
         """轮次产物在但读不出(计划 8 Ruling 20:视图按"没有轮次"再次触发):用新信封整份重写为
         failed(T3),按 fail_once 的守卫记一次失败记录。run id 取绑定模型产物里的那个;模型本身也读
         不出或不合法时 run id 为空,只在轮次产物上留原因。"""
@@ -396,8 +451,6 @@ def make_start_round_handler(
         reason = "unreadable round product"
         point = "mindagent.rounds.read"
         env = _round_envelope(model_id, {"model_id": model_id, "run_id": run_id, "failure": None})
-        _fail_round(store, env, reason, category="T3", point=point)
-        fail_once(store, run_id, task_id=task_id_for(model_id), category="T3",
-                  point=point, retries=0, reason=reason)
+        _close_round(store, env, reason, category="T3", point=point, rollback=rollback, run_id=run_id, record=True)
 
     return handle
