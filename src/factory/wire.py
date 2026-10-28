@@ -131,7 +131,8 @@ class Assembly:
         return bool(self.handlers)
 
 
-INTERACT_TURN_TIMEOUT_S = 30.0  # 真模型说一句比罐头慢得多;默认的 5 秒是给罐头后端定的
+INTERACT_TURN_TIMEOUT_S = 90.0     # 设计源 6.4 节:训练位策略 HTTP 60 秒加一轮记忆最坏 20 秒;默认的 5 秒是给罐头后端定的
+INTERACT_MESSAGE_TIMEOUT_S = 90.0  # 客户端相邻两条服务端消息的等待上限(设计源 6.4 节)
 
 
 def _shared_runtime(
@@ -156,6 +157,7 @@ def _shared_runtime(
 
         switch = OpponentSwitch(lines)
         return AgentRuntime(store, lines, turn_timeout_s=INTERACT_TURN_TIMEOUT_S,
+                            message_timeout_s=INTERACT_MESSAGE_TIMEOUT_S,
                             opponent_backend_factory=switch), switch
     return AgentRuntime(store, lines), None
 

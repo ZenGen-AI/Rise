@@ -171,10 +171,39 @@ def test_interact_alone_builds_one_runtime_and_a_longer_turn_timeout(
     try:
         assert len(runtimes) == 1
         assert dispatcher_kwargs[-1]["client_factory"].__self__ is runtimes[0]
-        assert runtimes[0]._timeout == 30.0
+        assert runtimes[0]._timeout == 90.0
+        assert runtimes[0]._message_timeout == 90.0
         assert type(dispatcher_kwargs[-1]["data_producer"]).__name__ == "TemplateDataProducer"
     finally:
         asm.close()
+
+
+def test_both_switches_share_the_larger_turn_timeout(defaults_repo, env, runtimes):
+    asm = assemble(defaults_repo, FactoryOptions(switches=("agent",), interact=True), env=env)
+    try:
+        assert (runtimes[0]._timeout, runtimes[0]._message_timeout) == (90.0, 90.0)
+    finally:
+        asm.close()
+
+
+def test_the_agent_switch_alone_has_no_message_timeout(defaults_repo, runtimes):
+    asm = assemble(defaults_repo, FactoryOptions(switches=("agent",)), env={})
+    try:
+        assert (runtimes[0]._timeout, runtimes[0]._message_timeout) == (5.0, None)
+    finally:
+        asm.close()
+
+
+def test_the_time_budget_constants():
+    import factory.interact_policy as ip
+    import factory.vllm_policy as vp
+    import factory.wire as wire
+    from mindtrainer.trajectory_source import PER_TURN_DEADLINE_S
+    assert (wire.INTERACT_TURN_TIMEOUT_S, wire.INTERACT_MESSAGE_TIMEOUT_S) == (90.0, 90.0)
+    assert (vp.POLICY_TIMEOUT_S, ip.OPPONENT_TIMEOUT_S, PER_TURN_DEADLINE_S) == (60.0, 25.0, 90.0)
+    assert not hasattr(ip, "PER_TURN_DEADLINE_S")
+    assert vp.POLICY_TIMEOUT_S + 20.0 < wire.INTERACT_TURN_TIMEOUT_S       # 训练位 HTTP 加记忆 20 秒,低于服务端等提交
+    assert ip.OPPONENT_TIMEOUT_S + 20.0 < 60.0                             # 对手 HTTP 加记忆 20 秒,低于服务端后端上限
 
 
 def test_the_agent_switch_alone_keeps_the_default_turn_timeout_and_builds_one_runtime(
@@ -619,8 +648,16 @@ def test_the_sessions_are_registered_before_the_body_and_dropped_after(world, tm
     before = runtime.interact_deadline_s
     with factory(RUN, cfg):
         assert runtime._sessions == {"t1": RUN, "t2": RUN}
-        assert runtime.interact_deadline_s == cfg.max_turns_per_episode * 30.0
+        assert runtime.interact_deadline_s == before
     assert runtime._sessions == {} and runtime.interact_deadline_s == before
+
+
+def test_a_training_scope_leaves_the_runtime_deadline_to_deployment_sessions(world, tmp_path, stub):
+    """同开时部署会话(不传 deadline_s)在训练进行中仍用运行时自己的值。"""
+    runtime, _, factory, _ = _unit(world, tmp_path, stub)
+    before = runtime.interact_deadline_s
+    with factory(RUN, _cfg()):
+        assert runtime.interact_deadline_s == before
 
 
 def test_the_scope_yields_a_per_rollout_factory_of_actio_instances_around_the_vllm_policy(world, tmp_path, stub):

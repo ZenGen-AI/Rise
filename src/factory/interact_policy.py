@@ -8,10 +8,10 @@
 4. 本 run 有 external_api 对手位时,现在才读 `training_defaults.yaml` 的 opponent 段并造那个后端(每次进入都重读,
    改了不必重启守护进程;读不到或写坏了判 failed,原因只报段名与异常类型);
 5. 起 vLLM 服务(`policy_context`),在同一服务上造 vLLM 对手工厂;
-6. 把每个情境 id 登记到运行时(落盘钩子据此把 episode 写进本 run),调长流 deadline,交出 `policy_for_rollout`:
+6. 把每个情境 id 登记到运行时(落盘钩子据此把 episode 写进本 run),交出 `policy_for_rollout`:
    `policy_for_rollout(episode_id)` 是上下文管理器,每条 rollout 进出一次,进入时在 `VllmPolicy` 外面新造一个带记忆的
    Actio 实例(`memory_role_backend`,每条 rollout 一份空 `TupleMemory`),退出时(正常、异常都一样)关掉它。
-退出时(正常、训练抛异常都一样)先注销情境、还原 deadline,再由 `policy_context` 停服务放租约。
+退出时(正常、训练抛异常都一样)先注销情境,再由 `policy_context` 停服务放租约。
 
 对手后端经 `OpponentSwitch` 交给运行时:运行时在装配期就造好(它还要服务 MindAgent 部署),而 vLLM 对手要用
 会话里才有的 `ServiceHandle`,所以运行时拿到的是这个可切换的工厂,策略上下文进入时装上真工厂、退出时卸下。
@@ -24,7 +24,7 @@
 `ServeStopError`(停服务后作业仍在运行,租约保留)虽属延后类,却单独处理:它在进入、训练中、退出时都可能冒出来,
 统一在整个服务上下文之外接住,译成 T2 的 `DirectiveFailedError`,原因点名作业 id 并要求人工停掉占着显存的作业。
 作业停不下来,重试只会撞上同一个租约;若退出时才冒出来,训练其实已经完成,延后重试还会在已完成的训练上反复起服务。
-它冒出来时登记注销、deadline 还原、对手开关解绑都已在各自的 finally 里做完,不会被跳过。
+它冒出来时登记注销、对手开关解绑都已在各自的 finally 里做完,不会被跳过。
 
 训练体里抛出的真推理失败也分两路(Ruling 27):`RolloutFailedError`(确定性拒绝除外)与 `OpponentApiError`
 译成 `RolloutDeferredError`(`DeferredError` 的子类),走延后通道,指令保持 pending,守护进程不会被它带走。
@@ -71,8 +71,7 @@ from simulator.store_adapter import read_scenario
 from trainscheduler.config import load_training_defaults
 
 TRAINED_ADAPTER = "trained"          # 训练位在 vLLM 服务里的适配器名;站内对手的适配器名就是它的 model_ref
-PER_TURN_DEADLINE_S = 30.0           # 长流 deadline 按每回合 30 秒算:max_turns_per_episode * 30
-OPPONENT_TIMEOUT_S = 25.0            # 对手发言的 HTTP 上限,低于服务端每回合 30 秒的限时,免得线程在服务端放弃后还挂着
+OPPONENT_TIMEOUT_S = 25.0            # 对手发言的 HTTP 上限,低于服务端后端调用上限 60 秒:25 秒加一轮记忆最坏 20 秒
 
 OpponentFactory = Callable[[RoleBinding, Scenario], ModelBackend]
 
@@ -353,14 +352,11 @@ def make_policy_factory(
                         backend.close()
 
                 registered: list[str] = []
-                previous: float | None = None
                 try:
-                    # 先登记再放行第一个会话。不要在持有 runtime._lock 时给 interact_deadline_s 赋值(setter 取同一把非重入锁;getter 不取)
-                    previous = runtime.interact_deadline_s
+                    # 先登记再放行第一个会话
                     for sid in cfg.scenario_ids:
                         runtime.register_session(sid, run_id)
                         registered.append(sid)
-                    runtime.interact_deadline_s = cfg.max_turns_per_episode * PER_TURN_DEADLINE_S
                     try:
                         yield policy_for_rollout
                     except RolloutFailedError as exc:
@@ -378,8 +374,6 @@ def make_policy_factory(
                 finally:
                     for sid in registered:
                         runtime.unregister_session(sid)
-                    if previous is not None:
-                        runtime.interact_deadline_s = previous
         except ServeStopError as exc:
             # 进入、训练中、退出时冒出来都在这里:各 finally 与服务上下文已经展开完,没有清理被跳过
             raise _stuck_service(run_id, exc) from exc

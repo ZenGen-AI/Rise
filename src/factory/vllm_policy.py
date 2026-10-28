@@ -25,7 +25,7 @@ from simulator.backends import ModelBackend
 from simulator.datamodel import Persona, RoleBinding, Scenario, TurnRecord
 
 # 一次发言的等待上限。服务端另有按回合的限时(TimeoutBackend),这一层只是不让 HTTP 无限挂着
-POLICY_TIMEOUT_S = 120.0
+POLICY_TIMEOUT_S = 60.0
 
 
 class VllmPolicy:
