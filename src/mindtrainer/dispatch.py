@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+import dataclasses
 from collections.abc import Callable
 from contextlib import AbstractContextManager, ExitStack, nullcontext
 
@@ -264,9 +266,38 @@ def _is_adapter_export(ref: BigRef) -> bool:
     return hint.get("type") == "roll_ssh" and hint.get("format") == EXPORT_FORMAT
 
 
+# 注入的记忆解析器:(种子, 人格 id 元组) -> (人格 id -> 起点摘要, 运行时身份)。
+# 派发器不知道记忆库长什么样,也不得导入 actio、factory;由装配方(组合根)注入。
+MemoryResolver = Callable[[str | None, tuple[str, ...]], tuple[dict[str, str], dict]]
+
+
+def _resolve_memory(run_id: str, cfg: TrainingConfig, memory_resolver: MemoryResolver) -> TrainingConfig:
+    """解出 cfg.memory 里的起点摘要与运行时身份,返回带解出值的新配置。解出值只进这次派发的配置
+    (于是进 config_hash、policy_factory、policy_backend),不写回 directive.yaml:续训时要重新解。
+
+    入参人格按绑定顺序去重。解析器抛 DirectiveFailedError 就按它的原因重抛(组合根给出可读原因);
+    抛其余任何异常只报类名,不带异常文本(起点库打不开、摘要算不出,文本里可能有端点地址)。
+    回写后再过一次严格校验:解析器给的摘要缺人格、身份缺键,都在这里判 T2。"""
+    persona_ids = tuple(dict.fromkeys(b.persona_id for b in cfg.bindings))
+    try:
+        digests, runtime = memory_resolver(cfg.memory["seed"], persona_ids)
+    except DirectiveFailedError as exc:
+        raise DirectiveFailedError(f"directive {run_id}: {exc.reason}") from exc
+    except Exception as exc:
+        raise DirectiveFailedError(f"directive {run_id}: memory resolver failed: {type(exc).__name__}") from exc
+    resolved = dataclasses.replace(
+        cfg, memory={"seed": cfg.memory["seed"], "digests": dict(digests), "runtime": copy.deepcopy(runtime)},
+    )
+    reason = validate_training_config(resolved)
+    if reason is not None:
+        raise DirectiveFailedError(f"directive {run_id}: {reason}")
+    return resolved
+
+
 def _policy_backend(cfg: TrainingConfig, endpoint: str | None) -> dict:
     """interact 训练的后端说明,写进 training_run.policy_backend,让读记录的人不必从配置重新推导。
-    只含 JSON 安全的类型(要写进产物树)。cfg 是回写后、严格校验过的配置;对手位 = 除训练位以外的绑定。"""
+    只含 JSON 安全的类型(要写进产物树)。cfg 是回写后、严格校验过的配置;对手位 = 除训练位以外的绑定。
+    memory 是解析之后的那份(含 digests 与 runtime):读记录的人从这里就能看到记忆从哪来。"""
     return {
         "trained": {
             "ref": cfg.base_checkpoint_ref.uri,
@@ -281,6 +312,7 @@ def _policy_backend(cfg: TrainingConfig, endpoint: str | None) -> dict:
             for b in cfg.bindings if b.slot_id != cfg.trained_slot
         },
         "real_inference_with_mock_training": True,
+        "memory": copy.deepcopy(cfg.memory),
     }
 
 
@@ -293,6 +325,7 @@ def make_mindtrainer_dispatcher(
     policy_factory: Callable[[str, TrainingConfig], AbstractContextManager[PolicyForRollout]] | None = None,
     data_producer: DataProducer | None = None,
     policy_endpoint: str | None = None,
+    memory_resolver: MemoryResolver | None = None,
 ) -> Dispatcher:
     """构造 MindTrainer 派发器。它只做一件事:把一条 pending 的 directive 跑成候选。
 
@@ -308,6 +341,7 @@ def make_mindtrainer_dispatcher(
       严格校验过的配置。上下文覆盖 _interact_sources 与整个 resume_or_run,且在分类异常的 try 里:
       进入时抛的延后异常(租约被占、服务起不来)照常走延后通道,此时训练记录一个字节都没写;
       进入时抛的确定性错误照常判 failed。两者同给是调用方的错,构造时 ValueError。
+      另需 memory_resolver,进策略上下文之前解出起点摘要与运行时身份。
     - policy_endpoint:策略所用计算端点的名字,只用来写进 interact 运行的 training_run.policy_backend。
       由装配方给(派发器不得导入 factory,自己查不到);没给就记 None。batch 路径不写 policy_backend。
     - data_producer:指令带 data_spec 且本 run 名下的清单缺失时,用它先合成数据(两种模式都可,
@@ -345,9 +379,19 @@ def make_mindtrainer_dispatcher(
                     f"directive {run_id}: interact mode needs a client_factory and a policy or policy_factory"
                     "; start factory run or factory reconcile with --interact to run interact directives"
                 )
+            # is not None 守卫让还没带 memory 段的旧指令照旧跑;Task 28 让 interact 必带 memory 后去掉
+            if cfg.memory is not None and memory_resolver is None:
+                raise DirectiveFailedError(
+                    f"directive {run_id}: interact mode needs a memory_resolver"
+                    "; start factory run or factory reconcile with --interact to run interact directives"
+                )
             _synthesize_missing(store, run_id, cfg, directive, data_producer)
             # 清单缺失在进策略上下文(起 vLLM、占租约)之前就判
             manifests = _batch_manifests(store, run_id, cfg)
+            # 解析在清单与客户端检查之后(缺了就不白跑解析器)、策略上下文之前(上下文要起服务、占租约);
+            # resume_or_run 的 config_hash 在此之后算,续训时重新解出的摘要或身份一变就是 T3
+            if cfg.memory is not None:
+                cfg = _resolve_memory(run_id, cfg, memory_resolver)
         else:
             _synthesize_missing(store, run_id, cfg, directive, data_producer)
             make_sources = _batch_sources(store, run_id, cfg)

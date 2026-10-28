@@ -13,6 +13,7 @@ from controlplane.paths import (
     candidate_checkpoint_file, dataset_manifest_file, episodes_dir, persona_file, run_dir,
     scenario_file,
 )
+from memory_fixtures import fake_memory_resolver, resolved_memory, unresolved_memory
 from mindtrainer.data_producer import TemplateDataProducer
 from mindtrainer.data_spec import DataSynthesisError, parse_data_spec
 from mindtrainer.dispatch import make_mindtrainer_dispatcher
@@ -521,16 +522,19 @@ def test_the_recorded_backend_is_built_from_the_written_back_config(store, live)
     """生成路:persona_id 与 scenario_ids 回写之后才是严格配置;policy_backend 取的是回写后的绑定,
     对手位的 driver(调度器写进去的 scripted)与 model_ref 原样进记录。"""
     server = live()
-    _directive(store, cfg=_interact_cfg())
+    _directive(store, cfg=_interact_cfg(memory=unresolved_memory()))
     reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
         client_factory=server.client_factory, policy=ScriptedBackend({"a": _POLICY_LINES}),
-        data_producer=TemplateDataProducer(), policy_endpoint="gpu-1"))
+        data_producer=TemplateDataProducer(), policy_endpoint="gpu-1", memory_resolver=fake_memory_resolver))
     run = store.read_product(f"{run_dir(RUN)}/training_run.yaml")
     assert run.status == "executed"
     assert run.payload["policy_backend"] == {
         "trained": {"ref": "file:///ckpt/base", "kind": "base", "endpoint": "gpu-1"},
         "opponents": {"b": {"driver": "scripted", "source": "zengen-v1"}},
         "real_inference_with_mock_training": True,
+        # 解析器拿到的是回写后的人格 id(pers-auto-N),摘要按它们记
+        "memory": {**resolved_memory(["pers-auto-0", "pers-auto-1"]),
+                   "digests": {"pers-auto-0": "digest-pers-auto-0", "pers-auto-1": "digest-pers-auto-1"}},
     }
 
 

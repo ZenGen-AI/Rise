@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import grpc
 import pytest
 
-from controlplane.daemon import reconcile_once
+from controlplane.daemon import DirectiveFailedError, reconcile_once
 from controlplane.envelope import BigRef, Envelope, OwnerRef
 from controlplane.gitstore import GitStore
 from controlplane.paths import candidate_checkpoint_file, dataset_manifest_file, run_dir
@@ -18,6 +18,7 @@ from mindtrainer.orchestrator import NotEnoughGroupsError
 from mindtrainer.resume import NeedsHumanError
 from mindtrainer.roll_converter import EXPORT_FORMAT
 from mindtrainer.reward_pipeline import AttributionError
+from memory_fixtures import STAND_IN_RUNTIME, fake_memory_resolver, resolved_memory, unresolved_memory
 from mindtrainer.training_config import InvalidTrainingConfigError, RewardConfig, TrainingConfig
 from realtime_fixtures import plain_factory, plain_hook
 from simulator.backends import ScriptedBackend
@@ -640,6 +641,7 @@ def _interact_directive(store, **overrides):
         stage_manifest_refs={"sft": f"dsm-{RUN}-sft"},
         bindings=[RoleBinding("a", "pa", "self_play").to_dict(),
                   RoleBinding("b", "pb", "frozen_reference", model_ref="zengen-v1").to_dict()],
+        memory=unresolved_memory(),
     )
     fields.update(overrides)
     _directive(store, payload={"target_dimension": "tom", "recipe_ref": "", "training_config": _cfg_dict(**fields)})
@@ -684,7 +686,7 @@ def test_the_policy_factory_context_is_entered_once_with_the_run_id_and_the_vali
         return _Scope(trace, _TracingPolicy(trace))
 
     reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
-        client_factory=env.client_factory, policy_factory=policy_factory))
+        client_factory=env.client_factory, policy_factory=policy_factory, memory_resolver=fake_memory_resolver))
     assert store.read_product(f"{run_dir(RUN)}/directive.yaml").status == "executed"
     assert store.read_product(candidate_checkpoint_file(RUN)).status == "pending_review"
     (run_id, cfg), = calls                                  # 每次派发只造一次
@@ -703,7 +705,7 @@ def test_the_policy_factory_context_is_exited_when_training_raises(store, live):
     trace = []
     disp = make_mindtrainer_dispatcher(
         client_factory=env.client_factory, policy_factory=lambda run_id, cfg: _Scope(trace, _TracingPolicy(trace)),
-        executor_factory=lambda run_id: MockExecutor(crash_at_step=1))
+        executor_factory=lambda run_id: MockExecutor(crash_at_step=1), memory_resolver=fake_memory_resolver)
     with pytest.raises(SimulatedCrashError):
         reconcile_once(store, dispatcher=disp)
     assert trace[0] == "enter" and trace[-1] == ("exit", SimulatedCrashError)
@@ -724,7 +726,8 @@ def test_a_deferred_error_on_entering_the_policy_context_defers_without_writing_
     trace = []
     disp = make_mindtrainer_dispatcher(
         client_factory=env.client_factory,
-        policy_factory=lambda run_id, cfg: _Scope(trace, None, enter_raises=LeaseBusy("gpu lease is held")))
+        policy_factory=lambda run_id, cfg: _Scope(trace, None, enter_raises=LeaseBusy("gpu lease is held")),
+        memory_resolver=fake_memory_resolver)
     directive = store.read_product(f"{run_dir(RUN)}/directive.yaml")
     with pytest.raises(LeaseBusy):
         disp(store, directive)                               # 原样上抛,没有被包成 DirectiveFailedError
@@ -740,7 +743,8 @@ def test_a_deterministic_error_on_entering_the_policy_context_fails_the_directiv
     _interact_directive(store)
     disp = make_mindtrainer_dispatcher(
         client_factory=env.client_factory,
-        policy_factory=lambda run_id, cfg: _Scope([], None, enter_raises=DatasetIntegrityError("bad data")))
+        policy_factory=lambda run_id, cfg: _Scope([], None, enter_raises=DatasetIntegrityError("bad data")),
+        memory_resolver=fake_memory_resolver)
     reconcile_once(store, dispatcher=disp)
     env_d = store.read_product(f"{run_dir(RUN)}/directive.yaml")
     assert env_d.status == "failed" and env_d.payload["failure"]["category"] == "T2"
@@ -772,7 +776,7 @@ def test_a_plain_policy_still_works_and_needs_no_factory(store, live):
     _interact_directive(store)
     policy = _TracingPolicy(trace := [])
     reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
-        client_factory=env.client_factory, policy=policy))
+        client_factory=env.client_factory, policy=policy, memory_resolver=fake_memory_resolver))
     assert store.read_product(f"{run_dir(RUN)}/directive.yaml").status == "executed"
     assert "respond" in trace
 
@@ -826,6 +830,7 @@ def _record(store):
 
 def _run_interact(store, env, **dispatcher_kw):
     policy = ScriptedBackend({"a": ["agreed", "x", "no", "x"] * 8})
+    dispatcher_kw.setdefault("memory_resolver", fake_memory_resolver)
     reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
         client_factory=env.client_factory, policy=policy, **dispatcher_kw))
 
@@ -838,6 +843,7 @@ def test_an_interact_run_records_which_backend_produced_its_data(store, live):
         "trained": {"ref": "file:///ckpt/base", "kind": "base", "endpoint": "gpu-1"},
         "opponents": {"b": {"driver": "vllm", "source": "zengen-v1"}},
         "real_inference_with_mock_training": True,
+        "memory": {"seed": None, "digests": {"pa": "digest-pa", "pb": "digest-pb"}, "runtime": STAND_IN_RUNTIME},
     }
 
 
@@ -901,7 +907,7 @@ def test_the_policy_factory_route_records_the_backend_too(store, live):
     env = live()
     _interact_directive(store)
     reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
-        client_factory=env.client_factory, policy_endpoint="gpu-2",
+        client_factory=env.client_factory, policy_endpoint="gpu-2", memory_resolver=fake_memory_resolver,
         policy_factory=lambda run_id, cfg: _Scope([], ScriptedBackend({"a": ["agreed", "x", "no", "x"] * 8}))))
     assert _record(store).payload["policy_backend"]["trained"]["endpoint"] == "gpu-2"
 
@@ -913,12 +919,13 @@ def test_a_resume_after_a_crash_keeps_the_backend_the_first_attempt_wrote(store,
     with pytest.raises(SimulatedCrashError):
         reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
             client_factory=env.client_factory, policy=policy, policy_endpoint="gpu-1",
-            executor_factory=lambda run_id: MockExecutor(crash_at_step=1)))
+            executor_factory=lambda run_id: MockExecutor(crash_at_step=1), memory_resolver=fake_memory_resolver))
     assert _record(store).status == "pending"
     assert _record(store).payload["policy_backend"]["trained"]["endpoint"] == "gpu-1"
 
     reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
-        client_factory=env.client_factory, policy=policy, policy_endpoint="gpu-2"))
+        client_factory=env.client_factory, policy=policy, policy_endpoint="gpu-2",
+        memory_resolver=fake_memory_resolver))
     run = _record(store)
     assert (run.status, run.payload["resume_attempts"]) == ("executed", 1)
     assert run.payload["policy_backend"]["trained"]["endpoint"] == "gpu-1"   # 第二次换了端点,记录不改
@@ -930,10 +937,12 @@ def test_a_noop_redispatch_does_not_rewrite_the_recorded_backend(store, live):
     policy = ScriptedBackend({"a": ["agreed", "x", "no", "x"] * 16})
     directive = store.read_product(f"{run_dir(RUN)}/directive.yaml")
     make_mindtrainer_dispatcher(
-        client_factory=env.client_factory, policy=policy, policy_endpoint="gpu-1")(store, directive)
+        client_factory=env.client_factory, policy=policy, policy_endpoint="gpu-1",
+        memory_resolver=fake_memory_resolver)(store, directive)
     before, commits = _record(store), _commit_count(store)
     make_mindtrainer_dispatcher(                             # 记录已 executed:resume_or_run 走 noop
-        client_factory=env.client_factory, policy=policy, policy_endpoint="gpu-2")(store, directive)
+        client_factory=env.client_factory, policy=policy, policy_endpoint="gpu-2",
+        memory_resolver=fake_memory_resolver)(store, directive)
     assert _record(store) == before
     assert _record(store).payload["policy_backend"]["trained"]["endpoint"] == "gpu-1"
     assert _commit_count(store) == commits
@@ -990,6 +999,7 @@ def test_the_backend_has_one_opponent_entry_per_non_trained_slot_and_none_for_a_
             RoleBinding("c", "pc", "external_api"),   # 没有 model_ref:不合规的配置,但映射不应抛错
             RoleBinding("d", "pd", "frozen_reference", model_ref="zengen-v2", driver="scripted"),
         ],
+        memory=resolved_memory(["pa", "pb"]),
     )
     assert _policy_backend(cfg, None) == {
         "trained": {"ref": "file:///ckpt/base", "kind": "base", "endpoint": None},
@@ -999,4 +1009,103 @@ def test_the_backend_has_one_opponent_entry_per_non_trained_slot_and_none_for_a_
             "d": {"driver": "scripted", "source": "zengen-v2"},
         },
         "real_inference_with_mock_training": True,
+        "memory": resolved_memory(["pa", "pb"]),
     }
+
+
+# ---------------- memory_resolver:进策略上下文之前解出起点摘要与运行时身份 ----------------
+
+def _recording_resolver(trace, digests=None):
+    def resolve(seed, persona_ids):
+        trace.append(("resolve", seed, persona_ids))
+        return (digests if digests is not None else {p: f"digest-{p}" for p in persona_ids}), dict(STAND_IN_RUNTIME)
+    return resolve
+
+
+def test_the_memory_is_resolved_before_the_policy_context_is_entered_and_recorded(store, live):
+    _interact_directive(store, memory=unresolved_memory())
+    trace, seen = [], []
+
+    def factory(run_id, cfg):
+        seen.append(cfg.memory)
+        return _Scope(trace, ScriptedBackend({"a": ["agreed", "x", "no", "x"] * 8}))
+
+    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
+        client_factory=live().client_factory, policy_factory=factory, memory_resolver=_recording_resolver(trace)))
+    assert trace[0] == ("resolve", None, ("pa", "pb")) and trace[1] == "enter"
+    resolved = {"seed": None, "digests": {"pa": "digest-pa", "pb": "digest-pb"}, "runtime": STAND_IN_RUNTIME}
+    assert seen == [resolved]
+    assert _record(store).payload["policy_backend"]["memory"] == resolved
+    # 解出的值只进这次派发的配置与记录,指令原样不动(续训时重新解)
+    directive = store.read_product(f"{run_dir(RUN)}/directive.yaml")
+    assert directive.payload["training_config"]["memory"] == unresolved_memory()
+
+
+def test_the_resolved_memory_is_part_of_the_config_hash(store, live):
+    _interact_directive(store, memory=unresolved_memory())
+    with pytest.raises(SimulatedCrashError):
+        reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
+            executor_factory=lambda run_id: MockExecutor(crash_at_step=1), client_factory=live().client_factory,
+            policy=ScriptedBackend({"a": ["agreed", "x"] * 16}), memory_resolver=fake_memory_resolver))
+    assert _record(store).status == "pending"
+    changed = _recording_resolver([], digests={"pa": "digest-pa", "pb": "other"})
+    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
+        client_factory=live().client_factory, policy=ScriptedBackend({"a": ["agreed", "x"] * 16}),
+        memory_resolver=changed))
+    env = store.read_product(f"{run_dir(RUN)}/directive.yaml")
+    assert env.status == "failed" and env.payload["failure"]["category"] == "T3"
+    assert "config changed" in env.payload["failure"]["reason"]
+
+
+def test_an_interact_directive_without_a_memory_resolver_fails_naming_the_interact_switch(store, live):
+    _interact_directive(store, memory=unresolved_memory())
+    trace = []
+    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
+        client_factory=live().client_factory, policy_factory=lambda run_id, cfg: _Scope(trace, None)))
+    env = store.read_product(f"{run_dir(RUN)}/directive.yaml")
+    assert env.status == "failed" and env.payload["failure"]["category"] == "T2"
+    assert "memory_resolver" in env.payload["failure"]["reason"] and "--interact" in env.payload["failure"]["reason"]
+    assert trace == [] and not store.exists(f"{run_dir(RUN)}/training_run.yaml")
+
+
+def test_a_resolver_exception_fails_the_directive_with_its_class_name_only(store, live):
+    def broken(seed, persona_ids):
+        raise RuntimeError("cannot open https://memory.example/secret")
+
+    _interact_directive(store, memory=unresolved_memory())
+    trace = []
+    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
+        client_factory=live().client_factory, policy_factory=lambda run_id, cfg: _Scope(trace, None),
+        memory_resolver=broken))
+    env = store.read_product(f"{run_dir(RUN)}/directive.yaml")
+    reason = env.payload["failure"]["reason"]
+    assert env.status == "failed" and env.payload["failure"]["category"] == "T2"
+    assert "memory resolver failed: RuntimeError" in reason and "memory.example" not in reason
+    assert trace == []
+
+
+def test_a_resolver_that_refuses_with_a_reason_keeps_that_reason(store, live):
+    def refuses(seed, persona_ids):
+        raise DirectiveFailedError("memory.seed 'seed-1' needs a memory config")
+
+    _interact_directive(store, memory=unresolved_memory("seed-1"))
+    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
+        client_factory=live().client_factory, policy=ScriptedBackend({}), memory_resolver=refuses))
+    env = store.read_product(f"{run_dir(RUN)}/directive.yaml")
+    assert env.status == "failed" and "memory.seed 'seed-1' needs a memory config" in env.payload["failure"]["reason"]
+
+
+def test_a_resolver_that_misses_a_persona_fails_the_directive(store, live):
+    _interact_directive(store, memory=unresolved_memory())
+    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
+        client_factory=live().client_factory, policy=ScriptedBackend({}),
+        memory_resolver=_recording_resolver([], digests={"pa": "digest-pa"})))
+    env = store.read_product(f"{run_dir(RUN)}/directive.yaml")
+    assert env.status == "failed" and "memory.digests must name exactly the bound personas" in env.payload["failure"]["reason"]
+
+
+def test_a_batch_directive_never_calls_the_resolver(store):
+    trace = []
+    _directive(store, payload={"target_dimension": "tom", "recipe_ref": "", "training_config": _cfg_dict()})
+    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(memory_resolver=_recording_resolver(trace)))
+    assert trace == [] and store.read_product(f"{run_dir(RUN)}/directive.yaml").status == "executed"
