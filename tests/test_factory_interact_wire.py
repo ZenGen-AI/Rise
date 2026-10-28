@@ -623,6 +623,48 @@ def test_the_sessions_are_registered_before_the_body_and_dropped_after(world, tm
     assert runtime._sessions == {} and runtime.interact_deadline_s == before
 
 
+def test_the_scope_yields_a_per_rollout_factory_of_actio_instances_around_the_vllm_policy(world, tmp_path, stub):
+    from actio.memory import TupleMemory
+    from factory.memory_translate import MemoryTranslatingBackend
+    from factory.vllm_policy import VllmPolicy
+    _, _, factory, _ = _unit(world, tmp_path, stub)
+    cfg = _cfg()
+    with factory(RUN, cfg) as policy_for_rollout:
+        with policy_for_rollout(f"{RUN}-grpo0-t1-r0") as first:
+            assert isinstance(first, MemoryTranslatingBackend)
+            inst = first.instance
+            assert isinstance(inst.backend, VllmPolicy)                 # 有 respond_guided,不套 IgnoreGuidance
+            assert inst.episode_id == f"{RUN}-grpo0-t1-r0"
+            assert inst.interlocutors == {b.slot_id: b.persona_id for b in cfg.bindings}
+            assert isinstance(inst.memory, TupleMemory) and inst.memory.digest() == TupleMemory().digest()
+        with policy_for_rollout(f"{RUN}-grpo0-t1-r1") as second:
+            assert second.instance is not inst and second.instance.backend is inst.backend
+
+
+def test_leaving_a_rollout_closes_its_instance_even_when_the_rollout_raises(world, tmp_path, stub):
+    from factory.memory_translate import FactoryMemoryFailureError
+    _, _, factory, _ = _unit(world, tmp_path, stub)
+    with factory(RUN, _cfg()) as policy_for_rollout:
+        with pytest.raises(RuntimeError, match="rollout broke"):
+            with policy_for_rollout(f"{RUN}-grpo0-t1-r0") as backend:
+                raise RuntimeError("rollout broke")
+        with pytest.raises(FactoryMemoryFailureError, match="MemoryClosedError"):
+            backend.respond(None, None, [], "a")
+
+
+def test_an_interact_directive_records_v2_traces_on_the_trained_slot(world, tmp_path, stub, fake_serve):
+    """端到端:装配出的派发器里,训练位每一轮都带 v2 轨迹落盘;对手位同样(设计源第 11 节端到端一行的替身版)。"""
+    from simulator.store_adapter import read_episode
+    _write_directive(world)
+    _run(world, tmp_path)
+    assert _read(world, "directive").status == "executed"
+    assert _wait_until(lambda: len(_episode_ids(world)) >= 2)
+    for path in _episode_ids(world):
+        episode = read_episode(world, RUN, path.rsplit("/", 1)[-1].removesuffix(".yaml"))
+        assert episode.id.startswith(f"{RUN}-grpo0-")
+        assert episode.turns and all(t.activation_trace["schema"] == "actio.trace.v2" for t in episode.turns)
+
+
 def test_a_training_exception_still_unregisters_and_restores_the_deadline(world, tmp_path, stub):
     runtime, _, factory, serve = _unit(world, tmp_path, stub)
     before = runtime.interact_deadline_s

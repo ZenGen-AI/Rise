@@ -1,6 +1,7 @@
 """MindTrainer 派发器:把调和循环的 pending 指令跑成候选。"""
 import subprocess
 import time
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import grpc
@@ -463,7 +464,7 @@ def live(store):
         server.start()
         servers.append(server)
 
-        def client_factory():
+        def client_factory(*, deadline_s=None):
             channel = grpc.insecure_channel(f"127.0.0.1:{server.bound_port}")
             channels.append(channel)
             return EnvironmentServiceClient(pb2_grpc.EnvironmentServiceStub(channel))
@@ -502,6 +503,22 @@ def test_an_interact_directive_trains_against_a_live_server_and_leaves_a_candida
     assert store.read_product(f"{run_dir(RUN)}/training_run.yaml").status == "executed"
     assert store.read_product(candidate_checkpoint_file(RUN)).status == "pending_review"
     assert _wait_until(lambda: len(env.closed) == 4)  # 2 个 GRPO step x 每步一组 2 条 rollout
+
+
+def test_an_interact_directive_names_its_episodes_with_the_run_id(store, live):
+    env = live()
+    cfg = _cfg_dict(
+        mode="interact", grpo_steps=2, scenario_ids=["s1", "s2"], max_turns_per_episode=4,
+        stage_manifest_refs={"sft": f"dsm-{RUN}-sft"},
+        bindings=[RoleBinding("a", "pa", "self_play").to_dict(),
+                  RoleBinding("b", "pb", "frozen_reference", model_ref="zengen-v1").to_dict()],
+    )
+    _directive(store, payload={"target_dimension": "tom", "recipe_ref": "", "training_config": cfg})
+    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
+        client_factory=env.client_factory, policy=ScriptedBackend({"a": ["agreed", "x", "no", "x"] * 8})))
+    assert _wait_until(lambda: len(env.closed) == 4)
+    assert sorted(e.id for e in env.closed) == [
+        f"{RUN}-grpo0-s1-r0", f"{RUN}-grpo0-s1-r1", f"{RUN}-grpo1-s2-r0", f"{RUN}-grpo1-s2-r1"]
 
 
 def test_an_interact_directive_ignores_a_stray_grpo_opd_manifest_ref(store, live):
@@ -638,7 +655,7 @@ class _Scope:
         self.trace.append("enter")
         if self.enter_raises is not None:
             raise self.enter_raises
-        return self.policy
+        return lambda episode_id: nullcontext(self.policy)
 
     def __exit__(self, exc_type, exc, tb):
         self.trace.append(("exit", exc_type))

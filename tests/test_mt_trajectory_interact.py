@@ -1,4 +1,5 @@
 import time
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 
 import grpc
@@ -10,7 +11,7 @@ from mindtrainer.training_config import (
     InvalidTrainingConfigError, RewardConfig, TrainingConfig,
 )
 from mindtrainer.trajectory_source import (
-    InteractTrajectorySource, RolloutFailedError,
+    PER_TURN_DEADLINE_S, InteractTrajectorySource, RolloutFailedError, logical_episode_id,
 )
 from realtime_fixtures import plain_factory, plain_hook
 from simulator.backends import ScriptedBackend
@@ -18,6 +19,7 @@ from simulator.dataset import episode_group_id
 from simulator.datamodel import (
     Episode, Persona, RoleAssignment, RoleBinding, RoleSlot, Scenario, TurnRecord,
 )
+from simulator.realtime.backend_timeout import RoleMemoryFailureError, RoleMemoryUnavailableError
 from simulator.realtime.client import EnvironmentServiceClient, SessionRejectedError
 from simulator.realtime.proto import realtime_env_pb2_grpc as pb2_grpc
 from simulator.realtime.server import create_server
@@ -69,6 +71,24 @@ def _shape(episode):
     return [(t.speaker_slot, t.utterance) for t in episode.turns], episode.terminated_reason
 
 
+def _fixed(policy):
+    return lambda episode_id: nullcontext(policy)
+
+
+class _Rollouts:
+    """policy_for_rollout:记下每次进出与 id,进入时交出 policy。"""
+    def __init__(self, policy, events):
+        self.policy, self.events = policy, events
+
+    @contextmanager
+    def __call__(self, episode_id):
+        self.events.append(("enter", episode_id))
+        try:
+            yield self.policy
+        finally:
+            self.events.append(("exit", episode_id))
+
+
 @pytest.fixture
 def store(tmp_path):
     s = GitStore(str(tmp_path))
@@ -100,7 +120,7 @@ def live(store):
         server.start()
         servers.append(server)
 
-        def client_factory():
+        def client_factory(*, deadline_s=None):
             channel = grpc.insecure_channel(f"127.0.0.1:{server.bound_port}")
             channels.append(channel)
             return EnvironmentServiceClient(pb2_grpc.EnvironmentServiceStub(channel))
@@ -120,7 +140,7 @@ def test_rollouts_match_what_run_episode_produces_for_the_same_scripts(store, li
     env = live()
     policy = ScriptedBackend({"a": ["a1", "a2", "a3", "a4"]})
     cfg = _cfg(scenario_ids=["s1"], groups_per_step=1, group_size=2)
-    batch = InteractTrajectorySource(env.client_factory, policy, store, cfg).collect()
+    batch = InteractTrajectorySource(env.client_factory, _fixed(policy), store, cfg, run_id="run-1").collect()
 
     personas = {pid: _persona(pid) for pid in ("pa", "pb")}
     expected = []
@@ -138,7 +158,8 @@ def test_rollouts_match_what_run_episode_produces_for_the_same_scripts(store, li
 def test_each_scenario_forms_one_group_of_group_size(store, live):
     env = live()
     policy = ScriptedBackend({"a": [f"a{i}" for i in range(20)]})
-    batch = InteractTrajectorySource(env.client_factory, policy, store, _cfg(group_size=3)).collect()
+    batch = InteractTrajectorySource(
+        env.client_factory, _fixed(policy), store, _cfg(group_size=3), run_id="run-1").collect()
     assert [e.scenario_id for e in batch.episodes] == ["s1"] * 3 + ["s2"] * 3
     gids = [episode_group_id(e) for e in batch.episodes]
     assert len(set(gids[:3])) == 1 and len(set(gids[3:])) == 1 and gids[0] != gids[3]
@@ -150,9 +171,20 @@ def test_each_scenario_forms_one_group_of_group_size(store, live):
 def test_the_server_persists_exactly_the_episodes_returned(store, live):
     env = live()
     policy = ScriptedBackend({"a": [f"a{i}" for i in range(20)]})
-    batch = InteractTrajectorySource(env.client_factory, policy, store, _cfg()).collect()
+    batch = InteractTrajectorySource(env.client_factory, _fixed(policy), store, _cfg(), run_id="run-1").collect()
     assert _wait_until(lambda: len(env.closed) == 4)
     assert {e.id for e in env.closed} == {e.id for e in batch.episodes}
+
+
+def test_the_server_persists_each_rollout_under_its_logical_id(store, live):
+    env = live()
+    cfg = _cfg(scenario_ids=["s1"], groups_per_step=1, group_size=2)
+    batch = InteractTrajectorySource(
+        env.client_factory, _fixed(ScriptedBackend({"a": ["a1", "a2", "a3", "a4"]})), store, cfg,
+        run_id="run-1").collect()
+    assert batch.metadata["episode_ids"] == ["run-1-grpo0-s1-r0", "run-1-grpo0-s1-r1"]
+    assert _wait_until(lambda: len(env.closed) == 2)
+    assert sorted(e.id for e in env.closed) == batch.metadata["episode_ids"]
 
 
 def test_trained_slot_speaking_second_sees_the_opponents_opening_in_its_history(store, live):
@@ -166,7 +198,7 @@ def test_trained_slot_speaking_second_sees_the_opponents_opening_in_its_history(
             return f"a{len(seen)}", None
 
     cfg = _cfg(bindings=[_opponent(), _trained()], scenario_ids=["s1"], groups_per_step=1)
-    batch = InteractTrajectorySource(env.client_factory, Recorder(), store, cfg).collect()
+    batch = InteractTrajectorySource(env.client_factory, _fixed(Recorder()), store, cfg, run_id="run-1").collect()
     assert calls[0] == ("pa", "s1", "a")
     assert seen[0] == [("b", "b1")]
     assert seen[1] == [("b", "b1"), ("a", "a1"), ("b", "b2")]
@@ -184,7 +216,7 @@ def test_inner_thoughts_reach_the_server_side_episode_only_for_the_trained_slot(
             return f"a{self.n}", f"thought-{self.n}"
 
     cfg = _cfg(scenario_ids=["s1"], groups_per_step=1)
-    InteractTrajectorySource(env.client_factory, Thinker(), store, cfg).collect()
+    InteractTrajectorySource(env.client_factory, _fixed(Thinker()), store, cfg, run_id="run-1").collect()
     assert _wait_until(lambda: len(env.closed) == 2)
     for episode in env.closed:
         trained = [t for t in episode.turns if t.speaker_slot == "a"]
@@ -211,13 +243,13 @@ def test_a_policy_exception_aborts_the_session_and_no_half_episode_is_persisted(
 
     clients = []
 
-    def tracked():
-        client = env.client_factory()
+    def tracked(**kw):
+        client = env.client_factory(**kw)
         clients.append(client)
         return client
 
     with pytest.raises(_Boom, match="model bug"):
-        InteractTrajectorySource(tracked, Exploding(), store, _cfg()).collect()
+        InteractTrajectorySource(tracked, _fixed(Exploding()), store, _cfg(), run_id="run-1").collect()
     env.server.stop(2).wait()  # 等在途会话收尾,再断言"没有落盘"
     assert env.closed == []
     assert len(clients) == 1 and clients[0].closed
@@ -228,7 +260,7 @@ def test_a_stopped_server_is_a_transient_transport_failure_retried_then_reported
     env.server.stop(0).wait()
     cfg = _cfg(scenario_ids=["s1"], groups_per_step=1, max_retries_per_episode=1)
     source = InteractTrajectorySource(
-        env.client_factory, ScriptedBackend({"a": ["x"] * 4}), store, cfg
+        env.client_factory, _fixed(ScriptedBackend({"a": ["x"] * 4})), store, cfg, run_id="run-1"
     )
     with pytest.raises(RolloutFailedError) as exc:
         source.collect()
@@ -269,22 +301,25 @@ class _FakeClient:
         self.closed = False
         self.aborted = False
         self.created = None
+        self.traces = []
 
     @property
     def turns(self):
         return list(self._turns)
 
-    def create_session(self, *, scenario_id, role_assignment, personas, purpose, client_driven_slot):
+    def create_session(self, *, scenario_id, role_assignment, personas, purpose, client_driven_slot,
+                       episode_id=None):
         self.created = dict(
             scenario_id=scenario_id, role_assignment=role_assignment, personas=personas,
-            purpose=purpose, slot=client_driven_slot,
+            purpose=purpose, slot=client_driven_slot, episode_id=episode_id,
         )
         if self._create_error is not None:
             self.closed = True
             raise self._create_error
         return "sess"
 
-    def submit_turn(self, utterance, inner_thought=None):
+    def submit_turn(self, utterance, inner_thought=None, *, activation_trace=None):
+        self.traces.append(activation_trace)
         if self._submit_error is not None:
             self.closed = True
             raise self._submit_error
@@ -309,8 +344,10 @@ class _FakeFactory:
     def __init__(self, *plans):
         self._plans = list(plans)
         self.clients = []
+        self.deadlines = []
 
-    def __call__(self):
+    def __call__(self, *, deadline_s=None):
+        self.deadlines.append(deadline_s)
         plan = self._plans.pop(0) if self._plans else {}
         client = _FakeClient(f"ep-fake-{len(self.clients)}", **plan)
         self.clients.append(client)
@@ -320,7 +357,8 @@ class _FakeFactory:
 def _source(store, factory, policy=None, **cfg_kw):
     policy = policy or ScriptedBackend({"a": [f"a{i}" for i in range(50)]})
     start_step = cfg_kw.pop("start_step", 0)
-    return InteractTrajectorySource(factory, policy, store, _cfg(**cfg_kw), start_step=start_step)
+    return InteractTrajectorySource(
+        factory, _fixed(policy), store, _cfg(**cfg_kw), run_id="run-1", start_step=start_step)
 
 
 _ONE_GROUP = dict(scenario_ids=["s1"], groups_per_step=1)
@@ -479,3 +517,92 @@ def test_constructor_rejects_the_wrong_mode_an_invalid_config_and_a_negative_sta
         _source(store, _FakeFactory(), trained_slot="ghost")
     with pytest.raises(ValueError, match="start_step must be >= 0"):
         _source(store, _FakeFactory(), start_step=-1)
+
+
+# ====================== 逻辑 episode id、按 rollout 进出上下文、轨迹上行 ======================
+
+def test_the_logical_episode_id_is_run_stage_scenario_and_rollout():
+    assert logical_episode_id("run-7", 3, "s1", 1) == "run-7-grpo3-s1-r1"
+
+
+def test_each_rollout_gets_its_own_context_and_its_logical_id_reaches_create_session(store):
+    events = []
+    factory = _FakeFactory({"end_reason": "timeout"})
+    source = InteractTrajectorySource(
+        factory, _Rollouts(ScriptedBackend({"a": ["x"] * 50}), events), store, _cfg(**_ONE_GROUP),
+        run_id="run-1", start_step=2)
+    source.collect()
+    ids = ["run-1-grpo2-s1-r0", "run-1-grpo2-s1-r0", "run-1-grpo2-s1-r1"]   # 第一条重试一次,id 不变
+    assert [c.created["episode_id"] for c in factory.clients] == ids
+    assert events == [e for i in ids for e in (("enter", i), ("exit", i))]
+    assert factory.deadlines == [_cfg().max_turns_per_episode * PER_TURN_DEADLINE_S] * 3
+
+
+def test_a_three_tuple_reply_sends_its_trace_and_a_two_tuple_sends_none(store):
+    class Traced:
+        def __init__(self):
+            self.n = 0
+
+        def respond(self, persona, scenario, history, speaker_slot):
+            self.n += 1
+            return ("a", None, {"schema": "actio.trace.v2", "n": str(self.n)}) if self.n % 2 else ("b", None)
+
+    factory = _FakeFactory()
+    InteractTrajectorySource(factory, _fixed(Traced()), store, _cfg(**_ONE_GROUP), run_id="run-1").collect()
+    traces = factory.clients[0].traces
+    assert traces[0] == {"schema": "actio.trace.v2", "n": "1"} and traces[1] is None
+
+
+def test_a_reply_of_the_wrong_length_is_a_policy_bug_and_is_not_retried(store):
+    class Wrong:
+        def respond(self, persona, scenario, history, speaker_slot):
+            return ("a", None, {}, "extra")
+
+    factory = _FakeFactory()
+    with pytest.raises(TypeError, match="2- or 3-tuple"):
+        InteractTrajectorySource(factory, _fixed(Wrong()), store, _cfg(**_ONE_GROUP), run_id="run-1").collect()
+    assert len(factory.clients) == 1 and factory.clients[0].aborted
+
+
+@pytest.mark.parametrize("reason", ["role_backend_unavailable", "timeout", "role_memory_unavailable"])
+def test_a_create_rejection_with_a_transient_reason_is_retried(store, reason):
+    factory = _FakeFactory({"create_error": SessionRejectedError(reason, "busy")})
+    batch = _source(store, factory, **_ONE_GROUP).collect()
+    assert len(batch.episodes) == 2
+    assert [a["reason"] for a in batch.metadata["failed_attempts"]] == [reason]
+
+
+def test_a_transient_memory_failure_of_the_trained_slot_aborts_and_retries_the_rollout(store):
+    class Flaky:
+        def __init__(self):
+            self.calls = 0
+
+        def respond(self, persona, scenario, history, speaker_slot):
+            self.calls += 1
+            if self.calls == 2:
+                raise RoleMemoryUnavailableError("memory backend failed for slot 'a': MemoryFailureError")
+            return "a", None
+
+    events = []
+    factory = _FakeFactory()
+    batch = InteractTrajectorySource(
+        factory, _Rollouts(Flaky(), events), store, _cfg(**_ONE_GROUP), run_id="run-1").collect()
+    assert len(batch.episodes) == 2 and factory.clients[0].aborted
+    assert batch.metadata["failed_attempts"][0]["reason"] == "role_memory_unavailable"
+    assert batch.metadata["failed_attempts"][0]["detail"] == "RoleMemoryUnavailableError"
+    assert events[:3] == [("enter", "run-1-grpo0-s1-r0"), ("exit", "run-1-grpo0-s1-r0"),
+                          ("enter", "run-1-grpo0-s1-r0")]
+
+
+def test_a_deterministic_memory_failure_of_the_trained_slot_passes_through_unwrapped(store):
+    class Broken:
+        def respond(self, persona, scenario, history, speaker_slot):
+            raise RoleMemoryFailureError("memory backend failed for slot 'a': MemoryClosedError")
+
+    events = []
+    factory = _FakeFactory()
+    with pytest.raises(RoleMemoryFailureError):
+        InteractTrajectorySource(
+            factory, _Rollouts(Broken(), events), store, _cfg(**_ONE_GROUP), run_id="run-1").collect()
+    assert len(factory.clients) == 1 and factory.clients[0].aborted
+    assert events == [("enter", "run-1-grpo0-s1-r0"), ("exit", "run-1-grpo0-s1-r0")]

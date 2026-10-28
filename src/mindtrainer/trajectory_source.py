@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import AbstractContextManager
 from typing import Callable, Protocol
 
 import grpc
@@ -10,8 +11,23 @@ from mindtrainer.training_config import TrainingConfig, ensure_valid_config
 from simulator.backends import ModelBackend
 from simulator.dataset import DatasetManifest, verify_manifest
 from simulator.datamodel import Episode, RoleAssignment
+from simulator.realtime.backend_timeout import RoleMemoryUnavailableError
 from simulator.realtime.client import EnvironmentServiceClient, SessionRejectedError
 from simulator.store_adapter import read_persona, read_scenario
+
+
+# 每条 rollout 进出一次的策略上下文:交出 ModelBackend,respond 返回二元组或三元组。
+# 参数是这条 rollout 的逻辑 episode id(见 logical_episode_id)。
+PolicyForRollout = Callable[[str], AbstractContextManager[ModelBackend]]
+
+# 设计源 6.4 节"客户端每轮等待 90 秒":按 max_turns_per_episode 乘出整条会话的流 deadline。
+PER_TURN_DEADLINE_S = 90.0
+
+
+def logical_episode_id(run_id: str, step: int, scenario_id: str, k: int) -> str:
+    """一条 rollout 的逻辑 episode id:`{run_id}-grpo{step}-{scenario_id}-r{k}`。
+    只用白名单 [A-Za-z0-9._-] 内的字符(取决于 run_id 与 scenario_id 本身)。"""
+    return f"{run_id}-grpo{step}-{scenario_id}-r{k}"
 
 
 class TrajectorySource(Protocol):
@@ -129,8 +145,13 @@ def _classify_client_error(exc: Exception) -> _AttemptFailed:
 class InteractTrajectorySource:
     """InteractTrain 的轨迹源:作为客户端驱动 Plan 4 的实时环境服务。
 
-    - 一条 gRPC 流只承载一次会话,所以每条 rollout 用 client_factory() 新建客户端。
-    - policy 复用 simulator.backends.ModelBackend 协议。
+    - 一条 gRPC 流只承载一次会话,所以每条 rollout 用 client_factory(deadline_s=...) 新建客户端。
+    - policy_for_rollout 每条 rollout(含每次重试)进出一次,交出 simulator.backends.ModelBackend,
+      respond 返回二元组 (utterance, inner_thought) 或三元组 (…, activation_trace);三元组的轨迹随
+      submit_turn 上行。先进上下文、再造客户端、再 create_session;失败时先 abort 客户端、再退出上下文。
+    - 每条 rollout 用逻辑 episode id `{run_id}-grpo{step}-{scenario_id}-r{k}`(step 是本次 collect 的
+      GRPO step,k 是组内序号),随 create_session 上行,服务端按它落盘。同一条 rollout 的重试、失败后
+      重做同一步、续训从同一步接着走,id 都不变(服务端按同名覆盖)。
     - 每个 scenario 连续 rollout group_size 条,共享同一个 RoleAssignment 的内容,
       所以 group_id 相同。每次 collect() 取 groups_per_step 个 scenario,按 scenario_ids
       轮转(batch_for_step)。V1 顺序执行。
@@ -141,13 +162,16 @@ class InteractTrajectorySource:
     失败处理(补充 E.4:失败会话整条重跑,不续接):
     - 只有 terminated_reason ∈ {max_turns, goal_reached} 的 episode 进 batch。
     - T1 瞬态(timeout、role_backend_timeout、role_backend_unavailable、role_memory_unavailable、persistence_failed、
-      传输层 UNAVAILABLE)原样重跑,上限 max_retries_per_episode,每次失败记入 metadata["failed_attempts"]。
+      传输层 UNAVAILABLE;创建被拒时同样按 reason 判,上面这些原因的拒绝也重跑;训练位的
+      RoleMemoryUnavailableError 记为 role_memory_unavailable、detail 只写类名)原样重跑,
+      上限 max_retries_per_episode,每次失败记入 metadata["failed_attempts"]。
     - 其余(invalid_session、role_backend_rejected、role_memory_failure、role_backend_failure 等)不重试,抛 RolloutFailedError。
       role_backend_rejected 是对手 API 明确拒绝(4xx,429 除外),确定性,T2:重试无益,编排器据此写 failed。
       role_memory_failure 是对手位记忆的确定性失败,同样是 T2,编排器同样据此写 failed。
       role_backend_failure 在服务端同时覆盖"后端确定性异常"和"工厂/解析器故障",
       光看 reason 分不出 T1 还是 T2,所以保守地不重试。
-    - 策略自己抛的异常不重试、不包装:会话先 abort()(服务端按断连判 FAILED、不落盘),
+    - 策略自己抛的异常不重试、不包装(含训练位的 RoleMemoryFailureError,确定性,由编排器与派发器
+      分类;回复长度或轨迹类型不对的 TypeError 同理):会话先 abort()(服务端按断连判 FAILED、不落盘),
       原异常原样向上抛——那是被训模型的 bug,不是瞬态服务问题。
     - 失败的 collect() 里已经成功的 rollout 已被服务端经 on_session_closed 落盘,下次
       collect() 会对同一批 scenario 产出新的 episode,所以 ControlPlane 里会留下不属于
@@ -160,11 +184,12 @@ class InteractTrajectorySource:
 
     def __init__(
         self,
-        client_factory: Callable[[], EnvironmentServiceClient],
-        policy: ModelBackend,
+        client_factory: Callable[..., EnvironmentServiceClient],
+        policy_for_rollout: PolicyForRollout,
         store: GitStore,
         config: TrainingConfig,
         *,
+        run_id: str,
         start_step: int = 0,
     ) -> None:
         ensure_valid_config(config)
@@ -173,7 +198,8 @@ class InteractTrajectorySource:
         if start_step < 0:
             raise ValueError(f"start_step must be >= 0, got {start_step}")
         self._client_factory = client_factory
-        self._policy = policy
+        self._policy_for_rollout = policy_for_rollout
+        self._run_id = run_id
         self._store = store
         self._cfg = config
         # 已完成的 GRPO step 数:续训时由编排器传入,让 scenario 轮转接着走
@@ -217,9 +243,10 @@ class InteractTrajectorySource:
 
     def _rollout(self, scenario, personas, rollout: int, failed_attempts: list[dict]) -> Episode:
         budget = 1 + self._cfg.max_retries_per_episode
+        episode_id = logical_episode_id(self._run_id, self._next_step, scenario.id, rollout)
         for attempt in range(1, budget + 1):
             try:
-                return self._attempt(scenario, personas)
+                return self._attempt(scenario, personas, episode_id)
             except _AttemptFailed as failure:
                 failed_attempts.append(
                     {
@@ -241,41 +268,63 @@ class InteractTrajectorySource:
                     ) from failure
         raise AssertionError("unreachable: the loop always returns or raises")
 
-    def _attempt(self, scenario, personas) -> Episode:
+    def _attempt(self, scenario, personas, episode_id: str) -> Episode:
         slot = self._cfg.trained_slot
-        client = self._client_factory()
-        try:
+        # 上下文进入时抛的异常(工厂侧的确定性错误)不包装,原样上抛
+        with self._policy_for_rollout(episode_id) as policy:
+            client = self._client_factory(
+                deadline_s=self._cfg.max_turns_per_episode * PER_TURN_DEADLINE_S
+            )
             try:
-                client.create_session(
-                    scenario_id=scenario.id,
-                    role_assignment=self._assignment(scenario.id),
-                    personas=personas,
-                    purpose="training",
-                    client_driven_slot=slot,
-                )
-            except SessionRejectedError as exc:
-                raise _AttemptFailed(exc.reason, exc.detail, False) from exc
-            except (grpc.RpcError, RuntimeError) as exc:
-                raise _classify_client_error(exc) from exc
-            persona = personas[self._trained_persona_id]
-            while not client.closed:
-                # 策略的异常不在任何 except 里:它穿过下面的 finally(先 abort)原样上抛
-                utterance, thought = self._policy.respond(persona, scenario, client.turns, slot)
                 try:
-                    client.submit_turn(utterance, thought)
+                    client.create_session(
+                        scenario_id=scenario.id,
+                        role_assignment=self._assignment(scenario.id),
+                        personas=personas,
+                        purpose="training",
+                        client_driven_slot=slot,
+                        episode_id=episode_id,
+                    )
+                except SessionRejectedError as exc:
+                    raise _AttemptFailed(exc.reason, exc.detail, exc.reason in _TRANSIENT_REASONS) from exc
                 except (grpc.RpcError, RuntimeError) as exc:
                     raise _classify_client_error(exc) from exc
-            try:
-                episode = client.drain_until_end()
-            except (grpc.RpcError, RuntimeError) as exc:
-                raise _classify_client_error(exc) from exc
-        finally:
-            if not client.closed:
-                # 不发 EndSession:服务端按断连判 FAILED,不经 on_session_closed 落盘。
-                # 若改发 end_session,半截 episode 会被当成正常结束写进 ControlPlane。
-                client.abort()
+                persona = personas[self._trained_persona_id]
+                while not client.closed:
+                    try:
+                        reply = policy.respond(persona, scenario, client.turns, slot)
+                    except RoleMemoryUnavailableError as exc:
+                        # 训练位记忆暂时不可用:整条重跑。detail 只写类名。
+                        raise _AttemptFailed("role_memory_unavailable", type(exc).__name__, True) from exc
+                    # 其余策略异常(含 RoleMemoryFailureError)不在任何 except 里:
+                    # 穿过下面的 finally(先 abort)原样上抛
+                    utterance, thought, trace = _unpack_reply(reply, slot)
+                    try:
+                        client.submit_turn(utterance, thought, activation_trace=trace)
+                    except (grpc.RpcError, RuntimeError) as exc:
+                        raise _classify_client_error(exc) from exc
+                try:
+                    episode = client.drain_until_end()
+                except (grpc.RpcError, RuntimeError) as exc:
+                    raise _classify_client_error(exc) from exc
+            finally:
+                if not client.closed:
+                    # 不发 EndSession:服务端按断连判 FAILED,不经 on_session_closed 落盘。
+                    # 若改发 end_session,半截 episode 会被当成正常结束写进 ControlPlane。
+                    client.abort()
         if episode.terminated_reason in _ACCEPTED_REASONS:
             return episode
         raise _AttemptFailed(
             episode.terminated_reason, "", episode.terminated_reason in _TRANSIENT_REASONS
         )
+
+
+def _unpack_reply(reply: object, slot: str) -> tuple[str, str | None, dict | None]:
+    """策略回复 -> (utterance, inner_thought, activation_trace)。与 simulator.runner._unpack_reply 同一判法:
+    长度不是 2 或 3、或轨迹不是 dict 都是策略的 bug,抛 TypeError,不重试。"""
+    if not isinstance(reply, (tuple, list)) or len(reply) not in (2, 3):
+        raise TypeError(f"policy for slot {slot!r} must return a 2- or 3-tuple, got {reply!r}")
+    trace = reply[2] if len(reply) == 3 else None
+    if trace is not None and not isinstance(trace, dict):
+        raise TypeError(f"policy for slot {slot!r} returned a non-dict activation_trace: {trace!r}")
+    return reply[0], reply[1], trace

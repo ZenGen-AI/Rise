@@ -8,7 +8,9 @@
 4. 本 run 有 external_api 对手位时,现在才读 `training_defaults.yaml` 的 opponent 段并造那个后端(每次进入都重读,
    改了不必重启守护进程;读不到或写坏了判 failed,原因只报段名与异常类型);
 5. 起 vLLM 服务(`policy_context`),在同一服务上造 vLLM 对手工厂;
-6. 把每个情境 id 登记到运行时(落盘钩子据此把 episode 写进本 run),调长流 deadline,交出策略。
+6. 把每个情境 id 登记到运行时(落盘钩子据此把 episode 写进本 run),调长流 deadline,交出 `policy_for_rollout`:
+   `policy_for_rollout(episode_id)` 是上下文管理器,每条 rollout 进出一次,进入时在 `VllmPolicy` 外面新造一个带记忆的
+   Actio 实例(`memory_role_backend`,每条 rollout 一份空 `TupleMemory`),退出时(正常、异常都一样)关掉它。
 退出时(正常、训练抛异常都一样)先注销情境、还原 deadline,再由 `policy_context` 停服务放租约。
 
 对手后端经 `OpponentSwitch` 交给运行时:运行时在装配期就造好(它还要服务 MindAgent 部署),而 vLLM 对手要用
@@ -35,6 +37,7 @@ import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, ExitStack, contextmanager
 
+from actio.memory import TupleMemory
 from compute.client import ComputeClient
 from compute.endpoint import ComputeEndpoint
 from compute.errors import ComputeError, ServeStopError
@@ -47,6 +50,7 @@ from factory.agent import AGENT_CONFIG, AgentRuntime, read_agent_settings
 from factory.errors import FactoryConfigError
 from factory.eval_config import DEFAULT_SERVE_PORT
 from factory.interact_checks import has_userinfo
+from factory.memory_translate import MemoryTranslatingBackend, memory_role_backend
 from factory.opponents import (
     ExternalApiBackend,
     ModelRefError,
@@ -60,7 +64,7 @@ from factory.vllm_policy import POLICY_TIMEOUT_S, policy_context, vllm_opponent_
 from mindtrainer.dispatch import DirectiveFailedError
 from mindtrainer.orchestrator import _DETERMINISTIC_ROLLOUT_REASONS
 from mindtrainer.training_config import TrainingConfig
-from mindtrainer.trajectory_source import RolloutFailedError
+from mindtrainer.trajectory_source import PolicyForRollout, RolloutFailedError
 from simulator.backends import ModelBackend, ScriptedBackend
 from simulator.datamodel import RoleBinding, Scenario
 from simulator.store_adapter import read_scenario
@@ -285,13 +289,15 @@ def make_policy_factory(
     serve: Callable[..., object] | None = None,
     policy_timeout_s: float = POLICY_TIMEOUT_S,
     opponent_timeout_s: float = OPPONENT_TIMEOUT_S,
-) -> Callable[[str, TrainingConfig], AbstractContextManager[ModelBackend]]:
+) -> Callable[[str, TrainingConfig], AbstractContextManager[PolicyForRollout]]:
     """派发器要的 `policy_factory(run_id, cfg)`。serve 可注入,测试里不连 SSH。
+    上下文交出的是 `policy_for_rollout(episode_id)`,不是后端:轨迹源每条 rollout 进出一次,拿到该条 rollout 自己的、
+    包着同一个 `VllmPolicy` 的 Actio 实例。
     外部对手的地址与模型不在这里传:每次进入上下文时从 `store` 里的 training_defaults.yaml 读(见 _opponent_section)。
     opponent_timeout_s 同时是站内 vLLM 对手与外部 API 对手的单次 HTTP 上限。"""
 
     @contextmanager
-    def scope(run_id: str, cfg: TrainingConfig) -> Iterator[ModelBackend]:
+    def scope(run_id: str, cfg: TrainingConfig) -> Iterator[PolicyForRollout]:
         overlap = _deployment_overlap(store, run_id, cfg)
         if overlap:
             raise DirectiveFailedError(
@@ -330,6 +336,22 @@ def make_policy_factory(
                 except (ComputeError, ModelRefError, OpponentCredentialError) as exc:
                     raise _failed(run_id, exc) from exc
                 stack.enter_context(switch.bound(_dispatching(vllm_make, make_external)))
+                interlocutors = {b.slot_id: b.persona_id for b in cfg.bindings}
+
+                @contextmanager
+                def policy_for_rollout(episode_id: str) -> Iterator[MemoryTranslatingBackend]:
+                    # 训练位与对手位同一写法:底座(VllmPolicy 有 respond_guided,不套 IgnoreGuidance)外面包带记忆的
+                    # Actio 实例。替身没有种子,"从起点出发"的副本就是每条 rollout 一份新的空 TupleMemory。
+                    # close() 抛的 FactoryMemoryFailureError 不接:它是 RoleMemoryFailureError 的子类,
+                    # 穿出轨迹源后由编排器写 failed、派发器判 T2。
+                    backend = memory_role_backend(
+                        policy, memory=TupleMemory(), episode_id=episode_id, interlocutors=interlocutors,
+                    )
+                    try:
+                        yield backend
+                    finally:
+                        backend.close()
+
                 registered: list[str] = []
                 previous: float | None = None
                 try:
@@ -340,7 +362,7 @@ def make_policy_factory(
                         registered.append(sid)
                     runtime.interact_deadline_s = cfg.max_turns_per_episode * PER_TURN_DEADLINE_S
                     try:
-                        yield policy
+                        yield policy_for_rollout
                     except RolloutFailedError as exc:
                         if exc.reason in _DETERMINISTIC_ROLLOUT_REASONS:
                             # invalid_session(请求本身有问题)、role_backend_rejected(对手 API 明确拒绝)、

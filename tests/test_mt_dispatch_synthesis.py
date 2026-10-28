@@ -458,7 +458,7 @@ def live(store):
         server.start()
         servers.append(server)
 
-        def client_factory():
+        def client_factory(*, deadline_s=None):
             channel = grpc.insecure_channel(f"127.0.0.1:{server.bound_port}")
             channels.append(channel)
             return EnvironmentServiceClient(pb2_grpc.EnvironmentServiceStub(channel))
@@ -543,11 +543,11 @@ def test_write_back_happens_once_and_stays_stable(store, live):
         def __init__(self):
             self.calls = 0
 
-        def __call__(self):
+        def __call__(self, *, deadline_s=None):
             self.calls += 1
             if self.calls == 1:
                 raise OSError("server not reachable yet")
-            return server.client_factory()
+            return server.client_factory(deadline_s=deadline_s)
 
     client_factory = FlakyOnce()
     _directive(store, cfg=_interact_cfg())

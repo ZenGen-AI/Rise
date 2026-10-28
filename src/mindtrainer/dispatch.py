@@ -28,7 +28,7 @@ from mindtrainer.training_config import (
     validate_training_config,
 )
 from mindtrainer.trajectory_source import (
-    BatchTrajectorySource, InteractTrajectorySource, TrajectorySource,
+    BatchTrajectorySource, InteractTrajectorySource, PolicyForRollout, TrajectorySource,
 )
 from simulator.backends import ModelBackend
 from simulator.dataset import DatasetIntegrityError, DatasetManifest, read_manifest
@@ -230,8 +230,9 @@ def _interact_sources(
     store: GitStore,
     cfg: TrainingConfig,
     manifests: dict[str, DatasetManifest],
-    client_factory: Callable[[], object],
-    policy: ModelBackend,
+    client_factory: Callable[..., object],
+    policy_for_rollout: PolicyForRollout,
+    run_id: str,
 ) -> Callable[[int], dict[str, TrajectorySource]]:
     """interact 的 grpo_opd 来自实时会话,只有 sft 用清单。清单由调用方先读好(_batch_manifests):
     缺失、读不出这类确定性的错要在占用推理服务之前就判,不能等策略上下文进入之后。"""
@@ -242,7 +243,7 @@ def _interact_sources(
         }
         if cfg.grpo_steps > 0:
             sources["grpo_opd"] = InteractTrajectorySource(
-                client_factory, policy, store, cfg, start_step=start
+                client_factory, policy_for_rollout, store, cfg, run_id=run_id, start_step=start
             )
         return sources
 
@@ -287,9 +288,9 @@ def make_mindtrainer_dispatcher(
     *,
     executor_factory: Callable[[str], TrainingExecutor] = lambda run_id: MockExecutor(),
     converter: CheckpointConverter | None = None,
-    client_factory: Callable[[], object] | None = None,
+    client_factory: Callable[..., object] | None = None,
     policy: ModelBackend | None = None,
-    policy_factory: Callable[[str, TrainingConfig], AbstractContextManager[ModelBackend]] | None = None,
+    policy_factory: Callable[[str, TrainingConfig], AbstractContextManager[PolicyForRollout]] | None = None,
     data_producer: DataProducer | None = None,
     policy_endpoint: str | None = None,
 ) -> Dispatcher:
@@ -300,8 +301,10 @@ def make_mindtrainer_dispatcher(
 
     - batch:按 stage_manifest_refs 读数据集清单。
     - interact:另需 client_factory 与策略,注入后 grpo_opd 走实时会话。策略二选一:
-      policy 是现成的后端;policy_factory(run_id, cfg) 每次派发调用一次,返回一个上下文管理器,
-      进入时交出策略后端、退出时收尾(起停推理服务、登记会话都放在这一进一出里)。cfg 是回写后、
+      policy 是现成的固定后端(每条 rollout 都用它);policy_factory(run_id, cfg) 每次派发调用一次,
+      返回一个上下文管理器,进入时交出 policy_for_rollout(episode_id),每条 rollout 进出一次,
+      交出该条 rollout 的后端;整个上下文退出时收尾(起停推理服务、登记会话都放在这一进一出里)。
+      client_factory 必须收 keyword-only deadline_s。cfg 是回写后、
       严格校验过的配置。上下文覆盖 _interact_sources 与整个 resume_or_run,且在分类异常的 try 里:
       进入时抛的延后异常(租约被占、服务起不来)照常走延后通道,此时训练记录一个字节都没写;
       进入时抛的确定性错误照常判 failed。两者同给是调用方的错,构造时 ValueError。
@@ -354,9 +357,12 @@ def make_mindtrainer_dispatcher(
             with ExitStack() as stack:
                 extra: dict = {}
                 if cfg.mode == "interact":
-                    scope = nullcontext(policy) if policy is not None else policy_factory(run_id, cfg)
+                    scope = (
+                        nullcontext(lambda episode_id: nullcontext(policy)) if policy is not None
+                        else policy_factory(run_id, cfg)
+                    )
                     make_sources = _interact_sources(
-                        store, cfg, manifests, client_factory, stack.enter_context(scope)
+                        store, cfg, manifests, client_factory, stack.enter_context(scope), run_id
                     )
                     # 只有 interact 记后端;batch 不传,既有 training_run 逐字节不变
                     extra["policy_backend"] = _policy_backend(cfg, policy_endpoint)

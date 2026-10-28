@@ -1,5 +1,6 @@
 import dataclasses
 import time
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import grpc
@@ -475,7 +476,7 @@ def live(store):
         server.start()
         servers.append(server)
 
-        def client_factory():
+        def client_factory(*, deadline_s=None):
             channel = grpc.insecure_channel(f"127.0.0.1:{server.bound_port}")
             channels.append(channel)
             return EnvironmentServiceClient(pb2_grpc.EnvironmentServiceStub(channel))
@@ -510,7 +511,7 @@ def _interact_sources(store, env, cfg, calls):
         return {
             "sft": BatchTrajectorySource(store, read_manifest(store, RUN, "sft")),
             "grpo_opd": InteractTrajectorySource(
-                env.client_factory, policy, store, cfg, start_step=start
+                env.client_factory, lambda eid: nullcontext(policy), store, cfg, run_id=RUN, start_step=start
             ),
         }
     return make
