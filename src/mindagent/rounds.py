@@ -350,10 +350,10 @@ def make_start_round_handler(
                     continue
                 try:
                     memory_store.restore_from(pid, snap)
+                    snap.unlink()  # 删不掉的副本同样按覆盖失败处理:库与副本都留着等人,不从处理器逃出
                 except (MemoryFailureError, OSError) as exc:
                     raise RestoreFailedError(f"rollback {snap.name} for {pid}: {type(exc).__name__}",
                                              point="mindagent.deployment.restore") from exc
-                snap.unlink()
 
         return rollback
 

@@ -125,7 +125,7 @@ def test_bad_agent_yaml_is_an_assembly_error(store, change, match):
         assemble(store, FactoryOptions(switches=("agent",)), env={})
 
 
-@pytest.mark.parametrize("bad", ["张三", "p/../x", ".hidden", "a" * 129])
+@pytest.mark.parametrize("bad", ["张三", "p/../x", ".hidden", "a" * 129, 123, None])
 def test_a_bound_persona_id_the_memory_layout_refuses_exits_2_at_assembly(store, capsys, bad):
     """人格 id 拼进部署库与锁的文件名(PERSONA_ID_PATTERN):不合法的在装配期就判 FactoryConfigError、
     退出码 2,而不是让轮次处理器在取锁时抛 ActioDataError、守护进程每次重启都在同一处退出(终审 I-2)。"""

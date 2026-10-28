@@ -94,7 +94,8 @@ def read_agent_settings(store: GitStore) -> tuple[AgentConfig, tuple[str, ...]]:
         )
     except (KeyError, TypeError, ValueError, OverflowError) as exc:
         raise FactoryConfigError(f"{AGENT_CONFIG}: {describe(exc)}") from None
-    bad = sorted({b.persona_id for b in bindings if not PERSONA_ID_PATTERN.fullmatch(b.persona_id)})
+    bad = sorted({repr(b.persona_id) for b in bindings
+                  if not isinstance(b.persona_id, str) or not PERSONA_ID_PATTERN.fullmatch(b.persona_id)})
     if bad:
         raise FactoryConfigError(
             f"{AGENT_CONFIG}: bindings persona_id {bad} must be 1 to 128 characters of [A-Za-z0-9._-] "

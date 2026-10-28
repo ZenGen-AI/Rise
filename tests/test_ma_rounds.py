@@ -716,6 +716,25 @@ def test_a_failed_rollback_still_fails_the_round_and_keeps_library_and_copy(stor
     assert snap.exists() and mem.store.digest("pa") == before
 
 
+def test_a_copy_that_cannot_be_deleted_after_rollback_fails_the_round_instead_of_escaping(store, mem, monkeypatch):
+    # 终审复审 F4:覆盖成功但删副本永久失败(如权限)时,轮次判 T3 留记录,不从处理器逃出
+    _, snap = _kept_copy(store, mem)
+    real_unlink = type(snap).unlink
+
+    def refuse(self, *a, **kw):
+        if self == snap:
+            raise PermissionError("denied")
+        return real_unlink(self, *a, **kw)
+
+    monkeypatch.setattr(type(snap), "unlink", refuse)
+    _model(store, 2, "run-002")
+    _start(store, _handler(mem=mem))
+    env = store.read_product(agent_round_file("zengen-v1"))
+    assert env.status == "failed" and env.payload["failure"]["point"] == "mindagent.deployment.restore"
+    assert "PermissionError" in env.payload["failure"]["reason"] and "denied" not in env.payload["failure"]["reason"]
+    assert snap.exists()
+
+
 # ---------------- 终审 I-2:记忆层的确定性错误判 T3,不从处理器逃出 ----------------
 
 def _tick(store, handler):
