@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+import time
 from contextlib import AbstractContextManager
 from typing import Callable, Protocol
 
@@ -92,6 +94,23 @@ _TRANSIENT_REASONS = frozenset({
     "persistence_failed",
 })
 
+# 准入被拒的退避(终审 I-1):服务端先发 EndSession、再在收尾里 join 在途后端调用(最多
+# resource_join_timeout_s,缺省 60 秒),其间这个 episode id 一直登记在活动表里,同 id 的 CreateSession
+# 以 role_backend_unavailable 被拒;名额满(活动加滞留达上限)也是这个原因。所以创建被拒且原因是它时,
+# 在同一次尝试里退避重建,不计入 max_retries_per_episode:0.5 秒起指数退避、单次至多 8 秒,总等待
+# admission_wait_s(缺省 65 秒,不少于服务端 join 上限加 5 秒)。用完预算仍被拒,才按原样算一次瞬态失败。
+# mindagent.deployment 有同样的一份(本包不被 mindagent 导入);tests/test_interact_parity.py 钉住两边相等。
+ADMISSION_REFUSED = "role_backend_unavailable"
+ADMISSION_WAIT_S = 65.0
+ADMISSION_FIRST_BACKOFF_S = 0.5
+ADMISSION_MAX_BACKOFF_S = 8.0
+
+
+def _check_admission_wait(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+        raise ValueError(f"admission_wait_s must be a finite non-negative number, got {value!r}")
+    return float(value)
+
 
 class RolloutFailedError(Exception):
     """某条 rollout 失败且不再重试(不可重试的原因,或瞬态重试用尽)。
@@ -165,6 +184,9 @@ class InteractTrajectorySource:
       传输层 UNAVAILABLE;创建被拒时同样按 reason 判,上面这些原因的拒绝也重跑;训练位的
       RoleMemoryUnavailableError 记为 role_memory_unavailable、detail 只写类名)原样重跑,
       上限 max_retries_per_episode,每次失败记入 metadata["failed_attempts"]。
+    - 创建被拒且原因是 role_backend_unavailable(同 id 的旧会话还在收尾,或名额满)时,先在同一次尝试里
+      退避重建(见 ADMISSION_WAIT_S),不计入重试次数、不记 failed_attempts;预算用完仍被拒才按上一条算瞬态失败。
+      sleep 与 clock 只为测试注入。
     - 其余(invalid_session、role_backend_rejected、role_memory_failure、role_backend_failure 等)不重试,抛 RolloutFailedError。
       role_backend_rejected 是对手 API 明确拒绝(4xx,429 除外),确定性,T2:重试无益,编排器据此写 failed。
       role_memory_failure 是对手位记忆的确定性失败,同样是 T2,编排器同样据此写 failed。
@@ -191,8 +213,14 @@ class InteractTrajectorySource:
         *,
         run_id: str,
         start_step: int = 0,
+        admission_wait_s: float = ADMISSION_WAIT_S,
+        sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         ensure_valid_config(config)
+        self._admission_wait_s = _check_admission_wait(admission_wait_s)
+        self._sleep = sleep
+        self._clock = clock
         if config.mode != "interact":
             raise ValueError(f"InteractTrajectorySource needs mode='interact', got {config.mode!r}")
         if start_step < 0:
@@ -272,23 +300,8 @@ class InteractTrajectorySource:
         slot = self._cfg.trained_slot
         # 上下文进入时抛的异常(工厂侧的确定性错误)不包装,原样上抛
         with self._policy_for_rollout(episode_id) as policy:
-            client = self._client_factory(
-                deadline_s=self._cfg.max_turns_per_episode * PER_TURN_DEADLINE_S
-            )
+            client = self._open_session(scenario, personas, episode_id)
             try:
-                try:
-                    client.create_session(
-                        scenario_id=scenario.id,
-                        role_assignment=self._assignment(scenario.id),
-                        personas=personas,
-                        purpose="training",
-                        client_driven_slot=slot,
-                        episode_id=episode_id,
-                    )
-                except SessionRejectedError as exc:
-                    raise _AttemptFailed(exc.reason, exc.detail, exc.reason in _TRANSIENT_REASONS) from exc
-                except (grpc.RpcError, RuntimeError) as exc:
-                    raise _classify_client_error(exc) from exc
                 persona = personas[self._trained_persona_id]
                 while not client.closed:
                     try:
@@ -317,6 +330,47 @@ class InteractTrajectorySource:
         raise _AttemptFailed(
             episode.terminated_reason, "", episode.terminated_reason in _TRANSIENT_REASONS
         )
+
+    def _open_session(self, scenario, personas, episode_id: str) -> EnvironmentServiceClient:
+        """新建客户端并 create_session,返回会话已建成的客户端。一条流只承载一次会话,所以每次重建都新造客户端;
+        建不成的客户端在这里就 abort(被拒的本来已 closed,abort 是空操作)。创建被拒且原因是
+        ADMISSION_REFUSED 时按 ADMISSION_WAIT_S 那段的规则退避重建;其余拒绝、传输与协议错误照旧译成 _AttemptFailed。"""
+        give_up_at = self._clock() + self._admission_wait_s
+        backoff = ADMISSION_FIRST_BACKOFF_S
+        while True:
+            client = self._client_factory(
+                deadline_s=self._cfg.max_turns_per_episode * PER_TURN_DEADLINE_S
+            )
+            try:
+                client.create_session(
+                    scenario_id=scenario.id,
+                    role_assignment=self._assignment(scenario.id),
+                    personas=personas,
+                    purpose="training",
+                    client_driven_slot=self._cfg.trained_slot,
+                    episode_id=episode_id,
+                )
+            except SessionRejectedError as exc:
+                _abort_unless_closed(client)
+                wait = min(backoff, give_up_at - self._clock())
+                if exc.reason == ADMISSION_REFUSED and wait > 0:
+                    self._sleep(wait)
+                    backoff = min(backoff * 2, ADMISSION_MAX_BACKOFF_S)
+                    continue
+                raise _AttemptFailed(exc.reason, exc.detail, exc.reason in _TRANSIENT_REASONS) from exc
+            except (grpc.RpcError, RuntimeError) as exc:
+                _abort_unless_closed(client)
+                raise _classify_client_error(exc) from exc
+            except BaseException:
+                _abort_unless_closed(client)
+                raise
+            return client
+
+
+def _abort_unless_closed(client) -> None:
+    """不发 EndSession:服务端按断连判 FAILED,不落盘。"""
+    if not client.closed:
+        client.abort()
 
 
 def _unpack_reply(reply: object, slot: str) -> tuple[str, str | None, dict | None]:

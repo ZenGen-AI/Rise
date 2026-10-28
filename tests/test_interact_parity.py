@@ -15,11 +15,13 @@ from factory.interact_policy import _is_adapter_export as policy_is_adapter_expo
 from factory.opponents import ModelRefError, driver_for, resolve_model_ref
 from factory.sombench_runner import EXPORT_FORMAT as RUNNER_EXPORT_FORMAT
 from mindagent.deployment import TRANSIENT_REASONS as DEPLOYMENT_TRANSIENT_REASONS
+from mindagent import deployment as _deployment
 from mindtrainer.dispatch import _DEFAULT_OPPONENT_DRIVER
 from mindtrainer.dispatch import _is_adapter_export as dispatch_is_adapter_export
 from mindtrainer.roll_converter import EXPORT_FORMAT as CONVERTER_EXPORT_FORMAT
 from mindtrainer.training_config import OPPONENT_MODEL_BACKENDS
 from mindtrainer.trajectory_source import _TRANSIENT_REASONS as TRAJECTORY_TRANSIENT_REASONS
+from mindtrainer import trajectory_source as _trajectory_source
 from simulator.datamodel import OPPONENT_DRIVERS, RoleBinding
 from trainscheduler.config import _SLOT_DRIVERS
 
@@ -104,3 +106,11 @@ def test_the_converter_and_the_runner_name_the_export_format_the_same():
 def test_the_deployment_copy_of_the_transient_reasons_equals_the_trajectory_sources():
     """mindagent 不导入 mindtrainer,瞬态终止原因集合各写一份:一边加了另一边没加,部署与训练对同一个原因就会判得不一样。"""
     assert DEPLOYMENT_TRANSIENT_REASONS == TRAJECTORY_TRANSIENT_REASONS
+
+
+@pytest.mark.parametrize("name", ["ADMISSION_REFUSED", "ADMISSION_WAIT_S", "ADMISSION_FIRST_BACKOFF_S",
+                                  "ADMISSION_MAX_BACKOFF_S"])
+def test_the_admission_backoff_of_the_two_clients_is_the_same(name):
+    """准入被拒的退避(终审 I-1):轨迹源与部署驱动器各写一份,原因名、总预算与退避步长都要相等。"""
+    assert getattr(_trajectory_source, name) == getattr(_deployment, name)
+    assert _trajectory_source.ADMISSION_REFUSED in TRAJECTORY_TRANSIENT_REASONS

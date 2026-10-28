@@ -1,3 +1,4 @@
+import threading
 import time
 from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
@@ -565,12 +566,177 @@ def test_a_reply_of_the_wrong_length_is_a_policy_bug_and_is_not_retried(store):
     assert len(factory.clients) == 1 and factory.clients[0].aborted
 
 
-@pytest.mark.parametrize("reason", ["role_backend_unavailable", "timeout", "role_memory_unavailable"])
+@pytest.mark.parametrize("reason", ["timeout", "role_memory_unavailable"])
 def test_a_create_rejection_with_a_transient_reason_is_retried(store, reason):
     factory = _FakeFactory({"create_error": SessionRejectedError(reason, "busy")})
     batch = _source(store, factory, **_ONE_GROUP).collect()
     assert len(batch.episodes) == 2
     assert [a["reason"] for a in batch.metadata["failed_attempts"]] == [reason]
+
+
+# ====================== 准入被拒(role_backend_unavailable)时同一次尝试里退避重建 ======================
+
+class _FakeClock:
+    """注入给轨迹源的 sleep/clock:sleep 只把假时钟往前拨,不真睡。"""
+
+    def __init__(self):
+        self.now = 0.0
+        self.sleeps = []
+
+    def clock(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+_BUSY = SessionRejectedError("role_backend_unavailable", "episode 'x' already has an active session")
+
+
+def _backoff_source(store, factory, clock, **kw):
+    cfg_kw = dict(_ONE_GROUP, group_size=2)
+    cfg_kw.update(kw.pop("cfg", {}))
+    return InteractTrajectorySource(
+        factory, _fixed(ScriptedBackend({"a": [f"a{i}" for i in range(50)]})), store, _cfg(**cfg_kw),
+        run_id="run-1", sleep=clock.sleep, clock=clock.clock, **kw)
+
+
+def test_an_admission_refusal_backs_off_inside_the_attempt_and_does_not_count_as_a_retry(store):
+    clock = _FakeClock()
+    factory = _FakeFactory({"create_error": _BUSY}, {"create_error": _BUSY})
+    batch = _backoff_source(store, factory, clock, cfg={"max_retries_per_episode": 0}).collect()
+    assert len(batch.episodes) == 2 and batch.metadata["failed_attempts"] == []   # 一次计数的尝试就成了
+    assert len(factory.clients) == 4                                             # 两次被拒 + 两条成功
+    assert [c.created["episode_id"] for c in factory.clients[:3]] == ["run-1-grpo0-s1-r0"] * 3
+    assert all(c.closed for c in factory.clients[:2])
+    assert clock.sleeps == [0.5, 1.0]                                            # 指数退避,没有真睡
+
+
+def test_the_admission_backoff_is_capped_and_its_budget_falls_through_to_a_transient_failure(store):
+    clock = _FakeClock()
+    factory = _FakeFactory(*[{"create_error": _BUSY}] * 100)
+    source = _backoff_source(store, factory, clock, cfg={"max_retries_per_episode": 0}, admission_wait_s=20.0)
+    with pytest.raises(RolloutFailedError) as exc:
+        source.collect()
+    assert (exc.value.reason, exc.value.attempts) == ("role_backend_unavailable", 1)
+    assert exc.value.failed_attempts[0]["detail"] == _BUSY.detail
+    assert max(clock.sleeps) <= 8.0 and clock.sleeps[:5] == [0.5, 1.0, 2.0, 4.0, 8.0]
+    assert clock.now == 20.0                                                     # 用够预算,不超出
+
+
+def test_the_default_admission_budget_outlasts_the_servers_join_timeout():
+    import inspect
+    from simulator.realtime.server import create_server as _cs
+    join = inspect.signature(_cs).parameters["resource_join_timeout_s"].default
+    default = inspect.signature(InteractTrajectorySource).parameters["admission_wait_s"].default
+    assert default >= join + 5
+
+
+def test_other_create_rejections_are_not_backed_off(store):
+    clock = _FakeClock()
+    factory = _FakeFactory({"create_error": SessionRejectedError("invalid_session", "x")})
+    with pytest.raises(RolloutFailedError):
+        _backoff_source(store, factory, clock).collect()
+    assert clock.sleeps == [] and len(factory.clients) == 1
+
+
+def test_an_admission_budget_that_is_not_a_finite_non_negative_number_is_refused(store):
+    for bad in (-1.0, float("nan"), float("inf"), True):
+        with pytest.raises(ValueError, match="admission_wait_s"):
+            InteractTrajectorySource(_FakeFactory(), _fixed(None), store, _cfg(**_ONE_GROUP), run_id="run-1",
+                                     admission_wait_s=bad)
+
+
+class _HangOnce:
+    """对手位后端:第一次 respond 挂到 release(比服务端 backend_timeout_s 久),之后照常回话。"""
+
+    def __init__(self):
+        self.release = threading.Event()
+        self.calls = 0
+
+    def respond(self, persona, scenario, history, speaker_slot):
+        self.calls += 1
+        if self.calls == 1:
+            self.release.wait(10)
+        return f"b{self.calls}", None
+
+
+@pytest.fixture
+def same_id_server(store):
+    """真 loopback 服务端:对手位第一次调用挂住,backend_timeout_s 取 1 秒、resource_join_timeout_s 取 3 秒;返回 (hang, client_factory, 被拒原因)。
+    client_factory(message_timeout_s=...) 记下每个客户端 create_session 被拒的原因。"""
+    hang = _HangOnce()
+    rejected: list[str] = []
+    channels = []
+
+    def factory(scenario, assignment, personas, client_slot):
+        return {s: hang for s in assignment.slot_ids() - {client_slot}}
+
+    server = create_server(
+        plain_factory(factory), port=0, turn_timeout_s=5.0, backend_timeout_s=1.0,
+        resource_join_timeout_s=3.0, linger_retry_s=0.05,
+        scenario_resolver=lambda sid: read_scenario(store, sid),
+    )
+    server.start()
+
+    def make_factory(message_timeout_s=None):
+        def client_factory(*, deadline_s=None):
+            channel = grpc.insecure_channel(f"127.0.0.1:{server.bound_port}")
+            channels.append(channel)
+            client = EnvironmentServiceClient(pb2_grpc.EnvironmentServiceStub(channel),
+                                              message_timeout_s=message_timeout_s)
+            real = client.create_session
+
+            def create_session(**kw):
+                try:
+                    return real(**kw)
+                except SessionRejectedError as exc:
+                    rejected.append(exc.reason)
+                    raise
+            client.create_session = create_session
+            return client
+        return client_factory
+
+    yield SimpleNamespace(hang=hang, make_factory=make_factory, rejected=rejected)
+    hang.release.set()
+    for channel in channels:
+        channel.close()
+    server.stop(0)
+
+
+_OPP_FIRST = dict(scenario_ids=["s1"], groups_per_step=1, group_size=2, max_retries_per_episode=1,
+                  bindings=[_opponent(), _trained()])
+
+
+def test_a_same_id_retry_after_a_hung_opponent_backs_off_and_succeeds_against_a_real_server(store, same_id_server):
+    """设计 §11:同一逻辑 episode id 仍有活动会话时,第二个 CreateSession 以 role_backend_unavailable 被拒、
+    客户端按条重跑成功。对手开场那次调用挂过 backend_timeout_s → role_backend_timeout;服务端在 join 里
+    最多等 resource_join_timeout_s,其间同 id 的重跑被准入拒,轨迹源退避到旧会话收尾后建成。"""
+    env = same_id_server
+    threading.Timer(1.5, env.hang.release.set).start()     # 挂住的线程在 join 期内退出
+    source = InteractTrajectorySource(
+        env.make_factory(), _fixed(ScriptedBackend({"a": ["x"] * 8})), store, _cfg(**_OPP_FIRST),
+        run_id="run-1", admission_wait_s=10.0)
+    batch = source.collect()
+    assert [e.terminated_reason for e in batch.episodes] == ["max_turns", "max_turns"]
+    assert [a["reason"] for a in batch.metadata["failed_attempts"]] == ["role_backend_timeout"]
+    assert "role_backend_unavailable" in env.rejected                    # 确实撞上了旧会话
+    assert batch.episodes[0].id == "run-1-grpo0-s1-r0"
+
+
+def test_a_same_id_retry_after_a_client_abort_backs_off_and_succeeds_against_a_real_server(store, same_id_server):
+    """客户端侧先 abort 的瞬态:相邻消息等待超时(message_timeout_s)让客户端合成 timeout 并 abort,
+    旧会话的对手调用还挂着、服务端在 join 里;同 id 立即重跑被准入拒,退避到旧会话收尾后建成。"""
+    env = same_id_server
+    threading.Timer(1.5, env.hang.release.set).start()
+    source = InteractTrajectorySource(
+        env.make_factory(message_timeout_s=0.5), _fixed(ScriptedBackend({"a": ["x"] * 8})), store,
+        _cfg(**_OPP_FIRST), run_id="run-1", admission_wait_s=10.0)
+    batch = source.collect()
+    assert [e.terminated_reason for e in batch.episodes] == ["max_turns", "max_turns"]
+    assert [a["reason"] for a in batch.metadata["failed_attempts"]] == ["timeout"]
+    assert "role_backend_unavailable" in env.rejected
 
 
 def test_a_transient_memory_failure_of_the_trained_slot_aborts_and_retries_the_rollout(store):

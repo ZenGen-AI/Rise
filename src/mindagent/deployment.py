@@ -13,6 +13,8 @@ snapshots/<round_id>/<episode_id>-<persona_id>,每次尝试新开端口、新造
 """
 from __future__ import annotations
 
+import math
+import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
@@ -36,6 +38,14 @@ TRANSIENT_REASONS = frozenset({
     "timeout", "role_backend_timeout", "role_backend_unavailable", "role_memory_unavailable",
     "persistence_failed",
 })
+# 准入被拒的退避(终审 I-1),与 mindtrainer.trajectory_source 同一套(tests/test_interact_parity.py 钉住):
+# 服务端发完 EndSession 之后还在收尾里 join 在途后端调用(最多 resource_join_timeout_s,缺省 60 秒),
+# 其间同一部署 id 的 CreateSession 以 role_backend_unavailable 被拒。被拒且原因是它时,在同一次尝试里
+# 0.5 秒起指数退避(单次至多 8 秒)重建,总等待 admission_wait_s(缺省 65 秒),不计入 max_retries_per_episode。
+ADMISSION_REFUSED = "role_backend_unavailable"
+ADMISSION_WAIT_S = 65.0
+ADMISSION_FIRST_BACKOFF_S = 0.5
+ADMISSION_MAX_BACKOFF_S = 8.0
 
 
 # make_instance(带轮次前缀的 episode id, 该人格新开的端口) -> ActioInstance;每次尝试调一次。
@@ -131,13 +141,28 @@ def _restore(memory_store: DeploymentMemoryStore, persona_id: str, snap: Path,
     return digest
 
 
-def _attempt(instance, client_factory, scenario, assignment, personas, agent_slot, *,
-             episode_id: str, deadline_s: float | None) -> Episode:
-    """episode_id 是不带轮次的部署 id,随 CreateSession 交给服务端。deadline_s 为 None 时不传,
-    客户端工厂用它自己的现值(替身路径)。"""
-    persona = personas[next(b.persona_id for b in assignment.bindings if b.slot_id == agent_slot)]
-    client = client_factory() if deadline_s is None else client_factory(deadline_s=deadline_s)
-    try:
+def _check_admission_wait(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+        raise ValueError(f"admission_wait_s must be a finite non-negative number, got {value!r}")
+    return float(value)
+
+
+def _abort_unless_closed(client) -> None:
+    """不发 EndSession:服务端按断连判 FAILED,不落盘半截 episode。"""
+    if not client.closed:
+        client.abort()
+
+
+def _open_session(client_factory, scenario, assignment, personas, agent_slot, *, episode_id: str,
+                  deadline_s: float | None, admission_wait_s: float,
+                  sleep: Callable[[float], None], clock: Callable[[], float]):
+    """新建客户端并 create_session,返回会话已建成的客户端;建不成的客户端在这里 abort(被拒的本已 closed)。
+    创建被拒且原因是 ADMISSION_REFUSED 时退避重建(一条流只承载一次会话,所以每次都新造客户端),
+    预算用完仍被拒才往下走。第 10 节:其余创建被拒按终止原因查瞬态集合;传输与协议错误照旧分类。"""
+    give_up_at = clock() + admission_wait_s
+    backoff = ADMISSION_FIRST_BACKOFF_S
+    while True:
+        client = client_factory() if deadline_s is None else client_factory(deadline_s=deadline_s)
         try:
             client.create_session(
                 scenario_id=scenario.id,
@@ -148,10 +173,31 @@ def _attempt(instance, client_factory, scenario, assignment, personas, agent_slo
                 episode_id=episode_id,
             )
         except SessionRejectedError as exc:
-            # 第 10 节:创建被拒按终止原因查瞬态集合(准入满额的 role_backend_unavailable 要重跑)
+            _abort_unless_closed(client)
+            wait = min(backoff, give_up_at - clock())
+            if exc.reason == ADMISSION_REFUSED and wait > 0:
+                sleep(wait)
+                backoff = min(backoff * 2, ADMISSION_MAX_BACKOFF_S)
+                continue
             raise _AttemptFailed(exc.reason, exc.detail, exc.reason in TRANSIENT_REASONS) from exc
         except (grpc.RpcError, RuntimeError) as exc:
+            _abort_unless_closed(client)
             raise _classify_client_error(exc) from exc
+        except BaseException:
+            _abort_unless_closed(client)
+            raise
+        return client
+
+
+def _attempt(instance, client_factory, scenario, assignment, personas, agent_slot, *,
+             episode_id: str, deadline_s: float | None, admission_wait_s: float = ADMISSION_WAIT_S,
+             sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.monotonic) -> Episode:
+    """episode_id 是不带轮次的部署 id,随 CreateSession 交给服务端。deadline_s 为 None 时不传,
+    客户端工厂用它自己的现值(替身路径)。准入被拒的退避见 _open_session。"""
+    persona = personas[next(b.persona_id for b in assignment.bindings if b.slot_id == agent_slot)]
+    client = _open_session(client_factory, scenario, assignment, personas, agent_slot, episode_id=episode_id,
+                           deadline_s=deadline_s, admission_wait_s=admission_wait_s, sleep=sleep, clock=clock)
+    try:
         while not client.closed:
             # 记忆端口的失败按 transient 分两个终止原因,信息只报类名(第 10 节);策略(Actio 实例)的
             # 其余异常不在任何 except 里:穿过下面的 finally(先 abort)原样上抛
@@ -201,6 +247,9 @@ def run_deployment_episodes(
     episodes_per_scenario: int = 1,
     max_retries_per_episode: int = 1,
     stream_deadline_s: float | None = None,
+    admission_wait_s: float = ADMISSION_WAIT_S,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
 ) -> list[Episode]:
     """按 scenario_ids 的顺序,每个情境跑 episodes_per_scenario 条部署 episode,返回全部 episode
     (含重入时复用的)。每条 episode 落在 runs/<run_id>/episodes/<部署 id>.yaml。
@@ -220,8 +269,12 @@ def run_deployment_episodes(
       覆盖失败(抛错或摘要对不上)抛 RestoreFailedError,库与副本都保留。
     - 实例自己的异常(记忆端口失败除外)与存储的 OSError:会话先 abort(服务端不落盘),实例已关,
       原异常原样上抛,不重试、不包装、不覆盖,与进程崩溃同效。
+    - 创建被拒且原因是 role_backend_unavailable(同 id 的旧会话还在服务端收尾,或名额满)时,先在同一次
+      尝试里退避重建(见 ADMISSION_WAIT_S),不计入重试次数、不记 failed_attempts;admission_wait_s 用完仍被拒
+      才按上一条算一次 T1 失败。sleep 与 clock 只为测试注入。
     - stream_deadline_s 为 None 时不给客户端工厂传 deadline_s。
     """
+    admission_wait_s = _check_admission_wait(admission_wait_s)
     agent_slot = agent_slot_of(bindings)
     persona_id = next(b.persona_id for b in bindings if b.slot_id == agent_slot)
     skill_version = normalize_library_version(library_version)["skill"]
@@ -282,7 +335,8 @@ def run_deployment_episodes(
                     instance = make_instance(f"{round_id}/{eid}", port)
                     try:
                         raw = _attempt(instance, client_factory, scenario, assignment, personas, agent_slot,
-                                       episode_id=eid, deadline_s=stream_deadline_s)
+                                       episode_id=eid, deadline_s=stream_deadline_s,
+                                       admission_wait_s=admission_wait_s, sleep=sleep, clock=clock)
                     finally:
                         instance.close()  # 先关实例与端口:restore_from 要求该人格没有打开的端口
                 except _AttemptFailed as exc:
