@@ -25,6 +25,7 @@ from factory.agent import (
 )
 from factory.configio import preflight, read_tree_config
 from mindagent.admit import handle_admit_proposal
+from mindagent.library import check_memory_library_empty
 from mindagent.rounds import make_start_round_handler
 from recipestore.admit import handle_admit_recipe
 from recipestore.record import handle_record_track
@@ -79,7 +80,13 @@ def _has_bridge_role(store: GitStore, role: str) -> bool:
     return role in read_tree_config(store, backends_config_file())
 
 
+def _checked_memory_library(ctx) -> None:
+    """装配期预检控制面 memory_library/ 为空:非空转成 FactoryConfigError,命令行退出码 2,树里什么都不写。"""
+    preflight("memory_library/", lambda: check_memory_library_empty(ctx.store))
+
+
 def _agent(ctx) -> Handler:
+    _checked_memory_library(ctx)
     config, lines = read_agent_settings(ctx.store)
     runtime = ctx.runtime
     if runtime is None:
@@ -96,9 +103,15 @@ def _agent(ctx) -> Handler:
     )
 
 
+def _admit_proposal(ctx) -> Handler:
+    # 门② 的记忆提案也改走部署库(Task 34),留在树里的旧条目会被误当成已收录,所以收录处理器装配时也查
+    _checked_memory_library(ctx)
+    return handle_admit_proposal
+
+
 DEFAULT_BUILDERS: Mapping[str, Callable] = {
     "admit_recipe": lambda ctx: handle_admit_recipe,
-    "admit_proposal": lambda ctx: handle_admit_proposal,
+    "admit_proposal": _admit_proposal,
     "record_track": lambda ctx: handle_record_track,
     "nominate_recipe": _nominate,
     "plan_next_round": _plan,

@@ -242,7 +242,7 @@ def make_start_round_handler(
              ckpt: BigRef | None) -> None:
         def instance_with(extra: tuple[Skill, ...] = ()):
             return instantiate(
-                backend_factory(model_id, ckpt), skills=lib.skills + tuple(extra), memories=lib.memories,
+                backend_factory(model_id, ckpt), skills=lib.skills + tuple(extra), memories=(),
                 library_version=lib.version, profile={"model_id": model_id, "round_id": env.id},
             )
 

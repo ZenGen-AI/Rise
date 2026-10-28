@@ -9,7 +9,14 @@ from controlplane.gitstore import GitStore
 from controlplane.paths import library_state_file, memory_file, skill_file
 from mindagent.config import AgentConfig, agent_slot_of
 from mindagent.errors import MindAgentDataError
-from mindagent.library import LibraryState, load_library, memory_id_for, read_library_versions, skill_id_for
+from mindagent.library import (
+    LibraryState,
+    check_memory_library_empty,
+    load_library,
+    memory_id_for,
+    read_library_versions,
+    skill_id_for,
+)
 from simulator.datamodel import RoleBinding
 
 SRC = Path(__file__).resolve().parents[1] / "src"
@@ -80,7 +87,7 @@ def test_agent_slot_of_needs_exactly_one_self_play():
 
 def test_an_empty_tree_is_an_empty_library_at_version_zero(store):
     lib = load_library(store)
-    assert lib == LibraryState(skills=(), memories=(), version={"skill": "0", "memory": "0"})
+    assert lib == LibraryState(skills=(), version={"skill": "0", "memory": "0"})
     assert read_library_versions(store) == {"skill_version": "0", "memory_version": "0", "admitted": []}
 
 
@@ -88,13 +95,14 @@ def test_load_library_reads_effective_entries_sorted_and_the_versions(store):
     store.write_product(skill_file("skill-b"), _env("skill-b", "skill", "effective", _skill("skill-b")), "m")
     store.write_product(skill_file("skill-a"), _env("skill-a", "skill", "effective", _skill("skill-a")), "m")
     store.write_product(skill_file("skill-old"), _env("skill-old", "skill", "deprecated", _skill("skill-old")), "m")
+    # memory_library/ 里的 effective 条目 load_library 也不读(设计二起记忆在树外的部署库)
     store.write_product(memory_file("mem-a"), _env("mem-a", "memory", "effective", _memory("mem-a")), "m")
     store.write_product(library_state_file(), _env("library-state", "library_state", "executed",
                         {"skill_version": "3", "memory_version": "1", "admitted": []}), "m")
     lib = load_library(store)
     assert [s.id for s in lib.skills] == ["skill-a", "skill-b"]
     assert isinstance(lib.skills[0], Skill)
-    assert [m.id for m in lib.memories] == ["mem-a"]
+    assert not hasattr(lib, "memories")
     assert lib.version == {"skill": "3", "memory": "1"}
 
 
@@ -140,15 +148,27 @@ def test_every_mindagent_source_starts_with_future_annotations_and_controlplane_
 @pytest.mark.parametrize("which, text", [
     ("skill", "<<<<<<< HEAD\nid: skill-a\n"),                       # 合并冲突标记
     ("skill", "id: skill-a\npayload: [1, 2]\n"),                     # 信封校验失败
-    ("memory", "id: mem-a\nstatus: effective\n"),                    # 信封缺必填字段
-], ids=["skill-conflict", "skill-bad-envelope", "memory-missing-fields"])
+], ids=["skill-conflict", "skill-bad-envelope"])
 def test_an_unreadable_library_file_is_a_mindagent_data_error_naming_it(store, which, text):
     """库文件不在调和循环的视图里,CP-17 的暂停规则管不到它;轮次处理器只接 MindAgentDataError
     与 ActioDataError(轮次 failed),别的异常会从处理器漏出去打崩守护进程。"""
-    rel = skill_file("skill-a") if which == "skill" else memory_file("mem-a")
+    rel = skill_file("skill-a")
     path = store.repo_root / rel
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
     with pytest.raises(MindAgentDataError, match=rel.rsplit("/", 1)[-1]):
         load_library(store)
 
+
+def test_load_library_no_longer_reads_the_memory_library(store):
+    store.write_product(memory_file("mem-a"), _env("mem-a", "memory", "effective", _memory("mem-a")), "m")
+    lib = load_library(store)
+    assert not hasattr(lib, "memories")
+    assert lib.version == {"skill": "0", "memory": "0"}
+
+
+def test_a_non_empty_memory_library_is_a_data_error_naming_it(store):
+    check_memory_library_empty(store)          # 空目录或不存在:通过
+    store.write_product(memory_file("mem-a"), _env("mem-a", "memory", "effective", _memory("mem-a")), "m")
+    with pytest.raises(MindAgentDataError, match=r"memory_library/ must be empty.*mem-a\.yaml"):
+        check_memory_library_empty(store)

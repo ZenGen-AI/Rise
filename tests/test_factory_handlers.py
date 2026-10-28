@@ -5,7 +5,7 @@ import sys
 import pytest
 
 from controlplane.config import write_config
-from controlplane.paths import backends_config_file, scheduler_config_file
+from controlplane.paths import backends_config_file, memory_file, scheduler_config_file
 from controlplane.reconcile import CLOSED_LOOP_ACTIONS
 from factory import handlers as fh
 from factory.agent import AGENT_CONFIG, AgentRuntime, CannedGuidedBackend, read_agent_settings
@@ -864,3 +864,13 @@ def test_the_interact_deadline_is_settable_and_read_when_a_client_is_built(store
         assert calls[-1] == {"timeout": 3.0}
     finally:
         runtime.close()
+
+
+@pytest.mark.parametrize("switch", ["agent", "admit"])
+def test_a_non_empty_memory_library_exits_2_at_assembly(store, capsys, switch):
+    from factory.cli import main
+    rel = memory_file("mem-a")
+    (store.repo_root / rel).parent.mkdir(parents=True, exist_ok=True)
+    (store.repo_root / rel).write_text("id: mem-a\n", encoding="utf-8")
+    assert main(["reconcile", str(store.repo_root), "--once", "--enable", switch], env={}) == 2
+    assert "memory_library/ must be empty" in capsys.readouterr().err
