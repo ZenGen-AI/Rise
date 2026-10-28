@@ -39,3 +39,17 @@ def test_next_states():
 def test_assert_transition_raises():
     with pytest.raises(InvalidTransitionError):
         assert_transition("review", "draft", "effective")
+
+
+def test_approved_can_be_rejected_only_by_the_admit_handler():
+    # 设计二第 9 节"门② 失败"(F23):抽取失败的记忆提案 approved → rejected
+    assert can_transition("review", "approved", "rejected")
+    assert next_states("review", "approved") == {"effective", "rejected"}
+
+
+def test_the_cli_table_deliberately_lacks_the_admit_only_edge():
+    # CLI 的 cli/src/commands.ts 表是给人用的:人不能把已批准的提案改回拒绝,只有收录处理器能
+    import re
+    from pathlib import Path
+    ts = (Path(__file__).resolve().parents[1] / "cli/src/commands.ts").read_text(encoding="utf-8")
+    assert re.search(r'^\s*approved: \["effective"\],$', ts, re.M)

@@ -5,10 +5,12 @@ NONREVIEW = "nonreview"
 
 # spec §1.3 需审核类：draft → pending_review → approved → effective →（deprecated|superseded）
 #                       pending_review → rejected
+# approved → rejected 只许收录处理器在记忆抽取失败时走(设计二第 9 节,F23);
+# cli/src/commands.ts 的 REVIEW_TRANSITIONS 有意不加,人不能把已批准的提案改回拒绝。
 REVIEW_TRANSITIONS: dict[str, set[str]] = {
     "draft": {"pending_review"},
     "pending_review": {"approved", "rejected"},
-    "approved": {"effective"},
+    "approved": {"effective", "rejected"},
     "effective": {"deprecated", "superseded"},
     "rejected": set(),
     "superseded": set(),
