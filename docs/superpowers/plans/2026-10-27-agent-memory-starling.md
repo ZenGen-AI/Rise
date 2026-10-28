@@ -2462,7 +2462,7 @@ git commit -m "test(memory): 部署记忆语义在 Starling 上再跑一遍,真�
 
 > 门② 部分收录的规则在写计划之后改过(Codex 第九轮):前几条已提交、后一条抽取失败时,**不放弃**失败的那条,它留 `pending`,提案留 `approved`,处理器抛 `DeferredError` 退避重试,抽取恢复后收录完。00、50 两篇与设计源已按新规则改好。下面各任务里写着"这一条 `abandon_event`、写 T2、留 `approved` 等人处理"的写回条目已过时,跳过。
 
-> 开工前已经追平过一次:`docs/design` 六篇的设计措辞在提交 `6af53eb` 到 `9d1eb64` 里按设计源与写计划时的裁定改过。下面各任务的"写回台账裁定"一步,先 `git log -p 6af53eb^..9d1eb64 -- <该篇>` 看哪些已经改了,只做还没改的;已改的条目跳过,不要重复改写。施工中又改了设计措辞的,照同样的办法写回。
+> 开工前已经追平过一次:`docs/design` 六篇的设计措辞在提交 `7050add` 到 `3c0162d` 里按设计源与写计划时的裁定改过。下面各任务的"写回台账裁定"一步,先 `git log -p 7050add^..3c0162d -- <该篇>` 看哪些已经改了,只做还没改的;已改的条目跳过,不要重复改写。施工中又改了设计措辞的,照同样的办法写回。
 
 本步改 `docs/design/` 的 00、20、30、40、50、70、90 七篇、设计源 spec,以及(只核对)`docs/design/diagrams/` 的生成图。**不改源码与测试**,所以没有"先写失败的测试"的循环;每个任务的"测试"是两个检查器加 `sync_docs --check`,"提交"逐个文件暂存。
 
@@ -2485,7 +2485,7 @@ git commit -m "test(memory): 部署记忆语义在 Starling 上再跑一遍,真�
 - `python3 docs/design/tools/sync_docs.py [文档名]` 重写区块;`--check` 只检查,不同步时退出码 1。
 - 单篇的 `[计划中]` 行内带路径的例外只对**同一行**生效;跨行表格单元格不算。
 
-### 现状数字(写计划时 `grep -c` 与 `len(split("\n"))` 实测,HEAD 为 d1b0bcb)
+### 现状数字(写计划时 `grep -c` 与 `len(split("\n"))` 实测,HEAD 为 f0b0ff2)
 
 | 文档 | 行数 | 余量到 900 | `[计划中]` 行数 | 设计二合入之前就有的 `[计划中]` 行 |
 |---|---|---|---|---|
@@ -2502,7 +2502,7 @@ git commit -m "test(memory): 部署记忆语义在 Starling 上再跑一遍,真�
 
 ### 设计二合入后设计源又改了四次,文档还没跟上(Task 21 先补)
 
-`git log f053cd0..HEAD -- docs/superpowers/specs/2026-10-25-actio-starling-memory-design.md` 有四个提交(`128eefe`、`a31af64`、`70d0d1a`、`d1b0bcb`),而 `docs/design` 最后一次改动是 `f053cd0`。这四个提交改了:`close()` 不再放弃事件(放弃改由 MindAgent 在 episode 最终结束时做)、`TupleMemory.recall` 的 id 一律是内容 id、部署事件 key 的轮次前缀、`embed_pending` 返回成功条数且有失败就抛、`recall` 抛 `RecallDegradedError`、`.owner` 用 `O_CREAT | O_EXCL`、整条流 deadline 按调用方传、S4 改为 volatile、摘要按 `snapshot` 后的条目算。这些在文档里是**旧措辞**,和 、、 同属"写回"的范围。Task 21 先把它们补齐再处理台账裁定,否则后面按台账改一遍、再按设计源改一遍,会改两次同一行。
+`git log 4775eb9..HEAD -- docs/superpowers/specs/2026-10-25-actio-starling-memory-design.md` 有四个提交(`be2ebbd`、`4b58349`、`c782cac`、`f0b0ff2`),而 `docs/design` 最后一次改动是 `4775eb9`。这四个提交改了:`close()` 不再放弃事件(放弃改由 MindAgent 在 episode 最终结束时做)、`TupleMemory.recall` 的 id 一律是内容 id、部署事件 key 的轮次前缀、`embed_pending` 返回成功条数且有失败就抛、`recall` 抛 `RecallDegradedError`、`.owner` 用 `O_CREAT | O_EXCL`、整条流 deadline 按调用方传、S4 改为 volatile、摘要按 `snapshot` 后的条目算。这些在文档里是**旧措辞**,和 、、 同属"写回"的范围。Task 21 先把它们补齐再处理台账裁定,否则后面按台账改一遍、再按设计源改一遍,会改两次同一行。
 
 ### 任务顺序与依赖
 
@@ -2845,7 +2845,7 @@ Run: `grep -n "\[计划中\]" docs/design/40-actio.md | cut -c1-100`
 
 - [ ] **Step 2: 写回台账裁定(旧措辞逐条定位)**
 
-1. **`close()` 不放弃事件**(设计源 f053cd0 之后改的,同属  的前提):旧措辞在 363、377、388、421、448、677、818、836 行,逐行改:
+1. **`close()` 不放弃事件**(设计源 4775eb9 之后改的,同属  的前提):旧措辞在 363、377、388、421、448、677、818、836 行,逐行改:
    - 363 行:`五个方法里 \`remember\` 推进它,\`close\` 放弃本实例留下的 \`pending\` 行` → `五个方法里 \`remember\` 推进它;\`close\` 只关库,不放弃任何事件(放弃是终态,同 key 再写会抛冲突,放早了就堵死重试)`。
    - 377 行:`放弃不进端口签名:\`close()\` 先逐个放弃本实例写过的 \`pending\` key,再关库。所以部署 episode 结束后库里没有它的 \`pending\` 行;门② 的事件不经实例,由管理面写与放弃` → `放弃不进端口签名,也不在 \`close()\` 里做:要等调用方知道这条 episode 最终成功还是失败。部署库由 MindAgent 经管理面放弃:episode 成功提交后对它留下的 \`pending\` 行逐个 \`abandon_event\`,最终失败前先用起点副本 \`restore_from\`,回滚后库里本来就没有这条 episode 的事件行。门② 的事件不经实例,由管理面写与放弃`。
    - 388 行(不变量 8):`\`close\` 先放弃本实例留下的 \`pending\` 事件,再关库` → `\`close\` 只关库,不放弃事件`。
@@ -2855,8 +2855,8 @@ Run: `grep -n "\[计划中\]" docs/design/40-actio.md | cut -c1-100`
    - 818 行(测试):`\`close()\` 放弃仍 \`pending\` 的 key 再关库,部署库里不留该实例的 \`pending\` 行` → `\`close()\` 只关库,\`pending\` 行原样留在库里(由 MindAgent 放弃)`。
    - 836 行:`关闭语义(\`close()\` 放弃本实例留下的 \`pending\` 事件)` → `关闭语义(\`close()\` 只关库)`。
    - 551、553 行及其他含"关闭实例会放弃 \`pending\` 事件"的单元格(552 行):`关闭实例会放弃 \`pending\` 事件并关闭它持有的端口` → `关闭实例会关闭它持有的端口(不放弃事件)`。
-2. **`embed_pending` 返回成功条数、有失败就抛**(设计源 128eefe):419 行代码注释 `# 只做嵌入,返回条数` → `# 只做嵌入,返回成功条数;有失败就抛瞬态 MemoryFailureError`。
-3. **`TupleMemory` 的 id 一律是内容 id**(设计源 cb32d8e 之后的改动):221 行 `TupleMemory:包 MemoryEntry 元组与 retrieve 的替身记忆` 后补半句"`recall` 返回的 `MemoryHit.id` 一律是 `content_id(subject, content)`,不用条目自带的 `id`";AC-16(743 行)后半"同一内容的两条语句得到同一个 id"保留,补"替身与 Starling 一致";`memories=` 简写实例的 `memory_hits` 与今天不同,既有断言 `mem-1` 字面量的测试已随第 1 步改写——这一句并进 AC-16 的"代价"列。
+2. **`embed_pending` 返回成功条数、有失败就抛**(设计源 be2ebbd):419 行代码注释 `# 只做嵌入,返回条数` → `# 只做嵌入,返回成功条数;有失败就抛瞬态 MemoryFailureError`。
+3. **`TupleMemory` 的 id 一律是内容 id**(设计源 6f89e45 之后的改动):221 行 `TupleMemory:包 MemoryEntry 元组与 retrieve 的替身记忆` 后补半句"`recall` 返回的 `MemoryHit.id` 一律是 `content_id(subject, content)`,不用条目自带的 `id`";AC-16(743 行)后半"同一内容的两条语句得到同一个 id"保留,补"替身与 Starling 一致";`memories=` 简写实例的 `memory_hits` 与今天不同,既有断言 `mem-1` 字面量的测试已随第 1 步改写——这一句并进 AC-16 的"代价"列。
 4. **摘要口径**():280-287 行摘要算法表,"替身"那行改成"TupleMemory 对 `snapshot(entries)` 的结果(召回实际看到的条目,不是原始列表)逐条 `to_dict()` 去掉 `id` 后的排序列表,加事件表,算同样形状的 sha256。Starling 一侧按全行:被取代的行改为 `archived` 仍是召回候选,`volatile` 与 `pending_review` 行影响后续写入的冲突探测,所以都进摘要。两边的原则一致:影响召回或后续写入的行进摘要"。把 284 行"进摘要"单元格里"全部列"后补"(全行,不按状态过滤)"。
 5. **排除清单增补**():285 行"排除清单"单元格在 `inferred_at` 之后补:`confidence_history_json` 里每个条目的 `ts`(规范化时去掉)、engram 的 UUID(换成 \`engram:<content_hash>\`);`observed_at` 在写入端改取 engram 的 `created_at`,所以不再随墙钟变。同一单元格改写。
 6. **召回放宽到 volatile**():
@@ -2864,7 +2864,7 @@ Run: `grep -n "\[计划中\]" docs/design/40-actio.md | cut -c1-100`
    - 847 行(局限表)"训练里不做后台维护 | 没有 TTL、回放与巩固;召回只靠嵌入"→"召回含未巩固的 `volatile` 行(适配器放宽),可能有近重复"。
    - 861 行(未核实项)保留。
    - 553 行 Starling 公开接口列表:`Memory.recall` 后补"(带 `holder`、`strict`、`include_volatile`)"。
-7. **`recall` 的严格模式**(设计源 128eefe):773 行 `recall`、`embed_pending` 的嵌入请求超时或连不上 | 真 | → 在 `recall` 一侧补"查询词嵌入失败抛 `RecallDegradedError`,适配器译成瞬态 MemoryFailureError;`embed_pending` 返回的 `failed` 大于 0 同样抛",并进同一单元格。
+7. **`recall` 的严格模式**(设计源 be2ebbd):773 行 `recall`、`embed_pending` 的嵌入请求超时或连不上 | 真 | → 在 `recall` 一侧补"查询词嵌入失败抛 `RecallDegradedError`,适配器译成瞬态 MemoryFailureError;`embed_pending` 返回的 `failed` 大于 0 同样抛",并进同一单元格。
 8. **`remember_event` 签名**():426-433 行 `DeploymentMemoryStore` 代码块与 553 行 Starling 接口列表里,`remember_event(persona_id, key, text, *, interlocutor)` 管理面签名**不变**(`epoch` 是 Starling 门面的参数,由适配器填,不进管理面);只在 553 行"`Memory.remember_event`"后补"(带 `epoch`)",`events` 表加 `tenant_id`、`failure_category`、主键 `(tenant_id, key)`、`[key] ` 前缀在 Starling 侧加,这几项只出现在 90 篇 470 行 Starling 接口列表,40 篇不展开。
 9. **`abandon_event` 未知 key**():40 篇 275 行状态表 `abandoned` 行出口列补"未知 key 抛 MemoryFailureError(`transient` 为假),已放弃再放弃为空操作";`committed` 行不许放弃保持。
 10. **`MemoryClosedError` 与 `close(timeout=)`**():388 行不变量 8 后补"`close` 等门面在途调用返回后合并 WAL 并关连接;关后调用抛 MemoryClosedError"。
@@ -2872,7 +2872,7 @@ Run: `grep -n "\[计划中\]" docs/design/40-actio.md | cut -c1-100`
 12. **人格 id 字符集**(R6):258-263 行实体表加不了行,把 262 行 DeploymentMemoryStore 的"约束"列末尾补"人格 id 须匹配 `PERSONA_ID_PATTERN`(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`),两个部署管理面拼路径前都校验,不合法抛 ActioDataError"。
 13. **空查询词与 `episode_id` 必填**(R3、R4):411-440 行入口签名之后的叙述里补一句:"查询词为空串时实例不调 `recall`;`episode_id` 必填按'会写库'判断,即 `replay_read_only` 为假时要求"(443 行单元格里已有"可写端口没给 `episode_id` 时抛 `ActioDataError`",核对一致,只补空查询词)。
 14. **`TRACE_SCHEMA` 改名**(R9):469 行 `actio.trace` 模块表 `TRACE_SCHEMA` → `TRACE_SCHEMA_V1`、`TRACE_SCHEMA_V2`、`TRACE_KEYS_V2`。**这一行已在 `[已落地]` 行里**,所以改名后符号在代码里存在,检查器不告警;若不改,旧名在代码里已不存在,会告警"在代码与施工计划里都找不到"。
-15. **工作包 9 的 `instantiate` 参数**(设计源 aeb3188):443 行已含 `interlocutors`,411-414 行代码块里 `instantiate` 签名 `memories=None, memory=None, episode_id=None, replay_read_only=False,` 缺 `interlocutors=None`,补进去(同一行,不增行):`memories=None, memory=None, episode_id=None, interlocutors=None, replay_read_only=None,`(`replay_read_only` 默认 `None`,`memories=` 简写默认只读,`memory=` 默认可写;核对 `src/actio/instance.py` 的真实默认值后抄)。
+15. **工作包 9 的 `instantiate` 参数**(设计源 bd12718):443 行已含 `interlocutors`,411-414 行代码块里 `instantiate` 签名 `memories=None, memory=None, episode_id=None, replay_read_only=False,` 缺 `interlocutors=None`,补进去(同一行,不增行):`memories=None, memory=None, episode_id=None, interlocutors=None, replay_read_only=None,`(`replay_read_only` 默认 `None`,`memories=` 简写默认只读,`memory=` 默认可写;核对 `src/actio/instance.py` 的真实默认值后抄)。
 
 - [ ] **Step 3: 头部四行与第 9 章**
 
@@ -2969,7 +2969,7 @@ Run: `grep -n "\[计划中\]" docs/design/50-mindagent.md | cut -c1-100`
 
 - 第 6 行「状态」:`部署记忆换成 Starling(经部署记忆管理面访问)、部署实例按 episode 新造、门② 的记忆收录改路 [计划中]` 拆成两半:部署实例按 episode 新造、门② 改路、人格库锁、起点副本 [已落地](替身 FileTupleStore 上);换成 Starling [计划中 依第 7 步]。
 - 第 9 行「依赖」`Actio(……含记忆端口、管理面与 Starling 适配器 [计划中])`:端口与管理面摘,Starling 适配器依第 7 步。
-- 第 12 行「对应实施计划」`智能体记忆设计的第 7 步(部署记忆、轮次摘要、快照重放、门② 改路)[计划中]`:写成"智能体记忆设计的第 5 步(部署记忆、轮次摘要、快照重放、门② 改路,替身路径)[已落地]"(原文写的"第 7 步"是旧施工顺序里的步号,现在 MindAgent 是第 5 步;施工顺序在 `f053cd0` 调过)。
+- 第 12 行「对应实施计划」`智能体记忆设计的第 7 步(部署记忆、轮次摘要、快照重放、门② 改路)[计划中]`:写成"智能体记忆设计的第 5 步(部署记忆、轮次摘要、快照重放、门② 改路,替身路径)[已落地]"(原文写的"第 7 步"是旧施工顺序里的步号,现在 MindAgent 是第 5 步;施工顺序在 `4775eb9` 调过)。
 - 第 9 章用例数:719 行 `共 152 个用例` 与 809 行 `九个测试文件共 152 个用例` 是基线实测数。第 5 步改了:`test_ma_admit.py`(22→新数)、`test_ma_rounds.py`(28)、`test_ma_deployment.py`(22),新增 `test_ma_memory_layout.py`,`test_ma_config_library.py`(27)也加了用例,`test_ma_e2e.py` 可能改。实测:
 
 ```bash
@@ -3043,11 +3043,11 @@ Run: `grep -n "\[计划中\]" docs/design/90-factory-and-cli.md | cut -c1-100`
    - 733 行 FC-29:`根目录取控制面仓库之外的临时目录` → `根目录是 \`<git 目录>/rismforge-memory\`,不是临时目录(重启要保留)`;备选列"替身不落盘"保留。
    - 810、813 行测试表"临时目录"指测试夹具,保留。
 3. **时间预算常量**():199、548、736 行 `(PER_TURN_DEADLINE_S 取 90)`:这个常量现在在 `mindtrainer.trajectory_source`,由轨迹源经 `client_factory(deadline_s=)` 传;`factory.interact_policy` 里原来那个常量与"改写运行时 `interact_deadline_s`"已删。在 199 行末补"`factory.interact_policy` 不再改写运行时的 `interact_deadline_s`;两开关同开时各自按自己传的值,部署会话不借用训练的 deadline"。848 行同理。
-4. **两个开关同开**(设计源 128eefe):876 行"同开时服务端等提交取 90 秒 | 部署会话只是多等" → 补"整条流 deadline 今天也只有一份,所以改为按调用方给:`client_factory(*, deadline_s=)`;轨迹源与部署驱动器各自传 `max_turns × 90` 与 `max_turns × 40`"。并入同一单元格。
-5. **`.owner` 原子创建**(设计源 128eefe):329、370、586、732(FC-28)行的"首次使用时写入"→"首次使用时以 `O_CREAT | O_EXCL` 原子创建,`FileExistsError` 时读回再比;两个仓库同时首次使用,只有一个能创建,另一个读到对方的路径而退出码 2"。**依第 7 步**:第 7 步未合则这几处保留 `[计划中]` 并仍改措辞。
+4. **两个开关同开**(设计源 be2ebbd):876 行"同开时服务端等提交取 90 秒 | 部署会话只是多等" → 补"整条流 deadline 今天也只有一份,所以改为按调用方给:`client_factory(*, deadline_s=)`;轨迹源与部署驱动器各自传 `max_turns × 90` 与 `max_turns × 40`"。并入同一单元格。
+5. **`.owner` 原子创建**(设计源 be2ebbd):329、370、586、732(FC-28)行的"首次使用时写入"→"首次使用时以 `O_CREAT | O_EXCL` 原子创建,`FileExistsError` 时读回再比;两个仓库同时首次使用,只有一个能创建,另一个读到对方的路径而退出码 2"。**依第 7 步**:第 7 步未合则这几处保留 `[计划中]` 并仍改措辞。
 6. **Starling PR 接口列表**(、):470 行"缺的公开接口经 PR 补进 Starling:`Memory.recall` 的 `holder`、嵌入器注入、`make_openai_embedder`、`embed_pending`、`digest`、`backup_to`、`close`、`remember_event`,以及事件表配套的 `next_seq`、`pending_events`、`abandon_event`" → 改成:`Memory.recall` 的 `holder`、`strict`(查询词嵌入失败抛 `RecallDegradedError`)、`include_volatile`(召回放宽到未巩固的 `volatile` 行);`Memory.open(embedder=)`、`make_openai_embedder`(带 `max_retries`);`embed_pending` 返回 `EmbedStats`;`digest`、`backup_to`、`close(timeout=)`;`remember_event(key, text, *, interlocutor, epoch)`;事件表 `events` 加 `tenant_id`、`failure_category`,主键 `(tenant_id, key)`,配套 `next_seq`、`pending_events`、`abandon_event`(未知 key 抛 `KeyError`)。业务逻辑(三段写入、摘要、备份、嵌入循环)进 C++ 内核,Python 门面只转发(Starling 的 `CLAUDE.md` 规定)。`[key] ` 文本前缀在 Starling 一侧加。**这一行的标记依第 7 步 PR 是否合并**:PR 未合,标记留着。这一行是单元格,净增约 0 到 1 行,用下面的候选腾地方。
-7. **记忆单次调用口径**(设计源 128eefe):549 行"记忆单次网络调用 4 秒"保留;补"`make_openai_embedder` 带 `max_retries`(默认 0)"。
-8. **嵌入失败不再静默**(设计源 128eefe):549 行或 FC-30 之后补一句"嵌入查询词失败抛 `RecallDegradedError`、`embed_pending` 返回 `failed` 大于 0,适配器都译成瞬态 MemoryFailureError,不静默"。并入 201 行 `factory.memory_translate` 的说明。
+7. **记忆单次调用口径**(设计源 be2ebbd):549 行"记忆单次网络调用 4 秒"保留;补"`make_openai_embedder` 带 `max_retries`(默认 0)"。
+8. **嵌入失败不再静默**(设计源 be2ebbd):549 行或 FC-30 之后补一句"嵌入查询词失败抛 `RecallDegradedError`、`embed_pending` 返回 `failed` 大于 0,适配器都译成瞬态 MemoryFailureError,不静默"。并入 201 行 `factory.memory_translate` 的说明。
 
 - [ ] **Step 3: 头部与测试表**
 
@@ -3176,7 +3176,7 @@ git commit -m "docs(design): 调度器篇的 interact 段加 memory 键与样例
 - Consumes: 台账里改了设计措辞的裁定。
 - Produces: 设计源(历史来源)与 `docs/design` 六篇措辞一致。
 
-设计源已经含的(`git log` 里 `128eefe`、`a31af64`、`70d0d1a`、`d1b0bcb` 四个提交):`close()` 只关库、部署事件 key 的轮次前缀、`TupleMemory` 摘要按 `snapshot`、 的 S4 改写与 `recall(include_volatile=)`、`.owner` 用 `O_EXCL`、`embed_pending` 返回 `EmbedStats`。**这些不用再改**,只补下面几条。每条先 `grep` 旧措辞(行号是写计划时的),改完再 `grep` 确认。
+设计源已经含的(`git log` 里 `be2ebbd`、`4b58349`、`c782cac`、`f0b0ff2` 四个提交):`close()` 只关库、部署事件 key 的轮次前缀、`TupleMemory` 摘要按 `snapshot`、 的 S4 改写与 `recall(include_volatile=)`、`.owner` 用 `O_EXCL`、`embed_pending` 返回 `EmbedStats`。**这些不用再改**,只补下面几条。每条先 `grep` 旧措辞(行号是写计划时的),改完再 `grep` 确认。
 
 - [ ] **Step 1: 逐条改写**
 
@@ -3353,7 +3353,7 @@ git commit -m "docs(design): 智能体记忆文档与图收尾,路线图第 8 �
 ### 附:各篇 `[计划中]` 现有数与改完后预计剩余
 
 
-数字是写计划时(HEAD `d1b0bcb`)的 `grep -c "\[计划中\]"`(按行计)。"必留"是无论第 7 步合不合都保留的行:每篇的图例定义行(1 行)加要真机、真端点、真 Starling 才能核实的项,以及设计二合入之前就有、与本设计无关的 `[计划中]`。"依第 7 步"是用关键词粗筛的**上界**(命中 `StarlingMemory`、`memory_config`、`.owner`、清扫等词不等于整行都依第 7 步,实施时逐行看)。
+数字是写计划时(HEAD `f0b0ff2`)的 `grep -c "\[计划中\]"`(按行计)。"必留"是无论第 7 步合不合都保留的行:每篇的图例定义行(1 行)加要真机、真端点、真 Starling 才能核实的项,以及设计二合入之前就有、与本设计无关的 `[计划中]`。"依第 7 步"是用关键词粗筛的**上界**(命中 `StarlingMemory`、`memory_config`、`.owner`、清扫等词不等于整行都依第 7 步,实施时逐行看)。
 
 | 文档 | 现有 | 必留 | 疑似依第 7 步(上界) | 第 7 步已合:预计剩余 | 第 7 步未合:预计剩余 |
 |---|---|---|---|---|---|
