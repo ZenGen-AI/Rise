@@ -1,13 +1,14 @@
 """六个处理器键的真实构造器表:{处理器键: (BuildContext) -> Handler}。
 
 - admit_recipe / record_track:计划 3 的处理器本身(recipestore.admit / recipestore.record)。
-- admit_proposal:计划 7 的处理器本身(mindagent.admit)。
+- admit_proposal:计划 7 的处理器工厂,记忆增量写树外的部署库。
 - plan_next_round:计划 5 的 make_plan_handler;后端按 --planner-backend 选;--confirm-directives
   覆盖 scheduler.yaml 的 confirm_directives(只在内存里,不写回配置)。
 - nominate_recipe:计划 5 的 make_nominate_handler;accept_mock_evidence 与传给 reconcile_once 的是
   同一个值(--allow-mock-evidence);repo_commit 来自 BuildContext。
 - start_agent_round:计划 7 的 make_start_round_handler;AgentConfig 与对手台词来自 agent.yaml,
   实时服务端是进程内 loopback(factory.agent.AgentRuntime),模型后端是罐头后端。
+  它与 admit_proposal 共用 BuildContext.deployment_memory(assemble 造的那一份)。
 """
 from __future__ import annotations
 
@@ -24,7 +25,7 @@ from factory.agent import (
     read_agent_settings,
 )
 from factory.configio import preflight, read_tree_config
-from mindagent.admit import handle_admit_proposal
+from mindagent.admit import make_admit_proposal_handler
 from mindagent.library import check_memory_library_empty
 from mindagent.rounds import make_start_round_handler
 from recipestore.admit import handle_admit_recipe
@@ -94,19 +95,25 @@ def _agent(ctx) -> Handler:
         ctx.register_closer(runtime.close)
     # ctx.runtime 非空时是 assemble 造的共用运行时(--interact 与 agent 开关同开),它的收尾已登记过
     bridge = ctx.bridge("agent") if _has_bridge_role(ctx.store, "agent") else None
+    mem = ctx.deployment_memory
     return make_start_round_handler(
         config=config,
         client_factory=runtime.client_factory,
         backend_factory=canned_backend_factory,
         personas_loader=personas_from_tree,
         bridge=bridge,
+        memory_store=mem.store,
+        memory_layout=mem.layout,
+        memory_runtime=mem.runtime,
+        scratch_store_factory=mem.scratch_store_factory,
     )
 
 
 def _admit_proposal(ctx) -> Handler:
-    # 门② 的记忆提案也改走部署库(Task 34),留在树里的旧条目会被误当成已收录,所以收录处理器装配时也查
+    # 门② 的记忆提案改走部署库,留在树里的旧条目会被误当成已收录,所以收录处理器装配时也查
     _checked_memory_library(ctx)
-    return handle_admit_proposal
+    mem = ctx.deployment_memory
+    return make_admit_proposal_handler(memory_store=mem.store, memory_layout=mem.layout)
 
 
 DEFAULT_BUILDERS: Mapping[str, Callable] = {

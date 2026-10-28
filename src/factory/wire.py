@@ -29,9 +29,10 @@ from inference_bridge import CliBridge
 from mindtrainer.data_producer import TemplateDataProducer
 from mindtrainer.dispatch import make_mindtrainer_dispatcher
 
-if TYPE_CHECKING:  # factory.agent 拖进 grpc 与 mindagent,只在类型检查时导入
+if TYPE_CHECKING:  # factory.agent 与 factory.memory_runtime 拖进 grpc 与 mindagent,只在类型检查时导入
     from factory.agent import AgentRuntime
     from factory.interact_policy import OpponentSwitch
+    from factory.memory_runtime import DeploymentMemory
 
 _log = logging.getLogger("factory.wire")
 
@@ -85,6 +86,8 @@ class BuildContext:
     # --interact 或 --enable agent 时由 assemble 造的那一个运行时;其余情形是 None。
     # 它的收尾函数由 assemble 登记一次,构造器只取用,不再登记。
     runtime: AgentRuntime | None = None
+    # 启用 start_agent_round 或 admit_proposal 时由 assemble 造的那一份部署记忆,两个构造器共用;其余是 None。
+    deployment_memory: DeploymentMemory | None = None
 
     def bridge(self, role: str) -> CliBridge:
         return build_bridge(self.store, role, env=self.env, log_dir=self.log_dir)
@@ -350,6 +353,11 @@ def assemble(
     if missing:
         raise FactoryConfigError(f"no handler builder for {missing}")
     evaluator = build_mock_evaluator(store)
+    # 未设 RISMFORGE_MEMORY_CONFIG 走替身;计划 B 第 7 步在这里按配置换成 Starling
+    deployment_memory = None
+    if keys & {"start_agent_round", "admit_proposal"}:
+        from factory.memory_runtime import stand_in_deployment_memory   # 惰性:拖进 mindagent(Ruling 16)
+        deployment_memory = stand_in_deployment_memory(store.repo_root)
     runtime, switch = _shared_runtime(store, options, keys)
     ctx = BuildContext(
         store=store,
@@ -360,6 +368,7 @@ def assemble(
         log_dir=None if log_dir is None else Path(log_dir),
         repo_commit=resolve_repo_commit(options.repo_commit),
         runtime=runtime,
+        deployment_memory=deployment_memory,
     )
     if runtime is not None:
         ctx.register_closer(runtime.close)         # 登记一次;构造器只取用

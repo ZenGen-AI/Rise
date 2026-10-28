@@ -5,14 +5,17 @@
 import grpc
 import pytest
 
+from actio.memory import FileTupleStore
 from actio.trace import validate_trace
 from controlplane.envelope import BigRef, Envelope, OwnerRef
 from controlplane.gitstore import GitStore
 from controlplane.paths import agent_round_file, library_state_file, model_file, proposal_file, skill_file
 from controlplane.reconcile import Action
-from mindagent.admit import handle_admit_proposal
+from factory.memory_runtime import STAND_IN_MEMORY_RUNTIME
+from mindagent.admit import make_admit_proposal_handler
 from mindagent.config import AgentConfig
 from mindagent.library import load_library
+from mindagent.memory_layout import MemoryLayout
 from mindagent.rounds import make_start_round_handler
 from realtime_fixtures import plain_factory
 from simulator.backends import ScriptedBackend
@@ -79,19 +82,23 @@ def world(tmp_path):
     server.start()
     channels = []
 
-    def client_factory():
+    def client_factory(**kw):
         channel = grpc.insecure_channel(f"127.0.0.1:{server.bound_port}")
         channels.append(channel)
         return EnvironmentServiceClient(_DeadlineStub(pb2_grpc.EnvironmentServiceStub(channel)))
 
+    mem_root = tmp_path.parent / f"{tmp_path.name}-mem"         # 部署记忆在仓库外
+    memory_store, memory_layout = FileTupleStore(mem_root / "deploy"), MemoryLayout(mem_root)
     handler = make_start_round_handler(
         config=AgentConfig(scenario_ids=("s1", "s2", "s3"), bindings=(OPP, AGENT), max_turns=4,
                            min_support=3, min_ratio=0.5),
         client_factory=client_factory,
         backend_factory=lambda model_id, ckpt: Echo(),
         personas_loader=lambda s, ids: {pid: read_persona(s, pid) for pid in ids},
+        memory_store=memory_store, memory_layout=memory_layout,
+        memory_runtime=STAND_IN_MEMORY_RUNTIME, scratch_store_factory=FileTupleStore,
     )
-    yield store, handler
+    yield store, handler, memory_store, memory_layout
     for c in channels:
         c.close()
     server.stop(0).wait()
@@ -115,7 +122,7 @@ def _agent_traces(store, run_id, episode_ids):
 
 
 def test_the_full_agent_rsi_loop_over_a_real_server(world):
-    store, handler = world
+    store, handler, memory_store, memory_layout = world
 
     # 第一轮:空库,裸路径,零提案
     _promote(store, 1, "run-001")
@@ -144,12 +151,16 @@ def test_the_full_agent_rsi_loop_over_a_real_server(world):
     v = proposal.payload["verification"]
     assert (v["method"], v["fired_on_motivating"], v["fired_elsewhere"]) == ("replay_behavior", 1.0, 0.0)
     assert v["episodes"] == finding["episode_refs"] == r2.payload["episode_ids"]
-    assert {u for u, t in _agent_traces(store, "run-002", r2.payload["episode_ids"])} == {"[skill:skill-goal] 推进目标"}
+    r2_turns = _agent_traces(store, "run-002", r2.payload["episode_ids"])
+    # Echo 把指导语用 "|" 拼起来:第一段是技能,其后是召回的记忆(部署库跨轮次持久,第一轮记下的对方原话)
+    assert {u.split("|")[0] for u, t in r2_turns} == {"[skill:skill-goal] 推进目标"}
+    assert any(t["memory_hits"] for _, t in r2_turns) and any("|[memory:" in u for u, _ in r2_turns)
 
     # 门②:人工批准,收录
     proposal.status = "approved"
     store.write_product(proposal_file(pid), proposal, "human: approve")
-    handle_admit_proposal(store, Action(kind="admit_proposal", target_id=pid, detail={}))
+    make_admit_proposal_handler(memory_store=memory_store, memory_layout=memory_layout)(
+        store, Action(kind="admit_proposal", target_id=pid, detail={}))
     assert store.read_product(proposal_file(pid)).status == "effective"
     lib = load_library(store)
     assert lib.version == {"skill": "2", "memory": "0"}
@@ -166,5 +177,7 @@ def test_the_full_agent_rsi_loop_over_a_real_server(world):
     assert all(t["selected"] == new_id and t["library_version"] == {"skill": "2", "memory": "0"}
                for _, t in first_turns)
     assert all(t["candidates"] == [new_id, "skill-goal"] and t["conflict"] is not None for _, t in first_turns)
-    assert first_turns[0][0] == f"[skill:{new_id}] 先回应对方的情绪,确认对方的感受,再谈具体问题"
+    assert first_turns[0][0].split("|")[0] == f"[skill:{new_id}] 先回应对方的情绪,确认对方的感受,再谈具体问题"
     assert all(t["selected"] == "skill-goal" for _, t in traces[1::2])
+    assert all(t["memory"]["digest_before"] for _, t in traces)        # 每轮带 v2 轨迹
+    assert memory_layout.round_snapshots("agent-round-zengen-v3") == []

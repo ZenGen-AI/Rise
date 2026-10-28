@@ -160,6 +160,7 @@ def test_interact_and_the_agent_switch_share_one_runtime(
         from_dispatcher = dispatcher_kwargs[-1]["client_factory"].__self__
         from_handler = handler_kwargs[-1]["client_factory"].__self__
         assert from_dispatcher is from_handler is runtimes[0]
+        assert handler_kwargs[-1]["memory_runtime"]["backend"] == "stand-in"
         assert [close.__self__ for close in asm.closers] == [runtimes[0]]      # 只登记一次收尾
     finally:
         asm.close()

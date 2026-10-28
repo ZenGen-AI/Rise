@@ -13,7 +13,6 @@ from factory.defaults import DEFAULT_AGENT_CONFIG, install_defaults
 from factory.errors import FactoryConfigError
 from factory.wire import CODE_ROOT, FactoryOptions, assemble, resolve_repo_commit
 from factory_fixtures import closed_loop_repo
-from mindagent.admit import handle_admit_proposal
 from mindagent.config import AgentConfig
 from recipestore.admit import handle_admit_recipe
 from recipestore.record import handle_record_track
@@ -39,10 +38,16 @@ def test_the_table_covers_exactly_the_six_keys():
     assert set(fh.DEFAULT_BUILDERS) == set(CLOSED_LOOP_ACTIONS)
 
 
-def test_three_keys_are_the_plan_3_and_plan_7_handlers_themselves(store):
+def test_two_keys_are_the_plan_3_handlers_themselves_and_admit_proposal_is_built(store):
+    # admit_proposal 现在是工厂造的闭包(它要拿部署记忆),不再是模块级函数本身
     asm = assemble(store, FactoryOptions(switches=("track", "admit")), env={})
-    assert asm.handlers == {"record_track": handle_record_track, "admit_recipe": handle_admit_recipe,
-                            "admit_proposal": handle_admit_proposal}
+    try:
+        assert set(asm.handlers) == {"record_track", "admit_recipe", "admit_proposal"}
+        assert asm.handlers["record_track"] is handle_record_track
+        assert asm.handlers["admit_recipe"] is handle_admit_recipe
+        assert callable(asm.handlers["admit_proposal"])
+    finally:
+        asm.close()
 
 
 def test_every_switch_builds_a_callable_handler_with_the_heuristic_backend(store):
@@ -874,3 +879,53 @@ def test_a_non_empty_memory_library_exits_2_at_assembly(store, capsys, switch):
     (store.repo_root / rel).write_text("id: mem-a\n", encoding="utf-8")
     assert main(["reconcile", str(store.repo_root), "--once", "--enable", switch], env={}) == 2
     assert "memory_library/ must be empty" in capsys.readouterr().err
+
+
+def test_round_and_admit_handlers_share_one_stand_in_deployment_memory(store, monkeypatch):
+    import factory.handlers as fh
+    from actio.memory import FileTupleStore
+    from controlplane.lock import git_dir
+    from factory.memory_runtime import STAND_IN_MEMORY_RUNTIME
+    seen = {}
+    monkeypatch.setattr(fh, "make_start_round_handler", lambda **kw: seen.setdefault("round", kw) and None or (lambda s, a: None))
+    monkeypatch.setattr(fh, "make_admit_proposal_handler", lambda **kw: seen.setdefault("admit", kw) and None or (lambda s, a: None))
+    asm = assemble(store, FactoryOptions(switches=("agent", "admit")), env={})
+    try:
+        r, a = seen["round"], seen["admit"]
+        assert isinstance(r["memory_store"], FileTupleStore) and r["memory_store"] is a["memory_store"]
+        assert r["memory_layout"] is a["memory_layout"]
+        assert r["memory_layout"].root == git_dir(store.repo_root) / "rismforge-memory"
+        assert r["memory_runtime"] == STAND_IN_MEMORY_RUNTIME and r["scratch_store_factory"] is FileTupleStore
+        assert r.get("stream_deadline_s") is None                       # 替身保持现值
+        assert not (store.repo_root / "control-plane" / "rismforge-memory").exists()
+    finally:
+        asm.close()
+
+
+def test_the_stand_in_memory_root_survives_a_second_assembly(store):
+    from factory.memory_runtime import stand_in_deployment_memory
+    first = stand_in_deployment_memory(store.repo_root)
+    first.store.remember_event("pa", "k#0", "pb：你好", interlocutor="pb")
+    second = stand_in_deployment_memory(store.repo_root)
+    assert second.store.digest("pa") == first.store.digest("pa")
+
+
+def test_switches_without_round_or_admit_build_no_deployment_memory(store, monkeypatch):
+    import factory.memory_runtime as mr
+    built = []
+    real = mr.stand_in_deployment_memory
+    monkeypatch.setattr(mr, "stand_in_deployment_memory", lambda root: built.append(root) or real(root))
+    asm = assemble(store, FactoryOptions(switches=("track",)), env={})
+    asm.close()
+    assert built == []
+    asm = assemble(store, FactoryOptions(switches=("track", "agent", "admit")), env={})
+    asm.close()
+    assert built == [store.repo_root]                                 # 两个处理器同开也只造一次
+
+
+def test_the_stand_in_memory_logs_its_backend(store, caplog):
+    import logging
+    from factory.memory_runtime import stand_in_deployment_memory
+    with caplog.at_level(logging.INFO, logger="factory.memory_runtime"):
+        stand_in_deployment_memory(store.repo_root)
+    assert "memory backend: stand-in" in caplog.text

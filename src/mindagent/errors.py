@@ -22,3 +22,7 @@ class AgentRoundFailedError(Exception):
         super().__init__(reason)
         self.reason = reason
         self.point = point
+
+
+class RestoreFailedError(AgentRoundFailedError):
+    """用起点副本覆盖部署库失败(第 9 节"覆盖失败"):轮次 T3,部署库与起点副本都保留,等人处理。"""

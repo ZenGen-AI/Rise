@@ -1,31 +1,69 @@
-"""收录处理器 admit_proposal(闭环集成设计 §3.2、§8.3):approved 的提案写进正式库。
+"""收录处理器 admit_proposal(闭环集成设计 §3.2、§8.3,设计二第 9 节):approved 的提案写进正式库。
 
-顺序:库条目(skill_file / memory_file,effective)→ library_state(版本 +1、记来源提案)→ 提案 effective。
-每一步重入安全:条目已在就不重写;library_state 已记过该提案就不再递增;所以崩在任何两步之间重跑都收敛。
+顺序(make_admit_proposal_handler 返回的处理器):
+1. 读提案,不是 approved 就返回;增量与库版本先校验,不合法记一次 T2、提案留在 approved。
+2. 记忆增量所涉人格逐个拿部署库锁,并查该人格有没有未提交的部署起点副本:锁被占或有在途 episode
+   就抛 DeferredError(守护进程不写树、按退避重试),否则轮次重入覆盖部署库时会抹掉刚收录的记忆。
+3. 记忆增量按位置逐个 remember_event 写进该人格的部署库,事件 key 是 <proposal_id>#<k>。记忆先于技能写:
+   抽取失败要整份提案转 rejected,技能条目已写成 effective 就收不回了。
+   - remember_event 抛错(库打不开、③ 写失败):记一次失败记录,提案留在 approved,不放弃事件;下一 tick
+     重入时同 key 同文本返回幂等的同一批语句 id,不二次抽取。
+   - 抽取失败且本提案没有已提交的记忆:放弃该事件(终态),记 T2,提案转 rejected 并带 reject_reason。
+   - 抽取失败但前面已有记忆提交:不转 rejected(已提交的放弃不了)、也不放弃这一条,记 T2(partial
+     admission),抛 DeferredError;重入时失败的那条按 pending 行再抽一次,成功就照常收录完。
+4. 技能条目写 skill_file(effective);条目已在就不重写。
+5. library_state 版本 +1、记来源提案,entries 里记忆一项就是事件 key;已记过该提案就不再递增。
+6. 提案载荷加 admitted_statements(只作证据,真正的收据在部署库的事件表里),转 effective。
+崩在任何两步之间重跑都收敛。
 """
 from __future__ import annotations
 
+from collections.abc import Callable
+from contextlib import ExitStack
 from datetime import datetime, timezone
 
 from actio.errors import ActioDataError
-from actio.memory import MemoryEntry
+from actio.memory_port import PERSONA_ID_PATTERN, DeploymentMemoryStore, MemoryFailureError
 from actio.skills import Skill
+from controlplane.deferred import DeferredError
 from controlplane.envelope import Envelope, OwnerRef
 from controlplane.gitstore import GitStore
-from controlplane.paths import library_state_file, memory_file, proposal_file, skill_file
+from controlplane.lock import FileLockBusyError
+from controlplane.paths import library_state_file, proposal_file, skill_file
 from controlplane.reconcile import Action
 from controlplane.states import assert_transition
 from mindagent.errors import MindAgentDataError
 from mindagent.failures import fail_once
-from mindagent.library import LIBRARY_STATE_ID, memory_id_for, read_library_versions, skill_id_for
+from mindagent.library import LIBRARY_STATE_ID, read_library_versions, skill_id_for
+from mindagent.memory_layout import MemoryLayout
+
+MEMORY_DEFINITION_KEYS = frozenset({"persona_id", "text", "interlocutor"})
+
+Handler = Callable[[GitStore, Action], None]
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _memory_definition(k: int, definition: dict) -> dict:
+    """记忆增量的 definition:恰好三个键;persona_id 拼进库文件名,要过 PERSONA_ID_PATTERN;
+    text 非空;interlocutor 是字符串,空串表示一般事实。"""
+    if set(definition) != MEMORY_DEFINITION_KEYS:
+        raise ValueError(f"increment {k}: memory definition must have exactly {sorted(MEMORY_DEFINITION_KEYS)}")
+    pid = definition["persona_id"]
+    if not isinstance(pid, str) or not PERSONA_ID_PATTERN.fullmatch(pid):
+        raise ValueError(f"increment {k}: memory persona_id is not a valid persona id: {pid!r}")
+    if not isinstance(definition["text"], str) or not definition["text"]:
+        raise ValueError(f"increment {k}: memory text must be a non-empty string")
+    if not isinstance(definition["interlocutor"], str):
+        raise ValueError(f"increment {k}: memory interlocutor must be a string")
+    return definition
+
+
 def _entries(proposal_id: str, increments: object) -> list[tuple[str, str, dict]]:
-    """[(kind, 条目 id, 条目载荷)]。任何一条不合法抛 ValueError(在写任何东西之前)。"""
+    """[(kind, 条目 id, 条目载荷)]。技能的条目 id 是 skill_id_for(...),记忆的是事件 key
+    <proposal_id>#<k>(k 是增量在提案里的位置,从 1 起)。任何一条不合法抛 ValueError(在写任何东西之前)。"""
     if not isinstance(increments, list) or not increments:
         raise ValueError("increments must be a non-empty list")
     out = []
@@ -39,8 +77,7 @@ def _entries(proposal_id: str, increments: object) -> list[tuple[str, str, dict]
                 definition["id"] = skill_id_for(proposal_id, k)
                 out.append(("skill", definition["id"], Skill.from_dict(definition).to_dict()))
             elif kind == "memory":
-                definition["id"] = memory_id_for(proposal_id, k)
-                out.append(("memory", definition["id"], MemoryEntry.from_dict(definition).to_dict()))
+                out.append(("memory", f"{proposal_id}#{k}", _memory_definition(k, definition)))
             else:
                 raise ValueError(f"increment {k}: unknown kind {kind!r}")
         except ActioDataError as exc:
@@ -55,53 +92,107 @@ def _entry_envelope(kind: str, entry_id: str, payload: dict, proposal_id: str) -
     )
 
 
-def handle_admit_proposal(store: GitStore, action: Action) -> None:
-    proposal_id = action.target_id
-    rel = proposal_file(proposal_id)
-    proposal = store.read_product(rel)
-    if proposal.status != "approved":
-        return  # effective 已收录;其余状态不归本处理器
-    task_id = f"admit-{proposal_id}"
-    run_id = proposal.payload.get("run_id")
-    try:
-        entries = _entries(proposal_id, proposal.payload.get("increments"))
-        # 库版本在写任何条目之前就校验:不是十进制数字串时无法递增,按确定性失败处理
-        state = read_library_versions(store)
-    except (ValueError, MindAgentDataError) as exc:
-        # 审核类状态机里 approved 只能去 effective,无处可放"失败":记一次 T2(确定性数据错误,处理器
-        # 空操作,设计 §11),提案原样留在 approved 等人处理。run_id 不是单个路径段或 run 目录不在时
-        # 不写失败记录(fail_once 的守卫)。之后每个 tick 重入都只是读一遍、什么都不写。
-        fail_once(store, run_id, task_id=task_id, category="T2",
-                  point="mindagent.admit", retries=0, reason=str(exc))
-        return
+def make_admit_proposal_handler(*, memory_store: DeploymentMemoryStore, memory_layout: MemoryLayout) -> Handler:
+    """memory_store 与 memory_layout 是部署记忆,与轮次处理器共用同一份(锁与"打开着的端口"都按它算)。"""
 
-    for kind, entry_id, payload in entries:
-        path = skill_file(entry_id) if kind == "skill" else memory_file(entry_id)
-        if not store.exists(path):
-            store.write_product(path, _entry_envelope(kind, entry_id, payload, proposal_id),
-                                f"mindagent: admit {entry_id} from {proposal_id}")
+    def handle(store: GitStore, action: Action) -> None:
+        proposal_id = action.target_id
+        rel = proposal_file(proposal_id)
+        proposal = store.read_product(rel)
+        if proposal.status != "approved":
+            return  # effective 已收录;其余状态不归本处理器
+        task_id = f"admit-{proposal_id}"
+        run_id = proposal.payload.get("run_id")
+        try:
+            entries = _entries(proposal_id, proposal.payload.get("increments"))
+            # 库版本在写任何条目之前就校验:不是十进制数字串时无法递增,按确定性失败处理
+            state = read_library_versions(store)
+        except (ValueError, MindAgentDataError) as exc:
+            # 记一次 T2(确定性数据错误,处理器空操作,设计 §11),提案原样留在 approved 等人处理。
+            # run_id 不是单个路径段或 run 目录不在时不写失败记录(fail_once 的守卫)。之后每个 tick 重入
+            # 都只是读一遍、什么都不写。
+            fail_once(store, run_id, task_id=task_id, category="T2",
+                      point="mindagent.admit", retries=0, reason=str(exc))
+            return
 
-    admitted = list(state["admitted"])
-    if all(a.get("proposal_id") != proposal_id for a in admitted):
-        kinds = {kind for kind, _, _ in entries}
-        # 版本存成十进制字符串(设计 §8.3);递增时按整数解析
-        skill_v = str(int(state["skill_version"]) + (1 if "skill" in kinds else 0))
-        memory_v = str(int(state["memory_version"]) + (1 if "memory" in kinds else 0))
-        admitted.append({
-            "proposal_id": proposal_id,
-            "skill_version": skill_v,
-            "memory_version": memory_v,
-            "entries": [entry_id for _, entry_id, _ in entries],
-        })
-        lib_rel = library_state_file()
-        version = store.read_product(lib_rel).version + 1 if store.exists(lib_rel) else 1
-        env = Envelope(
-            id=LIBRARY_STATE_ID, type="library_state", version=version, created_at=_now(),
-            created_by=OwnerRef(), status="executed", schema_version=1, links=[proposal_id],
-            payload={"skill_version": skill_v, "memory_version": memory_v, "admitted": admitted},
-        )
-        store.write_product(lib_rel, env, f"mindagent: library -> skill v{skill_v}, memory v{memory_v}")
+        memories = [(key, d) for kind, key, d in entries if kind == "memory"]
+        with ExitStack() as locks:
+            persona_ids = sorted({d["persona_id"] for _, d in memories})
+            for pid in persona_ids:
+                try:
+                    locks.enter_context(memory_layout.persona_lock(pid))
+                except FileLockBusyError as exc:
+                    raise DeferredError(f"persona library locked: {exc}") from exc
+            for pid in persona_ids:
+                in_flight = memory_layout.uncommitted_snapshots(pid)
+                if in_flight:
+                    names = ", ".join(p.name for p in in_flight)
+                    raise DeferredError(f"persona {pid} has an uncommitted deployment episode: {names}")
 
-    assert_transition("review", proposal.status, "effective")
-    proposal.status = "effective"
-    store.write_product(rel, proposal, f"mindagent: {proposal_id} effective")
+            statements: dict[str, list[str]] = {}
+            for key, d in memories:
+                pid = d["persona_id"]
+                try:
+                    outcome = memory_store.remember_event(pid, key, d["text"], interlocutor=d["interlocutor"])
+                    if outcome.failed and not statements:
+                        memory_store.abandon_event(pid, key)
+                except (MemoryFailureError, OSError, ActioDataError) as exc:
+                    # 不改提案、不放弃事件:留在 approved,下一 tick 重入同 key 补收据(只报类名)。
+                    # ActioDataError:库拒收这条事件(替身要求 interlocutor 非空),登记之前就拒,库没动;
+                    # 不接的话它从处理器漏出去打崩守护进程
+                    fail_once(store, run_id, task_id=task_id,
+                              category="T1" if getattr(exc, "transient", False) else "T2",
+                              point="mindagent.admit.memory", retries=0,
+                              reason=f"remember {key}: {type(exc).__name__}")
+                    return
+                if outcome.failed and statements:
+                    fail_once(store, run_id, task_id=task_id, category="T2", point="mindagent.admit.memory",
+                              retries=0,
+                              reason=f"partial admission: {key} extraction failed after {len(statements)} committed")
+                    raise DeferredError(f"partial admission of {proposal_id}: {key} pending")
+                if outcome.failed:
+                    reason = f"extraction failed for {key}: {outcome.category}"
+                    fail_once(store, run_id, task_id=task_id, category="T2", point="mindagent.admit.memory",
+                              retries=0, reason=reason)
+                    assert_transition("review", proposal.status, "rejected")
+                    proposal.status = "rejected"
+                    proposal.payload["reject_reason"] = reason
+                    store.write_product(rel, proposal, f"mindagent: {proposal_id} rejected (memory extraction)")
+                    return
+                statements[key] = list(outcome.stored)
+
+            for kind, entry_id, payload in entries:
+                if kind != "skill":
+                    continue
+                path = skill_file(entry_id)
+                if not store.exists(path):
+                    store.write_product(path, _entry_envelope(kind, entry_id, payload, proposal_id),
+                                        f"mindagent: admit {entry_id} from {proposal_id}")
+
+            admitted = list(state["admitted"])
+            if all(a.get("proposal_id") != proposal_id for a in admitted):
+                kinds = {kind for kind, _, _ in entries}
+                # 版本存成十进制字符串(设计 §8.3);递增时按整数解析
+                skill_v = str(int(state["skill_version"]) + (1 if "skill" in kinds else 0))
+                memory_v = str(int(state["memory_version"]) + (1 if "memory" in kinds else 0))
+                admitted.append({
+                    "proposal_id": proposal_id,
+                    "skill_version": skill_v,
+                    "memory_version": memory_v,
+                    "entries": [entry_id for _, entry_id, _ in entries],
+                })
+                lib_rel = library_state_file()
+                version = store.read_product(lib_rel).version + 1 if store.exists(lib_rel) else 1
+                env = Envelope(
+                    id=LIBRARY_STATE_ID, type="library_state", version=version, created_at=_now(),
+                    created_by=OwnerRef(), status="executed", schema_version=1, links=[proposal_id],
+                    payload={"skill_version": skill_v, "memory_version": memory_v, "admitted": admitted},
+                )
+                store.write_product(lib_rel, env, f"mindagent: library -> skill v{skill_v}, memory v{memory_v}")
+
+            proposal.payload["admitted_statements"] = statements
+            assert_transition("review", proposal.status, "effective")
+            proposal.status = "effective"
+            store.write_product(rel, proposal, f"mindagent: {proposal_id} effective")
+
+    return handle

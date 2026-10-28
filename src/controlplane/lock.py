@@ -46,7 +46,7 @@ class FileLockBusyError(Exception):
     """另一个持有者已占着这把文件锁。str(exc) 恰好是锁文件的绝对路径。"""
 
 
-def _git_dir(repo_root: Path) -> Path:
+def git_dir(repo_root: Path) -> Path:
     """这个工作树的 git 目录。.git 是目录就用它;是文件(worktree、子模块)就按 git 的格式读
     `gitdir: <路径>`,相对路径相对 .git 文件所在目录。不起 git 子进程:取锁在入口处,要快且确定。"""
     dot_git = repo_root / ".git"
@@ -62,7 +62,7 @@ def _git_dir(repo_root: Path) -> Path:
 @contextmanager
 def acquire_repo_lock(repo_root: str | Path) -> Iterator[None]:
     """取仓库写锁;被占用时立刻抛 RepoLockedError(不等待),退出上下文时释放。"""
-    lock_path = _git_dir(Path(repo_root).absolute()) / "rismforge.lock"
+    lock_path = git_dir(Path(repo_root).absolute()) / "rismforge.lock"
     fh = open(lock_path, "a+b")
     try:
         try:

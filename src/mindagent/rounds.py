@@ -8,31 +8,47 @@
   桥接已用尽自己的重试,T2 是确定性故障)→ 轮次 failed,并经 ledger.record_failure 写一条 T3
   失败记录(task_id 为 agent-<model>)。
 - 非桥接的瞬态(会话 T1 重跑用尽)与其余异常原样上抛,轮次保持 pending。按 R19,调和循环对
-  pending 的轮次在下一个 tick 重新触发 start_agent_round,所以本处理器的重入必须幂等:已落盘的
+  pending 的轮次在下一个 tick 重新触发 start_agent_round,所以本处理器的重入必须幂等:已提交的
   部署 episode 不重跑,提案按确定性 id 重写。
+
+部署记忆(设计二第 9 节):
+- 跑部署之前按排序后的绑定人格 id 逐个拿 deploy/<persona_id>.lock,拿不到判 T3(mindagent.rounds.lock);
+  锁持到处理器返回或抛出,下面的回滚也在锁里做。
+- 轮次产物带 memory_runtime(装配时给的运行时身份)与 episode_digests({部署 id: {persona_id: 起点摘要}}),
+  每条 episode 开始前写回一次;pending 轮次重入时继承上一次记下的 episode_digests,已提交的才认得出来。
+- 判 T3 时(覆盖失败除外)先用起点副本把在途 episode 覆盖回起点、删副本,再写失败记录;覆盖失败时库与
+  副本都保留。瞬态失败与其余异常不回滚:轮次留 pending,重入时由驱动器"副本在就先覆盖"处理。
+- 验证重放在部署库的验证快照上做:基线与候选各从快照恢复一份临时副本,实例只读;轮次结束即删。
 """
 from __future__ import annotations
 
+import copy
 import re
+import shutil
 from collections.abc import Callable
+from contextlib import ExitStack
 from datetime import datetime, timezone
+from pathlib import Path
 
 from actio.errors import ActioDataError
 from actio.instance import instantiate
+from actio.memory_port import DeploymentMemoryStore, MemoryFailureError
 from actio.skills import Skill
 from controlplane.envelope import BigRef, Envelope, InvalidBigRefError, OwnerRef
 from controlplane.gitstore import GitStore
+from controlplane.lock import FileLockBusyError
 from controlplane.models import version_of_file, version_of_id
 from controlplane.paths import CONTROL_PLANE_ROOT, agent_round_file, model_file, persona_file, scenario_file
 from controlplane.reconcile import Action
 from controlplane.states import assert_transition
 from inference_bridge import BridgeError
 from mindagent.analysis import analyze
-from mindagent.config import AgentConfig
+from mindagent.config import AgentConfig, agent_slot_of
 from mindagent.deployment import DeploymentFailedError, run_deployment_episodes
-from mindagent.errors import AgentRoundFailedError, MindAgentDataError, ProposalParseError
+from mindagent.errors import AgentRoundFailedError, MindAgentDataError, ProposalParseError, RestoreFailedError
 from mindagent.failures import UNREADABLE, fail_once, read_or_none
 from mindagent.library import LibraryState, load_library
+from mindagent.memory_layout import MemoryLayout
 from mindagent.packaging import Thresholds, package, screen, stale_proposals
 from mindagent.proposals import BRIDGE_GENERATOR, PROMPT_TEMPLATE_VERSION, RULE_GENERATOR, propose
 from mindagent.verify import verify
@@ -139,7 +155,7 @@ def _round_envelope(model_id: str, payload: dict) -> Envelope:
 
 
 def _binding_payload(model_id: str, version: int, run_id: str, ckpt: BigRef | None,
-                     lib: LibraryState, config: AgentConfig, generator: str) -> dict:
+                     lib: LibraryState, config: AgentConfig, generator: str, memory_runtime: dict) -> dict:
     payload = {
         "model_id": model_id,
         "model_version": version,
@@ -156,6 +172,8 @@ def _binding_payload(model_id: str, version: int, run_id: str, ckpt: BigRef | No
         },
         "generator_version": generator,
         "uses_bridge": generator == BRIDGE_GENERATOR,
+        "memory_runtime": copy.deepcopy(memory_runtime),
+        "episode_digests": {},
         "episode_ids": [],
         "findings": [],
         "proposals": [],
@@ -181,14 +199,24 @@ def _check_inputs(store: GitStore, config: AgentConfig) -> None:
 def make_start_round_handler(
     *,
     config: AgentConfig,
-    client_factory: Callable[[], object],
+    client_factory: Callable[..., object],
     backend_factory: BackendFactory,
     personas_loader: PersonasLoader,
+    memory_store: DeploymentMemoryStore,
+    memory_layout: MemoryLayout,
+    memory_runtime: dict,
+    scratch_store_factory: Callable[[Path], DeploymentMemoryStore],
     bridge=None,
+    stream_deadline_s: float | None = None,
 ) -> Handler:
     """backend_factory(model_id, checkpoint_ref) 每次调用返回一个新的模型后端(普通或带指导语的);
-    personas_loader(store, persona_ids) 返回 {persona_id: Persona}。bridge 缺省走规则模板。"""
+    personas_loader(store, persona_ids) 返回 {persona_id: Persona}。bridge 缺省走规则模板。
+    memory_store 与 memory_layout 是部署记忆(与门② 共用同一份);memory_runtime 是记忆运行时身份,
+    装配时深拷贝一次;scratch_store_factory(root) 给验证重放造临时副本库。stream_deadline_s 原样交给
+    部署驱动器,None 时客户端工厂用它自己的现值。"""
     generator = RULE_GENERATOR if bridge is None else BRIDGE_GENERATOR
+    runtime = copy.deepcopy(memory_runtime)
+    bound_personas = sorted({b.persona_id for b in config.bindings})
 
     def handle(store: GitStore, action: Action) -> None:
         model_id = action.target_id
@@ -215,13 +243,30 @@ def make_start_round_handler(
         lib: LibraryState | None = None
         try:
             lib = load_library(store)
-            payload = _binding_payload(model_id, version, run_id, ckpt, lib, config, generator)
+            payload = _binding_payload(model_id, version, run_id, ckpt, lib, config, generator, runtime)
             env = _round_envelope(model_id, payload)
             if existing is not None:
                 env.created_at = existing.created_at
+                # 不继承的话重入时认不出已提交的 episode,会按同一 id 重跑而撞上它自己 committed 的 key
+                env.payload["episode_digests"] = copy.deepcopy(existing.payload.get("episode_digests", {}))
             store.write_product(rel, env, f"mindagent: {env.id} pending")
             _check_inputs(store, config)
-            _run(store, env, lib, run_id, model_id, ckpt)
+            with ExitStack() as locks:
+                for pid in bound_personas:
+                    try:
+                        locks.enter_context(memory_layout.persona_lock(pid))
+                    except FileLockBusyError as exc:
+                        raise AgentRoundFailedError(f"persona library locked: {exc}",
+                                                    point="mindagent.rounds.lock") from exc
+                try:
+                    _run(store, env, lib, run_id, model_id, ckpt)
+                except (DeploymentFailedError, BridgeError, AgentRoundFailedError,
+                        MindAgentDataError, ActioDataError) as exc:
+                    # 判 T3 的这几类先把在途 episode 覆盖回起点;瞬态与覆盖失败不回滚
+                    transient = isinstance(exc, DeploymentFailedError) and exc.transient
+                    if not transient and not isinstance(exc, RestoreFailedError):
+                        _rollback(env.id)
+                    raise
         except DeploymentFailedError as exc:
             if exc.transient:
                 raise
@@ -238,32 +283,87 @@ def make_start_round_handler(
         except (MindAgentDataError, ActioDataError) as exc:
             _record(store, rel, run_id, model_id, f"{type(exc).__name__}: {exc}", "mindagent.rounds", 0)
 
+    def _rollback(round_id: str) -> None:
+        """T3 收尾(第 9 节"轮次失败收尾"):该轮次每个还在的起点副本覆盖回它的人格库,再删副本。
+        驱动器每次尝试的 finally 已关掉实例与端口;restore_from 遇到仍打开的端口会拒绝覆盖,这里把它
+        与文件系统错误一起改抛 RestoreFailedError,库与副本都不动。副本按最长的人格 id 后缀认领:
+        人格 id 里允许 '-',`...-x-pa` 不能被当成 `pa` 的副本。"""
+        by_length = sorted(bound_personas, key=len, reverse=True)
+        for snap in memory_layout.round_snapshots(round_id):
+            pid = next((p for p in by_length if snap.name.endswith(f"-{p}{memory_layout.suffix}")), None)
+            if pid is None:
+                continue
+            try:
+                memory_store.restore_from(pid, snap)
+            except (MemoryFailureError, OSError) as exc:
+                raise RestoreFailedError(f"rollback {snap.name} for {pid}: {type(exc).__name__}",
+                                         point="mindagent.deployment.restore") from exc
+            snap.unlink()
+
     def _run(store: GitStore, env: Envelope, lib: LibraryState, run_id: str, model_id: str,
              ckpt: BigRef | None) -> None:
-        def instance_with(extra: tuple[Skill, ...] = ()):
+        interlocutors = {b.slot_id: b.persona_id for b in config.bindings}
+        profile = {"model_id": model_id, "round_id": env.id}
+
+        def make_instance(episode_id: str, memory):
             return instantiate(
-                backend_factory(model_id, ckpt), skills=lib.skills + tuple(extra), memories=(),
-                library_version=lib.version, profile={"model_id": model_id, "round_id": env.id},
+                backend_factory(model_id, ckpt), skills=lib.skills, memory=memory, episode_id=episode_id,
+                interlocutors=interlocutors, library_version=lib.version, profile=profile,
             )
+
+        def on_episode_start(eid: str, by_persona: dict[str, str]) -> None:
+            env.payload["episode_digests"][eid] = dict(by_persona)
+            store.write_product(agent_round_file(model_id), env, f"mindagent: {env.id} start {eid}")
 
         persona_ids = sorted({b.persona_id for b in config.bindings})
         personas = personas_loader(store, persona_ids)
         episodes = run_deployment_episodes(
-            store, instance_with(), client_factory, run_id=run_id,
+            store, make_instance, client_factory, memory_store=memory_store, memory_layout=memory_layout,
+            run_id=run_id, round_id=env.id, library_version=lib.version,
+            episode_digests=env.payload["episode_digests"], on_episode_start=on_episode_start,
             scenario_ids=config.scenario_ids, personas=personas, bindings=config.bindings,
             model_id=model_id, max_turns=config.max_turns,
             episodes_per_scenario=config.episodes_per_scenario,
             max_retries_per_episode=config.max_retries_per_episode,
+            stream_deadline_s=stream_deadline_s,
         )
         findings = analyze(episodes, min_support=config.min_support, min_ratio=config.min_ratio, skills=lib.skills)
         drafts = propose(findings, bridge=bridge, run_id=run_id, task_id=f"{task_id_for(model_id)}-propose",
                          max_parse_retries=config.max_parse_retries)
         scenarios = {sid: read_scenario(store, sid) for sid in config.scenario_ids}
-        verifications = [
-            verify(d, findings, episodes, base_instance_factory=instance_with,
-                   personas=personas, scenarios=scenarios)
-            for d in drafts
-        ]
+
+        # 验证快照(第 9 节"验证重放"):部署跑完后把智能体位人格的部署库备份一份,基线与候选各从它恢复
+        # 一份临时副本、只读重放;部署库本身不被验证碰到。
+        agent_pid = next(b.persona_id for b in config.bindings if b.slot_id == agent_slot_of(config.bindings))
+        verify_snap = memory_layout.verify_snapshot(env.id, agent_pid)
+        scratch_root = memory_layout.verify_scratch(env.id)
+        built: list = []
+
+        def instance_with(extra: tuple[Skill, ...] = ()):
+            # episode_id 在只读重放下不产生事件 key;给它只是让"给 memory 时要 episode_id"的校验不分叉
+            scratch = scratch_store_factory(scratch_root / f"{len(built)}")
+            scratch.restore_from(agent_pid, verify_snap)
+            inst = instantiate(
+                backend_factory(model_id, ckpt), skills=lib.skills + tuple(extra),
+                memory=scratch.open(agent_pid), episode_id=f"{env.id}/verify", interlocutors=interlocutors,
+                replay_read_only=True, library_version=lib.version, profile=profile,
+            )
+            built.append(inst)
+            return inst
+
+        verify_snap.parent.mkdir(parents=True, exist_ok=True)
+        memory_store.backup_to(agent_pid, verify_snap)
+        try:
+            verifications = [
+                verify(d, findings, episodes, base_instance_factory=instance_with,
+                       personas=personas, scenarios=scenarios)
+                for d in drafts
+            ]
+        finally:
+            for inst in built:
+                inst.close()
+            verify_snap.unlink(missing_ok=True)
+            shutil.rmtree(scratch_root, ignore_errors=True)
         thresholds = Thresholds(config.min_fired_on_motivating, config.max_fired_elsewhere)
         written = package(store, env.id, findings, drafts, verifications, thresholds=thresholds,
                           run_id=run_id, bound_model_id=model_id)

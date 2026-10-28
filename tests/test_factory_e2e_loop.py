@@ -265,7 +265,8 @@ def test_the_mindagent_line_runs_inside_the_reconcile_loop(store):
 # ---- R19:start_agent_round 对 pending 轮次的重入(计划 7 留给本计划验证) ----
 
 class _Flaky:
-    """第一次构造的后端在第 fail_after 次发言时抛 OSError(瞬态,原样上抛);之后构造的后端正常。"""
+    """抛出之前构造的后端共用一个发言计数,第 fail_after 次发言抛 OSError(瞬态,原样上抛)并解除;
+    之后构造的后端正常。部署驱动器每条 episode 新造一个实例(各带一个后端),所以计数要跨后端累计。"""
 
     def __init__(self, fail_after):
         self.fail_after = fail_after
@@ -277,14 +278,15 @@ class _Flaky:
         inner = CannedGuidedBackend()
         if not self.armed:
             return inner
-        self.armed = False
         outer = self
 
         class Backend:
             def respond_guided(self, *a):
-                outer.calls += 1
-                if outer.calls >= outer.fail_after:
-                    raise OSError("model host went away")
+                if outer.armed:
+                    outer.calls += 1
+                    if outer.calls >= outer.fail_after:
+                        outer.armed = False
+                        raise OSError("model host went away")
                 return inner.respond_guided(*a)
 
         return Backend()
