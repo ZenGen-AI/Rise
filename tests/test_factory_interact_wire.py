@@ -287,6 +287,7 @@ from controlplane.paths import (
 from factory.agent import AgentRuntime
 from factory.interact_policy import OpponentSwitch, make_policy_factory
 from factory.opponents import EXPORT_FORMAT, ExternalApiBackend
+from memory_fixtures import unresolved_memory
 from mindtrainer.training_config import RewardConfig, TrainingConfig
 from simulator.datamodel import Persona, RoleBinding, RoleSlot, Scenario
 from simulator.store_adapter import write_persona, write_scenario
@@ -439,7 +440,7 @@ def _cfg_dict(*, bindings=None, **overrides) -> dict:
         mode="interact", trained_slot="a", base_checkpoint_ref=BASE.to_dict(), teacher_model_ref=TEACHER.to_dict(),
         reward=REWARD.to_dict(), sft_steps=0, grpo_steps=1, sft_batch_size=1, groups_per_step=1, group_size=2,
         grpo_config={}, opd_coefficient=0.1, checkpoint_every_steps=1, allow_resume=True,
-        scenario_ids=["t1", "t2"], max_turns_per_episode=4,
+        scenario_ids=["t1", "t2"], max_turns_per_episode=4, memory=unresolved_memory(),
         bindings=[b.to_dict() for b in (bindings or [RoleBinding("a", "pa", "self_play"), _opponent_binding()])],
     )
     cfg.update(overrides)
@@ -1520,7 +1521,6 @@ import logging
 
 from actio.memory import TupleMemory
 from factory.memory_runtime import STAND_IN_MEMORY_RUNTIME
-from memory_fixtures import unresolved_memory
 
 
 def test_the_assembled_dispatcher_records_the_stand_in_memory(world, tmp_path, stub, fake_serve):

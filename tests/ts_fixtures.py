@@ -17,6 +17,7 @@ from controlplane.paths import (
     run_dir,
     run_trace_file,
 )
+from memory_fixtures import unresolved_memory
 from trainscheduler.config import DEFAULT_TRAINING_CONFIG
 
 NOW = "2026-10-09T00:00:00Z"
@@ -124,7 +125,7 @@ def recipe_payload(run_id: str = "run-001", *, dimension: str = "tom", recipe_ty
                    bindings=[{"slot_id": "zengen", "persona_id": "p-1", "model_backend": "self_play", "model_ref": None},
                              {"slot_id": "other", "persona_id": "p-2", "model_backend": "frozen_reference",
                               "model_ref": "zengen-v1"}],
-                   max_turns_per_episode=4)
+                   max_turns_per_episode=4, memory=unresolved_memory())
     return {
         "recipe_type": recipe_type, "dimension": dimension, "source_run_id": run_id,
         "eval_anchor": {"taxonomy_version": "tax-v1", "item_pool_version": "pool-v1", "benchmark_version": "bench-v1",

@@ -18,8 +18,12 @@ from mindtrainer.orchestrator import NotEnoughGroupsError
 from mindtrainer.resume import NeedsHumanError
 from mindtrainer.roll_converter import EXPORT_FORMAT
 from mindtrainer.reward_pipeline import AttributionError
-from memory_fixtures import STAND_IN_RUNTIME, fake_memory_resolver, resolved_memory, unresolved_memory
-from mindtrainer.training_config import InvalidTrainingConfigError, RewardConfig, TrainingConfig
+from memory_fixtures import (
+    STAND_IN_RUNTIME, fake_memory_resolver, interact_dispatcher, resolved_memory, unresolved_memory,
+)
+from mindtrainer.training_config import (
+    InvalidTrainingConfigError, MISSING_MEMORY_REASON, RewardConfig, TrainingConfig,
+)
 from realtime_fixtures import plain_factory, plain_hook
 from simulator.backends import ScriptedBackend
 from simulator.datamodel import Persona, RoleAssignment, RoleBinding, RoleSlot, Scenario
@@ -161,7 +165,8 @@ def test_interact_without_a_client_factory_fails_the_directive(store):
     _directive(store, payload={"target_dimension": "tom", "recipe_ref": "",
                                "training_config": _cfg_dict(mode="interact", scenario_ids=["s1"],
                                                             bindings=[RoleBinding("a", "pa", "self_play").to_dict()],
-                                                            max_turns_per_episode=4)})
+                                                            max_turns_per_episode=4,
+                                                            memory=unresolved_memory())})
     reconcile_once(store, dispatcher=make_mindtrainer_dispatcher())
     env = store.read_product(f"{run_dir(RUN)}/directive.yaml")
     assert env.status == "failed"
@@ -495,10 +500,11 @@ def test_an_interact_directive_trains_against_a_live_server_and_leaves_a_candida
         stage_manifest_refs={"sft": f"dsm-{RUN}-sft"},
         bindings=[RoleBinding("a", "pa", "self_play").to_dict(),
                   RoleBinding("b", "pb", "frozen_reference", model_ref="zengen-v1").to_dict()],
+        memory=unresolved_memory(),
     )
     _directive(store, payload={"target_dimension": "tom", "recipe_ref": "", "training_config": cfg})
     policy = ScriptedBackend({"a": ["agreed", "x", "no", "x"] * 8})
-    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
+    reconcile_once(store, dispatcher=interact_dispatcher(
         client_factory=env.client_factory, policy=policy))
     assert store.read_product(f"{run_dir(RUN)}/directive.yaml").status == "executed"
     assert store.read_product(f"{run_dir(RUN)}/training_run.yaml").status == "executed"
@@ -513,9 +519,10 @@ def test_an_interact_directive_names_its_episodes_with_the_run_id(store, live):
         stage_manifest_refs={"sft": f"dsm-{RUN}-sft"},
         bindings=[RoleBinding("a", "pa", "self_play").to_dict(),
                   RoleBinding("b", "pb", "frozen_reference", model_ref="zengen-v1").to_dict()],
+        memory=unresolved_memory(),
     )
     _directive(store, payload={"target_dimension": "tom", "recipe_ref": "", "training_config": cfg})
-    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
+    reconcile_once(store, dispatcher=interact_dispatcher(
         client_factory=env.client_factory, policy=ScriptedBackend({"a": ["agreed", "x", "no", "x"] * 8})))
     assert _wait_until(lambda: len(env.closed) == 4)
     assert sorted(e.id for e in env.closed) == [
@@ -532,10 +539,11 @@ def test_an_interact_directive_ignores_a_stray_grpo_opd_manifest_ref(store, live
         stage_manifest_refs={"sft": f"dsm-{RUN}-sft", "grpo_opd": "dsm-run-9-grpo_opd"},
         bindings=[RoleBinding("a", "pa", "self_play").to_dict(),
                   RoleBinding("b", "pb", "frozen_reference", model_ref="zengen-v1").to_dict()],
+        memory=unresolved_memory(),
     )
     _directive(store, payload={"target_dimension": "tom", "recipe_ref": "", "training_config": cfg})
     policy = ScriptedBackend({"a": ["agreed", "x", "no", "x"] * 8})
-    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
+    reconcile_once(store, dispatcher=interact_dispatcher(
         client_factory=env.client_factory, policy=policy))
     assert store.read_product(f"{run_dir(RUN)}/directive.yaml").status == "executed"
     assert store.read_product(f"{run_dir(RUN)}/training_run.yaml").status == "executed"
@@ -551,9 +559,10 @@ def test_a_rollout_the_server_rejects_for_good_fails_the_directive_in_the_same_t
         stage_manifest_refs={"sft": f"dsm-{RUN}-sft"},
         bindings=[RoleBinding("a", "pa", "self_play").to_dict(),
                   RoleBinding("b", "pb", "frozen_reference", model_ref="zengen-v1").to_dict()],
+        memory=unresolved_memory(),
     )
     _directive(store, payload={"target_dimension": "tom", "recipe_ref": "", "training_config": cfg})
-    disp = make_mindtrainer_dispatcher(
+    disp = interact_dispatcher(
         client_factory=env.client_factory, policy=ScriptedBackend({"a": ["agreed", "x"] * 8}))
     reconcile_once(store, dispatcher=disp)  # 不抛
     env_d = store.read_product(f"{run_dir(RUN)}/directive.yaml")
@@ -760,10 +769,11 @@ def test_a_missing_manifest_fails_the_directive_before_the_policy_context_is_ent
         stage_manifest_refs={"sft": "dsm-run-9-sft"},        # run-9 没有数据
         bindings=[RoleBinding("a", "pa", "self_play").to_dict(),
                   RoleBinding("b", "pb", "frozen_reference", model_ref="zengen-v1").to_dict()],
+        memory=unresolved_memory(),
     )
     _directive(store, payload={"target_dimension": "tom", "recipe_ref": "", "training_config": cfg})
     trace = []
-    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
+    reconcile_once(store, dispatcher=interact_dispatcher(
         client_factory=env.client_factory, policy_factory=lambda run_id, c: _Scope(trace, _TracingPolicy(trace))))
     env_d = store.read_product(f"{run_dir(RUN)}/directive.yaml")
     assert env_d.status == "failed" and "manifest" in env_d.payload["failure"]["reason"]
@@ -790,7 +800,7 @@ def test_a_policy_and_a_policy_factory_together_are_refused_at_construction():
 def test_interact_with_neither_a_policy_nor_a_factory_fails_with_the_new_message(store, live):
     env = live()
     _interact_directive(store)
-    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(client_factory=env.client_factory))
+    reconcile_once(store, dispatcher=interact_dispatcher(client_factory=env.client_factory))
     env_d = store.read_product(f"{run_dir(RUN)}/directive.yaml")
     assert env_d.status == "failed" and env_d.payload["failure"]["category"] == "T2"
     reason = env_d.payload["failure"]["reason"]
@@ -1125,3 +1135,26 @@ def test_a_resolver_that_returns_malformed_digests_fails_the_directive_with_the_
     assert env.status == "failed" and env.payload["failure"]["category"] == "T2"
     assert "memory resolver failed: TypeError" in env.payload["failure"]["reason"]
     assert trace == [] and not store.exists(f"{run_dir(RUN)}/training_run.yaml")
+
+
+def test_a_pending_interact_run_written_before_memory_support_fails_before_hashing(store, live):
+    _interact_directive(store)
+    raw = store.read_product(f"{run_dir(RUN)}/directive.yaml")
+    del raw.payload["training_config"]["memory"]
+    store.write_product(f"{run_dir(RUN)}/directive.yaml", raw, "test: a directive from before memory support")
+    calls = []
+    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
+        client_factory=live().client_factory, policy=ScriptedBackend({}),
+        memory_resolver=lambda seed, ids: calls.append(ids)))
+    env = store.read_product(f"{run_dir(RUN)}/directive.yaml")
+    assert env.status == "failed" and env.payload["failure"]["category"] == "T2"
+    assert env.payload["failure"]["reason"] == f"directive {RUN}: {MISSING_MEMORY_REASON}"
+    assert calls == [] and not store.exists(f"{run_dir(RUN)}/training_run.yaml")
+
+
+def test_a_dispatcher_without_a_resolver_now_refuses_every_interact_directive(store, live):
+    _interact_directive(store)
+    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
+        client_factory=live().client_factory, policy=ScriptedBackend({})))
+    env = store.read_product(f"{run_dir(RUN)}/directive.yaml")
+    assert env.status == "failed" and "memory_resolver" in env.payload["failure"]["reason"]

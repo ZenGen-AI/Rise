@@ -13,12 +13,12 @@ from controlplane.paths import (
     candidate_checkpoint_file, dataset_manifest_file, episodes_dir, persona_file, run_dir,
     scenario_file,
 )
-from memory_fixtures import fake_memory_resolver, resolved_memory, unresolved_memory
+from memory_fixtures import fake_memory_resolver, interact_dispatcher, resolved_memory, unresolved_memory
 from mindtrainer.data_producer import TemplateDataProducer
 from mindtrainer.data_spec import DataSynthesisError, parse_data_spec
 from mindtrainer.dispatch import make_mindtrainer_dispatcher
 from mindtrainer.orchestrator import NotEnoughGroupsError
-from mindtrainer.training_config import RewardConfig, TrainingConfig
+from mindtrainer.training_config import MISSING_MEMORY_REASON, RewardConfig, TrainingConfig
 from realtime_fixtures import plain_factory
 from simulator.backends import ScriptedBackend
 from simulator.datamodel import RoleBinding
@@ -333,13 +333,14 @@ def test_an_interact_directive_synthesizes_only_its_sft_manifest(store):
         stage_manifest_refs={"sft": f"dsm-{RUN}-sft", "grpo_opd": f"dsm-{RUN}-grpo_opd"},
         bindings=[RoleBinding("a", "pa", "self_play").to_dict(),
                   RoleBinding("b", "pb", "frozen_reference", model_ref="zengen-v1").to_dict()],
+        memory=unresolved_memory(),
     )
     _directive(store, cfg=cfg)
 
     def no_client():
         raise AssertionError("grpo_steps=0: the live server must not be contacted")
 
-    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
+    reconcile_once(store, dispatcher=interact_dispatcher(
         client_factory=no_client, policy=ScriptedBackend({}), data_producer=TemplateDataProducer()))
     assert _status(store).status == "executed"
     assert store.exists(dataset_manifest_file(RUN, "sft"))
@@ -354,6 +355,7 @@ def test_an_interact_directive_without_a_client_fails_before_synthesizing(store)
         stage_manifest_refs={"sft": f"dsm-{RUN}-sft"},
         bindings=[RoleBinding("a", "pa", "self_play").to_dict(),
                   RoleBinding("b", "pb", "frozen_reference", model_ref="zengen-v1").to_dict()],
+        memory=unresolved_memory(),
     )
     _directive(store, cfg=cfg)
     spy = Spy()
@@ -393,6 +395,7 @@ def _interact_cfg(run_id=RUN, **kw):
             {"slot_id": "b", "persona_id": "", "model_backend": "frozen_reference",
              "model_ref": "zengen-v1", "driver": "scripted"},
         ],
+        memory=unresolved_memory(),
     )
     base.update(kw)
     return _cfg_dict(run_id, **base)
@@ -481,7 +484,7 @@ def test_interact_write_back_fills_scenario_ids_and_personas(store, live):
     server = live()
     original = _interact_cfg()
     _directive(store, cfg=copy.deepcopy(original))
-    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
+    reconcile_once(store, dispatcher=interact_dispatcher(
         client_factory=server.client_factory, policy=ScriptedBackend({"a": _POLICY_LINES}),
         data_producer=TemplateDataProducer()))
 
@@ -555,7 +558,7 @@ def test_write_back_happens_once_and_stays_stable(store, live):
 
     client_factory = FlakyOnce()
     _directive(store, cfg=_interact_cfg())
-    dispatcher = make_mindtrainer_dispatcher(
+    dispatcher = interact_dispatcher(
         client_factory=client_factory, policy=ScriptedBackend({"a": _POLICY_LINES}),
         data_producer=TemplateDataProducer())
 
@@ -587,7 +590,7 @@ def test_a_write_back_that_still_fails_strict_validation_is_t2(store):
     """生产器只给出一个情境而 groups_per_step=2:调度器会拒绝这样的指令,所以手工构造。
     回写之后的严格复校把它判成 T2,原因点名 groups_per_step。"""
     _directive(store, cfg=_interact_cfg(), data_spec=dict(SPEC, scenario_count=1))
-    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
+    reconcile_once(store, dispatcher=interact_dispatcher(
         client_factory=_no_client, policy=ScriptedBackend({}),
         data_producer=TemplateDataProducer()))
     env = _status(store)
@@ -600,7 +603,7 @@ def test_a_write_back_that_still_fails_strict_validation_is_t2(store):
 def test_a_pending_interact_directive_without_a_producer_fails_and_names_it(store):
     _directive(store, cfg=_interact_cfg())
     before = copy.deepcopy(_training_config(store))
-    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
+    reconcile_once(store, dispatcher=interact_dispatcher(
         client_factory=_no_client, policy=ScriptedBackend({})))
     env = _status(store)
     assert env.status == "failed"
@@ -614,7 +617,7 @@ def test_a_pending_interact_directive_without_a_producer_fails_and_names_it(stor
 def test_a_pending_interact_directive_without_data_spec_fails_and_names_it(store):
     _directive(store, cfg=_interact_cfg(), data_spec=None)
     spy = WorldSpy()
-    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
+    reconcile_once(store, dispatcher=interact_dispatcher(
         client_factory=_no_client, policy=ScriptedBackend({}), data_producer=spy))
     env = _status(store)
     assert env.status == "failed"
@@ -628,7 +631,7 @@ def test_a_pending_interact_directive_without_data_spec_fails_and_names_it(store
 def test_a_pending_interact_directive_with_a_malformed_data_spec_fails(store):
     _directive(store, cfg=_interact_cfg(), data_spec=dict(SPEC, seed="0"))
     spy = WorldSpy()
-    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
+    reconcile_once(store, dispatcher=interact_dispatcher(
         client_factory=_no_client, policy=ScriptedBackend({}), data_producer=spy))
     env = _status(store)
     assert env.status == "failed"
@@ -640,7 +643,7 @@ def test_a_pending_interact_directive_with_a_malformed_data_spec_fails(store):
 def test_a_producer_that_cannot_make_an_interact_world_fails_and_names_the_method(store):
     """Spy 只实现 produce:生成路要的 world_for_interact 它没有,指令判 failed 并写明缺什么。"""
     _directive(store, cfg=_interact_cfg())
-    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
+    reconcile_once(store, dispatcher=interact_dispatcher(
         client_factory=_no_client, policy=ScriptedBackend({}), data_producer=Spy()))
     env = _status(store)
     assert env.status == "failed"
@@ -676,7 +679,7 @@ def test_a_config_that_is_not_pending_but_incomplete_is_rejected_by_the_strict_c
     _directive(store, cfg=_interact_cfg(scenario_ids=case["scenario_ids"], bindings=bindings))
     before = copy.deepcopy(_training_config(store))
     spy = WorldSpy()
-    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
+    reconcile_once(store, dispatcher=interact_dispatcher(
         client_factory=_no_client, policy=ScriptedBackend({}), data_producer=spy))
     env = _status(store)
     assert env.status == "failed"
@@ -704,7 +707,7 @@ def test_a_named_interact_directive_is_dispatched_without_a_write_back(store, li
     )
     _directive(store, cfg=copy.deepcopy(cfg), data_spec=None)
     spy = WorldSpy()
-    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
+    reconcile_once(store, dispatcher=interact_dispatcher(
         client_factory=server.client_factory, policy=ScriptedBackend({"a": _POLICY_LINES}),
         data_producer=spy))
     env = _status(store)
@@ -719,7 +722,7 @@ def test_a_named_interact_directive_is_dispatched_without_a_write_back(store, li
 def test_a_deterministic_world_failure_fails_the_directive_and_writes_nothing(store):
     _directive(store, cfg=_interact_cfg())
     before = copy.deepcopy(_training_config(store))
-    disp = make_mindtrainer_dispatcher(
+    disp = interact_dispatcher(
         client_factory=_no_client, policy=ScriptedBackend({}),
         data_producer=WorldSpy(raises=DataSynthesisError("no template for this purpose")))
     reconcile_once(store, dispatcher=disp)  # 不抛
@@ -737,7 +740,7 @@ def test_a_transient_world_failure_propagates_and_the_directive_stays_pending(st
     _directive(store, cfg=_interact_cfg())
     before = copy.deepcopy(_training_config(store))
     with pytest.raises(type(exc)):
-        reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
+        reconcile_once(store, dispatcher=interact_dispatcher(
             client_factory=_no_client, policy=ScriptedBackend({}),
             data_producer=WorldSpy(raises=exc)))
     env = _status(store)
@@ -761,7 +764,7 @@ def test_a_crash_between_the_tree_writes_and_the_write_back_heals_on_the_next_ti
 
     monkeypatch.setattr(store, "write_product", crash_on_write_back)
     _directive(store, cfg=_interact_cfg())
-    dispatcher = make_mindtrainer_dispatcher(
+    dispatcher = interact_dispatcher(
         client_factory=server.client_factory, policy=ScriptedBackend({"a": _POLICY_LINES}),
         data_producer=TemplateDataProducer())
 
@@ -793,7 +796,7 @@ def test_the_sft_synthesis_after_a_write_back_sees_the_written_back_config(store
 
     _directive(store, cfg=_interact_cfg(
         sft_steps=1, stage_manifest_refs={"sft": f"dsm-{RUN}-sft"}))
-    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
+    reconcile_once(store, dispatcher=interact_dispatcher(
         client_factory=server.client_factory, policy=ScriptedBackend({"a": _POLICY_LINES}),
         data_producer=Recording()))
     assert _status(store).status == "executed"
@@ -802,3 +805,15 @@ def test_the_sft_synthesis_after_a_write_back_sees_the_written_back_config(store
     assert [b.persona_id for b in seen[0].bindings] == ["pers-auto-0", "pers-auto-1"]
     assert store.exists(dataset_manifest_file(RUN, "sft"))
     assert not store.exists(dataset_manifest_file(RUN, "grpo_opd"))
+
+
+def test_a_generated_interact_directive_from_before_memory_support_writes_nothing_back(store):
+    cfg = _interact_cfg()
+    del cfg["memory"]
+    _directive(store, cfg=cfg)                                     # data_spec 缺省就是本文件的 SPEC
+    before = _commit_count(store)
+    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(data_producer=TemplateDataProducer()))
+    env = store.read_product(f"{run_dir(RUN)}/directive.yaml")
+    assert env.status == "failed" and MISSING_MEMORY_REASON in env.payload["failure"]["reason"]
+    assert env.payload["training_config"]["scenario_ids"] == []      # 判在回写之前:情境与人格没有生成
+    assert _commit_count(store) == before + 1                        # 只有判 failed 那一笔

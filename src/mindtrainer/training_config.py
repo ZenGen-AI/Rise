@@ -19,6 +19,8 @@ OPPONENT_MODEL_BACKENDS = ("frozen_reference", "external_api")
 # memory 段(TrainingConfig.memory)的键;runtime 的五个键是记忆运行时身份(设计 5.2 节)
 MEMORY_KEYS = ("digests", "runtime", "seed")
 MEMORY_RUNTIME_KEYS = ("backend", "embedding", "extraction", "starling_version", "trace_schema")
+# interact 配置必带 memory 段;落地前写下的 interact 配置缺它,校验与派发器都以这条原因拒绝
+MISSING_MEMORY_REASON = "interact config has no memory section (written before memory support)"
 
 
 class InvalidTrainingConfigError(ValueError):
@@ -364,6 +366,9 @@ def _validate_reward(r: RewardConfig) -> str | None:
 
 
 def _validate_interact(cfg: TrainingConfig) -> str | None:
+    # 先于情境检查:宽口径的占位探针保留 memory,所以构造期与派发期对旧配置给出同一原因
+    if cfg.memory is None:
+        return MISSING_MEMORY_REASON
     if not cfg.scenario_ids or len(set(cfg.scenario_ids)) != len(cfg.scenario_ids):
         return "scenario_ids must be non-empty and unique"
     if cfg.groups_per_step > len(cfg.scenario_ids):
@@ -419,7 +424,7 @@ def _validate_interact(cfg: TrainingConfig) -> str | None:
 
 
 def _validate_memory_against_bindings(cfg: TrainingConfig) -> str | None:
-    """memory 段与绑定的对应关系(形状已由 _check_memory_types 查过)。memory 为 None 在这一步仍放行。
+    """memory 段与绑定的对应关系(形状已由 _check_memory_types 查过)。interact 的 memory 为 None 已由 _validate_interact 先拒绝。
     digests 与 runtime 都空是"未解析"(调度器写进配置时的样子),放行;填了就要一起填、人格要对得上、
     运行时身份要齐五个键。生成路 pending 时人格是空串、占位探针里是 "pending",digests 只能为空,这就是宽口径。"""
     memory = cfg.memory

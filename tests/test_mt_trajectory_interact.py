@@ -7,6 +7,7 @@ import pytest
 
 from controlplane.envelope import BigRef
 from controlplane.gitstore import GitStore
+from memory_fixtures import unresolved_memory
 from mindtrainer.training_config import (
     InvalidTrainingConfigError, RewardConfig, TrainingConfig,
 )
@@ -52,7 +53,7 @@ def _cfg(**kw):
         sft_steps=0, grpo_steps=4, sft_batch_size=2, groups_per_step=2, group_size=2,
         grpo_config={}, opd_coefficient=0.1, checkpoint_every_steps=2, allow_resume=True,
         scenario_ids=["s1", "s2"], bindings=[_trained(), _opponent()],
-        max_turns_per_episode=4,
+        max_turns_per_episode=4, memory=unresolved_memory(),
     )
     base.update(kw)
     return TrainingConfig(**base)
@@ -509,7 +510,7 @@ def test_create_session_receives_the_configured_assignment_personas_and_purpose(
 def test_constructor_rejects_the_wrong_mode_an_invalid_config_and_a_negative_start(store):
     batch_cfg = dict(
         mode="batch", sft_steps=0, grpo_steps=2, stage_manifest_refs={"grpo_opd": "m"},
-        scenario_ids=[], bindings=[], max_turns_per_episode=0,
+        scenario_ids=[], bindings=[], max_turns_per_episode=0, memory=None,  # batch 配置不带 memory 段
     )
     with pytest.raises(ValueError, match="mode='interact'"):
         _source(store, _FakeFactory(), **batch_cfg)

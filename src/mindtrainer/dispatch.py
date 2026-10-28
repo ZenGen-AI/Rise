@@ -26,8 +26,8 @@ from mindtrainer.reward_pipeline import (
 )
 from mindtrainer.store_adapter import read_training_run
 from mindtrainer.training_config import (
-    InvalidTrainingConfigError, TrainingConfig, is_pending_interact, load_config_from_directive,
-    validate_training_config,
+    InvalidTrainingConfigError, MISSING_MEMORY_REASON, TrainingConfig, is_pending_interact,
+    load_config_from_directive, validate_training_config,
 )
 from mindtrainer.trajectory_source import (
     BatchTrajectorySource, InteractTrajectorySource, PolicyForRollout, TrajectorySource,
@@ -364,6 +364,10 @@ def make_mindtrainer_dispatcher(
             cfg = load_config_from_directive(directive)
         except InvalidTrainingConfigError as exc:
             raise DirectiveFailedError(f"directive {run_id}: {exc}") from exc
+        if cfg.mode == "interact" and cfg.memory is None:
+            # 落地前写下的 interact 指令:早判,不让生成路的旧指令先合成、落树、回写情境与人格再判失败
+            # (紧随其后的 validate_training_config 给同一原因,早判只是让它不留副作用)
+            raise DirectiveFailedError(f"directive {run_id}: {MISSING_MEMORY_REASON}")
         # 生成路的 interact 指令此刻 scenario_ids 与 persona_id 还空着:先回写,再让严格校验看回写后的配置
         cfg = _prepare_interact(store, run_id, cfg, directive, data_producer)
         reason = validate_training_config(cfg)
@@ -380,8 +384,7 @@ def make_mindtrainer_dispatcher(
                     f"directive {run_id}: interact mode needs a client_factory and a policy or policy_factory"
                     "; start factory run or factory reconcile with --interact to run interact directives"
                 )
-            # is not None 守卫让还没带 memory 段的旧指令照旧跑;Task 28 让 interact 必带 memory 后去掉
-            if cfg.memory is not None and memory_resolver is None:
+            if memory_resolver is None:
                 raise DirectiveFailedError(
                     f"directive {run_id}: interact mode needs a memory_resolver"
                     "; start factory run or factory reconcile with --interact to run interact directives"
@@ -391,8 +394,7 @@ def make_mindtrainer_dispatcher(
             manifests = _batch_manifests(store, run_id, cfg)
             # 解析在清单与客户端检查之后(缺了就不白跑解析器)、策略上下文之前(上下文要起服务、占租约);
             # resume_or_run 的 config_hash 在此之后算,续训时重新解出的摘要或身份一变就是 T3
-            if cfg.memory is not None:
-                cfg = _resolve_memory(run_id, cfg, memory_resolver)
+            cfg = _resolve_memory(run_id, cfg, memory_resolver)
         else:
             _synthesize_missing(store, run_id, cfg, directive, data_producer)
             make_sources = _batch_sources(store, run_id, cfg)

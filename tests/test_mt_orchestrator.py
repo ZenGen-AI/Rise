@@ -10,6 +10,7 @@ from controlplane.envelope import BigRef
 from controlplane.gitstore import GitStore
 from controlplane.observe import trace
 from controlplane.paths import candidate_checkpoint_file, training_run_file
+from memory_fixtures import unresolved_memory
 from mindtrainer.checkpoint import CandidateAlreadyReviewedError, MockConverter
 from mindtrainer.datamodel import StepResult, TrainingRun, TrajectoryBatch
 from mindtrainer.executor import MockExecutor, SimulatedCrashError
@@ -497,7 +498,7 @@ def _interact_cfg(**kw):
         group_size=2, grpo_config={}, opd_coefficient=0.1, checkpoint_every_steps=2,
         allow_resume=True, stage_manifest_refs={"sft": "dsm-run-1-sft"},
         scenario_ids=["s1", "s2", "s3"], bindings=[_trained(), _opponent()],
-        max_turns_per_episode=4,
+        max_turns_per_episode=4, memory=unresolved_memory(),
     )
     base.update(kw)
     return TrainingConfig(**base)

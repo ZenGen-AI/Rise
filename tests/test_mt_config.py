@@ -8,7 +8,7 @@ import yaml
 from controlplane.envelope import BigRef, Envelope, OwnerRef
 from memory_fixtures import STAND_IN_RUNTIME, resolved_memory, unresolved_memory
 from mindtrainer.training_config import (
-    InvalidTrainingConfigError, RewardConfig, TrainingConfig, config_hash,
+    InvalidTrainingConfigError, MISSING_MEMORY_REASON, RewardConfig, TrainingConfig, config_hash,
     ensure_valid_config, load_config_from_directive, phase_at, total_steps,
     validate_pending_interact, validate_training_config,
 )
@@ -54,7 +54,7 @@ def _interact(**kw) -> TrainingConfig:
         grpo_config={"learning_rate": 1e-5, "clip": {"low": 0.8, "high": 1.2}},
         opd_coefficient=0.1, checkpoint_every_steps=2, allow_resume=True,
         scenario_ids=["s1", "s2"], bindings=[_trained(), _opponent()],
-        max_turns_per_episode=6,
+        max_turns_per_episode=6, memory=unresolved_memory(),
     )
     base.update(kw)
     return TrainingConfig(**base)
@@ -896,3 +896,13 @@ def test_config_hash_changes_when_the_starting_memory_or_its_runtime_changes(cha
     after = copy.deepcopy(before)
     change(after)
     assert config_hash(_interact(memory=before)) != config_hash(_interact(memory=after))
+
+
+def test_an_interact_config_without_memory_is_refused_on_both_paths():
+    assert validate_training_config(_interact(memory=None)) == MISSING_MEMORY_REASON
+    assert validate_pending_interact(_pending(memory=None)) == MISSING_MEMORY_REASON
+    assert MISSING_MEMORY_REASON == "interact config has no memory section (written before memory support)"
+
+
+def test_a_batch_config_still_needs_no_memory():
+    assert validate_training_config(_batch()) is None

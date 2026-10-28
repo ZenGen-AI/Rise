@@ -83,6 +83,14 @@ def test_an_interact_recipe_needs_allow_interact(store):
     assert validate_decision(store, _d("replay", source="recipe-run-004"), config=allowed) is None
 
 
+def test_cloning_an_interact_recipe_from_before_memory_support_is_refused(store):
+    payload = recipe_payload("run-004", recipe_type="interact")
+    del payload["training_config"]["memory"]
+    write_recipe(store, "run-004", payload=payload)
+    with pytest.raises(ResolveError, match="no memory section"):
+        resolve_action(store, _d("replay", source="recipe-run-004"), config=ALLOW, defaults=DEFAULTS)
+
+
 def test_the_recipe_must_target_the_decided_dimension(store):
     reason = validate_decision(store, _d("clone", dimension="empathy", source="recipe-run-001"), config=CFG)
     assert "targets 'tom', not 'empathy'" in reason

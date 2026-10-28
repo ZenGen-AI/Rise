@@ -5,6 +5,7 @@ import pytest
 
 from controlplane.envelope import CURRENT_SCHEMA_VERSION, Envelope, OwnerRef
 from controlplane.states import can_transition
+from memory_fixtures import unresolved_memory
 from mindtrainer.data_spec import data_spec_from_directive, parse_data_spec, stages_to_synthesize
 from mindtrainer.training_config import (
     load_config_from_directive,
@@ -155,7 +156,8 @@ def _bindings():
 
 def _interact_cfg(**kw):
     cfg = copy.deepcopy(DEFAULT_TRAINING_CONFIG)
-    cfg.update({"mode": "interact", "trained_slot": "a", "max_turns_per_episode": 4, **kw})
+    cfg.update({"mode": "interact", "trained_slot": "a", "max_turns_per_episode": 4,
+                "memory": unresolved_memory(), **kw})
     return cfg
 
 
