@@ -1511,3 +1511,44 @@ def test_item_11_is_satisfied_by_passing_interact(tmp_path):
     _allow_interact(store)
     assemble(store, FactoryOptions(switches=("plan",), planner_backend="heuristic", interact=True),
              env=hosts_env(tmp_path)).close()
+
+
+# ---- 组合根的替身记忆解析器:--interact 装配时注入(设计二 7.1 节) ----
+
+import logging
+
+from actio.memory import TupleMemory
+from factory.memory_runtime import STAND_IN_MEMORY_RUNTIME
+from memory_fixtures import unresolved_memory
+
+
+def test_the_assembled_dispatcher_records_the_stand_in_memory(world, tmp_path, stub, fake_serve):
+    _write_directive(world, memory=unresolved_memory())
+    _run(world, tmp_path)
+    assert _read(world, "directive").status == "executed"
+    empty = TupleMemory().digest()
+    assert _read(world, "training_run").payload["policy_backend"]["memory"] == {
+        "seed": None, "digests": {"pa": empty, "pb": empty}, "runtime": STAND_IN_MEMORY_RUNTIME,
+    }
+
+
+def test_a_seeded_interact_directive_fails_without_a_memory_config(world, tmp_path, fake_serve):
+    _write_directive(world, memory=unresolved_memory("seed-1"))
+    _run(world, tmp_path)
+    env = _read(world, "directive")
+    assert env.status == "failed" and env.payload["failure"]["category"] == "T2"
+    assert "needs a memory config" in env.payload["failure"]["reason"]
+    assert fake_serve.calls == []                    # 解析在策略上下文之前:没起服务
+    assert not world.exists(f"{run_dir(RUN)}/training_run.yaml")
+
+
+def test_the_interact_assembly_logs_the_stand_in_memory_backend(world, tmp_path, caplog):
+    with caplog.at_level(logging.INFO, logger="factory.wire"):
+        assemble(world, FactoryOptions(interact=True, endpoint="gpu-2"), env=_env(tmp_path)).close()
+    assert "memory backend: stand-in" in caplog.text
+
+
+def test_an_assembly_without_interact_does_not_log_a_memory_backend(world, caplog):
+    with caplog.at_level(logging.INFO, logger="factory.wire"):
+        assemble(world, FactoryOptions()).close()
+    assert "memory backend" not in caplog.text

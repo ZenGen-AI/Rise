@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 from collections.abc import Callable, Mapping
@@ -31,6 +32,8 @@ from mindtrainer.dispatch import make_mindtrainer_dispatcher
 if TYPE_CHECKING:  # factory.agent 拖进 grpc 与 mindagent,只在类型检查时导入
     from factory.agent import AgentRuntime
     from factory.interact_policy import OpponentSwitch
+
+_log = logging.getLogger("factory.wire")
 
 PLANNER_BACKENDS = ("bridge", "heuristic")
 EXECUTORS = ("mock", "roll")
@@ -166,7 +169,7 @@ def _interact_wiring(
     store: GitStore, options: FactoryOptions, runtime: AgentRuntime, switch: OpponentSwitch,
     environ: Mapping[str, str],
 ) -> dict:
-    """`--interact` 要交给派发器的东西:策略工厂,以及它所用端点的名字。
+    """`--interact` 要交给派发器的东西:策略工厂、它所用端点的名字,以及解起点记忆的替身解析器。
 
     端点只选一次:点名的或唯一的那个。同一个端点既给 policy_context 起服务,也作为 policy_endpoint
     写进 training_run.policy_backend,所以记录里的端点就是服务实际起在的端点。配置错一律 FactoryConfigError。"""
@@ -174,6 +177,7 @@ def _interact_wiring(
     from factory.compute_config import build_compute_client, read_endpoints_config, read_host_map, select_endpoint
     from factory.interact_checks import check_interact_config
     from factory.interact_policy import make_policy_factory
+    from factory.memory_runtime import stand_in_memory_resolver
 
     check_interact_config(store, environ)          # 设计 90 拒绝项 2 到 9,先于端点与主机映射。只作启动门槛:
     # opponent 段不在这里取,策略上下文每次进入时自己从树里重读(装配之后改了也生效)
@@ -182,7 +186,12 @@ def _interact_wiring(
     policy_factory = make_policy_factory(
         store=store, runtime=runtime, switch=switch, client=client, endpoint=endpoint, env=environ,
     )
-    return {"policy_factory": policy_factory, "policy_endpoint": endpoint.endpoint_id}
+    _log.info("memory backend: stand-in")
+    return {
+        "policy_factory": policy_factory,
+        "policy_endpoint": endpoint.endpoint_id,
+        "memory_resolver": stand_in_memory_resolver,
+    }
 
 
 def _dispatcher(options: FactoryOptions, runtime: AgentRuntime | None, **kwargs):
