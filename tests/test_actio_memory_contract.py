@@ -8,12 +8,24 @@ import yaml
 
 from actio.memory import FileTupleStore, TupleMemory
 from actio.memory_port import MemoryClosedError, MemoryEvent, MemoryEventConflict, MemoryHit
+from starling_fakes import offline_api_key, shared_fake_openai
 
 SAMPLE = yaml.safe_load(Path(__file__).with_name("memory_contract_sample.yaml").read_text(encoding="utf-8"))
+
+
+def _starling_port(fresh_dir):
+    pytest.importorskip("starling")            # 未装时这一参数跳过,契约只跑替身(设计源第 11 节)
+    from actio.memory_starling import StarlingMemory
+    fresh_dir.mkdir(parents=True)
+    with offline_api_key():                      # C++ 适配器在构造时读 OPENAI_API_KEY
+        return StarlingMemory.open(fresh_dir / "pa.db", persona_id="pa",
+                                   endpoints=shared_fake_openai().endpoints())
+
 
 PORT_FACTORIES = {
     "tuple": lambda fresh_dir: TupleMemory(),
     "file": lambda fresh_dir: FileTupleStore(fresh_dir).open("pa"),
+    "starling": _starling_port,
 }
 
 
@@ -73,6 +85,8 @@ def test_the_same_event_gets_the_same_content_ids_in_two_ports(make_port):
     first = SAMPLE["steps"][0]["remember"]
     a.remember(_event(first))
     b.remember(_event(first))
+    a.embed_pending()   # 写路径是 remember 后 embed_pending(设计源 4.3 节);语义后端不嵌入就召回不到
+    b.embed_pending()
     query = SAMPLE["steps"][0]["recall"][0]["query"]
     ha, hb = a.recall(query, limit=3), b.recall(query, limit=3)
     assert ha and [h.id for h in ha] == [h.id for h in hb]
@@ -84,8 +98,10 @@ def test_recall_honours_the_limit(make_port):
     port = make_port()
     for step in SAMPLE["steps"][:3]:
         port.remember(_event(step["remember"]))
+    port.embed_pending()
     query = SAMPLE["steps"][1]["recall"][0]["query"]
     three = port.recall(query, limit=3)
+    assert len(three) > 1                      # 命中不止一条,下面的 limit=1 才真的在截断
     assert port.recall(query, limit=0) == []
     assert port.recall(query, limit=1) == three[:1]
 

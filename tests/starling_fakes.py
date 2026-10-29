@@ -13,6 +13,7 @@ SemanticRetriever.vector_recall 绑定没有释放 GIL,Memory.recall 在等查�
 from __future__ import annotations
 
 import atexit
+import contextlib
 import hashlib
 import http.client
 import json
@@ -25,10 +26,15 @@ import tempfile
 import threading
 import time
 import traceback
+from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from actio.text import tokens
+
+if TYPE_CHECKING:  # 只给类型注解用;运行时不导入 starling,没装 memory extra 也能导入本模块
+    from actio.memory_starling import StarlingEndpoints
 
 # Starling python/starling/extractor/prompts.py 里信念抽取提示词的开头
 _BELIEF_PROMPT_HEAD = "You are an extractor for a Statement-based memory system."
@@ -37,6 +43,21 @@ _SEGMENT = re.compile(r"\[([^\]\n]+)\] ([^：\n]+)：([^\n]+)")
 _CONTROL = "/__fake__/"
 # 等子进程打印 PORT 行的期限(秒);子进程在导入阶段卡住时不让整个测试会话挂死
 _START_TIMEOUT_S = 10.0
+
+
+@contextlib.contextmanager
+def offline_api_key() -> Iterator[None]:
+    """只在块内把 OPENAI_API_KEY 设成占位值,退出时还原(原来没设就删掉)。
+    Starling 的 C++ 适配器在构造时读这个变量;假端点不校验它。"""
+    previous = os.environ.get("OPENAI_API_KEY")
+    os.environ["OPENAI_API_KEY"] = "offline-test-key"
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("OPENAI_API_KEY", None)
+        else:
+            os.environ["OPENAI_API_KEY"] = previous
 
 
 def _server_argv(dim: int) -> list[str]:
@@ -274,6 +295,26 @@ class FakeOpenAI:
     @property
     def embedding_calls(self) -> int:
         return self._counts()["embedding_calls"]
+
+    def wait_for_chat_call(self, *, timeout_s: float = 5.0) -> None:
+        """等到假端点至少收到过一次 /chat/completions。服务端在子进程里,父进程的 Event 收不到它的信号,
+        所以轮询子进程里的计数。超时抛 TimeoutError。"""
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if self.chat_calls > 0:
+                return
+            time.sleep(0.02)
+        raise TimeoutError(f"{timeout_s:g} 秒内假端点没有收到 /chat/completions 请求")
+
+    def endpoints(self, *, timeout_ms: int = 2000, max_retries: int = 0) -> "StarlingEndpoints":
+        """指向本假端点的抽取与嵌入配置。max_retries 默认 0:Starling 的 C++ 默认重试 3 次,
+        失败路径的用例一次调用会拖到约 21 秒。"""
+        from actio.memory_starling import StarlingEndpoints  # 延迟导入:它导入 starling
+
+        return StarlingEndpoints(
+            extraction_base_url=self.base_url, extraction_model="fake-extract",
+            embedding_base_url=self.base_url, embedding_model="fake-embed", embedding_dim=self.dim,
+            timeout_ms=timeout_ms, max_retries=max_retries)
 
     def _request(self, method: str, path: str, body: dict | None = None) -> dict:
         conn = http.client.HTTPConnection("127.0.0.1", self._port, timeout=10)
