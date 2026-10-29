@@ -335,7 +335,7 @@ requires-dist = [
     { name = "protobuf", specifier = ">=7.35.1,<8.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pyyaml", specifier = ">=6.0" },
-    { name = "starling-memory", marker = "extra == 'memory'", git = "https://github.com/ruijieguo/starling?rev=20de8a13f4169a5f587180407d9d1bf7cae1123d" },
+    { name = "starling-memory", marker = "extra == 'memory'", git = "https://github.com/ruijieguo/starling?rev=730e415bef327ee9da8989a03444fd0d8269b7eb" },
 ]
 provides-extras = ["dev", "memory"]
 
@@ -474,7 +474,7 @@ wheels = [
 [[package]]
 name = "starling-memory"
 version = "0.0.1"
-source = { git = "https://github.com/ruijieguo/starling?rev=20de8a13f4169a5f587180407d9d1bf7cae1123d#20de8a13f4169a5f587180407d9d1bf7cae1123d" }
+source = { git = "https://github.com/ruijieguo/starling?rev=730e415bef327ee9da8989a03444fd0d8269b7eb#730e415bef327ee9da8989a03444fd0d8269b7eb" }
 
 [[package]]
 name = "typing-extensions"
