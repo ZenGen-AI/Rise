@@ -197,3 +197,14 @@ def test_layer_rules_hold():
                 if top in forbidden:
                     offenders.append(f"{path.relative_to(src)}:{lineno} imports {top}")
     assert not offenders, "layer rules (design §11) violated: " + "; ".join(offenders)
+
+
+def test_only_actio_memory_starling_imports_starling():
+    """设计二全局约束:全 src/ 只有 actio/memory_starling.py 导入 starling(factory 经它间接用)。"""
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[1] / "src"
+    offenders = [f"{p.relative_to(src)}:{n}" for p in sorted(src.rglob("*.py"))
+                 for n, top in _top_level_imports(p)
+                 if top == "starling" and p.relative_to(src).as_posix() != "actio/memory_starling.py"]
+    assert offenders == []

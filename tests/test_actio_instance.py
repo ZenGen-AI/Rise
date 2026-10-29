@@ -612,14 +612,19 @@ _ALLOWED = ("actio", "simulator.datamodel", "__future__", "copy", "dataclasses",
             "pathlib", "re", "typing")
 
 
-def _allowed(mod):
-    return any(mod == a or mod.startswith(a + ".") for a in _ALLOWED)
+# memory_starling.py 是全 src/ 里唯一导入 starling 的文件;os 与 tempfile 供原子替换与空库摘要用
+_ALLOWED_MEMORY_STARLING = _ALLOWED + ("starling", "os", "tempfile")
+
+
+def _allowed(mod, allowed=_ALLOWED):
+    return any(mod == a or mod.startswith(a + ".") for a in allowed)
 
 
 def test_actio_only_imports_itself_simulator_datamodel_and_the_stdlib():
     for path in sorted(SRC.glob("*.py")):
+        allowed = _ALLOWED_MEMORY_STARLING if path.name == "memory_starling.py" else _ALLOWED
         for mod in _imports(path):
-            assert _allowed(mod), (path.name, mod)
+            assert _allowed(mod, allowed), (path.name, mod)
 
 
 def test_every_actio_source_starts_with_future_annotations():

@@ -12,10 +12,14 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "grpcio-tools>=1.84.0"]
+memory = ["starling-memory @ git+https://github.com/ruijieguo/starling@20de8a13f4169a5f587180407d9d1bf7cae1123d"]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/controlplane", "src/simulator", "src/diagnostic", "src/mindtrainer", "src/inference_bridge", "src/recipestore", "src/trainplanner", "src/trainscheduler", "src/actio", "src/mindagent", "src/factory", "src/compute"]
@@ -25,4 +29,5 @@ pythonpath = ["src"]
 testpaths = ["tests"]
 markers = [
     "slow: 真起子进程或多段作业的测试,用 -m 'not slow' 跳过",
+    "memory_live: 连真抽取与真嵌入端点的用例,只在设了 RISMFORGE_MEMORY_LIVE=1 时跑,不进 CI",
 ]
