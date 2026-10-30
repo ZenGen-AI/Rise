@@ -1,0 +1,56 @@
+"""设计源 §13 的两项未核实:真端点的单次延迟、真嵌入下的召回质量。连真网络、要真密钥,不进 CI:
+只有 RISMFORGE_MEMORY_LIVE=1 且 RISMFORGE_MEMORY_CONFIG 指向真配置时才跑。"""
+import os
+import statistics
+import time
+from pathlib import Path
+
+import pytest
+
+pytestmark = [
+    pytest.mark.memory_live,
+    pytest.mark.skipif(os.environ.get("RISMFORGE_MEMORY_LIVE") != "1", reason="set RISMFORGE_MEMORY_LIVE=1 to run"),
+]
+pytest.importorskip("starling")
+
+TURNS = [f"pb：第{i}轮,我担心预算超支,人手也不够" for i in range(10)]
+
+
+@pytest.fixture
+def live_port(tmp_path):
+    from actio.memory_starling import StarlingEndpoints, StarlingMemory
+    from factory.memory_config import check_api_key, read_memory_config
+    cfg = read_memory_config(env=os.environ, repo_root=Path(__file__).resolve().parents[1])
+    assert cfg is not None, "RISMFORGE_MEMORY_CONFIG must point at a real config"
+    check_api_key(os.environ)
+    port = StarlingMemory.open(tmp_path / "live.db", persona_id="pa", endpoints=StarlingEndpoints(
+        cfg.extraction_base_url, cfg.extraction_model, cfg.embedding_base_url, cfg.embedding_model,
+        cfg.embedding_dim, cfg.timeout_ms, cfg.max_retries))
+    yield port, cfg.timeout_ms / 1000.0
+    port.close()
+
+
+def test_ten_turns_stay_within_the_per_call_budget(live_port, capsys):
+    from actio.memory_port import MemoryEvent
+    port, limit = live_port
+    took = {"recall": [], "remember": [], "embed_pending": []}
+    for i, text in enumerate(TURNS):
+        for name, call in (("recall", lambda: port.recall(text, limit=3)),
+                           ("remember", lambda: port.remember(MemoryEvent(f"live#{i}", text, "pb"))),
+                           ("embed_pending", port.embed_pending)):
+            t0 = time.monotonic(); call(); took[name].append(time.monotonic() - t0)
+    with capsys.disabled():
+        for name, xs in took.items():
+            print(f"{name}: max {max(xs):.2f}s median {statistics.median(xs):.2f}s")
+    assert max(took["recall"]) <= limit and max(took["embed_pending"]) <= limit
+    assert max(took["remember"]) <= 3 * limit          # 三段抽取,每段至多一个 timeout_ms(6.4 节)
+
+
+def test_recall_brings_back_the_related_sentence(live_port):
+    from actio.memory_port import MemoryEvent
+    port, _ = live_port
+    port.remember(MemoryEvent("q#0", "pb：我负责鉴权模块", "pb"))
+    port.remember(MemoryEvent("q#1", "pb：明天下雨", "pb"))
+    port.embed_pending()
+    hits = port.recall("谁负责鉴权", limit=1)
+    assert hits and "鉴权" in hits[0].text
