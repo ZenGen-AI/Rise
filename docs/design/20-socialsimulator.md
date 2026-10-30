@@ -209,7 +209,7 @@ SocialSimulator 的仿真部分是工厂的"社会情境发生器":它把情境�
 | `src/simulator/realtime/session.py` | 会话状态与迁移表 | 无 | 39 | [已落地] |
 | `src/simulator/realtime/backend.py` | `ClientDrivenBackend`,`TurnTimeoutError` | datamodel | 62 | [已落地] |
 | `src/simulator/realtime/backend_timeout.py` | `TimeoutBackend`,`RoleBackendTimeoutError`;`TimeoutBackend` 构造时收会话资源,每次调用在调用方线程里先登记进它、后端线程结束时移出;记忆失败的两个异常基类 RoleMemoryUnavailableError(T1)与 RoleMemoryFailureError(T2) | backends、resources | 58 | [已落地] |
-| `src/simulator/realtime/resources.py` | 会话信息 SessionInfo、会话资源 SessionResources 与异常 SessionClosingError:资源持有未套期限的 `backends`、在途线程集合与收尾动作,提供 `quiesce`、`join`、`close` | backends | — | [已落地] |
+| `src/simulator/realtime/resources.py` | 会话信息 SessionInfo、会话资源 SessionResources 与异常 SessionClosingError:资源持有未套期限的 `backends`、在途线程计数与收尾动作,提供 `quiesce`、`join`、`close` | backends | — | [已落地] |
 | `src/simulator/realtime/driver.py` | `SessionDriver`:后台线程、outbox 队列、收尾分类,含两个记忆失败分支 | runner、session、两种实时后端、backend_timeout | 162 | [已落地] |
 | `src/simulator/realtime/validation.py` | `validate_create_session` 纯函数校验;`validate_episode_id` 校验 `episode_id` 白名单 | datamodel | 52 | [已落地] |
 | `src/simulator/realtime/codec.py` | 数据模型与 protobuf 互转 | proto | 84 | [已落地] |
@@ -335,7 +335,7 @@ manifest_hash: <64 位十六进制>   # 对排序后的 episode_refs 规范化 J
 
 读图说明。创建请求先校验,通过才建驱动器,随即从 CREATED 进入 ACTIVE。校验、准入或依赖失败时不建会话,直接以 `EndSession` 拒绝。运行器正常返回后经 COMPLETING 到 CLOSED 并落盘;超时、后端失败、记忆失败、断连转入 FAILED,不落盘。CLOSED 与 FAILED 之后,服务端按 quiesce、join、close 的顺序收尾会话资源 [已落地]。CREATED 到 FAILED 在迁移表里允许,但代码不走这条边。
 
-终止原因现有十一种,加两种记忆失败原因后共十三种 [已落地]。
+终止原因共十三种,含两种记忆失败原因 [已落地]。
 
 | 终止原因 | 去向 | 产生者 | 失败类 |
 |---|---|---|---|
@@ -436,7 +436,7 @@ SessionInfo、SessionResources、SessionClosingError 三个类型都放在 `src/
 | 批量写序 | 先写全部 episode,最后写清单;清单在即代表数据集完整 |
 | episode id | 批量为 `<run>-<阶段>-<情境 id>-r<k>`;实时取 `CreateSession.episode_id`,没给时为 `ep-sess-<12 位十六进制>` [已落地] |
 | 逻辑 episode id | 由客户端定,同一条 rollout 的重试不变:训练是 `{run_id}-grpo{step}-{scenario_id}-r{k}`(同一情境在不同 GRPO step 反复出现,id 里带 step 才不撞),部署是 `deploy-{model}-{scenario}-{k}`。服务端落盘的 episode 用它当 id [已落地] |
-| `episode_id` 校验 | 只许 `[A-Za-z0-9._-]`,1 到 128 字节,不是 `.` 或 `..`,不合以 `invalid_session`(T2)拒绝。同 id 已有活动会话以 `role_backend_unavailable`(T1)拒绝:客户端 abort 后旧会话要等收尾,立刻重试会撞上它,这是暂时的。活动指从准入登记起,到 servicer 收尾完或移交滞留表为止 [已落地] |
+| `episode_id` 校验 | 空串当作没给,服务端用 `ep-<session_id>` 命名;非空的只许 `[A-Za-z0-9._-]`,1 到 128 字节,不是 `.` 或 `..`,不合以 `invalid_session`(T2)拒绝。同 id 已有活动会话以 `role_backend_unavailable`(T1)拒绝:客户端 abort 后旧会话要等收尾,立刻重试会撞上它,这是暂时的。活动指从准入登记起,到 servicer 收尾完或移交滞留表为止 [已落地] |
 | 实时落盘 | 服务端不自己写产物树,由调用方注入 `on_session_closed`,钩子须线程安全。新签名带 `session_id`,调用方据此而不是按情境 id 找会话归属 [已落地] |
 | 钩子异常 | 只记日志,不中断流,客户端仍收到 `EndSession` |
 | 情境来源 | 注入 `scenario_resolver` 时按 id 读完整情境;未注入时退回只有角色位的空情境 |
@@ -608,7 +608,7 @@ interact 会话前的准备 [已落地]。下表是派发器与组合根在起�
 |---|---|---|---|
 | 1 准入 [已落地] | 在服务端的一把锁里做完三件事:检查活动数加滞留数小于 `max_workers`,检查 `episode_id` 没有活动会话,登记会话。之后才调工厂 | servicer | 名额满或 `episode_id` 有活动会话:`role_backend_unavailable`(T1) |
 | 2 造资源 [已落地] | 工厂按会话信息造全部后端并返回资源,在锁外跑 | 工厂 | 工厂抛异常:在同一把锁里撤销登记,以 `role_backend_failure` 拒绝。工厂保证不留半开的库:先建全部再返回,中途失败先关已开的 |
-| 3 启动 [已落地] | servicer 用资源给每个后端套 `TimeoutBackend`,期限取 `backend_timeout_s`,再把套好的字典交给驱动器,自己持有资源到流结束。驱动器只调后端,不持有资源 | servicer | 工厂返回之后、驱动器启动之前的任何失败(校验、缺后端、`start` 抛),由 servicer 在同一个 `try` 里对资源做 quiesce、join、close |
+| 3 启动 [已落地] | servicer 用资源给每个后端套 `TimeoutBackend`,期限取 `backend_timeout_s`,再把套好的字典交给驱动器,自己持有资源到流结束。驱动器只调后端,不持有资源 | servicer | 工厂返回之后、驱动器启动之前的任何失败(缺后端、`start` 抛),由 servicer 在 `Interact` 的 `finally` 里对资源做 quiesce、join、close;校验在调工厂之前,失败时不造资源 |
 | 4 运行 [已落地] | `TimeoutBackend` 在调用方线程里先登记(quiesce 之后直接抛 SessionClosingError,不起线程),daemon 线程退出时再移出。超时只是调用方放弃等待,线程仍在集合里 | TimeoutBackend | 集合的操作持一把锁;join 不持锁等待 |
 | 5 终态收尾 [已落地] | 驱动器进入 CLOSED 或 FAILED(含断开)后,流结束的 `finally` 按序调 quiesce、join(超时 60 秒)、close | servicer | quiesce 之后的 `respond` 抛 SessionClosingError |
 | 6 join 超时 [已落地] | 不 close、不删。资源移交滞留表,继续占一个会话名额;滞留数可由 servicer 的 lingering_count() 读,每分钟一行日志 | servicer | 准入检查把滞留数算进名额 |
@@ -660,7 +660,7 @@ interact 会话前的准备 [已落地]。下表是派发器与组合根在起�
 | SS-15 | 点名的情境 `purpose` 必须是 `training`,人格不限 [已落地] | 不限 `purpose` | 默认部署素材的情境是 `deployment_simulation`,拿它们训练等于污染训练数据 | 部署素材不能顺手拿来训练 |
 | SS-16 | 对手位三种驱动:固定对话(角色位写 `driver: scripted`)、站内 vLLM、外部 OpenAI 兼容 API;驱动由组合根选,模拟器只认 `ModelBackend` [已落地] | 只做一种驱动 | 场景二要求三种都支持;驱动在组合根里选,模拟器协议不用改 | 三种驱动的失败分类与超时口径各要成立 |
 | SS-17 | 固定对话优先用情境自带的 `opponent_script`,情境没带时用全局台词;`Scenario` 加一个可选字段 [已落地] | 只有全局台词 | 固定对话要能按情境区分对手说什么 | `Scenario` 多一个可选字段;旧产物读回不变 |
-| SS-18 | 后端工厂改收 SessionInfo、返回 SessionResources;`ModelBackend` 协议不加方法 [已落地] | 给协议加会话参数;工厂签名不动 | Actio 实例本来就满足 `respond`;会话身份是服务端本来缺的,现在工厂拿不到 session id,落盘登记表只能按情境 id 索引 | 工厂签名改一次,`AgentRuntime` 与测试跟着改 |
+| SS-18 | 后端工厂改收 SessionInfo、返回 SessionResources;`ModelBackend` 协议不加方法 [已落地] | 给协议加会话参数;工厂签名不动 | Actio 实例本来就满足 `respond`;会话身份是服务端本来缺的,原先工厂拿不到 session id,落盘登记表只能按情境 id 索引 | 工厂签名改一次,`AgentRuntime` 与测试跟着改 |
 | SS-19 | 每条会话一个 SessionResources,持有该会话全部对手位的后端;终态按 quiesce、join、close 收尾;join 超时的资源整个保留,占住一个会话名额,不关不删 [已落地] | 终态直接关库删目录;超时后强关 | 超时线程还在跑时关库或删库会写坏文件;daemon 线程杀不掉 | 挂死的后端永久占用会话名额,直到进程重启 |
 | SS-20 | 准入检查、会话登记、滞留计数在同一把锁里完成;工厂在锁外跑,失败时在同一把锁里撤销登记;`episode_id` 过白名单,同一时刻只许一个活动会话用它 [已落地] | 检查与登记分开加锁;信任客户端给的 id | 不在一把锁里,并发 `CreateSession` 会突破上限;客户端给的 id 会进目录名与主键 | 多一把锁 |
 | SS-21 | 记忆失败拆成 `role_memory_unavailable`(T1,按条重跑)与 `role_memory_failure`(T2,不重跑);驱动器只认两个异常基类并按它们分支,基类定义在 `backend_timeout.py`;组合根的转换后端接 actio 的记忆失败总基类,子类一并映射,按 `transient` 改抛继承这两个基类的异常 [已落地] | 并入 `role_backend_failure` | 并入后会被译成延后反复重试;记忆端点的网络抖动不该升人工;模拟器不导入 `actio`,只认异常基类 | 瞬态与确定性的映射由后端侧维护,新的瞬态类别出现前按 T2 处理 |
@@ -802,7 +802,7 @@ interact 会话前的准备 [已落地]。下表是派发器与组合根在起�
 |---|---|---|
 | 模板池各只有 3 项,按种子取模 | 情境与人格多样性极低 | V1 只为流程跑通 |
 | 发言严格按 bindings 轮转 | 不能表达插话、沉默、多方抢话 | 场景设计时按轮转建模 |
-| `role_backend_failure` 不区分 T1 与 T2 | 调用方只能保守不重试;对手 API 的 4xx 与 429、5xx、连不上已分出去,剩下的是后端抛说不清的异常、回复形状不对、工厂或解析器故障;记忆异常也已分出去,归 `role_memory_unavailable` 与 `role_memory_failure` [计划中] | 看服务端日志判断 |
+| `role_backend_failure` 不区分 T1 与 T2 | 调用方只能保守不重试;对手 API 的 4xx 与 429、5xx、连不上已分出去,剩下的是后端抛说不清的异常、回复形状不对、工厂或解析器故障;记忆异常也已分出去,归 `role_memory_unavailable` 与 `role_memory_failure` [已落地] | 看服务端日志判断 |
 | 失败会话不落盘 | 事后无法复盘失败对话 | 客户端可在 `abort` 前自行保存 |
 | 产物的 `created_at` 是写死的常量 | 不能据此判断真实生成时间 | 以 git 提交时间为准 |
 | 每条 episode 一次 git 提交 | 本机实测一次写入约 40 毫秒,单阶段 1024 条约 40 秒且阻塞循环;万条级数据集要数小时并撑大仓库 | V1 保持并如实写明;接真实训练之前改成分片文件加引用,清单引用分片 [推迟] |
