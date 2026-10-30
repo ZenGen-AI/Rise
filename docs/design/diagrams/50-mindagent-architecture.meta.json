@@ -1,5 +1,5 @@
 {
  "title": "MindAgent 模块组成",
  "desc": "轮次处理器按编号顺序调用五段流水线,读配置与正式库,失败经统一守卫留痕。收录处理器独立运行,只用正式库与失败守卫。全部模块都在 src/mindagent 下。",
- "describe": "**节点**\n\n- AgentConfig:config · 冻结数据类\n- 正式库读取:library · load_library\n- 失败守卫:failures · fail_once\n- 收录处理器:admit / handle_admit_proposal\n- 轮次处理器:rounds · make_start_round_handler 返回 (store, action) 处理器\n- 部署驱动器:deployment / 跑部署 episode\n- 经验分析器:analysis / 跨 episode 统计\n- 提案生成器:proposals / 规则模板或桥接\n- 提案验证器:verify / 离线重放度量行为\n- 提案打包器:packaging / 筛选并写提案\n\n**连线**\n\n- 轮次处理器 → AgentConfig\n- 轮次处理器 → 正式库读取\n- 轮次处理器 → 失败守卫\n- 收录处理器 → 失败守卫\n- 收录处理器 → 正式库读取\n- 轮次处理器 → 部署驱动器\n- 轮次处理器 → 经验分析器\n- 轮次处理器 → 提案生成器\n- 轮次处理器 → 提案验证器\n- 轮次处理器 → 提案打包器"
+ "describe": "**节点**\n\n- AgentConfig:config · 冻结数据类\n- 正式库读取:library · load_library\n- 失败守卫:failures · fail_once\n- 收录处理器:admit / make_admit_proposal_handler\n- 轮次处理器:rounds · make_start_round_handler 返回 (store, action) 处理器\n- 部署驱动器:deployment / 跑部署 episode\n- 经验分析器:analysis / 跨 episode 统计\n- 提案生成器:proposals / 规则模板或桥接\n- 提案验证器:verify / 离线重放度量行为\n- 提案打包器:packaging / 筛选并写提案\n\n**连线**\n\n- 轮次处理器 → AgentConfig\n- 轮次处理器 → 正式库读取\n- 轮次处理器 → 失败守卫\n- 收录处理器 → 失败守卫\n- 收录处理器 → 正式库读取\n- 轮次处理器 → 部署驱动器\n- 轮次处理器 → 经验分析器\n- 轮次处理器 → 提案生成器\n- 轮次处理器 → 提案验证器\n- 轮次处理器 → 提案打包器"
 }

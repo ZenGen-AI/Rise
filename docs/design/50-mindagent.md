@@ -158,7 +158,7 @@ MindAgent 是 AgentRSI 路径的执行者:不改权重,只让技能库与记忆�
 - AgentConfig:config · 冻结数据类
 - 正式库读取:library · load_library
 - 失败守卫:failures · fail_once
-- 收录处理器:admit / handle_admit_proposal
+- 收录处理器:admit / make_admit_proposal_handler
 - 轮次处理器:rounds · make_start_round_handler 返回 (store, action) 处理器
 - 部署驱动器:deployment / 跑部署 episode
 - 经验分析器:analysis / 跨 episode 统计
@@ -540,7 +540,7 @@ def load_library(store) -> LibraryState: ...
 <!-- figure:begin 50-mindagent-admission -->
 ![提案到入库的审核链](diagrams/50-mindagent-admission.svg)
 
-**图 4　提案到入库的审核链**　验证结果先按阈值筛选,未过的写进轮次的 dropped。通过的打包成 pending_review 提案,人工在门②批准或拒绝。批准后收录处理器先校验全部增量,再写库条目、递增 library_state,最后置 effective。技能写 skill_library/,记忆经 remember_event 进该人格的 Starling 库。增量不合法或写记忆抛异常记 T2 失败记录,提案留在 approved。记忆抽取失败则提案改为 rejected。
+**图 4　提案到入库的审核链**　验证结果先按阈值筛选,未过的写进轮次的 dropped。通过的打包成 pending_review 提案,人工在门②批准或拒绝。批准后收录处理器先校验全部增量,再写库条目、递增 library_state,最后置 effective。技能写 skill_library/,记忆经 remember_event 进该人格的 Starling 库。增量不合法记 T2 失败记录,提案留在 approved。写记忆抛异常也留在 approved,瞬态异常记 T1,其余记 T2。已有增量提交后抽取失败(部分收录)记 T2 并延后重试,提案仍留在 approved。一条都没提交就抽取失败,则放弃该事件,提案改为 rejected。人格库锁被占或有未提交的部署副本时,写库前先延后重试。
 
 <details>
 <summary>文字版:图中的节点与连线</summary>
@@ -557,7 +557,7 @@ def load_library(store) -> LibraryState: ...
 - 写库条目:技能写 skill_library/ / 记忆 remember_event 进 / 该人格的 Starling 库
 - library_state:对应版本 +1 / admitted 追加一条
 - 提案 effective:收录完成
-- T2 失败记录:不合法或异常:留在 approved / 记忆抽取失败:提案 rejected / failure-admit-<提案>
+- T1/T2 失败记录:异常:记 T1/T2,留 approved / 部分已提交:延后重试 / 一条都没提交:rejected
 - 提案 rejected:保留记录
 
 **连线**
@@ -572,9 +572,9 @@ def load_library(store) -> LibraryState: ...
 - 校验全部增量 → 写库条目
 - 写库条目 → library_state
 - library_state → 提案 effective
-- 校验全部增量 → T2 失败记录:增量不合法
-- 写库条目 → T2 失败记录:抽取失败或抛异常
-- T2 失败记录 → 提案 rejected:抽取失败
+- 校验全部增量 → T1/T2 失败记录:增量不合法
+- 写库条目 → T1/T2 失败记录:抽取失败或抛异常
+- T1/T2 失败记录 → 提案 rejected:抽取失败
 
 </details>
 <!-- figure:end 50-mindagent-admission -->

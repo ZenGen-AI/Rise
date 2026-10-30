@@ -25,6 +25,7 @@ def build() -> Canvas:
     c.edge(pend, appr, "bottom", "top", label="CLI approve", color=ORANGE)
     c.edge(pend, rej, label="CLI reject", color=ORANGE)
     c.edge(appr, eff, "bottom", "top", label="promote_candidate")
+    c.edge(appr, rej, "right", "bottom", label="仅收录处理器", label_at=0.35, dashed=True)
     c.edge(eff, dep, "right", "left", a_f=0.3, label="战绩退化")
     c.edge(eff, sup, "right", "left", a_f=0.8, label="被取代")
     c.note(270, 96, 240, "派发器写候选时直接写\npending_review,不经 draft", kind="neutral")
@@ -42,5 +43,5 @@ def build() -> Canvas:
     c.note(860, 396, 190, "failed 是终态\n原因写进 payload.failure", kind="neutral")
 
     c.legend(40, 534, [("human", "等待人工", False), ("compute", "生效 / 完成", False),
-                       ("danger", "失败 / 拒绝", False), ("neutral", "虚线 = 人工直接改文件", True)])
+                       ("danger", "失败 / 拒绝", False), ("neutral", "虚线 = 人工直接改文件 / approved → rejected 仅收录处理器走", True)])
     return c

@@ -274,6 +274,7 @@ ControlPlane 是系统的协调层:它不训练、不评测,只读写产物并�
 - pending_review → approved:CLI approve
 - pending_review → rejected:CLI reject
 - approved → effective:promote_candidate
+- approved → rejected:仅收录处理器(虚线)
 - effective → deprecated:战绩退化
 - effective → superseded:被取代
 - awaiting_confirmation → pending:CLI confirm

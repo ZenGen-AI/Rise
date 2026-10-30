@@ -11,7 +11,10 @@ def build() -> Canvas:
         desc="验证结果先按阈值筛选,未过的写进轮次的 dropped。通过的打包成 pending_review 提案,人工在门②批准或拒绝。"
              "批准后收录处理器先校验全部增量,再写库条目、递增 library_state,最后置 effective。"
              "技能写 skill_library/,记忆经 remember_event 进该人格的 Starling 库。"
-             "增量不合法或写记忆抛异常记 T2 失败记录,提案留在 approved。记忆抽取失败则提案改为 rejected。")
+             "增量不合法记 T2 失败记录,提案留在 approved。写记忆抛异常也留在 approved,瞬态异常记 T1,其余记 T2。"
+             "已有增量提交后抽取失败(部分收录)记 T2 并延后重试,提案仍留在 approved。"
+             "一条都没提交就抽取失败,则放弃该事件,提案改为 rejected。"
+             "人格库锁被占或有未提交的部署副本时,写库前先延后重试。")
     w, h = 200, 76
     hh = 90  # 三行副标题的方框高度
     xs = [30, 290, 550, 810]
@@ -29,8 +32,8 @@ def build() -> Canvas:
     st = c.box(xs[0], 314, w, "library_state", "对应版本 +1\nadmitted 追加一条", kind="store", h=hh)
 
     eff = c.box(xs[0], 478, w, "提案 effective", "收录完成", kind="compute", h=64)
-    t2 = c.box(xs[2], 478, w, "T2 失败记录",
-               "不合法或异常:留在 approved\n记忆抽取失败:提案 rejected\nfailure-admit-<提案>", kind="danger", h=hh)
+    t2 = c.box(xs[2], 478, w, "T1/T2 失败记录",
+               "异常:记 T1/T2,留 approved\n部分已提交:延后重试\n一条都没提交:rejected", kind="danger", h=hh)
     rej = c.box(840, 491, 160, "提案 rejected", "保留记录", kind="danger", h=64)
 
     c.edge(ver, scr)
@@ -51,7 +54,7 @@ def build() -> Canvas:
     for n, node in enumerate((chk, wr, st, eff), 1):
         c.badge(node.x, node.y, n, kind="compute")
     c.note(xs[0], 556, 330, "每步可重入:条目已在就跳过\nadmitted 已记就不再递增\n记忆同 key 重入不二次抽取\n"
-                           "记忆写前拿人格库锁:被占则延后重试", kind="neutral")
+                           "写前拿人格库锁:被占或有未提交副本则延后", kind="neutral")
     c.legend(40, 664, [("compute", "MindAgent 步骤", False), ("store", "正式库", False),
                        ("human", "人工门", False), ("danger", "失败 / 拒绝", False)])
     return c

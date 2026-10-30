@@ -13,7 +13,7 @@ def build() -> Canvas:
     cfg = c.box(40, 80, 220, "AgentConfig", "config · 冻结数据类", **kw)
     lib = c.box(300, 80, 220, "正式库读取", "library · load_library", **kw)
     fl = c.box(560, 80, 220, "失败守卫", "failures · fail_once", **kw)
-    ad = c.box(820, 80, 220, "收录处理器", "admit\nhandle_admit_proposal", kind="compute", h=64)
+    ad = c.box(820, 80, 220, "收录处理器", "admit\nmake_admit_proposal_handler", kind="compute", h=64)
 
     rd = c.box(40, 240, 1000, "轮次处理器", "rounds · make_start_round_handler 返回 (store, action) 处理器",
                kind="compute", h=64)
