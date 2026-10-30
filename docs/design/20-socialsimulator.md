@@ -3,7 +3,7 @@
 | 项 | 内容 |
 |---|---|
 | 一句话 | 生成情境与人格,驱动多角色多轮交互产出 Episode,批量产出带哈希清单的数据集,并以 gRPC 实时环境服务支撑交互式训练与部署经验采集 |
-| 状态 | 部分落地:数据模型、运行器、批量数据集、实时环境服务、激活轨迹打通,以及场景二接通所需的 interact 情境与人格两路来源、对手位三种驱动、`Scenario` 的可选字段 `opponent_script` [已落地];外部强模型生成后端、按目标维度生成情境与人格、episode 分片存储 [推迟];外部 API 对手超时归 `role_backend_timeout`、非 200 按 4xx、429 与 5xx 与连不上、形状不对三类分流,分别归 `role_backend_rejected`、`role_backend_unavailable`、`role_backend_failure` [已落地];会话资源与会话身份(资源对象、逻辑 episode id、准入、有序收尾、两个记忆失败终止原因)[计划中] |
+| 状态 | 部分落地:数据模型、运行器、批量数据集、实时环境服务、激活轨迹打通,以及场景二接通所需的 interact 情境与人格两路来源、对手位三种驱动、`Scenario` 的可选字段 `opponent_script` [已落地];外部强模型生成后端、按目标维度生成情境与人格、episode 分片存储 [推迟];外部 API 对手超时归 `role_backend_timeout`、非 200 按 4xx、429 与 5xx 与连不上、形状不对三类分流,分别归 `role_backend_rejected`、`role_backend_unavailable`、`role_backend_failure` [已落地];会话资源与会话身份(资源对象、逻辑 episode id、准入、有序收尾、两个记忆失败终止原因)[已落地] |
 | 所在层 | 计算层 |
 | 代码位置 | `src/simulator`(诊断评测在 `src/diagnostic`,本文不展开) |
 | 基线提交 | `b826440`(2026-10-21) |
@@ -108,10 +108,10 @@ SocialSimulator 的仿真部分是工厂的"社会情境发生器":它把情境�
 | G3 | 批量与实时共用同一运行器 | 驱动器在后台线程调用 `run_episode`;`tests/test_realtime_runner_on_turn.py` |
 | G4 | 数据集可精确复现 | 清单按 sha256 锚定每条 episode;`tests/test_sim_dataset.py` |
 | G5 | 每一轮完成后立即推送,不攒批 | `TurnUpdate` 在 `on_turn` 回调后入队即发 |
-| G6 | 失败可分类,半截会话不落盘 | 终止原因十一种,加两种记忆失败原因共十三种 [计划中];FAILED 不调落盘钩子;落盘失败另报 `persistence_failed` |
+| G6 | 失败可分类,半截会话不落盘 | 终止原因十一种,加两种记忆失败原因共十三种 [已落地];FAILED 不调落盘钩子;落盘失败另报 `persistence_failed` |
 | G7 | 会话之间不共享可变状态 | 工厂每会话返回新后端;`tests/test_realtime_servicer_e2e.py` |
-| G8 | 会话资源有身份并有序关闭 [计划中] | 每条会话一个资源对象;终态按 quiesce、join、close 收尾;回环集成测试覆盖正常、超时、断开三条路径 |
-| G9 | 记忆失败有自己的终止原因 [计划中] | `role_memory_unavailable`(T1)与 `role_memory_failure`(T2)不并入 `role_backend_failure`;驱动器单元测试 |
+| G8 | 会话资源有身份并有序关闭 [已落地] | 每条会话一个资源对象;终态按 quiesce、join、close 收尾;回环集成测试覆盖正常、超时、断开三条路径 |
+| G9 | 记忆失败有自己的终止原因 [已落地] | `role_memory_unavailable`(T1)与 `role_memory_failure`(T2)不并入 `role_backend_failure`;驱动器单元测试 |
 
 | 项 | 状态 | V1 的处理 |
 |---|---|---|
@@ -136,19 +136,19 @@ SocialSimulator 的仿真部分是工厂的"社会情境发生器":它把情境�
 | 只经产物树持久化 | 情境、人格、Episode、清单都是信封产物 | 实时服务落盘要靠调用方注入钩子 |
 | 实时资源边界 | 默认值见下表 | 单个异常客户端拖不垮服务进程 |
 | 本机回环 | `create_server` 只绑 `127.0.0.1` 的明文端口 | 跨机部署前必须补鉴权与 TLS |
-| 逻辑 episode_id 白名单与活动唯一 [计划中] | `CreateSession.episode_id` 只许 `[A-Za-z0-9._-]`、1 到 128 字节、不是 `.` 或 `..`,不合以 `invalid_session` 拒绝;同 id 已有活动会话以 `role_backend_unavailable`(T1)拒绝 | 客户端给的 id 会进目录名与事件主键:无白名单会穿越目录,不唯一会让两个会话写同一个 id |
+| 逻辑 episode_id 白名单与活动唯一 [已落地] | `CreateSession.episode_id` 只许 `[A-Za-z0-9._-]`、1 到 128 字节、不是 `.` 或 `..`,不合以 `invalid_session` 拒绝;同 id 已有活动会话以 `role_backend_unavailable`(T1)拒绝 | 客户端给的 id 会进目录名与事件主键:无白名单会穿越目录,不唯一会让两个会话写同一个 id |
 
 | 实时服务默认值 | 数值 | 来源 |
 |---|---|---|
 | 单会话最多轮次 `max_turns_cap` | 200 | `EnvironmentServicer.__init__` |
 | 等待 `CreateSession` | 10 秒 | `create_timeout_s` |
 | 等客户端提交一轮 | 30 秒 | `turn_timeout_s` |
-| 服务端后端单次调用 | 60 秒;含记忆的一轮对手发言最坏 45 秒,低于它 [计划中] | `backend_timeout_s` |
-| 客户端提交一轮的上限 | 服务端默认 30 秒;组合根给 `AgentRuntime` 默认传 5 秒,`--interact` 下传 30 秒,否则真模型一轮就超时 [已落地];`--interact` 改传 90 秒 [计划中] | `turn_timeout_s` |
-| 客户端等相邻两条服务端消息的间隔 | 现在只有整条流的 deadline;计划加上限 90 秒,整条流按 `max_turns × 90` 兜底 [计划中] | 客户端 `_next_msg` |
-| 并发会话上限 | 16 | `max_workers`,与 `maximum_concurrent_rpcs` 对齐;活动会话加滞留会话不得超过它 [计划中] |
-| 终态收尾等在途线程退出 | 60 秒 [计划中] | `join` 的 `timeout_s` 参数 |
-| 滞留表重试间隔 | 60 秒 [计划中] | 零等待 `join` 的重试周期 |
+| 服务端后端单次调用 | 60 秒;含记忆的一轮对手发言最坏 45 秒,低于它 [已落地] | `backend_timeout_s` |
+| 客户端提交一轮的上限 | 服务端默认 30 秒;组合根给 `AgentRuntime` 默认传 5 秒,`--interact` 下传 90 秒,否则真模型一轮就超时 [已落地] | `turn_timeout_s` |
+| 客户端等相邻两条服务端消息的间隔 | 客户端默认不设限;`--interact` 下组合根传 90 秒,整条流按 `max_turns × 90` 兜底 [已落地] | 客户端 `message_timeout_s`,由 `_next_msg` 执行 |
+| 并发会话上限 | 16 | `max_workers`,与 `maximum_concurrent_rpcs` 对齐;活动会话加滞留会话不得超过它 [已落地] |
+| 终态收尾等在途线程退出 | 60 秒 [已落地] | `resource_join_timeout_s`,传给 `join` 的 `timeout_s` |
+| 滞留表重试间隔 | 60 秒 [已落地] | `linger_retry_s`,零等待 `join` 的重试周期 |
 | keepalive 间隔与超时 | 30000 / 10000 毫秒 | `create_server` |
 
 ## 3. 架构
@@ -208,15 +208,15 @@ SocialSimulator 的仿真部分是工厂的"社会情境发生器":它把情境�
 | `src/simulator/stubs.py` | ControlPlane 骨架桩:情境池、候选、诊断占位 | generators、controlplane | 86 | [已落地] |
 | `src/simulator/realtime/session.py` | 会话状态与迁移表 | 无 | 39 | [已落地] |
 | `src/simulator/realtime/backend.py` | `ClientDrivenBackend`,`TurnTimeoutError` | datamodel | 62 | [已落地] |
-| `src/simulator/realtime/backend_timeout.py` | `TimeoutBackend`,`RoleBackendTimeoutError`;`TimeoutBackend` 构造时收会话资源,每次调用的线程开始时登记进它、结束时移出 [计划中];记忆失败的两个异常基类 RoleMemoryUnavailableError(T1)与 RoleMemoryFailureError(T2)[计划中] | backends、resources | 58 | [已落地];在途线程登记与两个异常基类 [计划中] |
-| `src/simulator/realtime/resources.py` [计划中] | 会话信息 SessionInfo、会话资源 SessionResources 与异常 SessionClosingError:资源持有未套期限的 `backends`、在途线程集合与收尾动作,提供 `quiesce`、`join`、`close` | backends | — | [计划中] |
-| `src/simulator/realtime/driver.py` | `SessionDriver`:后台线程、outbox 队列、收尾分类;新增两个记忆失败分支 [计划中] | runner、session、两种实时后端、backend_timeout | 162 | [已落地];记忆失败分支 [计划中] |
-| `src/simulator/realtime/validation.py` | `validate_create_session` 纯函数校验;`episode_id` 白名单校验 [计划中] | datamodel | 52 | [已落地];白名单 [计划中] |
+| `src/simulator/realtime/backend_timeout.py` | `TimeoutBackend`,`RoleBackendTimeoutError`;`TimeoutBackend` 构造时收会话资源,每次调用在调用方线程里先登记进它、后端线程结束时移出;记忆失败的两个异常基类 RoleMemoryUnavailableError(T1)与 RoleMemoryFailureError(T2) | backends、resources | 58 | [已落地] |
+| `src/simulator/realtime/resources.py` | 会话信息 SessionInfo、会话资源 SessionResources 与异常 SessionClosingError:资源持有未套期限的 `backends`、在途线程集合与收尾动作,提供 `quiesce`、`join`、`close` | backends | — | [已落地] |
+| `src/simulator/realtime/driver.py` | `SessionDriver`:后台线程、outbox 队列、收尾分类,含两个记忆失败分支 | runner、session、两种实时后端、backend_timeout | 162 | [已落地] |
+| `src/simulator/realtime/validation.py` | `validate_create_session` 纯函数校验;`validate_episode_id` 校验 `episode_id` 白名单 | datamodel | 52 | [已落地] |
 | `src/simulator/realtime/codec.py` | 数据模型与 protobuf 互转 | proto | 84 | [已落地] |
-| `src/simulator/realtime/servicer.py` | `EnvironmentServicer.Interact` 主循环;准入检查、给资源的后端套 `TimeoutBackend`、终态收尾、滞留表 [计划中] | driver、validation、codec、resources | 339 | [已落地];准入、套期限、收尾、滞留表 [计划中] |
-| `src/simulator/realtime/server.py` | `create_server` 组装,不启动;`BackendsFactory` 改收会话信息、返回会话资源 [计划中] | servicer | 60 | [已落地];新工厂签名 [计划中] |
-| `src/simulator/realtime/client.py` | `EnvironmentServiceClient` 同步客户端;`_next_msg` 加相邻两条消息之间的等待上限 90 秒,`create_session` 加可选 `episode_id` [计划中] | codec、proto | 242 | [已落地];相邻消息限时与 `episode_id` [计划中] |
-| `src/simulator/realtime/proto/realtime_env.proto` | 协议定义,生成物由 `scripts/gen_realtime_proto.sh` 产出并入库;`CreateSession` 新增可选 `episode_id` [计划中] | protobuf | 102 | [已落地];新字段 [计划中] |
+| `src/simulator/realtime/servicer.py` | `EnvironmentServicer.Interact` 主循环;准入检查、给资源的后端套 `TimeoutBackend`、终态收尾、滞留表 | driver、validation、codec、resources | 339 | [已落地] |
+| `src/simulator/realtime/server.py` | `create_server` 组装,不启动;`BackendsFactory` 收会话信息、返回会话资源 | servicer | 60 | [已落地] |
+| `src/simulator/realtime/client.py` | `EnvironmentServiceClient` 同步客户端;构造参数 `message_timeout_s` 给 `_next_msg` 加相邻两条消息之间的等待上限,`create_session` 加可选 `episode_id` | codec、proto | 242 | [已落地] |
+| `src/simulator/realtime/proto/realtime_env.proto` | 协议定义,生成物由 `scripts/gen_realtime_proto.sh` 产出并入库;`CreateSession` 带可选 `episode_id` | protobuf | 102 | [已落地] |
 
 依赖方向规则。
 
@@ -226,7 +226,7 @@ SocialSimulator 的仿真部分是工厂的"社会情境发生器":它把情境�
 | 不得导入 | `mindtrainer`、`diagnostic`、`actio`、`mindagent` 及任何闭环新包 |
 | 核心无 IO | `datamodel`、`backends`、`runner`、`generators`、`validation`、`session` 不读写文件与网络 |
 | 已知回指 | `controlplane.daemon` 导入 `simulator.stubs`,包级循环,运行时不成环,骨架桩移出前保留 |
-| 对记忆保持不透明 [计划中] | 会话资源对它持有的每个智能体直接调可选 `close()` 并删副本目录,不导入 `actio` 与 `starling`,也不认识记忆库 |
+| 对记忆保持不透明 [已落地] | 会话资源对它持有的每个智能体直接调可选 `close()` 并删副本目录,不导入 `actio` 与 `starling`,也不认识记忆库 |
 
 对手位的三种驱动 [已落地]。对手位后端由调用方按角色位传入,模拟器本身只认 `ModelBackend` 协议。不传 `--interact` 时组合根的 `AgentRuntime._backends` 仍一律给全局罐头台词的 `ScriptedBackend`;传了 `--interact`,同一个函数对登记给训练 run 的会话按角色位在三种驱动里选,实现全在组合根,模拟器不新增依赖。默认驱动来自 `model_backend`:`frozen_reference` 走站内 vLLM,`external_api` 走外部 API;固定对话只在角色位写了 `driver: scripted` 时才用。部署会话(没登记给训练 run 的)不判绑定,沿用原来的罐头后端,显式写了 `driver: scripted` 的除外。
 
@@ -238,11 +238,11 @@ SocialSimulator 的仿真部分是工厂的"社会情境发生器":它把情境�
 
 `model_ref` 在组合根里由 `resolve_model_ref` 解析成权重引用 [已落地]。解析不到,或指到的不是适配器导出,派发时确定性失败,不静默退回脚本台词。外部 API 客户端是一个极小的实现 [已落地],用标准库 `urllib`,与 `src/compute/tunnel.py` 的 HTTP 探测同一手法。凭证只从环境变量读,异常信息只报变量名。站内对手与训练位共用一个 vLLM 进程,最多挂两个 LoRA [已落地]。
 
-对手位包成带记忆的智能体 [计划中]。工厂为每个对手位返回一个智能体实例,里面包着原来的驱动后端,不套期限。期限由服务端拿到资源后套上。模拟器只认 `ModelBackend`,不导入 `actio`,也不知道里面有记忆。固定对话的台词与三种驱动的请求都不变。
+对手位包成带记忆的智能体 [已落地]。工厂为每个对手位返回一个智能体实例,里面包着原来的驱动后端,不套期限。期限由服务端拿到资源后套上。模拟器只认 `ModelBackend`,不导入 `actio`,也不知道里面有记忆。固定对话的台词与三种驱动的请求都不变。
 
-记忆失败靠一层转换后端跨过包边界 [计划中]。组合根给每个 Actio 实例外套一层转换后端,把 actio 的记忆失败异常按 `transient` 标记改抛 RoleMemoryUnavailableError 或 RoleMemoryFailureError 的子类。这两个基类定义在 `backend_timeout.py`,驱动器只认它们,按它们分出两个终止原因,所以 simulator 与 mindtrainer 都不导入 actio。转换后端只接 actio 的记忆失败总基类一个类,它的子类也一并映射。
+记忆失败靠一层转换后端跨过包边界 [已落地]。组合根给每个 Actio 实例外套一层转换后端,把 actio 的记忆失败异常按 `transient` 标记改抛 RoleMemoryUnavailableError 或 RoleMemoryFailureError 的子类。这两个基类定义在 `backend_timeout.py`,驱动器只认它们,按它们分出两个终止原因,所以 simulator 与 mindtrainer 都不导入 actio。转换后端只接 actio 的记忆失败总基类一个类,它的子类也一并映射。
 
-`ExternalApiBackend` 每个会话新造一个,不再共享同一个实例 [计划中]。部署会话的对手位同样包成智能体,每会话一份空记忆,不跨会话留存 [计划中]。对手位的激活轨迹随落盘的 episode 保存,下行时照旧抹掉(不变量 3)。
+`ExternalApiBackend` 每个会话新造一个,不共享同一个实例 [已落地]。部署会话的对手位同样包成智能体,每会话一份空记忆,不跨会话留存 [已落地]。对手位的激活轨迹随落盘的 episode 保存,下行时照旧抹掉(不变量 3)。
 
 ## 4. 数据模型与状态机
 
@@ -333,41 +333,41 @@ manifest_hash: <64 位十六进制>   # 对排序后的 episode_refs 规范化 J
 </details>
 <!-- figure:end 20-socialsimulator-states -->
 
-读图说明。创建请求先校验,通过才建驱动器,随即从 CREATED 进入 ACTIVE。校验、准入或依赖失败时不建会话,直接以 `EndSession` 拒绝。运行器正常返回后经 COMPLETING 到 CLOSED 并落盘;超时、后端失败、记忆失败、断连转入 FAILED,不落盘。CLOSED 与 FAILED 之后,服务端按 quiesce、join、close 的顺序收尾会话资源 [计划中]。CREATED 到 FAILED 在迁移表里允许,但代码不走这条边。
+读图说明。创建请求先校验,通过才建驱动器,随即从 CREATED 进入 ACTIVE。校验、准入或依赖失败时不建会话,直接以 `EndSession` 拒绝。运行器正常返回后经 COMPLETING 到 CLOSED 并落盘;超时、后端失败、记忆失败、断连转入 FAILED,不落盘。CLOSED 与 FAILED 之后,服务端按 quiesce、join、close 的顺序收尾会话资源 [已落地]。CREATED 到 FAILED 在迁移表里允许,但代码不走这条边。
 
-终止原因现有十一种,加两种记忆失败原因后共十三种 [计划中]。
+终止原因现有十一种,加两种记忆失败原因后共十三种 [已落地]。
 
 | 终止原因 | 去向 | 产生者 | 失败类 |
 |---|---|---|---|
 | `max_turns` | CLOSED | 运行器跑满轮次 | 正常 |
 | `goal_reached` | 只出现在批量路径 | `stop_predicate` 返回真 | 正常 |
 | `client_terminated` | CLOSED | 客户端发 `EndSession` | 正常 |
-| `timeout` | FAILED | 客户端超时未提交:`--interact` 下现为 30 秒,计划改 90 秒 [计划中] | T1 |
+| `timeout` | FAILED | 客户端超时未提交:`--interact` 下服务端等 90 秒;或客户端等相邻两条服务端消息超过 90 秒,由客户端本地判定 | T1 |
 | `role_backend_timeout` | FAILED | 服务端后端 60 秒未返回 | T1 |
-| `role_backend_unavailable` | FAILED;准入已满或逻辑 episode_id 撞上活动会话时创建被拒 [计划中] | 对手 API 暂时不可用:429、5xx、连不上、连接中途断开;准入时活动加滞留会话数已达上限、同 `episode_id` 已有活动会话 [计划中] | T1 [已落地] |
+| `role_backend_unavailable` | FAILED;准入已满或逻辑 episode_id 撞上活动会话时创建被拒 | 对手 API 暂时不可用:429、5xx、连不上、连接中途断开;准入时活动加滞留会话数已达上限、同 `episode_id` 已有活动会话 | T1 [已落地] |
 | `role_backend_rejected` | FAILED | 对手 API 明确拒绝:4xx,429 除外 | T2 [已落地] |
-| `role_backend_failure` | FAILED 或创建被拒 | 后端抛其余异常(含对手 API 的回复形状不对;记忆异常已分出去 [计划中]),或工厂、解析器故障 | T1 或 T2,协议上不区分 |
-| `role_memory_unavailable` | FAILED | 对手位后端抛出瞬态的记忆失败:调用超时、传输失败 | T1 [计划中] |
-| `role_memory_failure` | FAILED | 对手位后端抛出确定性的记忆失败:瞬态以外的一切 | T2 [计划中] |
+| `role_backend_failure` | FAILED 或创建被拒 | 后端抛其余异常(含对手 API 的回复形状不对;记忆异常已分出去 [已落地]),或工厂、解析器故障 | T1 或 T2,协议上不区分 |
+| `role_memory_unavailable` | FAILED | 对手位后端抛出瞬态的记忆失败:调用超时、传输失败 | T1 [已落地] |
+| `role_memory_failure` | FAILED | 对手位后端抛出确定性的记忆失败:瞬态以外的一切 | T2 [已落地] |
 | `client_disconnected` | FAILED | 请求流结束而未发 `EndSession` | T1 |
 | `persistence_failed` | CLOSED,但树里没有 episode | 运行器正常结束,落盘钩子抛异常 | T1 [已落地] |
-| `invalid_session` | 创建被拒 | 校验失败(含 `episode_id` 格式不合白名单 [计划中])、协议违规、10 秒未创建 | T2 |
+| `invalid_session` | 创建被拒 | 校验失败(含 `episode_id` 格式不合白名单 [已落地])、协议违规、10 秒未创建 | T2 |
 
 不变量。
 
 1. Episode 只由已真实完成的轮次组成,唤醒哨兵不会被写成一轮。
 2. 交给后端的 `history` 里,其他角色位的 `inner_thought` 与 `activation_trace` 为 None;自己角色位的轮次是深拷贝。
 3. 下行给客户端的对手轮同样抹掉这两项;服务端落盘的 Episode 保留完整记录。
-4. 同一条 gRPC 流只承载一次会话,`episode_id` 取 `CreateSession.episode_id`,没给时为 `ep-<session_id>` [计划中]。
+4. 同一条 gRPC 流只承载一次会话,`episode_id` 取 `CreateSession.episode_id`,没给时为 `ep-<session_id>` [已落地]。
 5. FAILED 的会话不调用 `on_session_closed`,`EndSession.episode_id` 为空。
 6. 中止原因以第一个为准,后续 `request_abort` 不覆盖。
 7. 清单里每条 episode 的 sha256 与产物树里的内容一致,否则 `verify_manifest` 抛错,不静默跳过。
 8. 外部配置路加载的情境与人格,`source` 一律被强制为 `external`。
-9. 会话进入 CLOSED 或 FAILED 后,资源按 quiesce、join、close 收尾;join 超时的资源整个保留,不关不删 [计划中]。
+9. 会话进入 CLOSED 或 FAILED 后,资源按 quiesce、join、close 收尾;join 超时的资源整个保留,不关不删 [已落地]。
 
 ## 5. 接口契约
 
-结论:对内是三个库函数入口,对外是一个 gRPC 双向流;签名以代码为准,激活轨迹相关的字段与参数 [已落地];会话资源与会话身份带来的新签名 [计划中],施工时可能微调。
+结论:对内是三个库函数入口,对外是一个 gRPC 双向流;签名以代码为准,激活轨迹相关的字段与参数 [已落地];会话资源与会话身份带来的新签名 [已落地]。
 
 库入口[已落地]:
 
@@ -402,7 +402,7 @@ class EnvironmentServiceClient:
     def abort(self) -> None
 ```
 
-会话资源与会话身份的新签名 [计划中],施工时可能微调。工厂改为收会话信息、返回会话资源,落盘钩子多带 `session_id`,`create_server` 另加 `resource_join_timeout_s`、`linger_retry_s` 两个参数(滞留表的 join 等待与重试间隔,默认都是 60 秒),`max_workers` 透传给 servicer 算名额。
+会话资源与会话身份的新签名 [已落地]。工厂改为收会话信息、返回会话资源,落盘钩子多带 `session_id`,`create_server` 另加 `resource_join_timeout_s`、`linger_retry_s` 两个参数(滞留表的 join 等待与重试间隔,默认都是 60 秒),`max_workers` 透传给 servicer 算名额。
 
 ```python
 BackendsFactory = Callable[[SessionInfo], SessionResources]
@@ -414,15 +414,16 @@ class SessionResources:
     def close(self) -> None: ...                 # 对每个智能体直调可选 close(),删登记的目录
 on_session_closed(session_id, episode)           # 落盘钩子的新参数
 EnvironmentServiceClient.create_session(..., episode_id: str | None = None)
+EnvironmentServiceClient(stub, *, message_timeout_s=None)   # 相邻两条服务端消息的最长间隔;None 不设限
 ```
 
-SessionInfo、SessionResources、SessionClosingError 三个类型都放在 `src/simulator/realtime/resources.py` [计划中]。
+SessionInfo、SessionResources、SessionClosingError 三个类型都放在 `src/simulator/realtime/resources.py` [已落地]。
 
 协议 `Interact` 一条流一次会话,消息如下。
 
 | 消息 | 方向 | 内容 |
 |---|---|---|
-| `CreateSession` | 客户端到服务端 | `scenario_id`、角色分配、人格映射、`purpose`、`client_driven_slot`、可选 `episode_id` [计划中] |
+| `CreateSession` | 客户端到服务端 | `scenario_id`、角色分配、人格映射、`purpose`、`client_driven_slot`、可选 `episode_id` [已落地] |
 | `SessionReady` | 服务端到客户端 | `session_id`,会话已进入 ACTIVE |
 | `SubmitTurn` | 客户端到服务端 | `utterance`、可选 `inner_thought`、可选 `activation_trace` |
 | `TurnUpdate` | 服务端到客户端 | 一条 `TurnRecordProto`,含客户端自己轮的回显 |
@@ -433,10 +434,10 @@ SessionInfo、SessionResources、SessionClosingError 三个类型都放在 `src/
 | 约定 | 内容 |
 |---|---|
 | 批量写序 | 先写全部 episode,最后写清单;清单在即代表数据集完整 |
-| episode id | 批量为 `<run>-<阶段>-<情境 id>-r<k>`;实时取 `CreateSession.episode_id`,没给时为 `ep-sess-<12 位十六进制>` [计划中] |
-| 逻辑 episode id | 由客户端定,同一条 rollout 的重试不变:训练是 `{run_id}-grpo{step}-{scenario_id}-r{k}`(同一情境在不同 GRPO step 反复出现,id 里带 step 才不撞),部署是 `deploy-{model}-{scenario}-{k}`。服务端落盘的 episode 用它当 id [计划中] |
-| `episode_id` 校验 | 只许 `[A-Za-z0-9._-]`,1 到 128 字节,不是 `.` 或 `..`,不合以 `invalid_session`(T2)拒绝。同 id 已有活动会话以 `role_backend_unavailable`(T1)拒绝:客户端 abort 后旧会话要等收尾,立刻重试会撞上它,这是暂时的。活动指从准入登记起,到 servicer 收尾完或移交滞留表为止 [计划中] |
-| 实时落盘 | 服务端不自己写产物树,由调用方注入 `on_session_closed`,钩子须线程安全。新签名带 `session_id`,调用方据此而不是按情境 id 找会话归属 [计划中] |
+| episode id | 批量为 `<run>-<阶段>-<情境 id>-r<k>`;实时取 `CreateSession.episode_id`,没给时为 `ep-sess-<12 位十六进制>` [已落地] |
+| 逻辑 episode id | 由客户端定,同一条 rollout 的重试不变:训练是 `{run_id}-grpo{step}-{scenario_id}-r{k}`(同一情境在不同 GRPO step 反复出现,id 里带 step 才不撞),部署是 `deploy-{model}-{scenario}-{k}`。服务端落盘的 episode 用它当 id [已落地] |
+| `episode_id` 校验 | 只许 `[A-Za-z0-9._-]`,1 到 128 字节,不是 `.` 或 `..`,不合以 `invalid_session`(T2)拒绝。同 id 已有活动会话以 `role_backend_unavailable`(T1)拒绝:客户端 abort 后旧会话要等收尾,立刻重试会撞上它,这是暂时的。活动指从准入登记起,到 servicer 收尾完或移交滞留表为止 [已落地] |
+| 实时落盘 | 服务端不自己写产物树,由调用方注入 `on_session_closed`,钩子须线程安全。新签名带 `session_id`,调用方据此而不是按情境 id 找会话归属 [已落地] |
 | 钩子异常 | 只记日志,不中断流,客户端仍收到 `EndSession` |
 | 情境来源 | 注入 `scenario_resolver` 时按 id 读完整情境;未注入时退回只有角色位的空情境 |
 
@@ -452,8 +453,8 @@ SessionInfo、SessionResources、SessionClosingError 三个类型都放在 `src/
 | MindAgent | 无 | 接口②,复用客户端"客户端后说"能力,工作包 7 [已落地] | [已落地] |
 | factory | 无 | 组合根调 `create_server` 并注入 `scenario_resolver`,工作包 9 [已落地] | [已落地] |
 | factory 组合根(场景二接通) | 无 | `Scenario.opponent_script` 与 `ModelBackend` 协议:组合根据此按角色位选对手驱动 [已落地] | [已落地] |
-| factory 组合根(会话资源) | 智能体的可选 `close()`:会话资源收尾时对它持有的每个智能体直接调用一次,不经 `TimeoutBackend` 转发,没有就跳过;工厂返回未套期限的会话资源,并保证自己抛异常时不留半开的库;工厂造资源时把 `session_id` 到 run id 的对应记进第二张登记表,终态删除,落盘只查它 | 新的工厂签名与 `on_session_closed` 带 `session_id`;组合根在取到仓库排他锁之后、起任何会话之前,只清扫记忆根目录下 `runs/` 的子目录;`--interact` 装配把 `turn_timeout_s` 改传 90 秒,并给每个 Actio 实例外套记忆异常转换后端 | [计划中] |
-| MindTrainer 与 MindAgent 的客户端(会话身份) | 无 | `create_session` 的可选 `episode_id`;客户端相邻两条消息之间的等待上限 90 秒;`role_memory_unavailable` 进各自的瞬态集合,`role_memory_failure` 不进;现有两处把创建被拒一律判不可重跑,要改成按终止原因查各自的瞬态集合;不改,准入满与 `episode_id` 撞上活动会话的两种 `role_backend_unavailable` 不会重跑 | [计划中] |
+| factory 组合根(会话资源) | 智能体的可选 `close()`:会话资源收尾时对它持有的每个智能体直接调用一次,不经 `TimeoutBackend` 转发,没有就跳过;工厂返回未套期限的会话资源,并保证自己抛异常时不留半开的库;工厂造资源时把 `session_id` 到 run id 的对应记进第二张登记表,终态删除,落盘只查它 | 新的工厂签名与 `on_session_closed` 带 `session_id`;组合根在取到仓库排他锁之后、起任何会话之前,只清扫记忆根目录下 `runs/` 的子项;`--interact` 装配给 `AgentRuntime` 传 `turn_timeout_s` 90 秒,并给每个 Actio 实例外套记忆异常转换后端 | [已落地] |
+| MindTrainer 与 MindAgent 的客户端(会话身份) | 无 | `create_session` 的可选 `episode_id`;客户端相邻两条消息之间的等待上限 90 秒,由 `--interact` 装配的运行时给客户端;`role_memory_unavailable` 进各自的瞬态集合,`role_memory_failure` 不进;创建被拒按终止原因查各自的瞬态集合,不再一律判不可重跑,所以准入满与 `episode_id` 撞上活动会话的两种 `role_backend_unavailable` 会按条重跑 | [已落地] |
 | MindTrainer 派发器(场景二接通) | 无 | 生成器与 `write_scenario`、`write_persona`:生成路据此写入情境与人格,再回写指令 [已落地] | [已落地] |
 
 工作包 6 对本文接口的改动如下。
@@ -527,23 +528,23 @@ SessionInfo、SessionResources、SessionClosingError 三个类型都放在 `src/
 
 第 11 步的筛选在 `src/mindtrainer/trajectory_source.py` 里,`_ACCEPTED_REASONS` 为 `max_turns` 与 `goal_reached`。
 
-第 10 步推完 `EndSession` 之后,流结束的 `finally` 按序对会话资源做 quiesce、join、close [计划中]。
+第 10 步推完 `EndSession` 之后,流结束的 `finally` 按序对会话资源做 quiesce、join、close [已落地]。
 
 失败与恢复路径。
 
 | 场景 | 服务端行为 | 客户端看到 | 恢复 |
 |---|---|---|---|
-| 校验不过(含 `max_turns` 超过上限 200)、未知情境;`episode_id` 格式不合白名单 [计划中] | 不启动驱动器 | `SessionRejectedError`,`invalid_session` | 修输入,重试无益 |
-| 准入时活动加滞留会话数已达上限 [计划中] | 不调工厂,不启动驱动器 | `SessionRejectedError`,`role_backend_unavailable` | 客户端按条整条重跑,有上限;滞留不解除则重跑用尽后上抛 |
-| 同 `episode_id` 已有活动会话 [计划中] | 不调工厂,不启动驱动器 | `SessionRejectedError`,`role_backend_unavailable` | 客户端按条整条重跑,有上限;旧会话收尾完后重跑成功 |
+| 校验不过(含 `max_turns` 超过上限 200)、未知情境;`episode_id` 格式不合白名单 [已落地] | 不启动驱动器 | `SessionRejectedError`,`invalid_session` | 修输入,重试无益 |
+| 准入时活动加滞留会话数已达上限 [已落地] | 不调工厂,不启动驱动器 | `SessionRejectedError`,`role_backend_unavailable` | 客户端先在同一次尝试里退避重建(总等待 65 秒,不计入重跑次数),仍被拒再按条整条重跑,有上限;滞留不解除则重跑用尽后上抛 |
+| 同 `episode_id` 已有活动会话 [已落地] | 不调工厂,不启动驱动器 | `SessionRejectedError`,`role_backend_unavailable` | 客户端同样先退避重建;旧会话收尾完后重建成功 |
 | 同一条流上第二次 `CreateSession` | 已在跑的第一个会话判 FAILED、不落盘,整条流以 `invalid_session` 结束 | 原始协议客户端收到 `invalid_session`;库客户端一条流只发一次创建,碰不到这种情况 | 一次会话用一条新流 |
 | 创建前就提交或结束会话,或连上后 10 秒内没有 `CreateSession` | 不启动驱动器,以 `invalid_session` 结束 | 原始协议客户端收到 `invalid_session`;库客户端的 `submit_turn` 在创建前调用是用法错误,不保证给出 `SessionRejectedError` | 先创建,再提交 |
 | 工厂或解析器抛非 `LookupError` 异常 | 不启动驱动器 | `SessionRejectedError`,`role_backend_failure` | 调用方决定是否重试 |
-| 客户端超时未提交(`--interact` 下现为 30 秒,计划改 90 秒 [计划中]) | FAILED,不落盘 | `EndSession(timeout)` | MindTrainer 整条重跑,有上限 |
-| 对手后端 60 秒未返回 | FAILED,底层线程跑完后结果丢弃;线程登记在会话资源里,终态收尾等它退出,等不到则资源滞留 [计划中] | `EndSession(role_backend_timeout)` | 整条重跑,有上限 |
-| 对手位后端抛出瞬态的记忆失败 [计划中] | FAILED,不落盘 | `EndSession(role_memory_unavailable)` | 整条重跑,有上限;用尽后抛 `RolloutFailedError` |
-| 对手位后端抛出确定性的记忆失败 [计划中] | FAILED,不落盘 | `EndSession(role_memory_failure)` | 不重跑,抛 `RolloutFailedError`;MindTrainer 把指令判 `failed`,不进延后通道 |
-| 客户端相邻两条服务端消息的间隔超过 90 秒 [计划中] | 客户端 abort 后,服务端按断连判 FAILED | 客户端自判 `timeout` | 整条重跑,有上限 |
+| 客户端超时未提交(`--interact` 下服务端等 90 秒) | FAILED,不落盘 | `EndSession(timeout)` | MindTrainer 整条重跑,有上限 |
+| 对手后端 60 秒未返回 | FAILED,底层线程跑完后结果丢弃;线程登记在会话资源里,终态收尾等它退出,等不到则资源滞留 [已落地] | `EndSession(role_backend_timeout)` | 整条重跑,有上限 |
+| 对手位后端抛出瞬态的记忆失败 [已落地] | FAILED,不落盘 | `EndSession(role_memory_unavailable)` | 整条重跑,有上限;用尽后抛 `RolloutFailedError` |
+| 对手位后端抛出确定性的记忆失败 [已落地] | FAILED,不落盘 | `EndSession(role_memory_failure)` | 不重跑,抛 `RolloutFailedError`;MindTrainer 把指令判 `failed`,不进延后通道 |
+| 客户端相邻两条服务端消息的间隔超过 90 秒 [已落地] | 客户端 abort 后,服务端按断连判 FAILED | 客户端自判 `timeout` | 整条重跑,有上限 |
 | 对手 API 回 429、5xx,或连不上、连接中途断开 | FAILED | `EndSession(role_backend_unavailable)` | 整条重跑,有上限;用尽后抛 `RolloutFailedError` |
 | 对手 API 回其余 4xx | FAILED | `EndSession(role_backend_rejected)` | 不重跑,抛 `RolloutFailedError`;MindTrainer 把训练记录写 `failed` |
 | 对手后端抛其余异常(含回复形状不对) | FAILED | `EndSession(role_backend_failure)` | MindTrainer 不重试,抛 `RolloutFailedError` |
@@ -597,22 +598,22 @@ interact 会话前的准备 [已落地]。下表是派发器与组合根在起�
 | run 目录 | `dataset_manifest_grpo_opd.yaml`、`episodes/` |
 | 校验 | `verify_manifest` 按清单顺序返回两条 episode |
 
-### 会话资源的生命周期 [计划中]
+### 会话资源的生命周期 [已落地]
 
 结论:每条会话一个会话资源 SessionResources,由工厂造、servicer 持有;终态时先停调用、再等线程、再关库、再删文件。
 
-资源对象把后端、在途线程与要清理的目录收在一起。模拟器只调它的三个方法 quiesce、join、close,不认识里面装的是什么。下表是它从准入到清扫的八个阶段,施工时可能微调。
+资源对象把后端、在途线程与要清理的目录收在一起。模拟器只调它的三个方法 quiesce、join、close,不认识里面装的是什么。下表是它从准入到清扫的八个阶段。
 
 | 阶段 | 动作 | 执行者 | 失败时 |
 |---|---|---|---|
-| 1 准入 [计划中] | 在服务端的一把锁里做完三件事:检查活动数加滞留数小于 `max_workers`,检查 `episode_id` 没有活动会话,登记会话。之后才调工厂 | servicer | 名额满或 `episode_id` 有活动会话:`role_backend_unavailable`(T1) |
-| 2 造资源 [计划中] | 工厂按会话信息造全部后端并返回资源,在锁外跑 | 工厂 | 工厂抛异常:在同一把锁里撤销登记,以 `role_backend_failure` 拒绝。工厂保证不留半开的库:先建全部再返回,中途失败先关已开的 |
-| 3 启动 [计划中] | servicer 用资源给每个后端套 `TimeoutBackend`,期限取 `backend_timeout_s`,再把套好的字典交给驱动器,自己持有资源到流结束。驱动器只调后端,不持有资源 | servicer | 工厂返回之后、驱动器启动之前的任何失败(校验、缺后端、`start` 抛),由 servicer 在同一个 `try` 里对资源做 quiesce、join、close |
-| 4 运行 [计划中] | `TimeoutBackend` 在调用方线程里先登记(quiesce 之后直接抛 SessionClosingError,不起线程),daemon 线程退出时再移出。超时只是调用方放弃等待,线程仍在集合里 | TimeoutBackend | 集合的操作持一把锁;join 不持锁等待 |
-| 5 终态收尾 [计划中] | 驱动器进入 CLOSED 或 FAILED(含断开)后,流结束的 `finally` 按序调 quiesce、join(超时 60 秒)、close | servicer | quiesce 之后的 `respond` 抛 SessionClosingError |
-| 6 join 超时 [计划中] | 不 close、不删。资源移交滞留表,继续占一个会话名额;滞留数可由 servicer 的 lingering_count() 读,每分钟一行日志 | servicer | 准入检查把滞留数算进名额 |
-| 7 滞留重试 [计划中] | 滞留表每 60 秒对每个资源做一次零等待的 join,成功后 close 并删目录 | servicer | 删除失败记日志,留给启动清扫 |
-| 8 清扫 [计划中] | 取到仓库排他锁之后、起任何会话之前,删掉记忆根目录下 `runs/` 的全部子目录,不碰 `deploy/`、`seeds/`、`snapshots/`。此时本进程没有会话。别的进程被仓库锁挡在外面。记忆根目录只属于这个仓库,所以不会误删在途副本。运行中只删滞留表 join 成功的资源登记的目录,不扫目录 | 组合根 | 无 |
+| 1 准入 [已落地] | 在服务端的一把锁里做完三件事:检查活动数加滞留数小于 `max_workers`,检查 `episode_id` 没有活动会话,登记会话。之后才调工厂 | servicer | 名额满或 `episode_id` 有活动会话:`role_backend_unavailable`(T1) |
+| 2 造资源 [已落地] | 工厂按会话信息造全部后端并返回资源,在锁外跑 | 工厂 | 工厂抛异常:在同一把锁里撤销登记,以 `role_backend_failure` 拒绝。工厂保证不留半开的库:先建全部再返回,中途失败先关已开的 |
+| 3 启动 [已落地] | servicer 用资源给每个后端套 `TimeoutBackend`,期限取 `backend_timeout_s`,再把套好的字典交给驱动器,自己持有资源到流结束。驱动器只调后端,不持有资源 | servicer | 工厂返回之后、驱动器启动之前的任何失败(校验、缺后端、`start` 抛),由 servicer 在同一个 `try` 里对资源做 quiesce、join、close |
+| 4 运行 [已落地] | `TimeoutBackend` 在调用方线程里先登记(quiesce 之后直接抛 SessionClosingError,不起线程),daemon 线程退出时再移出。超时只是调用方放弃等待,线程仍在集合里 | TimeoutBackend | 集合的操作持一把锁;join 不持锁等待 |
+| 5 终态收尾 [已落地] | 驱动器进入 CLOSED 或 FAILED(含断开)后,流结束的 `finally` 按序调 quiesce、join(超时 60 秒)、close | servicer | quiesce 之后的 `respond` 抛 SessionClosingError |
+| 6 join 超时 [已落地] | 不 close、不删。资源移交滞留表,继续占一个会话名额;滞留数可由 servicer 的 lingering_count() 读,每分钟一行日志 | servicer | 准入检查把滞留数算进名额 |
+| 7 滞留重试 [已落地] | 滞留表每 60 秒对每个资源做一次零等待的 join,成功后 close 并删目录 | servicer | 删除失败记日志,留给启动清扫 |
+| 8 清扫 [已落地] | 取到仓库排他锁之后、起任何会话之前,删掉记忆根目录下 `runs/` 的每个子项(其中符号链接只删链接本身),不碰 `deploy/`、`seeds/`、`snapshots/`。此时本进程没有会话。别的进程被仓库锁挡在外面。记忆根目录只属于这个仓库,所以不会误删在途副本。运行中只删滞留表 join 成功的资源登记的目录,不扫目录 | 组合根 | 无 |
 
 滞留表由 servicer 持有,所以回环服务端不经组合根就能测准入与滞留。资源对象对记忆保持不透明:close 只对每个后端调一次可选的 `close`,没有就跳过。
 
@@ -620,15 +621,15 @@ interact 会话前的准备 [已落地]。下表是派发器与组合根在起�
 
 时间预算。外层的上限高于内层一轮的最坏耗时,外层不先于内层超时。
 
-| 预算 | 现值 | 目标值 | 为什么够用 |
+| 预算 | 改前 | 改后 | 为什么够用 |
 |---|---|---|---|
-| 客户端等相邻两条服务端消息的间隔(`_next_msg`) | 无,只有整条流的 deadline | 90 秒,整条流按 `max_turns × 90` 兜底 [计划中] | 每条对手发言是一条消息,间隔以单个对手轮为界:对手一轮上限 60 秒,加推送往返仍低于 90 秒 |
+| 客户端等相邻两条服务端消息的间隔(`_next_msg`) | 无,只有整条流的 deadline | 90 秒(`--interact` 装配传入;客户端默认不设限),整条流按 `max_turns × 90` 兜底 [已落地] | 每条对手发言是一条消息,间隔以单个对手轮为界:对手一轮上限 60 秒,加推送往返仍低于 90 秒 |
 | 服务端后端单次调用 | 60 秒 | 不改 | 对手一轮最坏 45 秒:HTTP 25 秒加记忆最坏 20 秒,低于 60 秒 |
 | 对手 HTTP | 25 秒 | 不改 | 低于服务端的 60 秒,线程在服务端放弃之前自己结束 |
-| 记忆单次网络调用 | 无 | 4 秒,不重试 [计划中] | 一轮五次:召回嵌入查询词一次,写入抽取三次,嵌入一批;最坏合计 20 秒 |
-| 训练位策略 HTTP | 120 秒 | 60 秒 [计划中] | 训练位一轮最坏 80 秒:HTTP 60 秒加记忆最坏 20 秒,低于服务端等提交的 90 秒;120 秒会先超过它 |
-| 终态等在途线程的 `join` | 无 | 60 秒 [计划中] | 等不到就滞留,收尾不会无限阻塞;滞留重试间隔同为 60 秒 |
-| 服务端等客户端提交一轮(`turn_timeout_s`) | 30 秒(`--interact`) | 90 秒 [计划中] | 训练位一轮最坏 80 秒,低于 90 秒;30 秒装不下含记忆的训练位一轮 |
+| 记忆单次网络调用 | 无 | 4 秒,不重试 [已落地] | 一轮五次:召回嵌入查询词一次,写入抽取三次,嵌入一批;最坏合计 20 秒 |
+| 训练位策略 HTTP | 120 秒 | 60 秒 [已落地] | 训练位一轮最坏 80 秒:HTTP 60 秒加记忆最坏 20 秒,低于服务端等提交的 90 秒;120 秒会先超过它 |
+| 终态等在途线程的 `join` | 无 | 60 秒 [已落地] | 等不到就滞留,收尾不会无限阻塞;滞留重试间隔同为 60 秒 |
+| 服务端等客户端提交一轮(`turn_timeout_s`) | 30 秒(`--interact`) | 90 秒 [已落地] | 训练位一轮最坏 80 秒,低于 90 秒;30 秒装不下含记忆的训练位一轮 |
 
 记忆最坏值按调用次数算。一次写入顺序发三次抽取。语义召回要嵌入一次查询词。所以一轮五次网络调用,每次 4 秒。
 
@@ -649,27 +650,27 @@ interact 会话前的准备 [已落地]。下表是派发器与组合根在起�
 | SS-5 | 清单由生产方产出,按 sha256 锚定每条 episode | 只记 episode id | 配方要精确复现数据集;篡改、丢失都能发现 | 改一个字就要重建清单 |
 | SS-6 | 分组键含 `model_ref`,不含 `max_turns` | 只按情境分组 | 换了对手模型就不是同一上下文,组内基线不可比;`max_turns` 是预算 | 同情境不同对手被拆成多组,组数变多 |
 | SS-7 | 一条流一次会话,校验通过直接 ACTIVE | 一条流多会话;创建后再确认 | 状态简单,延迟低 | 每次 rollout 新建一条流 |
-| SS-8 | 客户端输入错误判 `invalid_session`,服务端依赖故障判 `role_backend_failure` | 统一判 `invalid_session` | 让调用方区分"重试无益"与"可能瞬态" | `role_backend_failure` 同时覆盖后端确定性异常,调用方只能保守不重试。记忆异常拆给 `role_memory_unavailable` 与 `role_memory_failure`,准入满另报 `role_backend_unavailable`,不再混进这一桶 [计划中] |
+| SS-8 | 客户端输入错误判 `invalid_session`,服务端依赖故障判 `role_backend_failure` | 统一判 `invalid_session` | 让调用方区分"重试无益"与"可能瞬态" | `role_backend_failure` 同时覆盖后端确定性异常,调用方只能保守不重试。记忆异常拆给 `role_memory_unavailable` 与 `role_memory_failure`,准入满另报 `role_backend_unavailable`,不再混进这一桶 [已落地] |
 | SS-9 | FAILED 不落盘;`abort()` 不发 `EndSession` | 半截会话也落盘并标原因 | 半截 episode 进训练数据会污染梯度 | 失败会话的对话内容只在客户端内存里,事后不能复盘 |
 | SS-10 | `EndSession` 只带 episode 引用,客户端用逐轮记录重建 | 协议内联整条 Episode | 不重复传输;逐轮推送本已给全 | 客户端重建与服务端落盘若分歧,需对照两边 |
-| SS-11 | 服务端后端调用套 `TimeoutBackend`,每次一个 daemon 线程 | 线程池;不设期限 | 挂死的对手不拖住会话;daemon 线程不阻止进程退出 | 超时后底层调用继续占资源直到自然结束。线程登记进会话资源,终态等它退出;等不到就让资源滞留并占一个名额,不关库不删目录 [计划中] |
+| SS-11 | 服务端后端调用套 `TimeoutBackend`,每次一个 daemon 线程 | 线程池;不设期限 | 挂死的对手不拖住会话;daemon 线程不阻止进程退出 | 超时后底层调用继续占资源直到自然结束。线程登记进会话资源,终态等它退出;等不到就让资源滞留并占一个名额,不关库不删目录 [已落地] |
 | SS-12 | 外部配置路强制 `source="external"` | 信任输入里的标记 | 来源可追溯,不被外部数据冒充 | 无法从外部导入标为 `auto` 的定义 |
 | SS-13 | V1 保持每条 episode 一个产物文件、一次提交,清单逐条锚定 sha256;分片文件加引用推迟到接真实训练之前 [推迟] | 现在就分片 | 小规模 mock 下逐条足够;分片要同时改清单格式、读取与校验 | 万条级数据集写入要数小时,仓库膨胀 |
 | SS-14 | interact 的情境与人格走两路来源:配置点名树里已有的,或按种子生成;一次配置只走一路,不混用 [已落地] | 允许点名一部分、生成其余 | 混用会产出无法追溯的混合语料 | 使用者要多写几行配置 |
 | SS-15 | 点名的情境 `purpose` 必须是 `training`,人格不限 [已落地] | 不限 `purpose` | 默认部署素材的情境是 `deployment_simulation`,拿它们训练等于污染训练数据 | 部署素材不能顺手拿来训练 |
 | SS-16 | 对手位三种驱动:固定对话(角色位写 `driver: scripted`)、站内 vLLM、外部 OpenAI 兼容 API;驱动由组合根选,模拟器只认 `ModelBackend` [已落地] | 只做一种驱动 | 场景二要求三种都支持;驱动在组合根里选,模拟器协议不用改 | 三种驱动的失败分类与超时口径各要成立 |
 | SS-17 | 固定对话优先用情境自带的 `opponent_script`,情境没带时用全局台词;`Scenario` 加一个可选字段 [已落地] | 只有全局台词 | 固定对话要能按情境区分对手说什么 | `Scenario` 多一个可选字段;旧产物读回不变 |
-| SS-18 | 后端工厂改收 SessionInfo、返回 SessionResources;`ModelBackend` 协议不加方法 [计划中] | 给协议加会话参数;工厂签名不动 | Actio 实例本来就满足 `respond`;会话身份是服务端本来缺的,现在工厂拿不到 session id,落盘登记表只能按情境 id 索引 | 工厂签名改一次,`AgentRuntime` 与测试跟着改 |
-| SS-19 | 每条会话一个 SessionResources,持有该会话全部对手位的后端;终态按 quiesce、join、close 收尾;join 超时的资源整个保留,占住一个会话名额,不关不删 [计划中] | 终态直接关库删目录;超时后强关 | 超时线程还在跑时关库或删库会写坏文件;daemon 线程杀不掉 | 挂死的后端永久占用会话名额,直到进程重启 |
-| SS-20 | 准入检查、会话登记、滞留计数在同一把锁里完成;工厂在锁外跑,失败时在同一把锁里撤销登记;`episode_id` 过白名单,同一时刻只许一个活动会话用它 [计划中] | 检查与登记分开加锁;信任客户端给的 id | 不在一把锁里,并发 `CreateSession` 会突破上限;客户端给的 id 会进目录名与主键 | 多一把锁 |
-| SS-21 | 记忆失败拆成 `role_memory_unavailable`(T1,按条重跑)与 `role_memory_failure`(T2,不重跑);驱动器只认两个异常基类并按它们分支,基类定义在 `backend_timeout.py`;组合根的转换后端接 actio 的记忆失败总基类,子类一并映射,按 `transient` 改抛继承这两个基类的异常 [计划中] | 并入 `role_backend_failure` | 并入后会被译成延后反复重试;记忆端点的网络抖动不该升人工;模拟器不导入 `actio`,只认异常基类 | 瞬态与确定性的映射由后端侧维护,新的瞬态类别出现前按 T2 处理 |
-| SS-22 | 对手位的记忆库是会话私有副本,路径含 `session_id`;每个库同一时刻只有一个写者:驱动器一个线程,每个角色位至多一次在途调用 [计划中] | 同一人格的对手位共用一个库 | 两个会话或两个位同时写一个库,互相覆盖;个体隔离靠文件,不靠过滤 | 同一人格在两个位同时出现时开两份副本,磁盘多占 |
-| SS-23 | 进程里的后端线程总数以会话名额约束:不超过 `max_workers × (len(bindings) + 1)`;滞留资源占名额,滞留数达到 `max_workers` 时拒绝所有新会话,日志每分钟报一次滞留数 [计划中] | 滞留不占名额;强杀线程 | Python 的 daemon 线程杀不掉,名额是能给出的最强上界 | 挂死的后端一直占名额,由人重启进程 |
-| SS-24 | 时间预算逐层递增:客户端等相邻两条消息 90 秒、服务端等客户端提交 90 秒(两者方向相反、互不嵌套)、服务端后端 60 秒、对手 HTTP 25 秒、记忆单次网络调用 4 秒、训练位策略 HTTP 60 秒 [计划中] | 客户端只有整条流的 deadline;服务端等提交保持 30 秒;训练位 HTTP 保持 120 秒 | 训练位一轮最坏 80 秒,30 秒与 120 秒都装不下;没有相邻消息限时,服务端失联时客户端只能等整条流 deadline | 慢的真模型一轮若超时,判 T1 按条重跑,训练变慢 |
-| SS-25 | 逻辑 episode id 由客户端经 `CreateSession.episode_id` 传入,服务端落盘的 episode 用它当 id,没给时仍是 `ep-<session_id>`;落盘归属按 `session_id` 查,不按情境 id [计划中] | 沿用服务端生成的 id;按情境 id 路由落盘 | 重试会换 `session_id`,而下游需要一个跨重试不变的身份;情境被注销时仍在跑的会话要能落到自己的 run | 客户端要自己保证 id 合法且唯一,服务端靠白名单与活动唯一兜底 |
-| SS-26 | 同一逻辑 episode_id 撞上活动会话判 `role_backend_unavailable`(T1),格式不合白名单才判 `invalid_session`(T2)。活动从准入登记起,到 servicer 收尾完或移交滞留表为止 [计划中] | 撞上也判 `invalid_session` | 客户端 abort 后旧会话要等泄流线程与在途调用退出才进终态,立刻重试必撞上它,这是暂时的;判 T2 会让按条重跑的重试直接失败 | 客户端要把这条 T1 加进瞬态集合,否则不会重跑 |
-| SS-27 | `TimeoutBackend` 由 servicer 用会话资源套,工厂返回的后端未套期限;`close` 由资源对它持有的每个智能体直接调,不经包装层转发 [计划中] | 工厂返回时已套期限;`TimeoutBackend` 转发 `close` | 现状 `servicer.py` 就在服务端套;在途线程登记在资源里,套的人必须拿着资源;包装层转发 `close` 会让收尾依赖包装层的实现 | 工厂的测试看不到期限;资源要持有未套的智能体引用 |
-| SS-28 | 启动清扫只删记忆根目录下 `runs/` 的子目录,在取到仓库排他锁之后、起任何会话之前,由组合根做;模拟器不做 [计划中] | 清空整个记忆根目录;由 servicer 在构造时清 | `deploy/`、`seeds/`、`snapshots/` 存着不可再生的记忆;模拟器对记忆保持不透明 | 清扫的位置由组合根保证,漏调则崩溃遗留的副本只占磁盘 |
+| SS-18 | 后端工厂改收 SessionInfo、返回 SessionResources;`ModelBackend` 协议不加方法 [已落地] | 给协议加会话参数;工厂签名不动 | Actio 实例本来就满足 `respond`;会话身份是服务端本来缺的,现在工厂拿不到 session id,落盘登记表只能按情境 id 索引 | 工厂签名改一次,`AgentRuntime` 与测试跟着改 |
+| SS-19 | 每条会话一个 SessionResources,持有该会话全部对手位的后端;终态按 quiesce、join、close 收尾;join 超时的资源整个保留,占住一个会话名额,不关不删 [已落地] | 终态直接关库删目录;超时后强关 | 超时线程还在跑时关库或删库会写坏文件;daemon 线程杀不掉 | 挂死的后端永久占用会话名额,直到进程重启 |
+| SS-20 | 准入检查、会话登记、滞留计数在同一把锁里完成;工厂在锁外跑,失败时在同一把锁里撤销登记;`episode_id` 过白名单,同一时刻只许一个活动会话用它 [已落地] | 检查与登记分开加锁;信任客户端给的 id | 不在一把锁里,并发 `CreateSession` 会突破上限;客户端给的 id 会进目录名与主键 | 多一把锁 |
+| SS-21 | 记忆失败拆成 `role_memory_unavailable`(T1,按条重跑)与 `role_memory_failure`(T2,不重跑);驱动器只认两个异常基类并按它们分支,基类定义在 `backend_timeout.py`;组合根的转换后端接 actio 的记忆失败总基类,子类一并映射,按 `transient` 改抛继承这两个基类的异常 [已落地] | 并入 `role_backend_failure` | 并入后会被译成延后反复重试;记忆端点的网络抖动不该升人工;模拟器不导入 `actio`,只认异常基类 | 瞬态与确定性的映射由后端侧维护,新的瞬态类别出现前按 T2 处理 |
+| SS-22 | 对手位的记忆库是会话私有副本,路径含 `session_id`;每个库同一时刻只有一个写者:驱动器一个线程,每个角色位至多一次在途调用 [已落地] | 同一人格的对手位共用一个库 | 两个会话或两个位同时写一个库,互相覆盖;个体隔离靠文件,不靠过滤 | 同一人格在两个位同时出现时开两份副本,磁盘多占 |
+| SS-23 | 进程里的后端线程总数以会话名额约束:不超过 `max_workers × (len(bindings) + 1)`;滞留资源占名额,滞留数达到 `max_workers` 时拒绝所有新会话,日志每分钟报一次滞留数 [已落地] | 滞留不占名额;强杀线程 | Python 的 daemon 线程杀不掉,名额是能给出的最强上界 | 挂死的后端一直占名额,由人重启进程 |
+| SS-24 | 时间预算逐层递增:客户端等相邻两条消息 90 秒、服务端等客户端提交 90 秒(两者方向相反、互不嵌套)、服务端后端 60 秒、对手 HTTP 25 秒、记忆单次网络调用 4 秒、训练位策略 HTTP 60 秒 [已落地] | 客户端只有整条流的 deadline;服务端等提交保持 30 秒;训练位 HTTP 保持 120 秒 | 训练位一轮最坏 80 秒,30 秒与 120 秒都装不下;没有相邻消息限时,服务端失联时客户端只能等整条流 deadline | 慢的真模型一轮若超时,判 T1 按条重跑,训练变慢 |
+| SS-25 | 逻辑 episode id 由客户端经 `CreateSession.episode_id` 传入,服务端落盘的 episode 用它当 id,没给时仍是 `ep-<session_id>`;落盘归属按 `session_id` 查,不按情境 id [已落地] | 沿用服务端生成的 id;按情境 id 路由落盘 | 重试会换 `session_id`,而下游需要一个跨重试不变的身份;情境被注销时仍在跑的会话要能落到自己的 run | 客户端要自己保证 id 合法且唯一,服务端靠白名单与活动唯一兜底 |
+| SS-26 | 同一逻辑 episode_id 撞上活动会话判 `role_backend_unavailable`(T1),格式不合白名单才判 `invalid_session`(T2)。活动从准入登记起,到 servicer 收尾完或移交滞留表为止 [已落地] | 撞上也判 `invalid_session` | 客户端 abort 后旧会话要等泄流线程与在途调用退出才进终态,立刻重试必撞上它,这是暂时的;判 T2 会让按条重跑的重试直接失败 | 客户端要把这条 T1 加进瞬态集合,否则不会重跑 |
+| SS-27 | `TimeoutBackend` 由 servicer 用会话资源套,工厂返回的后端未套期限;`close` 由资源对它持有的每个智能体直接调,不经包装层转发 [已落地] | 工厂返回时已套期限;`TimeoutBackend` 转发 `close` | 现状 `servicer.py` 就在服务端套;在途线程登记在资源里,套的人必须拿着资源;包装层转发 `close` 会让收尾依赖包装层的实现 | 工厂的测试看不到期限;资源要持有未套的智能体引用 |
+| SS-28 | 启动清扫只删记忆根目录下 `runs/` 的子项,在取到仓库排他锁之后、起任何会话之前,由组合根做;模拟器不做 [已落地] | 清空整个记忆根目录;由 servicer 在构造时清 | `deploy/`、`seeds/`、`snapshots/` 存着不可再生的记忆;模拟器对记忆保持不透明 | 清扫的位置由组合根保证,漏调则崩溃遗留的副本只占磁盘 |
 | R12 | 打通激活轨迹:`SubmitTurn` 加可选字段,运行器接受三元组 [已落地] | 轨迹走单独通道 | 原设计未记录别的理由,施工计划表现为改动最小、既有二元组后端不改 | 改协议,要重新生成并入库 pb2 文件 |
 | R14 | 指令带 `data_spec`,派发器缺清单时调注入的生产器,生产器复用 `produce_grouped_dataset` [已落地] | 数据集只能预先生产 | 闭环能自己补数据 | V1 模板生成与目标维度无关,只证明流程跑通 |
 
@@ -689,14 +690,14 @@ interact 会话前的准备 [已落地]。下表是派发器与组合根在起�
 | 客户端提交超时、对手后端超时 | T1 | FAILED | `EndSession` 的 `reason` |
 | 对手后端抛其余异常 | T1 或 T2,协议上不区分 | FAILED | `EndSession(role_backend_failure)` |
 | 客户端断连 | T1 | FAILED,不落盘 | 无 |
-| 对手位后端抛出瞬态的记忆失败 [计划中] | T1 | FAILED,不落盘 | `EndSession(role_memory_unavailable)` |
-| 对手位后端抛出确定性的记忆失败 [计划中] | T2 | FAILED,不落盘;客户端不重跑 | `EndSession(role_memory_failure)` |
-| 准入时活动加滞留会话数达上限 [计划中] | T1 | 不调工厂,以 `role_backend_unavailable` 拒绝 | 日志每分钟报一次滞留数 |
-| `episode_id` 格式不合白名单 [计划中] | T2 | 以 `invalid_session` 拒绝 | `failure_detail` 写明原因 |
-| 同 `episode_id` 已有活动会话 [计划中] | T1 | 不调工厂,以 `role_backend_unavailable` 拒绝 | 客户端的失败尝试记录 |
-| 终态 `join` 超时 [计划中] | 不分类 | 资源进滞留表,不关不删,占一个会话名额 | 滞留数每分钟一行日志;每 60 秒重试一次零等待的 `join` |
-| 会话副本目录删除失败 [计划中] | 不分类 | 记日志,继续收尾 | 服务端日志;下次 `run` 或 `reconcile` 启动时清扫 |
-| 客户端相邻两条服务端消息的间隔超过 90 秒 [计划中] | T1 | 客户端判 `timeout` 并 abort,服务端按断连判 FAILED | 客户端的失败尝试记录 |
+| 对手位后端抛出瞬态的记忆失败 [已落地] | T1 | FAILED,不落盘 | `EndSession(role_memory_unavailable)` |
+| 对手位后端抛出确定性的记忆失败 [已落地] | T2 | FAILED,不落盘;客户端不重跑 | `EndSession(role_memory_failure)` |
+| 准入时活动加滞留会话数达上限 [已落地] | T1 | 不调工厂,以 `role_backend_unavailable` 拒绝 | 日志每分钟报一次滞留数 |
+| `episode_id` 格式不合白名单 [已落地] | T2 | 以 `invalid_session` 拒绝 | `failure_detail` 写明原因 |
+| 同 `episode_id` 已有活动会话 [已落地] | T1 | 不调工厂,以 `role_backend_unavailable` 拒绝 | 客户端的失败尝试记录 |
+| 终态 `join` 超时 [已落地] | 不分类 | 资源进滞留表,不关不删,占一个会话名额 | 滞留数每分钟一行日志;每 60 秒重试一次零等待的 `join` |
+| 会话副本目录删除失败 [已落地] | 不分类 | 记日志,继续收尾 | 服务端日志;下次 `run` 或 `reconcile` 启动时清扫 |
+| 客户端相邻两条服务端消息的间隔超过 90 秒 [已落地] | T1 | 客户端判 `timeout` 并 abort,服务端按断连判 FAILED | 客户端的失败尝试记录 |
 | 第 N+1 个并发会话 | T1 | gRPC `RESOURCE_EXHAUSTED` | 客户端看到传输错误 |
 | T1 重试耗尽 | 仍是 T1 | MindTrainer 抛 `RolloutFailedError`,训练记录与指令保持 `pending` | 无失败记录;下一次派发续训,续训次数耗尽后才升级为 T3 |
 | 点名的情境 `purpose` 不是 `training`;点名的情境或人格不在树里;点名只写了一半 [已落地] | 配置错误 | 组合根装配期退出码 2,不进派发 | 无产物,启动即退出 |
@@ -716,12 +717,12 @@ interact 会话前的准备 [已落地]。下表是派发器与组合根在起�
 | `controlplane.observe.trace` | run 目录顶层产物,含数据集清单 |
 | 读 `episodes/` 下的 yaml | 完整轮次,含双方内心推理 |
 | `read_manifest` 后 `verify_manifest` | 数据集是否完整、未被篡改 |
-| 服务端日志 | 工厂、解析器、落盘钩子的异常栈;滞留资源数每分钟一行 [计划中] |
+| 服务端日志 | 工厂、解析器、落盘钩子的异常栈;滞留资源数每分钟一行 [已落地] |
 | MindTrainer 的 `failed_attempts` | 每次失败会话的原因与次数 |
 
 ## 9. 测试策略
 
-结论:184 个用例全部在本机跑,不需要 GPU、真实模型或外网;实时测试起真实的回环 gRPC 服务端。
+结论:294 个用例全部在本机跑,不需要 GPU、真实模型或外网;实时测试起真实的回环 gRPC 服务端。
 
 | 层次 | 对象 | 替身 |
 |---|---|---|
@@ -731,19 +732,19 @@ interact 会话前的准备 [已落地]。下表是派发器与组合根在起�
 | 跨包 | 骨架桩、MindTrainer interact 轨迹源 | 同上 |
 | 单元 | `Scenario.opponent_script` 的读写兼容、按序消耗与循环 [已落地] | 无 |
 | 单元 | 点名与生成两路来源:互斥、成对、`purpose` 校验、生成后回写、重跑逐字节相同 [已落地] | 临时仓库 |
-| 单元 | SessionResources:quiesce 后 `respond` 抛 SessionClosingError;join 等到超时线程退出;close 删目录;join 超时则进滞留表、目录仍在、名额被占 [计划中] | 阻塞的假后端 |
-| 单元 | 驱动器的两个记忆失败分支:瞬态异常归 `role_memory_unavailable`,确定性异常归 `role_memory_failure`,都不落盘 [计划中] | 抛异常的假后端 |
-| 单元 | 客户端相邻两条消息的间隔超时译成 `timeout` 并 abort [计划中] | 不回消息的假服务端 |
-| 单元 | `episode_id` 白名单:非法字符、过长、`.` 与 `..` 都被拒 [计划中] | 无 |
-| 回环集成 | 服务端会话终态的三条路径(正常、超时、断开)都走 quiesce、join、close,副本目录被删 [计划中] | 端口 0 的本机服务端,可解除阻塞的假后端 |
-| 回环集成 | 准入在一把锁里:并发 `CreateSession` 不突破上限;同一 `episode_id` 的第二个会话被拒为 `role_backend_unavailable`;滞留数达上限时被拒为 `role_backend_unavailable`,滞留线程退出后名额释放 [计划中] | 端口 0 的本机服务端,可解除阻塞的假后端 |
-| 回环集成 | 落盘钩子带 `session_id`,情境被注销后仍在跑的会话落到自己的 run [计划中] | 端口 0 的本机服务端 |
+| 单元 | SessionResources:quiesce 后 `respond` 抛 SessionClosingError;join 等到超时线程退出;close 删目录;join 超时则进滞留表、目录仍在、名额被占 [已落地] | 阻塞的假后端 |
+| 单元 | 驱动器的两个记忆失败分支:瞬态异常归 `role_memory_unavailable`,确定性异常归 `role_memory_failure`,都不落盘 [已落地] | 抛异常的假后端 |
+| 单元 | 客户端相邻两条消息的间隔超时译成 `timeout` 并 abort [已落地] | 不回消息的假服务端 |
+| 单元 | `episode_id` 白名单:非法字符、过长、`.` 与 `..` 都被拒 [已落地] | 无 |
+| 回环集成 | 服务端会话终态的三条路径(正常、超时、断开)都走 quiesce、join、close,副本目录被删 [已落地] | 端口 0 的本机服务端,可解除阻塞的假后端 |
+| 回环集成 | 准入在一把锁里:并发 `CreateSession` 不突破上限;同一 `episode_id` 的第二个会话被拒为 `role_backend_unavailable`;滞留数达上限时被拒为 `role_backend_unavailable`,滞留线程退出后名额释放 [已落地] | 端口 0 的本机服务端,可解除阻塞的假后端 |
+| 回环集成 | 落盘钩子带 `session_id`,情境被注销后仍在跑的会话落到自己的 run [已落地] | 端口 0 的本机服务端 |
 | 回环集成 | 三类对手驱动各一条;外部 API 客户端的成功、超时、4xx、429 与 5xx 与连不上、形状不对、缺凭证只报变量名;真实服务端对着慢桩收尾为 `role_backend_timeout`、对着 404 桩收尾为 `role_backend_rejected`、对着 429 与 5xx 桩及关着的端口收尾为 `role_backend_unavailable`、对着坏回复桩收尾为 `role_backend_failure` [已落地] | 端口 0 的本机服务端,本地 HTTP 替身 |
 
 | 测试文件 | 用例数 | 状态 |
 |---|---|---|
-| `tests/test_sim_datamodel.py` | 10 | [已落地] |
-| `tests/test_sim_backends.py` | 5 | [已落地] |
+| `tests/test_sim_datamodel.py` | 12 | [已落地] |
+| `tests/test_sim_backends.py` | 8 | [已落地] |
 | `tests/test_sim_generators.py` | 5 | [已落地] |
 | `tests/test_sim_runner.py` | 6 | [已落地] |
 | `tests/test_runner_stop_predicate.py` | 4 | [已落地] |
@@ -752,29 +753,31 @@ interact 会话前的准备 [已落地]。下表是派发器与组合根在起�
 | `tests/test_sim_dataset.py` | 24 | [已落地] |
 | `tests/test_sim_integration.py` | 2 | [已落地] |
 | `tests/test_realtime_session.py` | 7 | [已落地] |
-| `tests/test_realtime_validation.py` | 8 | [已落地] |
+| `tests/test_realtime_validation.py` | 26 | [已落地] |
 | `tests/test_realtime_codec.py` | 7 | [已落地] |
 | `tests/test_realtime_proto_smoke.py` | 3 | [已落地] |
 | `tests/test_realtime_backend.py` | 8 | [已落地] |
 | `tests/test_realtime_backend_timeout.py` | 4 | [已落地] |
 | `tests/test_realtime_runner_on_turn.py` | 5 | [已落地] |
-| `tests/test_realtime_driver.py` | 8 | [已落地] |
+| `tests/test_realtime_driver.py` | 12 | [已落地] |
 | `tests/test_realtime_servicer_e2e.py` | 7 | [已落地] |
-| `tests/test_realtime_servicer_limits.py` | 25 | [已落地] |
+| `tests/test_realtime_servicer_limits.py` | 28 | [已落地] |
 | `tests/test_realtime_client.py` | 2 | [已落地] |
 | `tests/test_realtime_client_order.py` | 5 | [已落地] |
 | `tests/test_realtime_client_abort.py` | 7 | [已落地] |
-| `tests/test_realtime_client_transport.py` | 6 | [已落地] |
+| `tests/test_realtime_client_transport.py` | 22 | [已落地] |
 | `tests/test_realtime_persistence.py` | 1 | [已落地] |
 | `tests/test_realtime_proto_submit_trace.py` | 5 | [已落地] |
 | `tests/test_runner_activation_trace.py` | 10 | [已落地] |
 | `tests/test_realtime_activation_trace.py` | 11 | [已落地] |
+| `tests/test_realtime_session_resources.py` | 39 | [已落地] |
+| `tests/test_realtime_resources.py` | 14 | [已落地] |
 
-合计:批量侧 76 个,实时侧 119 个。不依赖的外部服务:GPU、ROLL、vLLM、任何外部模型 API、网络。
+合计:批量侧 81 个,实时侧 213 个。不依赖的外部服务:GPU、ROLL、vLLM、任何外部模型 API、网络。
 
 ## 10. 现状、局限与未核实项
 
-结论:批量与实时两条路径、激活轨迹都已落地并有测试;外部生成后端与按目标维度生成是空白;场景二接通需要的两路来源与对手三驱动也已落地并有测试;外部 API 对手的单次调用超时已归 `role_backend_timeout`(整条重跑),非 200 分三类:4xx 归 `role_backend_rejected`(T2,不重跑)、429 与 5xx 与连不上归 `role_backend_unavailable`(T1,按条重跑)、形状不对归 `role_backend_failure`,处理链都有测试钉住 [已落地];会话资源与会话身份是 [计划中],含资源对象、有序收尾、准入与滞留、逻辑 episode id、两个记忆失败原因、客户端逐轮限时。
+结论:批量与实时两条路径、激活轨迹都已落地并有测试;外部生成后端与按目标维度生成是空白;场景二接通需要的两路来源与对手三驱动也已落地并有测试;外部 API 对手的单次调用超时已归 `role_backend_timeout`(整条重跑),非 200 分三类:4xx 归 `role_backend_rejected`(T2,不重跑)、429 与 5xx 与连不上归 `role_backend_unavailable`(T1,按条重跑)、形状不对归 `role_backend_failure`,处理链都有测试钉住 [已落地];会话资源与会话身份 [已落地],含资源对象、有序收尾、准入与滞留、逻辑 episode id、两个记忆失败原因、客户端逐轮限时;要真机或真端点才能核实的几项仍是 [计划中],见下面的未核实项。
 
 | 能力 | 状态 | 说明 |
 |---|---|---|
@@ -789,11 +792,11 @@ interact 会话前的准备 [已落地]。下表是派发器与组合根在起�
 | interact 情境与人格的两路来源 | [已落地] | 点名或按种子生成,不混用;点名情境 `purpose` 必须是 `training` |
 | 对手位三种驱动 | [已落地] | 固定对话、站内 vLLM、外部 OpenAI 兼容 API;不传 `--interact` 时闭环只有全局罐头台词一种 |
 | `Scenario` 的可选字段 `opponent_script` | [已落地] | 旧产物与既有哈希不变 |
-| 会话资源 SessionResources 与有序收尾 | [计划中] | 工厂造、servicer 持有;终态 quiesce、join(60 秒)、close |
-| 准入同锁、滞留表、启动清扫 | [计划中] | 活动加滞留不超过 `max_workers`;滞留数每分钟一行日志;清扫只删记忆根目录下 `runs/` 的子目录 |
-| `CreateSession.episode_id` 与白名单 | [计划中] | 落盘 episode 用逻辑 id;同 id 活动唯一,撞上判 `role_backend_unavailable`(T1) |
-| 两个记忆失败终止原因 | [计划中] | `role_memory_unavailable`(T1)、`role_memory_failure`(T2) |
-| 客户端相邻两条消息的等待上限 90 秒;`--interact` 的 `turn_timeout_s` 改传 90 秒 | [计划中] | 超时译成 `timeout`(T1) |
+| 会话资源 SessionResources 与有序收尾 | [已落地] | 工厂造、servicer 持有;终态 quiesce、join(60 秒)、close |
+| 准入同锁、滞留表、启动清扫 | [已落地] | 活动加滞留不超过 `max_workers`;滞留数每分钟一行日志;清扫只删记忆根目录下 `runs/` 的子项 |
+| `CreateSession.episode_id` 与白名单 | [已落地] | 落盘 episode 用逻辑 id;同 id 活动唯一,撞上判 `role_backend_unavailable`(T1) |
+| 两个记忆失败终止原因 | [已落地] | `role_memory_unavailable`(T1)、`role_memory_failure`(T2) |
+| 客户端相邻两条消息的等待上限 90 秒;`--interact` 的 `turn_timeout_s` 传 90 秒 | [已落地] | 超时译成 `timeout`(T1) |
 
 | 局限 | 影响 | 缓解 |
 |---|---|---|
@@ -804,7 +807,7 @@ interact 会话前的准备 [已落地]。下表是派发器与组合根在起�
 | 产物的 `created_at` 是写死的常量 | 不能据此判断真实生成时间 | 以 git 提交时间为准 |
 | 每条 episode 一次 git 提交 | 本机实测一次写入约 40 毫秒,单阶段 1024 条约 40 秒且阻塞循环;万条级数据集要数小时并撑大仓库 | V1 保持并如实写明;接真实训练之前改成分片文件加引用,清单引用分片 [推迟] |
 | 服务端无鉴权、无 TLS,只绑本机 | 不能跨机部署 | 跨机前补安全层 |
-| 超时的后端调用不能强杀 | 慢后端持续占线程 | 按会话上限 16 控制总量;等不到退出的资源滞留并占名额,线程总数有上界;挂死的后端靠重启进程释放 [计划中] |
+| 超时的后端调用不能强杀 | 慢后端持续占线程 | 按会话上限 16 控制总量;等不到退出的资源滞留并占名额,线程总数有上界;挂死的后端靠重启进程释放 [已落地] |
 | 不传 `--interact` 时,闭环里对手位只有一种驱动:`AgentRuntime._backends` 给全局罐头台词 | 对手不能按情境区分,也接不了真实模型;被训模型只对付一个固定对手 | 三种驱动与 `opponent_script` 随 `--interact` 落地 [已落地] |
 
 | 未核实项 | 影响 | 核实办法 |
@@ -840,6 +843,6 @@ interact 会话前的准备 [已落地]。下表是派发器与组合根在起�
 | 点名路、生成路 | interact 情境与人格的两种来源:配置点名树里已有的,或按种子生成 [已落地] |
 | 对手驱动 | 对手位后端的三种实现:固定对话、站内 vLLM、外部 OpenAI 兼容 API [已落地] |
 | 情境剧本 | `Scenario` 的可选字段 `opponent_script`,情境自带的对手固定台词 [已落地] |
-| 会话资源 | SessionResources,一条会话的全部对手位后端、在途线程与要清理的目录,由工厂造、servicer 持有 [计划中] |
-| 滞留 | 终态 `join` 等不到在途线程退出时,资源整个保留在滞留表里,不关不删并继续占一个会话名额 [计划中] |
-| 逻辑 episode id | 客户端定的 episode 身份,重试不变,经 `CreateSession.episode_id` 传给服务端并作落盘 episode 的 id;区别于每次重试都新生成的 `session_id` [计划中] |
+| 会话资源 | SessionResources,一条会话的全部对手位后端、在途线程与要清理的目录,由工厂造、servicer 持有 [已落地] |
+| 滞留 | 终态 `join` 等不到在途线程退出时,资源整个保留在滞留表里,不关不删并继续占一个会话名额 [已落地] |
+| 逻辑 episode id | 客户端定的 episode 身份,重试不变,经 `CreateSession.episode_id` 传给服务端并作落盘 episode 的 id;区别于每次重试都新生成的 `session_id` [已落地] |
