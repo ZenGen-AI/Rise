@@ -51,27 +51,13 @@ def admit_store(tmp_path):
     return s
 
 
-def _spy_restores(mem, monkeypatch):
-    """记下每次 restore_from 之前人格库的摘要和它返回的摘要。此时端口都已关,库静止,读摘要安全。"""
-    calls = []
-    real = mem.store.restore_from
-
-    def spy(persona_id, path):
-        before = mem.store.digest(persona_id)
-        after = real(persona_id, path)
-        calls.append((before, after))
-        return after
-
-    monkeypatch.setattr(mem.store, "restore_from", spy)
-    return calls
-
-
-def _pending_in_copy(path: Path) -> list[str]:
-    """起点副本里还有哪些 pending 行。副本是提交点,字节不能变:拷出来再开。"""
+def _pending_in_copy(path: Path, persona_id: str) -> list[str]:
+    """库文件(或起点副本)里还有哪些 pending 行,与 `pending_events` 同一个 agent。副本是提交点,
+    字节不能变:拷出来再开。"""
     with tempfile.TemporaryDirectory() as tmp:
         copy = Path(tmp) / "peek.db"
         copy_library(path, copy)
-        memory = starling.Memory.open(str(copy), agent="peek")
+        memory = starling.Memory.open(str(copy), agent=persona_id)
         try:
             return [p.key for p in memory.pending_events()]
         finally:
@@ -90,50 +76,69 @@ class _StartProbe:
         self.seen.append({
             "eid": eid, "digest": by_persona["pa"],
             "library_pending": self._mem.store.pending_events("pa"),
-            "snapshot_pending": _pending_in_copy(self._mem.layout.snapshot(ROUND, eid, "pa")),
+            "snapshot_pending": _pending_in_copy(self._mem.layout.snapshot(ROUND, eid, "pa"), "pa"),
         })
 
 
 # ---------------- 部署驱动器(替身用例:tests/test_ma_deployment.py) ----------------
 
-@pytest.mark.parametrize("how", ["retries_exhausted", "crash"])
-def test_a_retry_rolls_the_library_back_to_the_same_digest(store, mem, monkeypatch, how):
-    """第一次尝试写了记忆、库摘要已变;失败后 restore_from 起点副本,重试或重入从与第一次相同的起点开始。
-    替身:test_exhausted_transient_retries_leave_the_library_at_the_start、
-    test_a_crash_mid_episode_is_rerun_from_the_restored_start。"""
+def _record_restores(mem, monkeypatch):
+    """记下每次 restore_from 之前人格库的摘要,用来证明回滚前库里确实有这次尝试写的记忆。
+    此时端口都已关,库静止,读摘要安全。不数调用次数。"""
+    before_restore = []
+    real = mem.store.restore_from
+
+    def spy(persona_id, path):
+        before_restore.append(mem.store.digest(persona_id))
+        return real(persona_id, path)
+
+    monkeypatch.setattr(mem.store, "restore_from", spy)
+    return before_restore
+
+
+def test_a_retry_rolls_the_library_back_to_the_same_digest(store, mem, monkeypatch):
+    """两次尝试都写了记忆后失败:每次失败之后 restore_from 起点副本,用尽重试时库停在起点;重入后的两次尝试
+    仍从同一个起点开始。替身:test_exhausted_transient_retries_leave_the_library_at_the_start。"""
     digests = {}
-    restores = _spy_restores(mem, monkeypatch)
-    if how == "retries_exhausted":
-        with pytest.raises(DeploymentFailedError) as info:
-            _run(store, _Factory({"end_reason": "timeout"}, {"end_reason": "timeout"}), mem, digests=digests)
-        assert info.value.transient and info.value.attempts == 2
-        start = digests[EID]["pa"]
-        assert len(restores) == 2                                      # 每次失败的尝试之后各回滚一次
-        assert all(before != start and after == start for before, after in restores)    # 回滚前确实写过记忆
-        assert mem.store.digest("pa") == start                         # 用尽重试后库停在起点
-    else:
-        class Crash(Exception):
-            pass
-
-        class Crashing(_FakeClient):
-            def submit_turn(self, *a, **kw):
-                raise Crash()
-
-        with pytest.raises(Crash):
-            _run(store, lambda **kw: Crashing(), mem, digests=digests)
-        start = digests[EID]["pa"]
-        assert restores == []                                          # 崩溃不走尝试间回滚
-        assert mem.store.digest("pa") != start                         # 半截记忆已写进部署库
+    before_restore = _record_restores(mem, monkeypatch)
+    with pytest.raises(DeploymentFailedError) as info:
+        _run(store, _Factory({"end_reason": "timeout"}, {"end_reason": "timeout"}), mem, digests=digests)
+    assert info.value.transient and info.value.attempts == 2
+    start = digests[EID]["pa"]
+    assert before_restore and all(d != start for d in before_restore)  # 回滚前库里确实有这次尝试写的记忆
+    assert mem.store.digest("pa") == start                             # 用尽重试后库停在起点
     assert mem.layout.snapshot(ROUND, EID, "pa").exists()              # 在途:留给重入或轮次回滚
-    n = len(restores)
     f = _Factory({"end_reason": "timeout"}, {})                        # 重入后第一次尝试再失败一次,第二次成功
     (ep,) = _run(store, f, mem, digests=digests)
     assert ep.id == EID and len(f.clients) == 2
-    assert [after for _, after in restores[n:]] == [start, start]      # 重入先覆盖,失败的尝试后再回滚
-    assert (restores[n][0] == start) == (how == "retries_exhausted")   # 用尽重试时库本来就在起点;崩溃时是半截记忆
     assert [c.traces[0]["memory"]["digest_before"] for c in f.clients] == [start, start]   # 两次尝试同一起点
     assert not mem.layout.snapshot(ROUND, EID, "pa").exists()          # 删起点副本 = 提交
     assert mem.store.digest("pa") != start                             # 提交了的记忆留在库里
+
+
+def test_a_crash_mid_episode_is_rerun_from_the_restored_start(store, mem):
+    """崩在 episode 中途:半截记忆已写进部署库、起点副本还在;重入先覆盖回起点,换了开场白后同一个 KEY0
+    带新文本不冲突(崩溃遗留的是已提交的旧文本行)。替身:test_a_crash_mid_episode_is_rerun_from_the_restored_start。"""
+    digests = {}
+
+    class Crash(Exception):
+        pass
+
+    class Crashing(_FakeClient):
+        def submit_turn(self, *a, **kw):
+            raise Crash()
+
+    with pytest.raises(Crash):
+        _run(store, lambda **kw: Crashing(), mem, digests=digests)
+    start = digests[EID]["pa"]
+    assert mem.layout.snapshot(ROUND, EID, "pa").exists()
+    assert mem.store.digest("pa") != start                             # 半截记忆已写进部署库
+    f = _Factory({"opening": "我换个说法"})
+    (ep,) = _run(store, f, mem, digests=digests)                       # 重入:先覆盖、核对摘要、再重跑
+    assert len(f.clients) == 1 and ep.id == EID
+    assert f.clients[0].traces[0]["memory"]["digest_before"] == start  # 重跑从起点开始
+    assert not mem.layout.snapshot(ROUND, EID, "pa").exists()
+    assert not mem.store.remember_event("pa", KEY0, "pb：我换个说法", interlocutor="pb").failed
 
 
 def test_a_pending_row_from_a_failed_attempt_does_not_conflict_on_the_retry(store, mem):
@@ -166,7 +171,7 @@ def test_the_second_round_reuses_the_episode_id_but_not_the_event_keys(store, me
     assert mem.fake.chat_calls == calls                                # 第二轮的行也是 committed 的
 
 
-def test_no_pending_rows_survive_an_episode_and_the_next_start_snapshot_is_clean(store, mem, monkeypatch):
+def test_no_pending_rows_survive_an_episode_and_the_next_start_snapshot_is_clean(store, mem, monkeypatch, tmp_path):
     """episodes_per_scenario=2:两条 episode 各有一个事件抽取失败、留 pending 行,episode 提交时驱动器放弃它们。
     第二条开始时部署库与它的起点副本里都没有 pending 行;全部结束后仍没有,两份起点副本都已删。
     替身没有同名用例。"""
@@ -176,14 +181,16 @@ def test_no_pending_rows_survive_an_episode_and_the_next_start_snapshot_is_clean
     real = mem.store.abandon_event
 
     def spy(persona_id, key):
-        abandoned.append((key, mem.store.pending_events(persona_id)))
+        copy = tmp_path / f"before-abandon-{len(abandoned)}.db"
+        copy_library(mem.layout.root / "deploy" / f"{persona_id}.db", copy)   # 端口都已关,库静止
+        abandoned.append((key, mem.store.pending_events(persona_id), _pending_in_copy(copy, persona_id)))
         real(persona_id, key)
 
     monkeypatch.setattr(mem.store, "abandon_event", spy)
     probe = _StartProbe(mem)
     eps = _run(store, _Factory(), mem, started=probe, episodes_per_scenario=2)
     assert [e.id for e in eps] == [EID, EID2]
-    assert abandoned == [(KEY0, [KEY0]), (key2, [key2])]               # 确有 pending 行,每条在提交时只放弃自己的
+    assert abandoned == [(KEY0, [KEY0], [KEY0]), (key2, [key2], [key2])]   # 确有 pending 行,每条在提交时只放弃自己的;探针读得到
     first, second = probe.seen
     assert (first["eid"], second["eid"]) == (EID, EID2)
     assert first["library_pending"] == second["library_pending"] == []

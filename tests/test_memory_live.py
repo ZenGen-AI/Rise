@@ -30,18 +30,30 @@ def live_port(tmp_path):
     port.close()
 
 
+def _timed(took, name, call):
+    """只给 call 本身计时,返回它的返回值;断言放在计时之外。"""
+    t0 = time.monotonic()
+    result = call()
+    took[name].append(time.monotonic() - t0)
+    return result
+
+
 def test_ten_turns_stay_within_the_per_call_budget(live_port, capsys):
     from actio.memory_port import MemoryEvent
     port, limit = live_port
     took = {"recall": [], "remember": [], "embed_pending": []}
+    embedded = 0
     for i, text in enumerate(TURNS):
-        for name, call in (("recall", lambda: port.recall(text, limit=3)),
-                           ("remember", lambda: port.remember(MemoryEvent(f"live#{i}", text, "pb"))),
-                           ("embed_pending", port.embed_pending)):
-            t0 = time.monotonic(); call(); took[name].append(time.monotonic() - t0)
+        hits = _timed(took, "recall", lambda: port.recall(text, limit=3))
+        out = _timed(took, "remember", lambda: port.remember(MemoryEvent(f"live#{i}", text, "pb")))
+        embedded += _timed(took, "embed_pending", port.embed_pending)
+        assert not out.failed, f"turn {i}: remember failed, category={out.category}"
+        if i >= 1:                                     # 第一轮之后已经 remember 并 embed_pending 过,库里有可召回的语句
+            assert hits, f"turn {i}: recall returned nothing"
     with capsys.disabled():
         for name, xs in took.items():
             print(f"{name}: max {max(xs):.2f}s median {statistics.median(xs):.2f}s")
+    assert embedded > 0, "no statement was embedded in ten turns"
     assert max(took["recall"]) <= limit and max(took["embed_pending"]) <= limit
     assert max(took["remember"]) <= 3 * limit          # 三段抽取,每段至多一个 timeout_ms(6.4 节)
 
@@ -49,8 +61,10 @@ def test_ten_turns_stay_within_the_per_call_budget(live_port, capsys):
 def test_recall_brings_back_the_related_sentence(live_port):
     from actio.memory_port import MemoryEvent
     port, _ = live_port
-    port.remember(MemoryEvent("q#0", "pb：我负责鉴权模块", "pb"))
-    port.remember(MemoryEvent("q#1", "pb：明天下雨", "pb"))
-    port.embed_pending()
+    first = port.remember(MemoryEvent("q#0", "pb：我负责鉴权模块", "pb"))
+    second = port.remember(MemoryEvent("q#1", "pb：明天下雨", "pb"))
+    assert not first.failed, f"remember q#0 failed, category={first.category}"
+    assert not second.failed, f"remember q#1 failed, category={second.category}"
+    assert port.embed_pending() >= 1
     hits = port.recall("谁负责鉴权", limit=1)
     assert hits and "鉴权" in hits[0].text
