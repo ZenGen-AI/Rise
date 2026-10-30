@@ -247,9 +247,14 @@ def _require_library_file(path: Path, method: str) -> None:
         raise MemoryFailureError(f"{method}: not a library file", transient=False)
 
 
-def _copy_library(src: Path, dst: Path) -> None:
+def copy_library(src: Path, dst: Path) -> None:
     """把库文件连同同名 -wal(有的话)拷到 dst。端口开着、WAL 没合并时,写入还在 -wal 里,只拷主文件
-    算出的摘要会漏掉它们。-shm 不拷:它是 WAL 的索引,打开时由 -wal 重建。"""
+    算出的摘要会漏掉它们。-shm 不拷:它是 WAL 的索引,打开时由 -wal 重建。
+
+    公开名:`library_digest`、`restore_from` 用它,训练路的副本(`factory.memory_runtime.TrainingCopies`)
+    也用它从种子取起点。取副本用文件复制而不用 `backup_to`:`backup_to` 要先打开源库,`Memory.open` 会建
+    -wal、-shm 并跑迁移,种子目录与文件是只读时失败;文件复制只读源,两种权限下摘要都等于 `library_digest`
+    给的起点摘要。**源必须静止**(没有连接在写它),约束同 `library_digest`。"""
     shutil.copyfile(src, dst)
     wal = _sidecar(src, "-wal")
     if wal.exists():
@@ -296,7 +301,7 @@ def library_digest(path: Path, *, close_timeout_s: float = 60.0) -> str:
     _require_library_file(path, "digest_of")
     with _translated(), tempfile.TemporaryDirectory() as tmp:
         copy = Path(tmp) / "library.db"
-        _copy_library(path, copy)
+        copy_library(path, copy)
         with _short_connection(copy, agent="digest", close_timeout_s=close_timeout_s) as memory:
             return memory.digest()
 
@@ -463,7 +468,7 @@ class StarlingDeploymentStore:
         _require_library_file(path, "restore_from")
         with _translated(), tempfile.TemporaryDirectory() as tmp:
             copy = Path(tmp) / "source.db"
-            _copy_library(path, copy)
+            copy_library(path, copy)
             partial = _sidecar(library, ".restore-partial")
             with self._short(copy, agent=persona_id) as memory:
                 digest = memory.digest()             # 坏备份在这里抛:根目录与库都还没动

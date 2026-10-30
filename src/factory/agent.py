@@ -16,6 +16,7 @@ import threading
 from collections import deque
 from collections.abc import Callable
 from dataclasses import fields
+from typing import TYPE_CHECKING
 
 import grpc
 
@@ -35,6 +36,9 @@ from simulator.realtime.proto import realtime_env_pb2_grpc as pb2_grpc
 from simulator.realtime.resources import SessionInfo, SessionResources
 from simulator.realtime.server import create_server
 from simulator.store_adapter import read_persona, read_scenario, write_episode
+
+if TYPE_CHECKING:       # 只给类型注解用:运行时不导入 factory.memory_runtime 里要用 Starling 的那部分
+    from factory.memory_runtime import TrainingCopies
 
 logger = logging.getLogger(__name__)
 
@@ -123,8 +127,9 @@ class DeadlineStub:
 
 class AgentRuntime:
     """进程内的 loopback 实时服务端,第一次 client_factory() 时才启动;close() 关通道、停服务端并等它停完。
-    对手位的底座后端按各自绑定的驱动分派(见 _backends),再一律包成带记忆的 Actio 实例(每个位一份各自的空 TupleMemory,
-    外套记忆异常的转换后端);情境从树里读(scenario_resolver)。
+    对手位的底座后端按各自绑定的驱动分派(见 _backends),再一律包成带记忆的 Actio 实例(每个位一份各自的记忆,
+    外套记忆异常的转换后端):替身是空 TupleMemory;传了 training_copies 且会话登记给了训练 run 时,是从种子复制的
+    Starling 私有副本(终态即删,见 _backends);情境从树里读(scenario_resolver)。
     每条 Interact 流带 deadline(DeadlineStub);流 deadline 可由调用方逐个给(client_factory(deadline_s=...)),
     interact_deadline_s 只是没给时的缺省。message_timeout_s 是客户端相邻两条服务端消息的最长间隔,运行时级,
     给每个客户端(None 即不设,与过去相同)。stub_factory 只为测试注入。
@@ -148,7 +153,8 @@ class AgentRuntime:
                  interact_deadline_s: float = INTERACT_DEADLINE_S,
                  message_timeout_s: float | None = None,
                  stub_factory=pb2_grpc.EnvironmentServiceStub,
-                 opponent_backend_factory: Callable[[RoleBinding, Scenario], ModelBackend] | None = None) -> None:
+                 opponent_backend_factory: Callable[[RoleBinding, Scenario], ModelBackend] | None = None,
+                 training_copies: TrainingCopies | None = None) -> None:
         # 与 EnvironmentServiceClient 同一判法,在这里先判:否则要到第一次 client_factory() 才抛,那时 channel 已造好、
         # 还没进 _channels,每次失败漏一个
         if message_timeout_s is not None and not (
@@ -165,6 +171,7 @@ class AgentRuntime:
         self._message_timeout = message_timeout_s
         self._stub_factory = stub_factory
         self._opponent_backend_factory = opponent_backend_factory
+        self._training_copies = training_copies
         self._server = None
         # (客户端, 通道) 成对记下:会话结束的客户端,通道在下一次发客户端时关掉(见 client_factory)
         self._channels: list = []
@@ -250,10 +257,15 @@ class AgentRuntime:
         其余会话(没传工厂,或没登记):显式 scripted 同上,别的一律是原来的 ScriptedBackend(不循环,全局台词),
         不碰工厂、不调 driver_for。
 
-        上面得到的只是底座。每个对手位的底座都再包成带记忆的 Actio 实例(memory_role_backend):每个位一份各自的空
-        TupleMemory(替身没有种子,训练会话的起点就是空库,与部署会话同一写法),情境对话方取自绑定表
-        (槽位 -> 角色卡 id)。对话台词不变,每轮多一份 v2 轨迹。closers 依次是每个已造后端的 close、最后是删路由;
-        造到一半抛异常时,先关已造好的后端(关失败只记类名)、再删路由、原样重抛。
+        上面得到的只是底座。每个对手位的底座都再包成带记忆的 Actio 实例(memory_role_backend):每个位一份各自的
+        记忆,情境对话方取自绑定表(槽位 -> 角色卡 id)。对话台词不变,每轮多一份 v2 轨迹。记忆有两种:
+        - 默认(没传 training_copies,或会话没登记给训练 run,即部署会话):一份空 TupleMemory,与部署会话同一写法。
+          closers 依次是每个已造后端的 close、最后(登记过时)是删路由;
+        - 会话登记给了训练 run 且传了 training_copies:该位绑定人格的 Starling 私有副本(从 run 的种子复制,
+          按会话一个目录)。closers 是 (release_all, 删路由):release_all 关掉所有端口,全部关上才删会话的副本目录
+          (有端口关不上,说明 Starling 还有在途调用,目录留给下次启动的清扫);它抛的异常由 SessionResources.close
+          记 warning 吞掉。run 还没 bind 种子(seed_of 抛 KeyError)按造后端失败处理。
+        造到一半抛异常时,先关已造好的后端并(训练路)删副本目录,关失败只记类名;再删路由、原样重抛。
 
         落盘路由:情境 id 已登记时,在读登记表的同一次持 _lock 里(再取 _routes_lock)记 session_id -> run id,
         "删这条"放进资源的 closers,随会话资源一起关;造后端抛异常时先删再把原异常抛出去(工厂不留半开状态)。
@@ -270,9 +282,14 @@ class AgentRuntime:
                 self._session_runs.pop(info.session_id, None)
 
         judged = run_id is not None and self._opponent_backend_factory is not None
+        copies = self._training_copies if run_id is not None else None
         interlocutors = {b.slot_id: b.persona_id for b in assignment.bindings}
         backends: dict[str, MemoryTranslatingBackend] = {}
+        orphans: list[object] = []     # 副本已开、还没包成后端就失败的端口:收尾时同样要关
+        session_dir = None
         try:
+            if copies is not None:
+                session_dir = copies.session_dir(run_id, info.session_id)    # 会话 id 不合法在这里抛,走下面的失败收尾
             for binding in assignment.bindings:
                 slot = binding.slot_id
                 if slot == client_slot:
@@ -284,17 +301,37 @@ class AgentRuntime:
                     base = self._opponent_backend_factory(binding, scenario)
                 else:
                     base = ScriptedBackend({slot: list(self._lines)})
-                backends[slot] = memory_role_backend(
-                    base, memory=TupleMemory(), episode_id=info.episode_id, interlocutors=interlocutors,
-                )
-        except Exception:
-            for built in backends.values():
+                if copies is None:
+                    memory = TupleMemory()
+                else:
+                    memory = copies.open_session_copy(run_id, info.session_id, slot, binding.persona_id)
                 try:
-                    built.close()
+                    backends[slot] = memory_role_backend(
+                        base, memory=memory, episode_id=info.episode_id, interlocutors=interlocutors,
+                    )
+                except BaseException:
+                    if copies is not None:
+                        orphans.append(memory)
+                    raise
+        except Exception:
+            if copies is None:
+                for built in backends.values():
+                    try:
+                        built.close()
+                    except Exception as exc:
+                        logger.warning("opponent backend close failed: %s", type(exc).__name__)
+            elif session_dir is not None:
+                try:
+                    copies.release([*backends.values(), *orphans], session_dir)
                 except Exception as exc:
                     logger.warning("opponent backend close failed: %s", type(exc).__name__)
             drop()
             raise
+        if copies is not None:
+            def release_all() -> None:
+                copies.release(list(backends.values()), session_dir)
+
+            return SessionResources(backends=backends, closers=(release_all, drop))
         closers = tuple(built.close for built in backends.values())
         return SessionResources(backends=backends, closers=(*closers, drop) if run_id is not None else closers)
 

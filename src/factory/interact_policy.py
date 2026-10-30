@@ -36,6 +36,7 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, ExitStack, contextmanager
+from typing import TYPE_CHECKING
 
 from actio.memory import TupleMemory
 from compute.client import ComputeClient
@@ -69,6 +70,9 @@ from simulator.backends import ModelBackend, ScriptedBackend
 from simulator.datamodel import RoleBinding, Scenario
 from simulator.store_adapter import read_scenario
 from trainscheduler.config import load_training_defaults
+
+if TYPE_CHECKING:       # 只给类型注解用:运行时不导入 factory.memory_runtime,没装 Starling 时本模块照常可用
+    from factory.memory_runtime import TrainingCopies
 
 TRAINED_ADAPTER = "trained"          # 训练位在 vLLM 服务里的适配器名;站内对手的适配器名就是它的 model_ref
 OPPONENT_TIMEOUT_S = 25.0            # 对手发言的 HTTP 上限,低于服务端后端调用上限 60 秒:25 秒加一轮记忆最坏 20 秒
@@ -288,12 +292,15 @@ def make_policy_factory(
     serve: Callable[..., object] | None = None,
     policy_timeout_s: float = POLICY_TIMEOUT_S,
     opponent_timeout_s: float = OPPONENT_TIMEOUT_S,
+    training_copies: TrainingCopies | None = None,
 ) -> Callable[[str, TrainingConfig], AbstractContextManager[PolicyForRollout]]:
     """派发器要的 `policy_factory(run_id, cfg)`。serve 可注入,测试里不连 SSH。
     上下文交出的是 `policy_for_rollout(episode_id)`,不是后端:轨迹源每条 rollout 进出一次,拿到该条 rollout 自己的、
     包着同一个 `VllmPolicy` 的 Actio 实例。
     外部对手的地址与模型不在这里传:每次进入上下文时从 `store` 里的 training_defaults.yaml 读(见 _opponent_section)。
-    opponent_timeout_s 同时是站内 vLLM 对手与外部 API 对手的单次 HTTP 上限。"""
+    opponent_timeout_s 同时是站内 vLLM 对手与外部 API 对手的单次 HTTP 上限。
+    training_copies 非 None(Starling)时:进入上下文先 bind(run_id, 种子),退出时在注销情境之后 unbind;
+    训练位每条 rollout 一份从种子复制的私有副本,退出即删(见 policy_for_rollout)。None(替身)时与过去相同。"""
 
     @contextmanager
     def scope(run_id: str, cfg: TrainingConfig) -> Iterator[PolicyForRollout]:
@@ -340,18 +347,39 @@ def make_policy_factory(
                 @contextmanager
                 def policy_for_rollout(episode_id: str) -> Iterator[MemoryTranslatingBackend]:
                     # 训练位与对手位同一写法:底座(VllmPolicy 有 respond_guided,不套 IgnoreGuidance)外面包带记忆的
-                    # Actio 实例。替身没有种子,"从起点出发"的副本就是每条 rollout 一份新的空 TupleMemory。
-                    # close() 抛的 FactoryMemoryFailureError 不接:它是 RoleMemoryFailureError 的子类,
-                    # 穿出轨迹源后由编排器写 failed、派发器判 T2。
-                    backend = memory_role_backend(
-                        policy, memory=TupleMemory(), episode_id=episode_id, interlocutors=interlocutors,
-                    )
+                    # Actio 实例。"从起点出发"的副本:替身是每条 rollout 一份新的空 TupleMemory;Starling 是每条
+                    # rollout 一份从种子复制的私有库(open_client_copy,同名目录先删后建,重试也从起点出发)。
+                    # 退出时(正常、异常都一样)替身 close 实例;Starling 由 release 关端口、全关上才删目录。
+                    # 两路 close 抛的 FactoryMemoryFailureError 都不接:它是 RoleMemoryFailureError 的子类,
+                    # 穿出轨迹源后由编排器写 failed、派发器判 T2。release 关不上时目录留给下次启动的清扫。
+                    if training_copies is None:
+                        memory = TupleMemory()
+                    else:
+                        memory = training_copies.open_client_copy(
+                            run_id, episode_id, cfg.trained_slot, interlocutors[cfg.trained_slot])
+                    try:
+                        backend = memory_role_backend(
+                            policy, memory=memory, episode_id=episode_id, interlocutors=interlocutors,
+                        )
+                    except BaseException:
+                        if training_copies is not None:
+                            # 端口已开、实例没造成:关上并删目录,别留一个开着的库;release 的失败不盖掉原异常
+                            try:
+                                training_copies.release([memory], training_copies.client_dir(run_id, episode_id))
+                            except Exception:
+                                pass        # release 已记 warning,目录留给清扫
+                        raise
                     try:
                         yield backend
                     finally:
-                        backend.close()
+                        if training_copies is None:
+                            backend.close()
+                        else:
+                            training_copies.release([backend], training_copies.client_dir(run_id, episode_id))
 
                 registered: list[str] = []
+                if training_copies is not None:
+                    training_copies.bind(run_id, cfg.memory["seed"])      # 先绑定再登记:会话一开就要查种子
                 try:
                     # 先登记再放行第一个会话
                     for sid in cfg.scenario_ids:
@@ -374,6 +402,8 @@ def make_policy_factory(
                 finally:
                     for sid in registered:
                         runtime.unregister_session(sid)
+                    if training_copies is not None:
+                        training_copies.unbind(run_id)
         except ServeStopError as exc:
             # 进入、训练中、退出时冒出来都在这里:各 finally 与服务上下文已经展开完,没有清理被跳过
             raise _stuck_service(run_id, exc) from exc

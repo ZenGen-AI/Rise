@@ -625,7 +625,7 @@ def test_a_deterministic_compute_error_fails_the_directive(world, tmp_path, fake
 
 # ---- 策略上下文本身:登记、deadline、清理、撞车 ----
 
-def _unit(store, tmp_path, stub, *, serve=None, opponent=None, env=None, runtime=None):
+def _unit(store, tmp_path, stub, *, serve=None, opponent=None, env=None, runtime=None, training_copies=None):
     """直接造策略工厂(不经装配),用真的 AgentRuntime 与注入的 serve。
     opponent 非空时写进树里的 training_defaults.yaml:策略上下文每次进入时从树里读 opponent 段。"""
     if opponent is not None:
@@ -637,7 +637,7 @@ def _unit(store, tmp_path, stub, *, serve=None, opponent=None, env=None, runtime
     serve = serve or FakeServe(stub.base_url)
     factory = make_policy_factory(
         store=store, runtime=runtime, switch=switch, client=SimpleNamespace(alias="gpu-181", endpoint=endpoint),
-        endpoint=endpoint, env=env or {}, serve=serve)
+        endpoint=endpoint, env=env or {}, serve=serve, training_copies=training_copies)
     return runtime, switch, factory, serve
 
 
@@ -690,6 +690,71 @@ def test_leaving_a_rollout_closes_its_instance_even_when_the_rollout_raises(worl
                 raise RuntimeError("rollout broke")
         with pytest.raises(FactoryMemoryFailureError, match="MemoryClosedError"):
             backend.respond(None, None, [], "a")
+
+
+def test_the_trained_slot_gets_a_starling_copy_per_rollout_and_it_is_removed_after(world, tmp_path, stub):
+    """训练位的私有副本(设计二 7.2 节):scope 绑定种子、每条 rollout 一份、退出即删,scope 退出后解绑。
+    importorskip 在函数体内:写在模块顶层,没装 Starling 时整个文件的替身路径用例都会被跳过。"""
+    pytest.importorskip("starling")
+    from factory.memory_runtime import StarlingLayout, TrainingCopies
+    from starling_fakes import FakeOpenAI, offline_api_key
+
+    with FakeOpenAI(dim=256) as fake, offline_api_key():
+        copies = TrainingCopies(StarlingLayout(tmp_path / "mem"), fake.endpoints(), close_timeout_s=0.2)
+        _, _, factory, _ = _unit(world, tmp_path, stub, training_copies=copies)
+        first, second = f"{RUN}-grpo0-t1-r0", f"{RUN}-grpo0-t1-r1"
+        with factory(RUN, _cfg()) as policy_for_rollout:
+            assert copies.seed_of(RUN) is None
+            with policy_for_rollout(first) as backend:
+                assert type(backend.instance.memory).__name__ == "StarlingMemory"
+                assert copies.client_dir(RUN, first).exists()
+            assert not copies.client_dir(RUN, first).exists()
+            with policy_for_rollout(second) as other:
+                assert other.instance.memory is not backend.instance.memory
+                assert copies.client_dir(RUN, second).exists()
+            assert not copies.client_dir(RUN, second).exists()
+        with pytest.raises(KeyError):
+            copies.seed_of(RUN)
+
+
+def test_a_rollout_that_raises_still_removes_its_copy_and_the_scope_unbinds_on_a_training_exception(
+        world, tmp_path, stub):
+    pytest.importorskip("starling")
+    from factory.memory_runtime import StarlingLayout, TrainingCopies
+    from starling_fakes import FakeOpenAI, offline_api_key
+
+    with FakeOpenAI(dim=256) as fake, offline_api_key():
+        copies = TrainingCopies(StarlingLayout(tmp_path / "mem"), fake.endpoints(), close_timeout_s=0.2)
+        runtime, _, factory, _ = _unit(world, tmp_path, stub, training_copies=copies)
+        episode = f"{RUN}-grpo0-t1-r0"
+        with pytest.raises(RuntimeError, match="boom"):
+            with factory(RUN, _cfg()) as policy_for_rollout:
+                with pytest.raises(RuntimeError, match="rollout broke"):
+                    with policy_for_rollout(episode):
+                        raise RuntimeError("rollout broke")
+                assert not copies.client_dir(RUN, episode).exists()
+                raise RuntimeError("boom")
+        with pytest.raises(KeyError):
+            copies.seed_of(RUN)
+        assert runtime._sessions == {}
+
+
+def test_the_scope_binds_the_configured_seed_and_the_trained_copy_starts_from_it(world, tmp_path, stub):
+    pytest.importorskip("starling")
+    from actio.memory_starling import StarlingDeploymentStore
+    from factory.memory_runtime import StarlingLayout, TrainingCopies
+    from starling_fakes import FakeOpenAI, offline_api_key
+
+    with FakeOpenAI(dim=256) as fake, offline_api_key():
+        layout = StarlingLayout(tmp_path / "mem")
+        seeds = StarlingDeploymentStore(layout.seed_dir("s1"), endpoints=fake.endpoints())
+        seeds.remember_event("pa", "seed#0", "pb：人手也不够", interlocutor="pb")
+        copies = TrainingCopies(layout, fake.endpoints(), close_timeout_s=0.2)
+        _, _, factory, _ = _unit(world, tmp_path, stub, training_copies=copies)
+        with factory(RUN, _cfg(memory=unresolved_memory("s1"))) as policy_for_rollout:
+            assert copies.seed_of(RUN) == "s1"
+            with policy_for_rollout(f"{RUN}-grpo0-t1-r0") as backend:
+                assert backend.instance.memory.digest() == seeds.digest("pa")     # 训练位绑的是 pa
 
 
 def test_an_interact_directive_records_v2_traces_on_the_trained_slot(world, tmp_path, stub, fake_serve):

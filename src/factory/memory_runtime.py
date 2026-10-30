@@ -4,13 +4,16 @@
 记忆运行时身份,两者一起进 config_hash 与训练记录。本模块有两路:
 
 - 替身:每个人格都从空库起步,没有任何种子库可用。
-- Starling(`StarlingLayout`、`starling_memory_runtime`、`starling_memory_resolver`,按 RISMFORGE_MEMORY_CONFIG
-  装配):种子库由人放进 `seeds/<seed_id>/`,本仓库只读;解析器按种子库算每个人格的起点摘要。
+- Starling(`StarlingLayout`、`starling_memory_runtime`、`starling_memory_resolver`、`TrainingCopies`,按
+  RISMFORGE_MEMORY_CONFIG 装配):种子库由人放进 `seeds/<seed_id>/`,本仓库只读;解析器按种子库算每个人格的
+  起点摘要;`TrainingCopies` 给训练路的每个对手位(按会话)与每个训练位(按 rollout)从种子复制一份私有库,
+  终态即删。
 
 本模块不导入 `starling`(全仓库只有 `actio/memory_starling.py` 导入它),没装 Starling 时 `import factory.memory_runtime`
 照常成功,替身路径照常起得来。Starling 的版本与抽取提示摘要由调用方从 `actio.memory_starling` 取来传进
 `starling_memory_runtime`;`starling_memory_resolver` 在被调用时才延迟导入 `actio.memory_starling`,所以缺依赖
-在装配期响,不拖到派发时。
+在装配期响,不拖到派发时。`TrainingCopies` 同理:`StarlingMemory`、`copy_library` 在方法内才导入,没装 Starling
+时类本身可以导入,只是造不出副本。
 
 运行时身份里没有记忆根目录:同一份库搬了目录不是另一个实验,路径进了哈希会让换机即 T3。
 
@@ -22,9 +25,12 @@ from __future__ import annotations
 
 import copy
 import logging
-from collections.abc import Callable
+import shutil
+import threading
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from actio.memory import FileTupleStore, TupleMemory
 from actio.memory_port import PERSONA_ID_PATTERN, DeploymentMemoryStore
@@ -34,6 +40,9 @@ from controlplane.lock import git_dir
 from factory.memory_config import MemoryConfig
 from mindagent.memory_layout import MemoryLayout
 from simulator.realtime.validation import validate_episode_id
+
+if TYPE_CHECKING:       # 只给类型注解用:运行时不导入 actio.memory_starling(它导入 starling)
+    from actio.memory_starling import StarlingEndpoints, StarlingMemory
 
 _log = logging.getLogger(__name__)
 
@@ -206,3 +215,138 @@ def starling_memory_resolver(
         return digests, copy.deepcopy(identity)
 
     return resolve
+
+
+class TrainingCopies:
+    """训练路的私有记忆副本(设计二 5.3、6.2、7.2 节):对手位按会话、训练位按 rollout,各拿一份从种子库复制出来的
+    Starling 库,终态即删。
+
+    - 绑定表:训练 run 进入策略上下文时 `bind(run_id, seed)`、退出时 `unbind`。表里的种子 id 决定这个 run 的
+      副本从哪取起点,没有种子(None)就是新建空库。一把锁护这张表;副本本身各在各的目录里,互不共享状态。
+    - 起点:`layout.seed(seed, persona_id)` 在就**用文件复制**取副本(`actio.memory_starling.copy_library`),种子里
+      没有这个人格就新建空库。不用 `backup_to`:它要先把种子打开,`Memory.open` 会建 -wal、-shm 并跑迁移,
+      种子目录与文件只读(5.3 节)时失败。种子没有写者,复制 `.db` 加 `-wal` 是一致的,所以副本的摘要等于
+      解析器经 `library_digest` 算出的起点摘要。同一组 rollout 因此从同一个起点出发,又彼此看不见对方写的东西。
+    - 删除:`release` 先把所有端口都关上,全部成功才删目录。关不上说明 Starling 还有在途调用,删目录会删掉一个
+      仍在写的库;留下的目录由下次启动的 `sweep` 兜底。
+
+    异常文字不含路径、端点与密钥:日志里只有目录名(会话 id 或 episode id)与异常类名。"""
+
+    def __init__(self, layout: StarlingLayout, endpoints: StarlingEndpoints, *,
+                 close_timeout_s: float = 60.0) -> None:
+        self._layout = layout
+        self._endpoints = endpoints
+        self._close_timeout_s = close_timeout_s
+        self._lock = threading.Lock()
+        self._seeds: dict[str, str | None] = {}
+
+    # ---- 绑定表 ----
+
+    def bind(self, run_id: str, seed: str | None) -> None:
+        """记下这个 run 的种子 id(None 即从空库起)。同 run 再绑则覆盖。"""
+        with self._lock:
+            self._seeds[run_id] = seed
+
+    def unbind(self, run_id: str) -> None:
+        """没绑过也不报错。已经开出的副本不受影响,各自随会话或 rollout 的终态删除。"""
+        with self._lock:
+            self._seeds.pop(run_id, None)
+
+    def seed_of(self, run_id: str) -> str | None:
+        """没绑定抛 `KeyError`:策略上下文还没进入,或者已经退出。"""
+        with self._lock:
+            return self._seeds[run_id]
+
+    # ---- 目录 ----
+
+    def session_dir(self, run_id: str, session_id: str) -> Path:
+        """`runs/<run_id>/<session_id>/`:一个会话所有对手位副本的目录。名字过布局的白名单(不合法抛 ValueError)。"""
+        return self._layout.session_copy(run_id, session_id, "x").parent
+
+    def client_dir(self, run_id: str, episode_id: str) -> Path:
+        """`runs/<run_id>/client/<episode_id>/`:一条 rollout 的训练位副本的目录。"""
+        return self._layout.client_copy(run_id, episode_id, "x").parent
+
+    # ---- 开副本 ----
+
+    def _open(self, run_id: str, path: Path, persona_id: str) -> StarlingMemory:
+        from actio.memory_starling import StarlingMemory, copy_library
+
+        seed = self.seed_of(run_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if seed is not None:
+            source = self._layout.seed(seed, persona_id)
+            try:
+                source.lstat()          # 与解析器同一判法:只有"确实没有这个文件"才从空库起,悬空的链接交给复制去报错
+            except FileNotFoundError:
+                pass
+            else:
+                copy_library(source, path)
+        return StarlingMemory.open(
+            path, persona_id=persona_id, endpoints=self._endpoints, close_timeout_s=self._close_timeout_s)
+
+    def open_session_copy(self, run_id: str, session_id: str, slot_id: str, persona_id: str) -> StarlingMemory:
+        """一个对手位在一个会话里的副本。同一会话的各位共用 `session_dir`,由调用方在会话终态 `release` 一次。"""
+        return self._open(run_id, self._layout.session_copy(run_id, session_id, slot_id), persona_id)
+
+    def open_client_copy(self, run_id: str, episode_id: str, slot_id: str, persona_id: str) -> StarlingMemory:
+        """训练位在一条 rollout 里的副本。同名目录先删后建:重试在同一线程里顺序发生,上一次尝试的上下文已经退出,
+        它的目录若还留着(`release` 没删成),删了重来才能从起点出发。打不开时把刚建的目录删掉:这个目录只属于
+        这一个位,没有别的端口在里面。"""
+        path = self._layout.client_copy(run_id, episode_id, slot_id)
+        shutil.rmtree(path.parent, ignore_errors=True)
+        try:
+            return self._open(run_id, path, persona_id)
+        except BaseException:
+            shutil.rmtree(path.parent, ignore_errors=True)
+            raise
+
+    # ---- 收尾 ----
+
+    def release(self, ports: Sequence[object], directory: Path) -> bool:
+        """关掉所有端口,全部成功才删 `directory`,返回真。
+
+        逐个 `close()` 且**一个关不上也继续关剩下的**:不关的话,那些端口的 SQLite 连接会一直开到进程退出。
+        有端口关不上时(Starling 的在途调用没返回,`close(timeout)` 等不到)记一条 warning、不删目录,
+        重抛第一个异常;调用返回后再 `release` 一次就能删。目录已经不在(会话没来得及开出副本)算删成功。
+        `rmtree` 自己失败只记 warning、返回假、不抛:留下的目录由 `sweep` 兜底。"""
+        first: Exception | None = None
+        for port in ports:
+            try:
+                port.close()
+            except Exception as exc:
+                if first is None:
+                    first = exc
+        if first is not None:
+            _log.warning("memory copy %s kept: a port did not close (%s)", directory.name, type(first).__name__)
+            raise first
+        try:
+            shutil.rmtree(directory)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            _log.warning("memory copy %s kept: removal failed (%s)", directory.name, type(exc).__name__)
+            return False
+        return True
+
+    def sweep(self) -> int:
+        """删掉 `runs/` 下的每个子项,返回删了几项;`deploy/`、`seeds/`、`snapshots/` 不碰。启动时在仓库锁里调用:
+        上一个进程崩溃时留下的副本在这里清掉。符号链接只删链接本身,不跟进去(跟着删会删到 runs/ 之外,
+        而且 Python 3.12 起 `shutil.rmtree` 对符号链接直接抛 OSError)。某一项删不掉记 warning 并继续。"""
+        runs = self._layout.runs_dir()
+        try:
+            entries = list(runs.iterdir())
+        except FileNotFoundError:
+            return 0
+        removed = 0
+        for entry in entries:
+            try:
+                if entry.is_symlink() or not entry.is_dir():
+                    entry.unlink()
+                else:
+                    shutil.rmtree(entry)
+            except OSError as exc:
+                _log.warning("memory sweep kept %s (%s)", entry.name, type(exc).__name__)
+                continue
+            removed += 1
+        return removed
