@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from actio.memory import FileTupleStore, TupleMemory
-from actio.memory_port import PERSONA_ID_PATTERN, DeploymentMemoryStore
+from actio.memory_port import PERSONA_ID_PATTERN, DeploymentMemoryStore, MemoryFailureError
 from actio.trace import TRACE_SCHEMA_V2
 from controlplane.daemon import DirectiveFailedError
 from controlplane.lock import git_dir
@@ -229,6 +229,10 @@ class TrainingCopies:
       解析器经 `library_digest` 算出的起点摘要。同一组 rollout 因此从同一个起点出发,又彼此看不见对方写的东西。
     - 删除:`release` 先把所有端口都关上,全部成功才删目录。关不上说明 Starling 还有在途调用,删目录会删掉一个
       仍在写的库;留下的目录由下次启动的 `sweep` 兜底。
+    - 保留表:因端口关不上而保留的目录登记在 `_held`(同一把锁),`release` 后来成功删掉时撤销。两个 `open_*_copy`
+      遇到登记过的目录抛非瞬态 `MemoryFailureError`、不删它:同一 episode id 的重试若在 close 超时之后到来,
+      先删后建会删掉一个 Starling 工作线程还在写的库。今天的调用方走不到这里(轨迹源只重试瞬态失败),
+      但防线要在这个类自己身上,不能靠三层调用方的约定。
 
     异常文字不含路径、端点与密钥:日志里只有目录名(会话 id 或 episode id)与异常类名。"""
 
@@ -239,6 +243,7 @@ class TrainingCopies:
         self._close_timeout_s = close_timeout_s
         self._lock = threading.Lock()
         self._seeds: dict[str, str | None] = {}
+        self._held: set[Path] = set()      # 因端口没关上而保留的目录;同一把锁护着
 
     # ---- 绑定表 ----
 
@@ -269,31 +274,47 @@ class TrainingCopies:
 
     # ---- 开副本 ----
 
+    def _refuse_if_held(self, directory: Path) -> None:
+        """目录是 `release` 因端口没关上而保留的:那个库可能还有 Starling 工作线程在写,不能删也不能往里建。"""
+        with self._lock:
+            held = directory in self._held
+        if held:
+            raise MemoryFailureError(
+                f"training copy {directory.name} is still held by a port that did not close", transient=False)
+
     def _open(self, run_id: str, path: Path, persona_id: str) -> StarlingMemory:
-        from actio.memory_starling import StarlingMemory, copy_library
+        from actio.memory_starling import StarlingMemory, copy_library, translate_failure
 
         seed = self.seed_of(run_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if seed is not None:
-            source = self._layout.seed(seed, persona_id)
-            try:
-                source.lstat()          # 与解析器同一判法:只有"确实没有这个文件"才从空库起,悬空的链接交给复制去报错
-            except FileNotFoundError:
-                pass
-            else:
-                copy_library(source, path)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if seed is not None:
+                source = self._layout.seed(seed, persona_id)
+                try:
+                    source.lstat()      # 与解析器同一判法:只有"确实没有这个文件"才从空库起,悬空的链接交给复制去报错
+                except FileNotFoundError:
+                    pass
+                else:
+                    copy_library(source, path)
+        except OSError as exc:
+            # 磁盘满、权限不够:译成非瞬态的记忆失败(文字只含类名)。裸 OSError 不会被训练位一侧当成记忆失败
+            raise translate_failure(exc) from None
         return StarlingMemory.open(
             path, persona_id=persona_id, endpoints=self._endpoints, close_timeout_s=self._close_timeout_s)
 
     def open_session_copy(self, run_id: str, session_id: str, slot_id: str, persona_id: str) -> StarlingMemory:
-        """一个对手位在一个会话里的副本。同一会话的各位共用 `session_dir`,由调用方在会话终态 `release` 一次。"""
-        return self._open(run_id, self._layout.session_copy(run_id, session_id, slot_id), persona_id)
+        """一个对手位在一个会话里的副本。同一会话的各位共用 `session_dir`,由调用方在会话终态 `release` 一次。
+        会话目录若是被保留的(见 `_held`)抛非瞬态 `MemoryFailureError`。"""
+        path = self._layout.session_copy(run_id, session_id, slot_id)
+        self._refuse_if_held(path.parent)
+        return self._open(run_id, path, persona_id)
 
     def open_client_copy(self, run_id: str, episode_id: str, slot_id: str, persona_id: str) -> StarlingMemory:
         """训练位在一条 rollout 里的副本。同名目录先删后建:重试在同一线程里顺序发生,上一次尝试的上下文已经退出,
-        它的目录若还留着(`release` 没删成),删了重来才能从起点出发。打不开时把刚建的目录删掉:这个目录只属于
-        这一个位,没有别的端口在里面。"""
+        它的目录若还留着(`release` 没删成),删了重来才能从起点出发。但目录是因端口没关上而保留的(见 `_held`)
+        时不删,抛非瞬态 `MemoryFailureError`。打不开时把刚建的目录删掉:这个目录只属于这一个位,没有别的端口在里面。"""
         path = self._layout.client_copy(run_id, episode_id, slot_id)
+        self._refuse_if_held(path.parent)
         shutil.rmtree(path.parent, ignore_errors=True)
         try:
             return self._open(run_id, path, persona_id)
@@ -308,8 +329,9 @@ class TrainingCopies:
 
         逐个 `close()` 且**一个关不上也继续关剩下的**:不关的话,那些端口的 SQLite 连接会一直开到进程退出。
         有端口关不上时(Starling 的在途调用没返回,`close(timeout)` 等不到)记一条 warning、不删目录,
-        重抛第一个异常;调用返回后再 `release` 一次就能删。目录已经不在(会话没来得及开出副本)算删成功。
-        `rmtree` 自己失败只记 warning、返回假、不抛:留下的目录由 `sweep` 兜底。"""
+        把目录登记进保留表(`open_*_copy` 据此拒绝往里重建),重抛第一个异常;调用返回后再 `release` 一次就能删,
+        同时撤销登记。目录已经不在(会话没来得及开出副本)算删成功。
+        `rmtree` 自己失败只记 warning、返回假、不抛:端口都已关上,不登记,留下的目录由 `sweep` 兜底。"""
         first: Exception | None = None
         for port in ports:
             try:
@@ -318,6 +340,8 @@ class TrainingCopies:
                 if first is None:
                     first = exc
         if first is not None:
+            with self._lock:
+                self._held.add(directory)
             _log.warning("memory copy %s kept: a port did not close (%s)", directory.name, type(first).__name__)
             raise first
         try:
@@ -325,15 +349,22 @@ class TrainingCopies:
         except FileNotFoundError:
             pass
         except OSError as exc:
+            with self._lock:
+                self._held.discard(directory)       # 端口都关上了,没有谁还在写
             _log.warning("memory copy %s kept: removal failed (%s)", directory.name, type(exc).__name__)
             return False
+        with self._lock:
+            self._held.discard(directory)
         return True
 
     def sweep(self) -> int:
         """删掉 `runs/` 下的每个子项,返回删了几项;`deploy/`、`seeds/`、`snapshots/` 不碰。启动时在仓库锁里调用:
-        上一个进程崩溃时留下的副本在这里清掉。符号链接只删链接本身,不跟进去(跟着删会删到 runs/ 之外,
-        而且 Python 3.12 起 `shutil.rmtree` 对符号链接直接抛 OSError)。某一项删不掉记 warning 并继续。"""
+        上一个进程崩溃时留下的副本在这里清掉。`runs/` 下的符号链接只删链接本身,不跟进去(跟着删会删到
+        `runs/` 之外,而且 `shutil.rmtree` 对符号链接直接抛 OSError)。`runs/` 自己是符号链接时抛非瞬态
+        `MemoryFailureError`、什么都不删:遍历会跟进链接,清空它指向的目录。某一项删不掉记 warning 并继续。"""
         runs = self._layout.runs_dir()
+        if runs.is_symlink():
+            raise MemoryFailureError("memory root runs/ is a symlink; refusing to sweep", transient=False)
         try:
             entries = list(runs.iterdir())
         except FileNotFoundError:

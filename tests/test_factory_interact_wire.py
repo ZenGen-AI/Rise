@@ -741,7 +741,7 @@ def test_a_rollout_that_raises_still_removes_its_copy_and_the_scope_unbinds_on_a
 
 def test_the_scope_binds_the_configured_seed_and_the_trained_copy_starts_from_it(world, tmp_path, stub):
     pytest.importorskip("starling")
-    from actio.memory_starling import StarlingDeploymentStore
+    from actio.memory_starling import StarlingDeploymentStore, empty_digest
     from factory.memory_runtime import StarlingLayout, TrainingCopies
     from starling_fakes import FakeOpenAI, offline_api_key
 
@@ -749,12 +749,69 @@ def test_the_scope_binds_the_configured_seed_and_the_trained_copy_starts_from_it
         layout = StarlingLayout(tmp_path / "mem")
         seeds = StarlingDeploymentStore(layout.seed_dir("s1"), endpoints=fake.endpoints())
         seeds.remember_event("pa", "seed#0", "pb：人手也不够", interlocutor="pb")
+        assert seeds.digest("pa") != empty_digest()                 # 种子有内容,"从种子起"才和"空库"分得开
         copies = TrainingCopies(layout, fake.endpoints(), close_timeout_s=0.2)
         _, _, factory, _ = _unit(world, tmp_path, stub, training_copies=copies)
         with factory(RUN, _cfg(memory=unresolved_memory("s1"))) as policy_for_rollout:
             assert copies.seed_of(RUN) == "s1"
             with policy_for_rollout(f"{RUN}-grpo0-t1-r0") as backend:
                 assert backend.instance.memory.digest() == seeds.digest("pa")     # 训练位绑的是 pa
+
+
+class _FailingCopies:
+    """策略上下文只用到这几个方法;open_client_copy 按给定的异常失败。不需要 Starling。"""
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    def bind(self, run_id, seed):
+        pass
+
+    def unbind(self, run_id):
+        pass
+
+    def open_client_copy(self, run_id, episode_id, slot_id, persona_id):
+        raise self._exc
+
+
+@pytest.mark.parametrize("transient", [False, True])
+def test_a_trained_copy_that_cannot_be_opened_is_translated_like_the_other_memory_failures(
+        world, tmp_path, stub, transient):
+    """open 阶段的 MemoryFailureError 没经转换后端。不译的话编排器只认 RoleMemoryFailureError,裸异常让 run 保持
+    pending 被反复重派:确定性的(种子坏了、磁盘满)译成 FactoryMemoryFailureError(T2),瞬态的译成
+    FactoryMemoryUnavailableError(_attempt 接成可重试的 role_memory_unavailable)。文字只含类名。"""
+    from actio.memory_port import MemoryFailureError
+    from factory.memory_translate import FactoryMemoryFailureError, FactoryMemoryUnavailableError
+
+    cause = MemoryFailureError("starling memory failed: OSError (secret-detail)", transient=transient)
+    _, _, factory, _ = _unit(world, tmp_path, stub, training_copies=_FailingCopies(cause))
+    expected = FactoryMemoryUnavailableError if transient else FactoryMemoryFailureError
+    with factory(RUN, _cfg()) as policy_for_rollout:
+        with pytest.raises(expected) as caught:
+            with policy_for_rollout(f"{RUN}-grpo0-t1-r0"):
+                pytest.fail("the body must not run")
+    assert caught.value.__cause__ is cause
+    assert "MemoryFailureError" in str(caught.value) and "secret-detail" not in str(caught.value)
+
+
+def test_a_corrupt_seed_fails_the_trained_slot_as_a_deterministic_memory_failure(world, tmp_path, stub):
+    pytest.importorskip("starling")
+    from factory.memory_runtime import StarlingLayout, TrainingCopies
+    from factory.memory_translate import FactoryMemoryFailureError
+    from starling_fakes import FakeOpenAI, offline_api_key
+
+    with FakeOpenAI(dim=256) as fake, offline_api_key():
+        layout = StarlingLayout(tmp_path / "mem")
+        layout.seed_dir("s1").mkdir(parents=True)
+        layout.seed("s1", "pa").write_bytes(b"this is not a sqlite library")
+        copies = TrainingCopies(layout, fake.endpoints(), close_timeout_s=0.2)
+        _, _, factory, _ = _unit(world, tmp_path, stub, training_copies=copies)
+        episode = f"{RUN}-grpo0-t1-r0"
+        with factory(RUN, _cfg(memory=unresolved_memory("s1"))) as policy_for_rollout:
+            with pytest.raises(FactoryMemoryFailureError):
+                with policy_for_rollout(episode):
+                    pytest.fail("the body must not run")
+            assert not copies.client_dir(RUN, episode).exists()
 
 
 def test_an_interact_directive_records_v2_traces_on_the_trained_slot(world, tmp_path, stub, fake_serve):

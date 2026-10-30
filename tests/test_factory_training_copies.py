@@ -23,7 +23,10 @@ def env(tmp_path):
         lay = StarlingLayout(tmp_path / "mem")
         seeds = StarlingDeploymentStore(tmp_path / "mem" / "seeds" / "s1", endpoints=fake.endpoints())
         seeds.remember_event("pa", "seed#0", "pb：人手也不够", interlocutor="pb")
-        yield lay, TrainingCopies(lay, fake.endpoints(), close_timeout_s=0.2), fake, seeds.digest("pa")
+        seeded = seeds.digest("pa")
+        # 种子真的有内容:否则"复制了种子"和"建了空库"分不出来,下面几条"同一起点"的断言会空转
+        assert seeded != empty_digest()
+        yield lay, TrainingCopies(lay, fake.endpoints(), close_timeout_s=0.2), fake, seeded
 
 
 def test_copies_of_one_group_start_from_the_same_seed_and_leave_the_seed_alone(env):
@@ -35,6 +38,7 @@ def test_copies_of_one_group_start_from_the_same_seed_and_leave_the_seed_alone(e
     c = copies.open_session_copy("run-1", "sess-1", "b", "pb")              # 种子里没有 pb:空库
     assert a.digest() == b.digest() == seeded and c.digest() == empty_digest()
     a.remember(EV)
+    assert a.digest() != seeded                                                # 写入真的生效了
     assert b.digest() == seeded                                                # 两份互不可见
     assert lay.client_copy("run-1", "run-1-grpo0-s1-r0", "a").exists()
     assert lay.session_copy("run-1", "sess-1", "b").exists()                  # session_id 在目录名里
@@ -138,7 +142,9 @@ def test_a_client_retry_recreates_its_copy_from_the_start(env):
     lay, copies, _, seeded = env
     copies.bind("run-1", "s1")
     first = copies.open_client_copy("run-1", "run-1-grpo0-s1-r0", "a", "pa")
-    first.remember(EV); first.close()                     # 上一次尝试:副本留着(close 后才轮到 release)
+    first.remember(EV)
+    assert first.digest() != seeded                       # 上一次尝试真的写了东西
+    first.close()                                         # 上一次尝试:副本留着(close 后才轮到 release)
     again = copies.open_client_copy("run-1", "run-1-grpo0-s1-r0", "a", "pa")
     assert again.digest() == seeded
     again.close()
@@ -190,6 +196,89 @@ def test_sweep_unlinks_a_symlink_and_never_follows_it(env, tmp_path):
     assert copies.sweep() == 2
     assert list(lay.runs_dir().iterdir()) == []
     assert outside.is_dir() and (outside / "keep.txt").read_text() == "keep"
+
+
+def _hold_a_write_in_flight(fake, port):
+    """让 port 上有一次 Starling 调用还没返回(假端点把抽取拖 1 秒),返回那条线程。"""
+    fake.chat_delay_s = 1.0
+    t = threading.Thread(target=port.remember, args=(EV,))
+    t.start()
+    fake.wait_for_chat_call(timeout_s=2)
+    return t
+
+
+def test_a_client_directory_kept_for_a_port_that_did_not_close_is_not_deleted_by_a_reopen(env):
+    """I-1:release 因 close 超时保留了目录,Starling 工作线程还在写。同一 episode id 再来开副本,不能 rmtree 它。
+    今天的调用方(轨迹源只重试瞬态失败)走不到这里,但防线要在 TrainingCopies 自己身上。"""
+    lay, copies, fake, seeded = env
+    copies.bind("run-1", "s1")
+    episode = "run-1-grpo0-s1-r0"
+    port = copies.open_client_copy("run-1", episode, "a", "pa")
+    t = _hold_a_write_in_flight(fake, port)
+    d = copies.client_dir("run-1", episode)
+    with pytest.raises(MemoryFailureError):
+        copies.release([port], d)
+    with pytest.raises(MemoryFailureError, match="still held") as held:
+        copies.open_client_copy("run-1", episode, "a", "pa")
+    assert held.value.transient is False and episode in str(held.value) and str(lay.root) not in str(held.value)
+    assert lay.client_copy("run-1", episode, "a").exists()                   # 没有 rmtree
+    t.join()
+    assert copies.release([port], d) is True and not d.exists()               # 在途调用返回、release 成功:登记撤销
+    fake.chat_delay_s = 0.0
+    again = copies.open_client_copy("run-1", episode, "a", "pa")
+    try:
+        assert again.digest() == seeded
+    finally:
+        again.close()
+
+
+def test_a_session_directory_kept_for_a_port_that_did_not_close_refuses_further_copies(env):
+    lay, copies, fake, _ = env
+    copies.bind("run-1", None)
+    port = copies.open_session_copy("run-1", "sess-1", "b", "pb")
+    t = _hold_a_write_in_flight(fake, port)
+    d = copies.session_dir("run-1", "sess-1")
+    with pytest.raises(MemoryFailureError):
+        copies.release([port], d)
+    with pytest.raises(MemoryFailureError, match="still held") as held:
+        copies.open_session_copy("run-1", "sess-1", "c", "pc")
+    assert held.value.transient is False
+    assert not lay.session_copy("run-1", "sess-1", "c").exists()
+    t.join()
+    assert copies.release([port], d) is True
+    fake.chat_delay_s = 0.0
+    copies.open_session_copy("run-1", "sess-1", "c", "pc").close()
+
+
+def test_a_copy_that_cannot_be_made_fails_as_a_permanent_memory_failure(env, monkeypatch):
+    """磁盘满、权限不够:复制抛的 OSError 译成非瞬态的 MemoryFailureError,文字只含类名,不留半建的目录。
+    不译的话它是裸 OSError,训练位一侧不被当成记忆失败,run 会被反复重派。"""
+    lay, copies, _, _ = env
+    copies.bind("run-1", "s1")
+
+    def full(src, dst):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr("actio.memory_starling.copy_library", full)
+    with pytest.raises(MemoryFailureError) as caught:
+        copies.open_client_copy("run-1", "run-1-grpo0-s1-r0", "a", "pa")
+    assert caught.value.transient is False and "OSError" in str(caught.value)
+    assert "No space" not in str(caught.value) and str(lay.root) not in str(caught.value)
+    assert not copies.client_dir("run-1", "run-1-grpo0-s1-r0").exists()
+
+
+def test_sweep_refuses_a_runs_directory_that_is_itself_a_symlink(env, tmp_path):
+    """M-1:runs/ 本身是指向别处的符号链接时,遍历会跟进去,启动一次就清空那个目录。"""
+    lay, copies, _, _ = env
+    outside = tmp_path / "outside"
+    (outside / "sub").mkdir(parents=True)
+    (outside / "keep.txt").write_text("keep")
+    lay.runs_dir().symlink_to(outside, target_is_directory=True)
+    with pytest.raises(MemoryFailureError, match="symlink") as caught:
+        copies.sweep()
+    assert caught.value.transient is False
+    assert (outside / "keep.txt").read_text() == "keep" and (outside / "sub").is_dir()
+    assert lay.runs_dir().is_symlink()
 
 
 # ---------------- 接到运行时上 ----------------

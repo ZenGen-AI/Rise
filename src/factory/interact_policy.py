@@ -39,6 +39,7 @@ from contextlib import AbstractContextManager, ExitStack, contextmanager
 from typing import TYPE_CHECKING
 
 from actio.memory import TupleMemory
+from actio.memory_port import MemoryFailureError
 from compute.client import ComputeClient
 from compute.endpoint import ComputeEndpoint
 from compute.errors import ComputeError, ServeStopError
@@ -51,7 +52,12 @@ from factory.agent import AGENT_CONFIG, AgentRuntime, read_agent_settings
 from factory.errors import FactoryConfigError
 from factory.eval_config import DEFAULT_SERVE_PORT
 from factory.interact_checks import has_userinfo
-from factory.memory_translate import MemoryTranslatingBackend, memory_role_backend
+from factory.memory_translate import (
+    FactoryMemoryFailureError,
+    FactoryMemoryUnavailableError,
+    MemoryTranslatingBackend,
+    memory_role_backend,
+)
 from factory.opponents import (
     ExternalApiBackend,
     ModelRefError,
@@ -355,8 +361,17 @@ def make_policy_factory(
                     if training_copies is None:
                         memory = TupleMemory()
                     else:
-                        memory = training_copies.open_client_copy(
-                            run_id, episode_id, cfg.trained_slot, interlocutors[cfg.trained_slot])
+                        try:
+                            memory = training_copies.open_client_copy(
+                                run_id, episode_id, cfg.trained_slot, interlocutors[cfg.trained_slot])
+                        except MemoryFailureError as exc:
+                            # 打不开副本(种子坏了、磁盘满、目录被占着)发生在转换后端造出来之前,要照
+                            # memory_translate 的口径自己译:编排器只认 RoleMemoryFailureError 判 T2,裸的
+                            # MemoryFailureError 会让 run 保持 pending 被反复重派。文字只放类名。
+                            message = f"trained slot memory copy could not be opened: {type(exc).__name__}"
+                            if exc.transient:
+                                raise FactoryMemoryUnavailableError(message) from exc
+                            raise FactoryMemoryFailureError(message) from exc
                     try:
                         backend = memory_role_backend(
                             policy, memory=memory, episode_id=episode_id, interlocutors=interlocutors,
