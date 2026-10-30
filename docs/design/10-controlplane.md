@@ -285,7 +285,7 @@ ControlPlane 是系统的协调层:它不训练、不评测,只读写产物并�
 </details>
 <!-- figure:end 10-controlplane-states -->
 
-左边是需审核类,今天只有候选 checkpoint 与配方走它。派发器直接写 `pending_review`,不经 `draft`。右边是非审核类,指令由守护进程置 `executed` 或 `failed`。迁移表还允许 `draft` 提交审核、`deprecated`、`superseded` 与 `consumed`:配方退化有写方(`recipestore` 的 `track.py`),其余几条边 V1 代码里还没有写方。`awaiting_confirmation` 与 `confirm` 命令 [已落地];`reconcile` 对 `awaiting_confirmation` 的指令不产生任何动作,它只作初始状态,由调度器按配置写入。图中唯一的虚线是人工直接改文件,把待确认指令置 `failed`。
+左边是需审核类,今天只有候选 checkpoint 与配方走它。派发器直接写 `pending_review`,不经 `draft`。右边是非审核类,指令由守护进程置 `executed` 或 `failed`。迁移表还允许 `draft` 提交审核、`deprecated`、`superseded` 与 `consumed`:配方退化有写方(`recipestore` 的 `track.py`),其余几条边 V1 代码里还没有写方。Python 一侧的迁移表另有 `approved → rejected` 一条边 [已落地],只许 MindAgent 收录处理器走:提案里一条记忆增量都没提交过时,记忆抽取失败才转 `rejected`;前面已有增量提交、后一条抽取失败时,提案留在 `approved`,处理器抛 `DeferredError` 退避重试。命令行不走这条边,两张迁移表从此有意不同。`awaiting_confirmation` 与 `confirm` 命令 [已落地];`reconcile` 对 `awaiting_confirmation` 的指令不产生任何动作,它只作初始状态,由调度器按配置写入。图中唯一的虚线是人工直接改文件,把待确认指令置 `failed`。
 
 晋级时守护进程写的模型信封如下。
 
@@ -328,7 +328,7 @@ def reconcile(state: TreeState) -> list[Action]: ...
 def apply_action(store, action, *, dispatcher=None) -> None: ...
 def reconcile_once(store, *, dispatcher=None) -> list[Action]: ...
 def run_daemon(store, interval_s, max_ticks=None, *, dispatcher=None) -> None: ...
-# [计划中] 新增 keyword-only 参数 on_locked:取到仓库锁之后、第一个 tick 之前调一次
+# 新增 keyword-only 参数 on_locked:取到仓库锁之后、第一个 tick 之前调一次 [已落地]
 def latest_promoted_checkpoint(store: GitStore) -> PromotedBase | None: ...
 def trace(store, run_id) -> str: ...
 def cost(store, run_id) -> str: ...
@@ -543,7 +543,7 @@ def evidence_acceptable(grade: str, accept_mock: bool) -> bool: ...
 | CP-7 | 新版本号取现有最大版本号加一,一轮内多个晋级依次递增;晋级先找 `promoted_from` 等于该候选的模型,找到就复用它的版本号 [已落地] | 取 `models/` 下的文件数加一 | 崩溃重放不再重复登记,人工删文件或手放模型文件不使版本号错位 | 人工删文件会留下版本号空洞;晋级多一次对 `models/` 的扫描 |
 | CP-8 | 惰性迁移,读取统一经迁移器链,V1 链为空 | 批量改写历史产物 | 历史保持可追溯 | 每次读取多一次迁移与校验 |
 | CP-9 | 配置只存凭证变量名,出现凭证字段即拒绝加载 | 允许本地明文 | 凭证绝不进 git | 换机器要自己配环境变量 |
-| CP-10 | 需审核类迁移表在 Python 与 TypeScript 各一份 | 共享一份 schema 生成 | 两种语言只经树里的文件通信 | 两边改漏一处就会分叉,目前靠人工核对 |
+| CP-10 | 需审核类迁移表在 Python 与 TypeScript 各一份 | 共享一份 schema 生成 | 两种语言只经树里的文件通信 | 两边改漏一处就会分叉,目前靠人工核对。唯一例外是 `approved → rejected`,只在 Python 一侧 |
 | CP-11 | `plan_next_round` 还要等来源 run 的配方入库门:启用提名且候选 `effective` 时,来源 run 须已有提名标记,且配方候选 `recipe-<run>` 不在 `pending_review` 或 `approved`;候选 `rejected` 不等 [已落地] | 不等,同一轮提名的配方最早在第 N+2 轮被复用 | 三道门的先后成为树里的状态事实,规划一定看得到刚入库的配方,不再依赖同一 tick 里提名先于规划的顺序 | 每一轮多停一次等人审门③;人手放进树的候选没有提名标记,规划不触发,要人手写下一条指令;关掉提名开关规划就不再等 |
 | CP-12 | 守护进程与一次性 tick 的入口在第一个 tick 之前取排他文件锁,锁文件在该工作树的 git 目录下(普通仓库是 `.git/`;worktree 与子模块的 `.git` 是 `gitdir:` 指针文件,锁放进它指向的目录,按工作树隔离);所有产物写入的提交只带本文件(`git commit -m <信息> -- <路径>`),Python 与 TypeScript 两侧一致;命令行不取锁 [已落地](Windows 的锁分支未在真机验证) | 命令行写入队列;维持现状 | 锁挡住两个守护进程重复派发与记账互相覆盖;只带本文件让命令行已暂存的改动不被守护进程带走 | 锁被占用时入口以退出码 2 退出;命令行与守护进程同时提交时 git 自己的索引锁冲突仍会让一方失败,已复现(同一仓库六个线程各写 15 次,90 次里 62 次失败),守护进程遇到即退出 |
 | CP-13 | 异步派发的契约现在定下,V1 不写代码:指令加 `submitted` 状态,派发器拆成提交与轮询,调和循环加轮询动作 [推迟];接真实 LoRA SFT 的例外见 CP-15 | V1 就实现;推迟到 V2 才设计 | 契约先于实现,真正做异步派发时不必同时改派发契约与调和循环 | 契约先于实现,真实执行器落地时细节仍会微调 |
@@ -611,12 +611,12 @@ def evidence_acceptable(grade: str, accept_mock: bool) -> bool: ...
 | 层次 | 对象 | 替身 | 文件与用例数 |
 |---|---|---|---|
 | 纯函数 | `reconcile` | fixture 化的 `TreeState` | `tests/test_reconcile.py`,14 |
-| 纯函数 | 迁移表、信封往返、Schema、证据等级 | 无 | `test_states.py` 6、`test_envelope.py` 3、`test_validate.py` 3、`test_evidence.py` 48 |
+| 纯函数 | 迁移表、信封往返、Schema、证据等级 | 无 | `test_states.py` 8、`test_envelope.py` 3、`test_validate.py` 3、`test_evidence.py` 48 |
 | 存储 | `GitStore`、迁移器链、路径 | 临时目录里的真 git | `test_gitstore.py` 10、`test_migration.py` 5、`test_paths.py` 24 |
 | 存储 | 提交只带本文件 | 临时目录里的真 git | `test_gitstore_commit_scope.py` 6 |
 | 执行壳 | `read_tree_state`、`reconcile_once`、派发缝、延后通道 | 桩派发器与自定义派发器 | `test_daemon.py` 6、`test_daemon_dispatcher.py` 14、`test_daemon_promote_checkpoint_ref.py` 3、`test_daemon_deferred.py` 10 |
 | 闭环 | 六个新动作、闭环视图、注入缝 | 构造的视图与处理器 | `test_reconcile_closed_loop.py` 99、`test_daemon_closed_loop_views.py` 20、`test_daemon_closed_loop_seams.py` 16 |
-| 闭环 | 确认态、晋级幂等、仓库文件锁 | 临时 git 仓库 | `test_awaiting_confirmation.py` 6、`test_promotion_idempotent.py` 26、`test_repo_lock.py` 12 |
+| 闭环 | 确认态、晋级幂等、仓库文件锁 | 临时 git 仓库 | `test_awaiting_confirmation.py` 6、`test_promotion_idempotent.py` 26、`test_repo_lock.py` 17 |
 | 工具函数 | 基座解析、观测、配置、记账、配置信封 | 构造的产物 | `test_models_resolve.py` 7、`test_observe.py` 5、`test_config.py` 8、`test_ledger.py` 33、`test_config_envelope.py` 24 |
 | 端到端 | 指令到晋级;拒绝不晋级 | 骨架桩 | `tests/test_e2e_loop.py`,2 |
 | 骨架 | 桩与冒烟 | 无 | `test_stubs.py` 3、`test_smoke.py` 2 |

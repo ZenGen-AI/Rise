@@ -9,7 +9,7 @@
 | 基线提交 | `b826440`(2026-10-21) |
 | 依赖 | ControlPlane(产物树、信封、路径、账本、证据等级)、TrainPlanner、RecipeStore、外部推理桥接(只取 `BridgeError`)、MindTrainer 的 `training_config` 与 `data_spec` 两个模块 |
 | 被依赖 | ControlPlane 调和循环(注入两个处理器)、factory 组合根 |
-| 对应实施计划 | 工作包 5(任务 60 至 68);场景二接通在本篇的范围是 `interact` 段与 `new` 加 `interact` 的解析,已随 `--interact` 接通落地 [已落地] |
+| 对应实施计划 | 工作包 5(任务 60 至 68);场景二接通在本篇的范围是 `interact` 段与 `new` 加 `interact` 的解析,已随 `--interact` 接通落地 [已落地];`interact` 段的 `memory` 键随智能体记忆的替身路径施工计划(agent-memory-standin,第 4 步)落地 [已落地] |
 
 ## 0. 系统速览
 
@@ -235,6 +235,8 @@ interact:
     - {slot_id: a, model_backend: self_play}
     - {slot_id: b, model_backend: frozen_reference, model_ref: zengen-v1}
   max_turns_per_episode: 4
+  # 记忆起点:seed 必填,null 表示每个人格从空库出发;非 null 是种子库 id
+  memory: {seed: null}
   # 点名路:scenario_ids 与 persona_ids 成对出现
   scenario_ids: [scen-auto-0, scen-auto-1]
   persona_ids: {a: pers-auto-0, b: pers-auto-1}
@@ -244,12 +246,13 @@ interact:
 
 | 规则 | 内容 |
 |---|---|
-| 段可选 | 缺整个段时,`new` 加 `interact` 仍判领域违规,与今天一致 |
+| 段可选 | 缺整个段时,`new` 加 `interact` 仍判领域违规,与今天一致。段在而缺 `memory` 抛 `SchedulerConfigError` |
 | 严格解析 | 与另两份配置同一口径:未知键、类型错、范围错抛 `SchedulerConfigError`;顶层键集合加上 `interact` |
 | 来源二选一 | 点名路是 `scenario_ids` 加 `persona_ids`,生成路是 `data_spec`。两路同时写,或两路都缺,都抛错 |
 | 成对 | 写了 `scenario_ids` 就必须写 `persona_ids`,反之亦然。只写一半抛错 |
 | 解析不读树 | 点名的 id 在不在树里、情境 `purpose` 是不是 `training`,解析不查;由 factory 的 `--interact` 装配期查,失败退出码 2 |
 | 情境数下限 | 情境数不得少于 `groups_per_step`(默认 2);`_validate_interact` 会拒绝,因为同一情境在一步里出现两次会让两批 rollout 并成一组(`src/mindtrainer/training_config.py:325-330`) |
+| 记忆起点 | 必填键 `memory`,形如 `{seed}`,只许 `seed` 一个键;`seed` 为 `null` 或非空字符串。`resolve` 把它写进展开的训练配置:`{seed, digests: {}, runtime: {}}`,后两个由派发器解析,调度器不算。`memory` 是锚定键,永不可扰动 |
 | 展开后仍过校验 | 展开成的 interact 训练配置要过 `validate_training_config`,与其他指令一致 |
 
 生成路的指令写出时 `training_config.scenario_ids` 为空,而 `validate_training_config` 要求它非空。所以指令构造改用一个宽口径:带 `data_spec`、`scenario_ids` 为空时放行,其余调用点仍用严格校验;派发器回写之后重新跑一次严格校验。宽口径只在调度器按 `new` 构造且带 `data_spec` 时成立 [已落地]。回写后 `config_hash` 覆盖情境 id、人格 id 与 `bindings`,这只保证配置层面可复现,不声称续训等价。
@@ -485,7 +488,7 @@ build_recipe_candidate(store, run_id, *, config, repo_commit=None,
 | 字段 | `new` 加 `interact` 的取值 |
 |---|---|
 | `mode` | `interact` |
-| `trained_slot`、`max_turns_per_episode` | 取自 `interact` 段 |
+| `trained_slot`、`max_turns_per_episode`、`memory.seed` | 取自 `interact` 段 |
 | `bindings` | 取自 `slots` 的 `slot_id`、`model_backend`、`model_ref`、可选 `driver`。生成路写指令时 `bindings` 为空(`RoleBinding.persona_id` 必填,人格还没生成),由派发器回写时补人格 id;点名路直接按 `persona_ids` 补齐 |
 | `scenario_ids` | 点名路取自段;生成路为空,由派发器回写。两路都必须不少于 `groups_per_step` |
 | 奖励、步数、组大小、教师引用 | 取自默认 batch 配置;**点名路例外**:`sft_steps` 强制为 0(点名路不做冷启动,也没有 `data_spec` 可合成 SFT 数据),`grpo_steps` 仍取默认 |
@@ -597,7 +600,7 @@ build_recipe_candidate(store, run_id, *, config, repo_commit=None,
 | TS-1 | 先写 `pending` 决策带 `next_run_id`,再解析与写指令,最后置 `executed` | 先写指令后记决策 | 解析失败与崩溃走同一条重入路径,run id 不重复分配 | 失败决策可能带着已分配但没用的 run id |
 | TS-2 | `clone` 换上最新已晋级基座;`replay` 一字不换 | `clone` 沿用配方旧基座 | 克隆是"在当前最好的模型上再用一次";复现换了基座就不是复现 | `clone` 的战绩混合配方与基座两种贡献,`mean_gain` 偏乐观 |
 | TS-3 | `new` 构造 batch;`new` 加 interact 只在 `interact` 段在场且 `allow_interact` 打开时放行,缺段或开关关着判领域违规 | 凭空构造 interact | interact 要点名情境与绑定,默认配置没有;违规还能重采样 | 缺段或开关关着时规划器开不了新的 interact 训练线;违规已收窄为「缺段」或「`allow_interact` 关」两种 [已落地] |
-| TS-4 | 扰动键是点路径,首段必须是 `TrainingConfig` 字段;多段时首段只能是 `grpo_config` 或 `reward`;锚定身份的字段永不可扰动 | 任意键 | 设计只说"在白名单内";防止扰动改掉基座、清单、模式 | 合法的新扰动要先改白名单 |
+| TS-4 | 扰动键是点路径,首段必须是 `TrainingConfig` 字段;多段时首段只能是 `grpo_config` 或 `reward`;锚定身份的字段(含 `memory`)永不可扰动 | 任意键 | 设计只说"在白名单内";防止扰动改掉基座、清单、模式 | 合法的新扰动要先改白名单 |
 | TS-5 | 配置错与模板缺失不算 `SchedulerError`,原样上抛,决策保持原状 | 判决策 `failed` | 失败的规划不会自动恢复,配置写错是人改一下就好的事 | 配置写错时守护循环每个 tick 都抛同一异常并退出 [已落地] |
 | TS-6 | `max_plan_attempts` 是总尝试次数,传给 `plan()` 的是减一后的重试次数 | 配置写重试次数 | 人读配置不用做减法;失败记录的尝试数等于配置值 | 无 |
 | TS-7 | 提名的"还没到"四种情形不写标记 | 一律写 `skipped` | 标记是幂等键,写了就永不再提名 | 过早的动作每次触发都会重判一次 |
