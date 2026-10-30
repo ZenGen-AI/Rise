@@ -16,6 +16,7 @@ import importlib.metadata
 import io
 import json
 import os
+import secrets
 import stat
 import time
 from collections.abc import Mapping
@@ -41,6 +42,7 @@ REQUIRED_KEYS = (
 OPTIONAL_KEYS = ("timeout_ms", "max_retries")
 
 _OWNER_FILE = ".owner"
+_CODE_PREFIX = "starling/"
 _OWNER_POLL_S = 0.02
 
 
@@ -88,6 +90,9 @@ def _check_root(value: object, *, repo_root: Path) -> Path:
         raise FactoryConfigError("memory config: root must be an absolute path")
     if _is_inside(path, repo_root):
         raise FactoryConfigError("memory config: root must live outside the control-plane repository")
+    # 记忆根目录只属于一个仓库,启动清扫会删 <root>/runs 下的所有子目录:根不能是仓库的上级
+    if _is_inside(repo_root, path):
+        raise FactoryConfigError("memory config: root must not contain the control-plane repository")
     return path
 
 
@@ -122,6 +127,8 @@ def normalize_base_url(key: str, value: object) -> str:
         raise FactoryConfigError(f"memory config: {key} must not carry user:password@ (value not shown)")
     if parts.scheme not in ("http", "https") or not host or parts.query or parts.fragment:
         raise FactoryConfigError(shape)
+    if port is not None and not 1 <= port <= 65535:       # urlsplit 已拒绝 >65535,这里实际多拦 0
+        raise FactoryConfigError(shape)
     if ":" in host:                                       # IPv6:hostname 去掉了方括号,拼回去
         host = f"[{host}]"
     suffix = f":{port}" if port is not None else ""
@@ -144,7 +151,8 @@ def read_memory_config(*, env: Mapping[str, str] | None = None, repo_root: Path)
         raise FactoryConfigError(f"{path} must live outside the control-plane repository")
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        # ValueError:非法编码,以及 PyYAML 的 timestamp 构造器遇到 2024-13-45 这类值时抛的(它不是 YAMLError)
         raise FactoryConfigError(f"{path} cannot be read as YAML ({type(exc).__name__})") from None
     if not isinstance(data, dict):
         raise FactoryConfigError(f"{path} must be a mapping")
@@ -175,28 +183,42 @@ def check_api_key(env: Mapping[str, str]) -> None:
         raise FactoryConfigError(f"{API_KEY_ENV} is empty or unset; the Starling memory reads its key from it")
 
 
-def _write_owner(fd: int, owner: Path, content: str, root: Path) -> None:
-    """把归属写进刚用 O_EXCL 建好的文件,fsync 之后才关。写失败就删掉这个空壳,免得下一个来的等到超时。"""
+def _publish_owner(root: Path, owner: Path, content: bytes) -> bool:
+    """先写临时文件、fsync,再用 `os.link` 发布成 `.owner`:`.owner` 要么不存在,要么内容完整。
+
+    目标已存在时 `os.link` 抛 `FileExistsError`,保住了 `O_EXCL` 的"只有一个赢家"。返回 True 表示这次
+    建成了;False 表示别人已经建了。不论成败,临时文件都删掉(含 Ctrl-C)。
+    """
+    tmp = root / f"{_OWNER_FILE}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
     try:
-        view = memoryview(content.encode("utf-8"))
-        while view:
-            view = view[os.write(fd, view):]
-        os.fsync(fd)
-    except OSError as exc:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
-            owner.unlink()
-        except OSError:
-            pass
+            view = memoryview(content)
+            while view:
+                view = view[os.write(fd, view):]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        try:
+            os.link(tmp, owner)
+        except FileExistsError:
+            return False
+        return True
+    except OSError as exc:
         raise FactoryConfigError(f"memory root {root}: cannot write {_OWNER_FILE} ({type(exc).__name__})") from None
     finally:
-        os.close(fd)
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
 
 
 def claim_memory_root(root: Path, repo_root: Path, *, read_back_timeout_s: float = 2.0) -> None:
     """首次使用时把 `root` 记在 `repo_root` 名下;已被另一个仓库占用就拒绝,信息写两个路径。
 
-    用 `O_CREAT | O_EXCL` 建 `.owner`,两个进程同时首次使用时只有一个建得成。另一个读回内容:对方刚建好
-    还没写完的窗口里读到的是空的,每 20 毫秒再读,至多 `read_back_timeout_s`,仍空就拒绝。
+    `.owner` 由临时文件经 `os.link` 发布,两个进程同时首次使用时只有一个发布得成,且发布出来的就是完整内容。
+    另一个读回比对。旧版本(直接 `O_EXCL` 建 `.owner`)被打断时会留下 0 字节的文件:读到空就每 20 毫秒
+    再读,至多 `read_back_timeout_s`,仍空就拒绝,信息写出该删哪个文件。
     """
     try:
         root.mkdir(parents=True, exist_ok=True)
@@ -204,22 +226,19 @@ def claim_memory_root(root: Path, repo_root: Path, *, read_back_timeout_s: float
         raise FactoryConfigError(f"memory root {root}: cannot be created ({type(exc).__name__})") from None
     mine = repo_root.resolve()
     me = f"{mine}\n"
+    try:
+        content = me.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise FactoryConfigError(f"repository path cannot be recorded as UTF-8 ({type(exc).__name__})") from None
     owner = root / _OWNER_FILE
     deadline = time.monotonic() + read_back_timeout_s
     while True:
-        try:
-            fd = os.open(owner, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            pass
-        except OSError as exc:
-            raise FactoryConfigError(f"memory root {root}: cannot create {_OWNER_FILE} ({type(exc).__name__})") from None
-        else:
-            _write_owner(fd, owner, me, root)
+        if _publish_owner(root, owner, content):
             return
         try:
             theirs = owner.read_text(encoding="utf-8")
         except FileNotFoundError:
-            theirs = ""                                    # 对方写失败删了空壳:回到循环头再建
+            theirs = ""                                    # 有人把它删了:回到循环头再发布
         except (OSError, UnicodeDecodeError) as exc:
             raise FactoryConfigError(f"memory root {root}: {_OWNER_FILE} cannot be read ({type(exc).__name__})") from None
         if theirs:
@@ -228,7 +247,8 @@ def claim_memory_root(root: Path, repo_root: Path, *, read_back_timeout_s: float
             raise FactoryConfigError(f"memory root {root} belongs to {theirs.strip()}, not {mine}")
         if time.monotonic() >= deadline:
             raise FactoryConfigError(
-                f"memory root {root}: {_OWNER_FILE} is empty; another repository may be claiming it"
+                f"memory root {root}: {_OWNER_FILE} is empty; "
+                f"if no other repository uses this root, delete {owner} and retry"
             )
         time.sleep(_OWNER_POLL_S)
 
@@ -275,9 +295,16 @@ def starling_install_source(*, distribution: importlib.metadata.Distribution | N
     record = dist.read_text("RECORD")
     if record is None:
         raise FactoryConfigError("Starling's install has no RECORD; cannot identify the installed code")
-    # 丢掉没有哈希的行(RECORD 自身、无哈希的 .pyc),按路径排序,免得安装顺序不同就换了标识
-    rows = sorted([row[0], row[1]] for row in csv.reader(io.StringIO(record)) if len(row) >= 2 and row[1])
+    # 只认 `import starling` 会加载的文件:路径在 starling/ 下、带哈希。*.dist-info(INSTALLER、REQUESTED、
+    # direct_url.json、uv_cache.json 描述的是怎么装的)、include/ 与 lib/(C++ 头文件和静态库)、../ 开头的脚本行
+    # 会随安装器、venv 变,同一份代码就会换标识。按路径排序,免得安装顺序不同也换标识。
+    rows = sorted(
+        [row[0], row[1]] for row in csv.reader(io.StringIO(record))
+        if len(row) >= 2 and row[1] and row[0].startswith(_CODE_PREFIX)
+    )
     if not rows:
-        raise FactoryConfigError("Starling's RECORD lists no hashed files; cannot identify the installed code")
+        raise FactoryConfigError(
+            f"Starling's RECORD lists no hashed files under {_CODE_PREFIX}; cannot identify the installed code"
+        )
     digest = hashlib.sha256(json.dumps(rows, separators=(",", ":")).encode("utf-8")).hexdigest()
     return f"record:{digest}"

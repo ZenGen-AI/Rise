@@ -80,7 +80,8 @@ def test_base_urls_are_normalized(raw, want):
 
 
 @pytest.mark.parametrize("raw", [SECRET_URL, "https://token@embed.example/v1", "ftp://embed.example/v1",
-                                 "embed.example/v1", "https:///v1", "https://embed.example/v1?k=1", "", 3])
+                                 "embed.example/v1", "https:///v1", "https://embed.example/v1?k=1", "", 3,
+                                 "https://embed.example:0/v1", "http://[::1]:0/v1"])
 def test_bad_base_urls_are_refused_without_echoing_the_value(raw):
     with pytest.raises(FactoryConfigError) as info:
         normalize_base_url("embedding_base_url", raw)
@@ -271,8 +272,9 @@ def test_an_empty_owner_file_is_refused_after_the_read_back_timeout(tmp_path):
     root = tmp_path / "mem"
     root.mkdir()
     (root / ".owner").write_text("", encoding="utf-8")
-    with pytest.raises(FactoryConfigError, match=r"\.owner is empty"):
+    with pytest.raises(FactoryConfigError, match=r"\.owner is empty") as info:
         claim_memory_root(root, tmp_path / "repo", read_back_timeout_s=0.1)
+    assert str(root / ".owner") in str(info.value) and "delete" in str(info.value)
 
 
 def test_an_owner_file_filled_in_during_the_wait_is_honoured(tmp_path):
@@ -296,3 +298,143 @@ def test_record_rows_without_a_hash_are_ignored():
         starling_install_source(distribution=_Dist({"RECORD": noisy}))
     with pytest.raises(FactoryConfigError, match="RECORD"):
         starling_install_source(distribution=_Dist({"RECORD": "starling-0.0.1.dist-info/RECORD,,\n"}))
+
+
+# ---- 评审后补的用例 -----------------------------------------------------------------------------------
+
+_CODE = "starling/__init__.py,sha256=AAA,10\nstarling/_core.so,sha256=BBB,99\n"
+_UV = (
+    "starling_memory-0.0.1.dist-info/INSTALLER,sha256=UVUV,3\n"
+    "starling_memory-0.0.1.dist-info/REQUESTED,sha256=EMPTY,0\n"
+    "starling_memory-0.0.1.dist-info/direct_url.json,sha256=URL1,80\n"
+    "starling_memory-0.0.1.dist-info/uv_cache.json,sha256=CACHE1,50\n"
+    "starling_memory-0.0.1.dist-info/RECORD,,\n"
+    "include/starling/api.h,sha256=HDR1,5\n"
+    "lib/libstarling_core.a,sha256=LIB1,9\n"
+    "../../../bin/starling-tool,sha256=BIN1,7\n"
+)
+_PIP = (
+    "starling_memory-0.0.1.dist-info/INSTALLER,sha256=PIPPIP,4\n"
+    "starling_memory-0.0.1.dist-info/direct_url.json,sha256=URL2,90\n"
+    "include/starling/api.h,sha256=HDR2,5\n"
+    "lib/libstarling_core.a,sha256=LIB2,9\n"
+    "../../bin/other-tool,sha256=BIN2,8\n"
+)
+
+
+def _identity(record):
+    return starling_install_source(distribution=_Dist({"RECORD": record}))
+
+
+def test_install_identity_covers_only_the_importable_code():
+    """INSTALLER、direct_url.json、头文件、静态库、脚本描述的是怎么装的,不是 import starling 加载什么。"""
+    assert _identity(_CODE) == _identity(_CODE + _UV) == _identity(_PIP + _CODE)
+
+
+def test_install_identity_changes_with_any_file_under_starling():
+    base = _identity(_CODE)
+    assert _identity(_CODE + "starling/extra.py,sha256=NEW,1\n") != base
+    assert _identity(_CODE.replace("starling/__init__.py,sha256=AAA,10\n", "")) != base
+    assert _identity(_CODE.replace("AAA", "ZZZ")) != base
+    assert _identity(_CODE.replace("starling/_core.so", "starling/_core2.so")) != base
+
+
+def test_a_record_with_nothing_under_starling_is_refused():
+    with pytest.raises(FactoryConfigError, match="RECORD"):
+        _identity(_UV)
+
+
+_PAIRS = "root: {root}\nextraction_base_url: https://extract.example/v1\nextraction_model: m\n" \
+         "embedding_base_url: https://embed.example/v1\nembedding_dim: 8\n"
+
+
+@pytest.mark.parametrize("extra", [
+    "embedding_model: 2024-13-45\n",          # 值是解析不出的日期
+    "embedding_model: m\n2024-13-45: x\n",    # 键是解析不出的日期
+    "embedding_model: 2024-02-31\n",
+], ids=["bad-date-value", "bad-date-key", "bad-day-of-month"])
+def test_a_yaml_scalar_the_loader_cannot_build_is_a_config_error_not_a_crash(tmp_path, extra):
+    """PyYAML 的 timestamp 构造器抛 ValueError(不是 YAMLError);不转成 FactoryConfigError 就会以退出码 1 崩出。"""
+    path = tmp_path / "memory.yaml"
+    path.write_text(_PAIRS.format(root=tmp_path / "mem") + extra, encoding="utf-8"); os.chmod(path, 0o600)
+    with pytest.raises(FactoryConfigError) as info:
+        _read(tmp_path, path)
+    assert "cannot be read as YAML" in str(info.value) and "ValueError" in str(info.value)
+    assert "13-45" not in str(info.value) and "02-31" not in str(info.value)
+
+
+def test_root_must_not_contain_the_control_plane_repository(tmp_path):
+    """记忆根目录只属于一个仓库,启动清扫会删 <root>/runs 下的所有子目录:根不能是仓库的上级。"""
+    (tmp_path / "repo").mkdir()
+    for root in (tmp_path, tmp_path.parent, Path(tmp_path.anchor)):
+        with pytest.raises(FactoryConfigError, match="root must not contain the control-plane repository"):
+            _read(tmp_path, _write(tmp_path, _payload(tmp_path, root=str(root))))
+    # 经符号链接指到上级也一样
+    link = tmp_path.parent / f"{tmp_path.name}-up"
+    link.symlink_to(tmp_path)
+    try:
+        with pytest.raises(FactoryConfigError, match="root must not contain"):
+            _read(tmp_path, _write(tmp_path, _payload(tmp_path, root=str(link))))
+    finally:
+        link.unlink()
+    # 与仓库同级、名字只是前缀相同的目录是允许的
+    assert _read(tmp_path, _write(tmp_path, _payload(tmp_path, root=str(tmp_path / "repo-mem")))).root == tmp_path / "repo-mem"
+
+
+def _leftovers(root):
+    return sorted(p.name for p in root.iterdir())
+
+
+def test_claiming_leaves_no_temporary_files_behind(tmp_path):
+    root, a, b = tmp_path / "mem", tmp_path / "repo-a", tmp_path / "repo-b"
+    claim_memory_root(root, a)
+    assert _leftovers(root) == [".owner"]
+    with pytest.raises(FactoryConfigError):
+        claim_memory_root(root, b)
+    assert _leftovers(root) == [".owner"]
+
+
+@pytest.mark.parametrize("boom, raised", [(OSError(5, "io error"), FactoryConfigError), (KeyboardInterrupt(), KeyboardInterrupt)],
+                         ids=["oserror", "interrupt"])
+def test_a_failure_before_publishing_leaves_no_owner_and_no_temporary_file(tmp_path, monkeypatch, boom, raised):
+    """.owner 只会不存在或内容完整:fsync 前被打断(含 Ctrl-C)不留 0 字节的 .owner,也不留临时文件。"""
+    root = tmp_path / "mem"
+
+    def fail(fd):
+        raise boom
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "fsync", fail)
+        with pytest.raises(raised):
+            claim_memory_root(root, tmp_path / "repo")
+    assert _leftovers(root) == []
+    claim_memory_root(root, tmp_path / "repo")                 # 之后照常能占
+    assert _leftovers(root) == [".owner"]
+
+
+def test_a_filesystem_without_hard_links_is_a_config_error(tmp_path, monkeypatch):
+    root = tmp_path / "mem"
+
+    def no_link(src, dst, **kw):
+        raise OSError(1, "operation not permitted")
+
+    monkeypatch.setattr(os, "link", no_link)
+    with pytest.raises(FactoryConfigError, match=r"cannot write \.owner \(PermissionError\)"):
+        claim_memory_root(root, tmp_path / "repo")
+    assert _leftovers(root) == []
+
+
+def test_an_empty_owner_deleted_by_hand_while_waiting_is_replaced(tmp_path):
+    import threading
+    root, repo = tmp_path / "mem", tmp_path / "repo"
+    root.mkdir()
+    owner = root / ".owner"
+    owner.write_text("", encoding="utf-8")
+    timer = threading.Timer(0.1, owner.unlink)
+    timer.start()
+    try:
+        claim_memory_root(root, repo, read_back_timeout_s=2.0)
+    finally:
+        timer.join()
+    assert owner.read_text(encoding="utf-8") == f"{repo.resolve()}\n"
+    assert _leftovers(root) == [".owner"]
