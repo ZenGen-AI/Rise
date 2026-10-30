@@ -1,5 +1,6 @@
 """StarlingDeploymentStore:部署管理面(设计二 4.1、5.3 节)。契约用例走端口,这里测管理面自己的语义:
 人格 id 校验、短命连接、崩溃后重调、备份与还原、摘要不改动被读的文件。"""
+import os
 import shutil
 import sqlite3
 
@@ -16,6 +17,10 @@ from actio.memory_starling import EPOCH, StarlingDeploymentStore  # noqa: E402
 KEY = "r1/deploy-m-s-0#1"                      # 部署 key 带轮次前缀、含 "/",只进事件 key
 KEY2 = "r1/deploy-m-s-1#1"
 TEXT = "pb：我担心预算超支"
+
+
+class _Crash(BaseException):
+    """模拟进程在某一步死掉:不是 Exception,所以不会被管理面的失败翻译吞成 MemoryFailureError。"""
 
 
 @pytest.fixture
@@ -340,6 +345,87 @@ def test_restore_swaps_in_one_file_and_clears_what_was_left_beside_the_library(t
     assert store.restore_from("pa", snap) == before
     assert _names(lib.parent) == ["pa.db"]
     assert store.digest("pa") == before
+
+
+SNAPSHOT_OF = ["pa", "pz"]      # 快照取自本人格的空库,或取自另一个人格的空库
+
+
+def _library_with_a_stale_wal(tmp_path, store, snapshot_of):
+    """造出「旧库的 -wal、-shm 留在库旁」:先备份一个空库当快照;端口写入后不关,把 -wal、-shm 拷出来;
+    关端口(WAL 合并、旁边的日志被删);再把拷出来的旧日志放回库旁。
+    返回 (快照路径, 快照摘要, 旧库摘要)。
+
+    快照取自哪里,旧日志重放进新库的样子不同:取自本人格自己的库时页布局对不上,开库报
+    `malformed database schema`;取自别的库时页布局对得上,重放无声无息,摘要回到还原前的值。"""
+    snap = tmp_path / "snap" / "pa.db"
+    snap_digest = store.backup_to(snapshot_of, snap)
+    port = store.open("pa")
+    port.remember(MemoryEvent(KEY, TEXT, "pb"))
+    old_digest = port.digest()
+    lib, kept = _lib(tmp_path), tmp_path / "kept"
+    kept.mkdir()
+    for suffix in ("-wal", "-shm"):
+        shutil.copyfile(lib.with_name(lib.name + suffix), kept / suffix)
+    port.close()
+    assert not lib.with_name(lib.name + "-wal").exists()            # 关端口时 WAL 已合并并删掉
+    for suffix in ("-wal", "-shm"):
+        shutil.copyfile(kept / suffix, lib.with_name(lib.name + suffix))
+    assert snap_digest != old_digest
+    return snap, snap_digest, old_digest
+
+
+def _beside_pa(tmp_path):
+    """pa 的库文件与它旁边的 -wal、-shm、.restore-partial(别的人格的库不算)。"""
+    return [n for n in _names(_lib(tmp_path).parent) if n.startswith("pa.db")]
+
+
+def _crash_at_replace(monkeypatch, *, after: bool):
+    """让 restore_from 里把 .restore-partial 换进库路径的那一次 os.replace 在 after 前或后「死掉」。
+    返回一个列表:每次拦到时记下库旁当时还有哪些 -wal、-shm。"""
+    real, seen = os.replace, []
+
+    def fake(src, dst, *args, **kwargs):
+        if not str(src).endswith(".restore-partial"):
+            return real(src, dst, *args, **kwargs)
+        seen.append([n for n in (f"{dst}-wal", f"{dst}-shm") if os.path.exists(n)])
+        if after:
+            real(src, dst, *args, **kwargs)
+        raise _Crash()
+
+    monkeypatch.setattr("actio.memory_starling.os.replace", fake)
+    return seen
+
+
+@pytest.mark.parametrize("snapshot_of", SNAPSHOT_OF)
+def test_a_crash_right_after_the_swap_leaves_no_old_wal_to_replay_into_the_restored_library(
+        tmp_path, fake, monkeypatch, snapshot_of):
+    """旧库的 -wal 留在新库旁,下次任何 Memory.open 都会把它重放进新库,回滚就静默失效
+    (VACUUM INTO 产出的是回滚日志模式的单文件,header 里没有 WAL 的 salt,挡不住)。
+    所以旁边的日志必须在 os.replace 之前删掉,换完之后崩溃,库旁也不剩它们。"""
+    store = _store(tmp_path, fake)
+    snap, snap_digest, old_digest = _library_with_a_stale_wal(tmp_path, store, snapshot_of)
+    _crash_at_replace(monkeypatch, after=True)
+    with pytest.raises(_Crash):
+        store.restore_from("pa", snap)
+    monkeypatch.undo()
+    assert store.digest("pa") == snap_digest != old_digest         # 重开后是快照,不是还原前的内容
+    assert store.restore_from("pa", snap) == snap_digest           # 重跑回滚照常成功
+    assert _beside_pa(tmp_path) == ["pa.db"]
+
+
+@pytest.mark.parametrize("snapshot_of", SNAPSHOT_OF)
+def test_a_crash_after_the_old_wal_is_cleared_but_before_the_swap_leaves_the_old_library_whole(
+        tmp_path, fake, monkeypatch, snapshot_of):
+    store = _store(tmp_path, fake)
+    snap, snap_digest, old_digest = _library_with_a_stale_wal(tmp_path, store, snapshot_of)
+    seen = _crash_at_replace(monkeypatch, after=False)
+    with pytest.raises(_Crash):
+        store.restore_from("pa", snap)
+    monkeypatch.undo()
+    assert seen == [[]]                                            # 换之前库旁已经没有 -wal、-shm
+    assert store.digest("pa") == old_digest                        # 旧库仍完整可开
+    assert store.restore_from("pa", snap) == snap_digest == store.digest("pa")     # 重跑回滚成功
+    assert _beside_pa(tmp_path) == ["pa.db"]
 
 
 def test_a_corrupt_library_or_backup_is_a_non_transient_failure(tmp_path, fake):

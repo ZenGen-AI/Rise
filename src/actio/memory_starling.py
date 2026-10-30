@@ -358,7 +358,14 @@ class StarlingDeploymentStore:
 
         不在原地打开 path:`Memory.open` 会跑迁移、写 WAL,而起点副本是提交点,字节不能变。
         所以拷到临时目录,在副本上开,`backup_to` 成库旁的 `<库>.restore-partial`(自洽的单文件),
-        再 `os.replace` 到库路径,最后删掉库旁残留的 -wal、-shm。"""
+        先删掉库旁的 -wal、-shm,再 `os.replace` 到库路径。
+
+        **必须先删日志、后换文件。** `backup_to` 用 `VACUUM INTO`,产出的是回滚日志模式的单文件,header
+        里不记 WAL 的 salt,SQLite 分不出库旁的 -wal 是不是它的。先换后删时,在两步之间崩溃会把旧库的
+        -wal 留在新库旁,之后任何一次 `Memory.open` 都把它重放进新库,摘要回到还原前的值,回滚静默
+        失效,close 时还会把重放的内容检查点写死进主文件。先删后换则两个崩溃点都安全:换之前崩溃,
+        旧库仍是完整可开的(没有打开的端口,上一次 close 已合并 WAL,库旁本来就没有日志);换之后崩溃,
+        库旁已经没有日志。"""
         library = self._path(persona_id)
         if self._open.get(persona_id, 0) > 0:
             raise MemoryFailureError("restore_from: persona has an open port", transient=False)
@@ -374,9 +381,9 @@ class StarlingDeploymentStore:
                 self._ensure_root()
                 partial.unlink(missing_ok=True)      # Starling 的 backup_to 遇到已存在的目标抛 FileExistsError
                 memory.backup_to(partial)
-            os.replace(partial, library)
             for suffix in _WAL_SUFFIXES:
                 _sidecar(library, suffix).unlink(missing_ok=True)
+            os.replace(partial, library)
         return digest
 
     # ---- 摘要 ----
