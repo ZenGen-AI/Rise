@@ -238,6 +238,58 @@ def _no_builders():
     return {"record_track": lambda ctx: (lambda s, a: None), "plan_next_round": lambda ctx: (lambda s, a: None)}
 
 
+@pytest.mark.parametrize("options", [
+    FactoryOptions(interact=True),                                   # --interact 单独用:wire.py 里 `if not keys:` 的独立分支
+    FactoryOptions(switches=("admit",)),                             # 只靠 needs_deployment 集合里的 admit_proposal 触发
+    FactoryOptions(switches=("agent",)),
+    FactoryOptions(interact=True, switches=("agent",)),
+], ids=["interact", "admit", "agent", "interact+agent"])
+def test_a_bad_memory_config_is_refused_at_every_entry_that_needs_memory(store, tmp_path, options):
+    """第 10 节:配置有问题不退回替身。四个需要记忆的入口各钉一次;memory_wiring 排在 _shared_runtime 与
+    _interact_wiring 之前,所以不必准备端点。断言文字里有 missing.yaml:确认抛的是记忆配置那条,不是别的装配错误。"""
+    env = {MEMORY_CONFIG_ENV: str(tmp_path / "missing.yaml")}
+    with pytest.raises(FactoryConfigError) as caught:
+        assemble(store, options, env=env)
+    assert "missing.yaml" in str(caught.value)
+
+
+def _runs_refusal_env(tmp_path, monkeypatch):
+    """装没装 Starling 都走到 runs/ 这一条:把安装检查打桩成通过(它排在 runs/ 检查之前)。"""
+    import factory.memory_runtime as mr
+    monkeypatch.setattr(mr, "starling_install_source", lambda: "git:abc")
+    (tmp_path / "mem").mkdir()
+    return _memory_env(tmp_path)
+
+
+def _assert_refused_before_claiming(code, capsys, tmp_path):
+    assert code == 2
+    err = capsys.readouterr().err
+    assert err.startswith("factory: error: ") and "runs/" in err
+    assert str(tmp_path / "mem") not in err and "127.0.0.1" not in err and "offline-test-key" not in err
+    assert not (tmp_path / "mem" / ".owner").exists()                # 拒绝先于认领
+
+
+def test_a_symlinked_runs_dir_is_exit_code_2_at_assembly_and_nothing_behind_it_is_touched(
+        store, tmp_path, monkeypatch, capsys):
+    """runs/ 是符号链接:启动清扫会跟进去删。装配期就拒绝,而不是等到持锁后的 sweep 抛原始异常(退出码 1、traceback)。"""
+    env = _runs_refusal_env(tmp_path, monkeypatch)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "keep.txt").write_text("precious", encoding="utf-8")
+    (tmp_path / "mem" / "runs").symlink_to(elsewhere, target_is_directory=True)
+    code = main(["reconcile", str(store.repo_root), "--once", "--enable", "agent"], env=env)
+    _assert_refused_before_claiming(code, capsys, tmp_path)
+    assert (elsewhere / "keep.txt").read_text(encoding="utf-8") == "precious"
+
+
+def test_a_runs_entry_that_is_a_plain_file_is_exit_code_2_at_assembly(store, tmp_path, monkeypatch, capsys):
+    env = _runs_refusal_env(tmp_path, monkeypatch)
+    (tmp_path / "mem" / "runs").write_text("not a directory", encoding="utf-8")
+    code = main(["reconcile", str(store.repo_root), "--once", "--enable", "agent"], env=env)
+    _assert_refused_before_claiming(code, capsys, tmp_path)
+    assert (tmp_path / "mem" / "runs").read_text(encoding="utf-8") == "not a directory"
+
+
 def test_a_bad_memory_config_is_exit_code_2_even_with_the_stand_in_files_absent(store, tmp_path, capsys):
     """配置有任何问题都在装配期拒绝,不退回替身:这里配置文件不存在。"""
     env = {MEMORY_CONFIG_ENV: str(tmp_path / "missing.yaml")}

@@ -420,12 +420,25 @@ class MemoryWiring:
     sweep: Callable[[], int] | None
 
 
+def _check_runs_dir(root: Path) -> None:
+    """`<根>/runs` 是符号链接或存在但不是目录,装配期拒绝(`FactoryConfigError`,命令行退出码 2)。
+
+    启动清扫会遍历并删掉 `runs/` 下的东西,符号链接会让它删到记忆根之外。`TrainingCopies.sweep` 自己也拒绝符号链接,
+    但它在持仓库锁之后才跑,抛出的 `MemoryFailureError` 不在 `factory.cli.main` 兜的异常里,操作员会看到 traceback 与
+    退出码 1;这是记忆根的配置错,应与其他配置错走同一个出口。`sweep` 里的检查保留,作第二道(装配之后有人换了目录)。
+    先判链接再判目录:`is_dir()` 会跟随链接。文字只写相对名,不含记忆根的绝对路径(第 10 节)。"""
+    runs = root / "runs"
+    if runs.is_symlink() or (runs.exists() and not runs.is_dir()):
+        raise FactoryConfigError("memory root: runs/ is a symlink or not a directory; replace it with a plain directory")
+
+
 def memory_wiring(repo_root: Path, env: Mapping[str, str], *, deployment: bool) -> MemoryWiring:
     """读 RISMFORGE_MEMORY_CONFIG 选后端,只在这里记一次启动日志。日志与异常文字都不含记忆根目录与端点地址(第 10 节)。
 
     - 没设(或空串):替身。`deployment` 为真才造替身的部署记忆。
     - 设了,按序:Starling 的安装来源(未安装、editable 在这里拒绝,先于任何对 `actio.memory_starling` 的导入与对记忆
-      根目录的写)、`OPENAI_API_KEY` 非空、认领记忆根目录(被另一个仓库占用就拒绝)、导入 `actio.memory_starling`。
+      根目录的写)、`OPENAI_API_KEY` 非空、`runs/` 不是符号链接也不是文件、认领记忆根目录(被另一个仓库占用就拒绝)、
+      导入 `actio.memory_starling`。
       装了包但 C++ 扩展载不进来(`ImportError`)译成与「没装」同一条安装提示的 `FactoryConfigError`。"""
     config = read_memory_config(env=env, repo_root=repo_root)
     if config is None:
@@ -436,6 +449,7 @@ def memory_wiring(repo_root: Path, env: Mapping[str, str], *, deployment: bool) 
         )
     install = starling_install_source()
     check_api_key(env)
+    _check_runs_dir(config.root)
     claim_memory_root(config.root, repo_root)
     try:
         from actio.memory_starling import (
