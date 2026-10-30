@@ -38,9 +38,9 @@ class FakeStarling:
     def recall(self, query, **kw):
         self._maybe("recall"); return list(self.hits)
 
-    def remember_event(self, key, text, *, interlocutor):
+    def remember_event(self, key, text, *, interlocutor, epoch):
         self._maybe("remember_event")
-        self.remembered.append((key, text, interlocutor))
+        self.remembered.append((key, text, interlocutor, epoch))
         return self.result
 
     def content_ids(self, statement_ids):
@@ -172,13 +172,13 @@ def test_a_negative_statement_gets_the_negation_before_the_predicate():
     assert hit == MemoryHit("mem-" + "a" * 16, "cog-pb 不responsible_for 我担心预算超支（desires，置信度 0.50）")
 
 
-def test_remember_stores_content_ids_and_leaves_the_clock_epoch_to_starling():
+def test_remember_stores_content_ids_and_passes_the_clock_epoch_explicitly():
     fake = FakeStarling()
     fake.result = SimpleNamespace(extraction_failed=False, failure_category="", statement_ids=["u-1", "u-2"])
     fake.ids = {"u-1": "ab" * 32, "u-2": "cd" * 32}
     out = StarlingMemory(fake).remember(EV)
     assert out == RememberOutcome(("mem-" + "ab" * 8, "mem-" + "cd" * 8), False, None)
-    assert fake.remembered == [("ep-1#0", "pb：我担心预算超支", "pb")]   # 不加 [key] 前缀,不传 epoch
+    assert fake.remembered == [("ep-1#0", "pb：我担心预算超支", "pb", EPOCH)]   # 不加 [key] 前缀;epoch 显式传
 
 
 @pytest.mark.parametrize("category, expected", [("transport_failure", "transport_failure"), ("", "unknown")])

@@ -4,9 +4,17 @@
 库间稳定);把 `remember_event` 的结果换成 `RememberOutcome`;把 Starling 抛的一切异常按第 10 节的
 表映射成 `MemoryFailureError` 及其子类;`embed_pending` 按事件时钟给出嵌入时刻。
 
-异常信息只放异常类名:原异常的文字可能含端点地址,所以一律 `from None` 改抛。"""
+异常信息只放异常类名:原异常的文字可能含端点地址,所以一律 `from None` 改抛。
+
+`StarlingDeploymentStore` 是同一个后端的部署管理面(满足 `DeploymentMemoryStore`):每个人格一个库
+`<root>/<persona_id>.db`,管理面的调用各开一条短命连接。"""
 from __future__ import annotations
 
+import contextlib
+import os
+import shutil
+import tempfile
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -16,6 +24,7 @@ import starling
 
 from actio.errors import ActioDataError
 from actio.memory_port import (
+    PERSONA_ID_PATTERN,
     MemoryClosedError,
     MemoryEvent,
     MemoryEventConflict,
@@ -24,7 +33,8 @@ from actio.memory_port import (
     RememberOutcome,
 )
 
-# 事件时钟的起点:与 `Memory.remember_event` 的默认 epoch 同值(设计源 4.3 节)。
+# 事件时钟的起点(设计源 4.3 节)。每次 `remember_event` 都显式传它,不靠门面的默认值恰好同值:
+# 门面哪天改了默认值,事件时刻和摘要会静默漂移。
 # 嵌入时刻是 EPOCH 加 next_seq 秒,所以恒不早于任何已写事件的 created_at。
 EPOCH = "2026-01-01T00:00:00Z"
 _EPOCH_AT = datetime.fromisoformat(EPOCH)
@@ -77,8 +87,29 @@ def translate_failure(exc: BaseException) -> MemoryFailureError:
     return MemoryFailureError(f"starling memory failed: {name}", transient=False)
 
 
+@contextlib.contextmanager
+def _translated() -> Iterator[None]:
+    """块内抛的一切 Exception 按第 10 节的表改抛,原异常的文字不带出去。"""
+    try:
+        yield
+    except Exception as exc:
+        raise translate_failure(exc) from None
+
+
 def _hit_id(content_id: str) -> str:
     return "mem-" + content_id[:_ID_HEX_CHARS]
+
+
+def _outcome(memory, res) -> RememberOutcome:
+    """`remember_event` 的返回译成 `RememberOutcome`,端口与管理面共用。"""
+    if res.extraction_failed:
+        return RememberOutcome((), True, res.failure_category or "unknown")
+    content_ids = memory.content_ids(list(res.statement_ids))
+    if _MISSING_CONTENT_ID in content_ids.values():
+        # 门面对本库不认得的语句 id 返回 "missing"。刚写完的语句不该认不得;放行的话
+        # 假 id mem-missing 会进 stored、准入载荷与轨迹,比一个报错难查得多。
+        raise MemoryFailureError("remember: statement not found in library", transient=False)
+    return RememberOutcome(tuple(_hit_id(content_ids[s]) for s in res.statement_ids), False, None)
 
 
 def _render(row) -> str:
@@ -106,13 +137,13 @@ class StarlingMemory:
 
     @classmethod
     def open(cls, path: Path, *, persona_id: str, endpoints: StarlingEndpoints,
-             close_timeout_s: float = 60.0) -> StarlingMemory:
+             close_timeout_s: float = 60.0, on_close: Callable[[], None] | None = None) -> StarlingMemory:
         try:
             memory = starling.Memory.open(
                 str(path), agent=persona_id, llm=endpoints.make_llm(), embedder=endpoints.make_embedder())
         except Exception as exc:
             raise translate_failure(exc) from None
-        return cls(memory, close_timeout_s=close_timeout_s)
+        return cls(memory, close_timeout_s=close_timeout_s, on_close=on_close)
 
     def _live(self):
         if self._closed:
@@ -147,16 +178,9 @@ class StarlingMemory:
     def remember(self, event: MemoryEvent) -> RememberOutcome:
         memory = self._live()
         try:
-            # epoch 用门面的默认值;"[key] " 前缀由 Starling 加,这里只传原文。
-            res = memory.remember_event(event.key, event.text, interlocutor=event.interlocutor)
-            if res.extraction_failed:
-                return RememberOutcome((), True, res.failure_category or "unknown")
-            content_ids = memory.content_ids(list(res.statement_ids))
-            if _MISSING_CONTENT_ID in content_ids.values():
-                # 门面对本库不认得的语句 id 返回 "missing"。刚写完的语句不该认不得;放行的话
-                # 假 id mem-missing 会进 stored、准入载荷与轨迹,比一个报错难查得多。
-                raise MemoryFailureError("remember: statement not found in library", transient=False)
-            return RememberOutcome(tuple(_hit_id(content_ids[s]) for s in res.statement_ids), False, None)
+            # "[key] " 前缀由 Starling 加,这里只传原文。
+            res = memory.remember_event(event.key, event.text, interlocutor=event.interlocutor, epoch=EPOCH)
+            return _outcome(memory, res)
         except Exception as exc:
             raise translate_failure(exc) from None
 
@@ -194,3 +218,184 @@ class StarlingMemory:
                 self._on_close()
             except Exception as exc:
                 raise translate_failure(exc) from None
+
+
+_WAL_SUFFIXES = ("-wal", "-shm")
+
+
+def _sidecar(path: Path, suffix: str) -> Path:
+    return path.with_name(path.name + suffix)
+
+
+def _copy_library(src: Path, dst: Path) -> None:
+    """把库文件连同同名 -wal(有的话)拷到 dst。端口开着、WAL 没合并时,写入还在 -wal 里,只拷主文件
+    算出的摘要会漏掉它们。-shm 不拷:它是 WAL 的索引,打开时由 -wal 重建。"""
+    shutil.copyfile(src, dst)
+    wal = _sidecar(src, "-wal")
+    if wal.exists():
+        shutil.copyfile(wal, _sidecar(dst, "-wal"))
+
+
+class StarlingDeploymentStore:
+    """部署记忆的管理面,满足 `DeploymentMemoryStore`:每个人格一个 Starling 库 `<root>/<persona_id>.db`
+    (组合根传入 `<记忆根>/deploy`,设计源 5.3 节)。
+
+    **调用方必须持该人格的人格锁。** 门面只在单个 `Memory` 内计在途调用,不串行化同一库上的多条连接;
+    管理面每次调用另开一条短命连接,与端口、与别的管理面调用并发时没有任何保护。rise 今天每个调用点都在
+    人格锁里(`mindagent.rounds._PersonaLocks`、`mindagent.admit` 的 `ExitStack`),所以本类不加自己的锁。
+
+    端口数只在实例内计(与 `FileTupleStore` 一样),所以组合根只造一个 store。
+
+    库不存在时:`pending_events` 返回 `[]`,`digest` 给空库的摘要,`abandon_event` 当未知 key,都不建文件;
+    `open`、`remember_event`、`backup_to` 要建库,会建。"""
+
+    def __init__(self, root: Path, *, endpoints: StarlingEndpoints, close_timeout_s: float = 60.0) -> None:
+        # 构造不碰磁盘:根目录由第一次需要建库的调用建。
+        self._root = Path(root)
+        self._endpoints = endpoints
+        self._close_timeout_s = close_timeout_s
+        self._open: dict[str, int] = {}      # 每个人格打开着的端口数
+
+    # ---- 路径与连接 ----
+
+    def _path(self, persona_id: str) -> Path:
+        """persona_id 直接拼进文件名:用 fullmatch(模式以 $ 结尾,match 会放过 "p1\\n"),
+        '/' 与开头的 '.' 都不许。"""
+        if not isinstance(persona_id, str) or not PERSONA_ID_PATTERN.fullmatch(persona_id):
+            raise ActioDataError(f"persona_id: expected 1 to 128 characters of [A-Za-z0-9._-] "
+                                 f"starting with a letter or digit, got {persona_id!r}")
+        return self._root / f"{persona_id}.db"
+
+    def _ensure_root(self) -> None:
+        with _translated():
+            self._root.mkdir(parents=True, exist_ok=True)
+
+    @contextlib.contextmanager
+    def _short(self, path: Path, *, agent: str, extract: bool = False) -> Iterator[starling.Memory]:
+        """一条短命连接:打开、交给块、关闭。`extract` 为真才配抽取与嵌入端点(只有 remember_event 要),
+        其余调用不读 OPENAI_API_KEY。块里抛的一切 Exception 按第 10 节的表改抛;块已经失败时,关闭的
+        失败被吞掉,让块的异常说话。`Memory.open` 对不存在的路径会建新库,要不要建由调用方先查。"""
+        with _translated():
+            memory = starling.Memory.open(
+                str(path), agent=agent,
+                llm=self._endpoints.make_llm() if extract else None,
+                embedder=self._endpoints.make_embedder() if extract else None)
+        try:
+            yield memory
+        except BaseException as exc:
+            with contextlib.suppress(Exception):
+                memory.close(timeout=self._close_timeout_s)
+            if isinstance(exc, Exception):
+                raise translate_failure(exc) from None
+            raise
+        with _translated():
+            memory.close(timeout=self._close_timeout_s)
+
+    def _released(self, persona_id: str) -> None:
+        """端口的 on_close:只做字典减一,不做任何可能抛的事(它抛了,计数减一就丢了)。"""
+        left = self._open.get(persona_id, 0) - 1
+        if left > 0:
+            self._open[persona_id] = left
+        else:
+            self._open.pop(persona_id, None)
+
+    # ---- DeploymentMemoryStore ----
+
+    def open(self, persona_id: str) -> StarlingMemory:
+        path = self._path(persona_id)
+        self._ensure_root()
+        port = StarlingMemory.open(
+            path, persona_id=persona_id, endpoints=self._endpoints, close_timeout_s=self._close_timeout_s,
+            on_close=lambda: self._released(persona_id))
+        self._open[persona_id] = self._open.get(persona_id, 0) + 1      # 打开成功后才计数
+        return port
+
+    def remember_event(self, persona_id: str, key: str, text: str, *, interlocutor: str) -> RememberOutcome:
+        path = self._path(persona_id)
+        self._ensure_root()
+        with self._short(path, agent=persona_id, extract=True) as memory:
+            res = memory.remember_event(key, text, interlocutor=interlocutor, epoch=EPOCH)
+            return _outcome(memory, res)
+
+    def abandon_event(self, persona_id: str, key: str) -> None:
+        path = self._path(persona_id)
+        if not path.exists():
+            raise translate_failure(KeyError(key)) from None            # 没有库就没有这个 key
+        with self._short(path, agent=persona_id) as memory:
+            memory.abandon_event(key)
+
+    def pending_events(self, persona_id: str) -> list[str]:
+        path = self._path(persona_id)
+        if not path.exists():
+            return []
+        with self._short(path, agent=persona_id) as memory:
+            return [p.key for p in memory.pending_events()]
+
+    def digest(self, persona_id: str) -> str:
+        path = self._path(persona_id)
+        if not path.exists():
+            return self._empty_digest()
+        with self._short(path, agent=persona_id) as memory:
+            return memory.digest()
+
+    def backup_to(self, persona_id: str, path: Path) -> str:
+        """备份到 path 并返回副本的摘要。人格还没有库时先建空库,所以起点副本总是存在。
+        path 已存在就覆盖(起点副本由 MindAgent 管,覆盖是它要的语义;Starling 拒绝已存在的目标,
+        所以先删),旁边残留的 -wal、-shm 一并删:它们若属于被覆盖的旧文件,会被新文件当成自己的。"""
+        library = self._path(persona_id)
+        self._ensure_root()
+        path = Path(path)
+        with self._short(library, agent=persona_id) as memory:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            for stale in (path, *(_sidecar(path, s) for s in _WAL_SUFFIXES)):
+                stale.unlink(missing_ok=True)
+            memory.backup_to(path)
+        return self.digest_of(path)
+
+    def restore_from(self, persona_id: str, path: Path) -> str:
+        """用 path 的内容覆盖该人格的库,返回恢复后的逻辑摘要。该人格还有打开的端口时拒绝;
+        坏备份在碰库之前就被拒,库原样不动。
+
+        不在原地打开 path:`Memory.open` 会跑迁移、写 WAL,而起点副本是提交点,字节不能变。
+        所以拷到临时目录,在副本上开,`backup_to` 成库旁的 `<库>.restore-partial`(自洽的单文件),
+        再 `os.replace` 到库路径,最后删掉库旁残留的 -wal、-shm。"""
+        library = self._path(persona_id)
+        if self._open.get(persona_id, 0) > 0:
+            raise MemoryFailureError("restore_from: persona has an open port", transient=False)
+        path = Path(path)
+        if not path.exists():
+            raise MemoryFailureError("restore_from: no such backup", transient=False)
+        with _translated(), tempfile.TemporaryDirectory() as tmp:
+            copy = Path(tmp) / "source.db"
+            _copy_library(path, copy)
+            partial = _sidecar(library, ".restore-partial")
+            with self._short(copy, agent=persona_id) as memory:
+                digest = memory.digest()             # 坏备份在这里抛:根目录与库都还没动
+                self._ensure_root()
+                partial.unlink(missing_ok=True)      # Starling 的 backup_to 遇到已存在的目标抛 FileExistsError
+                memory.backup_to(partial)
+            os.replace(partial, library)
+            for suffix in _WAL_SUFFIXES:
+                _sidecar(library, suffix).unlink(missing_ok=True)
+        return digest
+
+    # ---- 摘要 ----
+
+    def digest_of(self, path: Path) -> str:
+        """只读地算一个库文件的摘要(解析器与种子都用)。不在原地打开:`Memory.open` 会跑迁移、写 WAL,
+        而种子库只读(5.3 节)、起点副本是提交点,算摘要不能改它们的字节。所以连同 -wal 拷进临时目录,
+        在副本上算。摘要与打开时用的 agent 名无关。"""
+        path = Path(path)
+        if not path.exists():
+            raise MemoryFailureError("digest_of: no such library", transient=False)
+        with _translated(), tempfile.TemporaryDirectory() as tmp:
+            copy = Path(tmp) / "library.db"
+            _copy_library(path, copy)
+            with self._short(copy, agent="digest") as memory:
+                return memory.digest()
+
+    def _empty_digest(self) -> str:
+        """空库的摘要,在临时目录里开一个空库算。摘要的格式是 Starling 的,不在 rise 里写死它的值。"""
+        with _translated(), tempfile.TemporaryDirectory() as tmp:
+            with self._short(Path(tmp) / "empty.db", agent="digest") as memory:
+                return memory.digest()
