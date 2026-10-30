@@ -11,11 +11,14 @@
 from __future__ import annotations
 
 import contextlib
+import functools
+import hashlib
+import json
 import os
 import shutil
 import tempfile
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
@@ -253,6 +256,81 @@ def _copy_library(src: Path, dst: Path) -> None:
         shutil.copyfile(wal, _sidecar(dst, "-wal"))
 
 
+@contextlib.contextmanager
+def _short_connection(path: Path, *, agent: str, close_timeout_s: float,
+                      endpoints: StarlingEndpoints | None = None) -> Iterator[starling.Memory]:
+    """一条短命连接:打开、交给块、关闭。`endpoints` 给了才配抽取与嵌入端点(只有 remember_event 要),
+    其余调用不读 OPENAI_API_KEY。块里抛的一切 Exception 按第 10 节的表改抛;块已经失败时,关闭的
+    失败被吞掉,让块的异常说话。`Memory.open` 对不存在的路径会建新库,要不要建由调用方先查。
+
+    模块级而不是 store 的方法:`library_digest` 与 `empty_digest` 不需要端点,解析器手里也没有。"""
+    with _translated():
+        memory = starling.Memory.open(
+            str(path), agent=agent,
+            llm=endpoints.make_llm() if endpoints is not None else None,
+            embedder=endpoints.make_embedder() if endpoints is not None else None)
+    try:
+        yield memory
+    except BaseException as exc:
+        with contextlib.suppress(Exception):
+            memory.close(timeout=close_timeout_s)
+        if isinstance(exc, Exception):
+            raise translate_failure(exc) from None
+        raise
+    with _translated():
+        memory.close(timeout=close_timeout_s)
+
+
+def library_digest(path: Path, *, close_timeout_s: float = 60.0) -> str:
+    """只读地算一个库文件的摘要(解析器与种子都用)。不在原地打开:`Memory.open` 会跑迁移、写 WAL,
+    而种子库只读(5.3 节)、起点副本是提交点,算摘要不能改它们的字节。所以连同 -wal 拷进临时目录,
+    在副本上算。摘要与打开时用的 agent 名无关。
+
+    **`path` 必须静止:调用期间没有任何连接在写它。** 主文件与 -wal 分两次拷,在写的库可能拷出
+    不对应任何提交点的文件对。端口开着但没在写时,写入还在 -wal 里,连 -wal 一起拷才对;在写时
+    不支持。今天的调用方都满足:`backup_to` 末尾算的是刚写完的副本,解析器与种子算的是只读的种子库。
+    文件不存在、0 字节、文件头不对,都在拷贝之前抛非瞬态。悬空的符号链接算"不存在"。"""
+    path = Path(path)
+    if not path.exists():
+        raise MemoryFailureError("digest_of: no such library", transient=False)
+    _require_library_file(path, "digest_of")
+    with _translated(), tempfile.TemporaryDirectory() as tmp:
+        copy = Path(tmp) / "library.db"
+        _copy_library(path, copy)
+        with _short_connection(copy, agent="digest", close_timeout_s=close_timeout_s) as memory:
+            return memory.digest()
+
+
+@functools.cache
+def empty_digest() -> str:
+    """空库的摘要,在临时目录里开一个空库算(进程内只算一次)。摘要的格式是 Starling 的,不在 rise 里写死
+    它的值。库不存在的人格(`StarlingDeploymentStore.digest`)与"从空库起"的种子解析(`factory.memory_runtime`)
+    共用这一份。失败不进缓存:下一次调用重新算。"""
+    with _translated(), tempfile.TemporaryDirectory() as tmp:
+        with _short_connection(Path(tmp) / "empty.db", agent="digest", close_timeout_s=60.0) as memory:
+            return memory.digest()
+
+
+def starling_version() -> str:
+    """已安装 Starling 的 `__version__`。它区分不了同版本号的两个提交,所以记忆运行时身份里
+    另有安装来源(`factory.memory_config.starling_install_source`)。"""
+    return starling.__version__
+
+
+def extraction_prompts_digest() -> str:
+    """Starling 抽取配置(三段提示词、两个阈值与其余开关)规范化 JSON 的 sha256。进记忆运行时身份:
+    提示词或阈值随 Starling 升级变化,抽取出的记忆就变,身份跟着变,续训判 T3。
+
+    **前提:摘的是 `starling.ExtractionConfig()` 的默认值,必须与运行时实际用的一致。** 现在一致,
+    是因为本模块从不给 `Memory.open` 传 `extraction=`,而门面在 `extraction=None` 时用 `ExtractionConfig()`
+    (Starling `_memory_core.py` 的 `self._extraction = extraction or ExtractionConfig()`)。
+    将来若开始传自定义的 extraction,这里要一起改成摘那一份,否则身份描述的不是实际在用的配置。
+    `tests/test_actio_memory_starling.py` 里有一条用例钉住"不传 extraction"。"""
+    config = json.dumps(asdict(starling.ExtractionConfig()), ensure_ascii=False, sort_keys=True,
+                        separators=(",", ":"))
+    return hashlib.sha256(config.encode("utf-8")).hexdigest()
+
+
 class StarlingDeploymentStore:
     """部署记忆的管理面,满足 `DeploymentMemoryStore`:每个人格一个 Starling 库 `<root>/<persona_id>.db`
     (组合根传入 `<记忆根>/deploy`,设计源 5.3 节)。
@@ -291,24 +369,10 @@ class StarlingDeploymentStore:
 
     @contextlib.contextmanager
     def _short(self, path: Path, *, agent: str, extract: bool = False) -> Iterator[starling.Memory]:
-        """一条短命连接:打开、交给块、关闭。`extract` 为真才配抽取与嵌入端点(只有 remember_event 要),
-        其余调用不读 OPENAI_API_KEY。块里抛的一切 Exception 按第 10 节的表改抛;块已经失败时,关闭的
-        失败被吞掉,让块的异常说话。`Memory.open` 对不存在的路径会建新库,要不要建由调用方先查。"""
-        with _translated():
-            memory = starling.Memory.open(
-                str(path), agent=agent,
-                llm=self._endpoints.make_llm() if extract else None,
-                embedder=self._endpoints.make_embedder() if extract else None)
-        try:
+        """一条短命连接,见 `_short_connection`。`extract` 为真才配本 store 的端点。"""
+        with _short_connection(path, agent=agent, close_timeout_s=self._close_timeout_s,
+                               endpoints=self._endpoints if extract else None) as memory:
             yield memory
-        except BaseException as exc:
-            with contextlib.suppress(Exception):
-                memory.close(timeout=self._close_timeout_s)
-            if isinstance(exc, Exception):
-                raise translate_failure(exc) from None
-            raise
-        with _translated():
-            memory.close(timeout=self._close_timeout_s)
 
     def _released(self, persona_id: str) -> None:
         """端口的 on_close:只做字典减一,不做任何可能抛的事(它抛了,计数减一就丢了)。"""
@@ -353,7 +417,7 @@ class StarlingDeploymentStore:
     def digest(self, persona_id: str) -> str:
         path = self._path(persona_id)
         if not path.exists():
-            return self._empty_digest()
+            return empty_digest()
         with self._short(path, agent=persona_id) as memory:
             return memory.digest()
 
@@ -414,26 +478,5 @@ class StarlingDeploymentStore:
     # ---- 摘要 ----
 
     def digest_of(self, path: Path) -> str:
-        """只读地算一个库文件的摘要(解析器与种子都用)。不在原地打开:`Memory.open` 会跑迁移、写 WAL,
-        而种子库只读(5.3 节)、起点副本是提交点,算摘要不能改它们的字节。所以连同 -wal 拷进临时目录,
-        在副本上算。摘要与打开时用的 agent 名无关。
-
-        **`path` 必须静止:调用期间没有任何连接在写它。** 主文件与 -wal 分两次拷,在写的库可能拷出
-        不对应任何提交点的文件对。端口开着但没在写时,写入还在 -wal 里,连 -wal 一起拷才对;在写时
-        不支持。今天的调用方都满足:`backup_to` 末尾算的是刚写完的副本,解析器与种子算的是只读的种子库。
-        文件不存在、0 字节、文件头不对,都在拷贝之前抛非瞬态。"""
-        path = Path(path)
-        if not path.exists():
-            raise MemoryFailureError("digest_of: no such library", transient=False)
-        _require_library_file(path, "digest_of")
-        with _translated(), tempfile.TemporaryDirectory() as tmp:
-            copy = Path(tmp) / "library.db"
-            _copy_library(path, copy)
-            with self._short(copy, agent="digest") as memory:
-                return memory.digest()
-
-    def _empty_digest(self) -> str:
-        """空库的摘要,在临时目录里开一个空库算。摘要的格式是 Starling 的,不在 rise 里写死它的值。"""
-        with _translated(), tempfile.TemporaryDirectory() as tmp:
-            with self._short(Path(tmp) / "empty.db", agent="digest") as memory:
-                return memory.digest()
+        """只读地算一个库文件的摘要,约束见 `library_digest`;连接按本 store 的关闭期限关。"""
+        return library_digest(path, close_timeout_s=self._close_timeout_s)

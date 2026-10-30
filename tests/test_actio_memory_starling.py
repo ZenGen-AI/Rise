@@ -355,3 +355,93 @@ def test_a_configured_retry_is_honoured_so_the_zero_case_is_not_a_default():
         with pytest.raises(RuntimeError):
             endpoints.make_embedder().embed("预算")
         assert fake.embedding_calls == 2
+
+
+# ---------------- 记忆运行时身份用到的三个函数(Task 17) ----------------
+
+def test_starling_version_is_the_installed_dunder_version():
+    from actio.memory_starling import starling_version
+    assert starling_version() == starling.__version__
+
+
+def test_the_empty_digest_is_a_real_empty_library_and_is_computed_once(monkeypatch):
+    from actio.memory_starling import empty_digest
+    empty_digest.cache_clear()
+    opened = []
+    original = starling.Memory.open
+    monkeypatch.setattr(starling.Memory, "open", staticmethod(lambda *a, **kw: opened.append(a) or original(*a, **kw)))
+    first = empty_digest()
+    assert empty_digest() == first and len(opened) == 1               # 第二次不再开库
+    monkeypatch.undo()
+    with FakeOpenAI(dim=256) as fake, offline_api_key():
+        from actio.memory_starling import StarlingDeploymentStore
+        import tempfile, pathlib
+        with tempfile.TemporaryDirectory() as tmp:
+            port = StarlingDeploymentStore(pathlib.Path(tmp), endpoints=fake.endpoints()).open("pa")
+            try:
+                assert port.digest() == first                          # 空库的摘要就是新开一个库的摘要
+            finally:
+                port.close()
+
+
+def test_a_failed_empty_digest_is_not_cached(monkeypatch):
+    from actio.memory_starling import empty_digest
+    empty_digest.cache_clear()
+    original = starling.Memory.open
+    calls = []
+
+    def flaky(*a, **kw):
+        calls.append(1)
+        if len(calls) == 1:
+            raise OSError("disk full")
+        return original(*a, **kw)
+
+    monkeypatch.setattr(starling.Memory, "open", staticmethod(flaky))
+    with pytest.raises(MemoryFailureError):
+        empty_digest()
+    assert len(empty_digest()) == 64 and len(calls) == 2              # 第一次的失败没进缓存
+
+
+def test_the_extraction_prompts_digest_is_the_sha256_of_the_default_extraction_config():
+    import dataclasses
+    import hashlib
+    import json
+    from actio.memory_starling import extraction_prompts_digest
+    expected = hashlib.sha256(json.dumps(dataclasses.asdict(starling.ExtractionConfig()), ensure_ascii=False,
+                                         sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    assert extraction_prompts_digest() == expected and len(expected) == 64
+
+
+def test_the_extraction_prompts_digest_follows_the_prompts(monkeypatch):
+    """提示词或阈值变了,摘要跟着变:身份才能在 Starling 升级改了提示词时变,续训才判 T3。"""
+    from actio.memory_starling import extraction_prompts_digest
+    before = extraction_prompts_digest()
+    original = starling.ExtractionConfig()
+    changed = type(original)(belief_prompt=original.belief_prompt + " (edited)")
+    monkeypatch.setattr(starling, "ExtractionConfig", lambda: changed)
+    assert extraction_prompts_digest() != before
+    monkeypatch.setattr(starling, "ExtractionConfig", lambda: type(original)(weak_inference_floor=0.9))
+    assert extraction_prompts_digest() != before
+
+
+def test_no_connection_is_opened_with_a_custom_extraction(monkeypatch, tmp_path):
+    """`extraction_prompts_digest` 摘的是默认配置,前提是本模块从不传 `extraction=`(见它的 docstring)。
+    这条钉住前提:端口、管理面的每条连接都不带 extraction。哪天开始传了,这里红,提醒两处一起改。"""
+    from actio.memory_starling import StarlingDeploymentStore
+    seen = []
+    original = starling.Memory.open
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(starling.Memory, "open", staticmethod(spy))
+    with FakeOpenAI(dim=256) as fake, offline_api_key():
+        store = StarlingDeploymentStore(tmp_path / "deploy", endpoints=fake.endpoints())
+        store.remember_event("pa", "k#0", "pb：我担心预算超支", interlocutor="pb")        # 带端点的短命连接
+        port = store.open("pa")                                                        # 端口
+        port.close()
+        store.digest("pa")
+        store.backup_to("pa", tmp_path / "snap.db")
+        store.digest_of(tmp_path / "snap.db")
+    assert len(seen) >= 5 and all(kw.get("extraction") is None for kw in seen)
