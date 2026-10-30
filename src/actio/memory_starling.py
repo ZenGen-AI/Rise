@@ -29,6 +29,8 @@ from actio.memory_port import (
 EPOCH = "2026-01-01T00:00:00Z"
 _EPOCH_AT = datetime.fromisoformat(EPOCH)
 _ID_HEX_CHARS = 16
+# Starling 门面 `content_ids` 对本库没有的语句 id 给的占位值(与摘要里解不出引用时同一个标记)。
+_MISSING_CONTENT_ID = "missing"
 
 
 @dataclass(frozen=True)
@@ -91,7 +93,9 @@ class StarlingMemory:
     """一个人格的一个 Starling 记忆库,满足 `MemoryBackend`。
 
     `memory` 是 `starling.Memory`(单测里是只有用到的几个方法的替身)。`on_close` 在 close 成功后
-    调一次,给部署管理面登记端口已关用。"""
+    调一次,给部署管理面登记端口已关用。**`on_close` 必须不抛。** 它抛时,门面已经关了、端口已置为
+    关闭,`close()` 把它的异常经 `translate_failure` 改抛(非瞬态),之后再调 `close()` 是空操作,
+    不会再调 `on_close`:登记的副作用(例如计数减一)就此丢了。"""
 
     def __init__(self, memory, *, close_timeout_s: float = 60.0,
                  on_close: Callable[[], None] | None = None) -> None:
@@ -148,6 +152,10 @@ class StarlingMemory:
             if res.extraction_failed:
                 return RememberOutcome((), True, res.failure_category or "unknown")
             content_ids = memory.content_ids(list(res.statement_ids))
+            if _MISSING_CONTENT_ID in content_ids.values():
+                # 门面对本库不认得的语句 id 返回 "missing"。刚写完的语句不该认不得;放行的话
+                # 假 id mem-missing 会进 stored、准入载荷与轨迹,比一个报错难查得多。
+                raise MemoryFailureError("remember: statement not found in library", transient=False)
             return RememberOutcome(tuple(_hit_id(content_ids[s]) for s in res.statement_ids), False, None)
         except Exception as exc:
             raise translate_failure(exc) from None
@@ -180,6 +188,9 @@ class StarlingMemory:
             # 不置 _closed:超时意味着在途调用还没返回,门面仍开着,返回后可以再关一次。
             # 训练副本的收尾靠这一点决定删不删目录。
             raise translate_failure(exc) from None
-        self._closed = True
+        self._closed = True       # 门面确实已经关了:先置位,on_close 抛了端口也不能再用
         if self._on_close is not None:
-            self._on_close()
+            try:
+                self._on_close()
+            except Exception as exc:
+                raise translate_failure(exc) from None

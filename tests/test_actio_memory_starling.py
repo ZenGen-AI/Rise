@@ -188,6 +188,16 @@ def test_remember_reports_an_extraction_failure_as_a_counted_outcome(category, e
     assert StarlingMemory(fake).remember(EV) == RememberOutcome((), True, expected)
 
 
+def test_remember_refuses_a_statement_the_library_does_not_know_instead_of_minting_a_fake_id():
+    fake = FakeStarling()
+    fake.result = SimpleNamespace(extraction_failed=False, failure_category="", statement_ids=["u-1", "u-2"])
+    fake.ids = {"u-1": "ab" * 32, "u-2": "missing"}          # 门面对不认得的语句 id 给 "missing"
+    with pytest.raises(MemoryFailureError) as info:
+        StarlingMemory(fake).remember(EV)
+    assert type(info.value) is MemoryFailureError and info.value.transient is False
+    assert "mem-missing" not in str(info.value) and "not found" in str(info.value)
+
+
 def test_the_port_satisfies_the_memory_backend_protocol():
     assert isinstance(StarlingMemory(FakeStarling()), MemoryBackend)
 
@@ -227,6 +237,25 @@ def test_a_failed_close_does_not_mark_the_port_closed_so_a_second_close_can_fini
     assert closed == [1] and len(fake.closed_with) == 2
     with pytest.raises(MemoryClosedError):
         port.digest()
+
+
+def test_an_on_close_that_raises_is_translated_and_the_port_is_closed_anyway():
+    fake, calls = FakeStarling(), []
+
+    def broken():
+        calls.append(1)
+        raise RuntimeError("counter at http://127.0.0.1:9 broke")
+
+    port = StarlingMemory(fake, on_close=broken)
+    with pytest.raises(MemoryFailureError) as info:
+        port.close()
+    assert type(info.value) is MemoryFailureError and info.value.transient is False
+    assert "RuntimeError" in str(info.value) and "127.0.0.1" not in str(info.value)
+    assert info.value.__cause__ is None and info.value.__suppress_context__ is True      # from None
+    with pytest.raises(MemoryClosedError):                    # 门面已关:端口不能再用
+        port.digest()
+    port.close()                                              # 再关是空操作,不再调 on_close
+    assert fake.closed_with == [60.0] and calls == [1]
 
 
 def test_a_failure_while_opening_is_translated_and_leaks_no_path(tmp_path):
@@ -280,7 +309,7 @@ def test_a_failing_embedding_endpoint_surfaces_as_transient_failures(tmp_path):
 
 def test_close_with_a_call_in_flight_times_out_and_the_port_stays_usable_for_a_second_close(tmp_path):
     with FakeOpenAI(dim=256) as fake, offline_api_key():
-        fake.chat_delay_s = 1.5
+        fake.chat_delay_s = 0.8       # 与 timeout_ms=2000 留 1.2 秒余量,负载高时抽取请求不会自己超时
         port = StarlingMemory.open(tmp_path / "pa.db", persona_id="pa", endpoints=fake.endpoints(),
                                    close_timeout_s=0.2)
         done = []
