@@ -612,8 +612,10 @@ _ALLOWED = ("actio", "simulator.datamodel", "__future__", "copy", "dataclasses",
             "pathlib", "re", "typing")
 
 
-# memory_starling.py 是全 src/ 里唯一导入 starling 的文件;os 与 tempfile 供原子替换与空库摘要用
-_ALLOWED_MEMORY_STARLING = _ALLOWED + ("starling", "os", "tempfile")
+# memory_starling.py 是全 src/ 里唯一导入 starling 的文件;os、tempfile、shutil 供原子替换、空库摘要与
+# 临时副本用,contextlib 与 collections.abc 供短命连接与异常翻译的上下文管理器(及其返回类型注解)用,
+# 都是标准库,只对本文件放宽
+_ALLOWED_MEMORY_STARLING = _ALLOWED + ("starling", "os", "tempfile", "shutil", "contextlib", "collections.abc")
 
 
 def _allowed(mod, allowed=_ALLOWED):

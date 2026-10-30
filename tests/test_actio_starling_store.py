@@ -171,9 +171,11 @@ def test_digests_agree_with_the_port_once_statements_have_been_embedded(tmp_path
 
 
 def test_digest_of_counts_the_wal_of_a_library_that_is_still_open(tmp_path, fake):
+    """钉的是「端口开着但此刻没在写」:写入还在 -wal 里,所以要连 -wal 一起拷。
+    不是说写的同时算也行:digest_of 把主文件与 -wal 分两次拷,在写的库可能拷出对不上的一对(见 digest_of 的 docstring)。"""
     store = _store(tmp_path, fake)
     port = store.open("pa")
-    port.remember(MemoryEvent(KEY, TEXT, "pb"))                # 不关:写入还在 -wal 里
+    port.remember(MemoryEvent(KEY, TEXT, "pb"))                # 不关:写入还在 -wal 里,但这次 remember 已返回
     lib = _lib(tmp_path)
     wal = lib.with_name("pa.db-wal")
     assert wal.exists() and wal.stat().st_size > 0
@@ -441,6 +443,58 @@ def test_a_corrupt_library_or_backup_is_a_non_transient_failure(tmp_path, fake):
     assert _snapshot(lib.parent) == kept                            # 原库不被半截覆盖,旁边也没留文件
     with pytest.raises(MemoryFailureError):
         store.digest_of(bad)
+
+
+# SQLite 把已存在的 0 字节文件当成合法的空数据库:磁盘满、写副本时被 SIGKILL、手工 touch 都会造出一个。
+# 不先校验,restore_from 会把人格库清成空库,而 rounds 的回滚接着 unlink 副本,原记忆就找不回来。
+_NOT_A_LIBRARY = [
+    pytest.param(b"", id="zero-bytes"),
+    pytest.param(b"x" * 100, id="wrong-header-100-bytes"),
+    pytest.param(b"SQLite format 2\x00" + b"\x00" * 100, id="wrong-version-header"),
+    pytest.param(b"SQLite format 3", id="header-cut-short"),       # 15 字节:少了结尾的 NUL
+]
+
+
+@pytest.mark.parametrize("content", _NOT_A_LIBRARY)
+def test_a_source_that_is_not_a_library_file_is_refused_before_the_library_or_root_is_touched(
+        tmp_path, fake, content):
+    store = _store(tmp_path, fake)
+    store.remember_event("pa", KEY, TEXT, interlocutor="pb")
+    before = store.digest("pa")
+    kept = _snapshot(_lib(tmp_path).parent)
+    bad = tmp_path / "bad.db"
+    bad.write_bytes(content)
+    for method, call in (("restore_from", lambda: store.restore_from("pa", bad)),
+                         ("digest_of", lambda: store.digest_of(bad))):
+        with pytest.raises(MemoryFailureError, match=f"{method}: not a library file") as info:
+            call()
+        assert type(info.value) is MemoryFailureError and info.value.transient is False
+    assert store.digest("pa") == before != store.digest_of(_raw_empty(tmp_path))     # 人格库没被清空
+    assert _snapshot(_lib(tmp_path).parent) == kept
+    assert bad.read_bytes() == content                                # 源文件也没被动
+
+
+@pytest.mark.parametrize("content", _NOT_A_LIBRARY)
+def test_a_source_that_is_not_a_library_file_builds_no_root_for_a_persona_without_a_library(
+        tmp_path, fake, content):
+    store = _store(tmp_path, fake)
+    bad = tmp_path / "bad.db"
+    bad.write_bytes(content)
+    with pytest.raises(MemoryFailureError, match="restore_from: not a library file"):
+        store.restore_from("pa", bad)
+    assert not (tmp_path / "deploy").exists()
+
+
+def _raw_empty(tmp_path):
+    """一个真空库的副本,只用来拿空库摘要,证明「人格库没被清空」这句断言有分辨力。"""
+    empty = tmp_path / "raw-empty" / "empty.db"
+    empty.parent.mkdir(exist_ok=True)
+    memory = starling.Memory.open(str(tmp_path / "raw-empty" / "src.db"), agent="raw")
+    try:
+        memory.backup_to(empty)
+    finally:
+        memory.close(timeout=10)
+    return empty
 
 
 def test_a_corrupt_backup_leaves_no_root_behind_for_a_persona_without_a_library(tmp_path, fake):

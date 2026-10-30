@@ -227,6 +227,23 @@ def _sidecar(path: Path, suffix: str) -> Path:
     return path.with_name(path.name + suffix)
 
 
+# SQLite 数据库文件的前 16 字节。
+_SQLITE_MAGIC = b"SQLite format 3\x00"
+
+
+def _require_library_file(path: Path, method: str) -> None:
+    """拷贝或打开之前先认文件头。SQLite 把已存在的 0 字节文件当成合法的空数据库,不校验的话,
+    0 字节的"备份"(磁盘满、写副本时被 SIGKILL、手工 touch)会让 `restore_from` 把人格库清成空库,
+    而回滚接着删掉副本,原记忆就找不回来。头不对的文件同理:不是库,就不该交给 `Memory.open`。"""
+    try:
+        with open(path, "rb") as handle:
+            head = handle.read(len(_SQLITE_MAGIC))
+    except OSError as exc:
+        raise translate_failure(exc) from None
+    if head != _SQLITE_MAGIC:
+        raise MemoryFailureError(f"{method}: not a library file", transient=False)
+
+
 def _copy_library(src: Path, dst: Path) -> None:
     """把库文件连同同名 -wal(有的话)拷到 dst。端口开着、WAL 没合并时,写入还在 -wal 里,只拷主文件
     算出的摘要会漏掉它们。-shm 不拷:它是 WAL 的索引,打开时由 -wal 重建。"""
@@ -244,7 +261,9 @@ class StarlingDeploymentStore:
     管理面每次调用另开一条短命连接,与端口、与别的管理面调用并发时没有任何保护。rise 今天每个调用点都在
     人格锁里(`mindagent.rounds._PersonaLocks`、`mindagent.admit` 的 `ExitStack`),所以本类不加自己的锁。
 
-    端口数只在实例内计(与 `FileTupleStore` 一样),所以组合根只造一个 store。
+    端口数只在实例内计(与 `FileTupleStore` 一样),所以**组合根只造一个 store,这个假设在这里承重**:
+    另一个 store 实例或另一个进程开着的连接,`restore_from` 看不见,会把它库旁的 -wal、-shm 删掉,
+    它之后的提交落进已经被替换掉的旧文件(unlink 的 inode),丢失,不报错。
 
     库不存在时:`pending_events` 返回 `[]`,`digest` 给空库的摘要,`abandon_event` 当未知 key,都不建文件;
     `open`、`remember_event`、`backup_to` 要建库,会建。"""
@@ -354,7 +373,7 @@ class StarlingDeploymentStore:
 
     def restore_from(self, persona_id: str, path: Path) -> str:
         """用 path 的内容覆盖该人格的库,返回恢复后的逻辑摘要。该人格还有打开的端口时拒绝;
-        坏备份在碰库之前就被拒,库原样不动。
+        坏备份(不存在、0 字节、文件头不对、打不开)在碰库与根目录之前就被拒,库原样不动。
 
         不在原地打开 path:`Memory.open` 会跑迁移、写 WAL,而起点副本是提交点,字节不能变。
         所以拷到临时目录,在副本上开,`backup_to` 成库旁的 `<库>.restore-partial`(自洽的单文件),
@@ -364,14 +383,20 @@ class StarlingDeploymentStore:
         里不记 WAL 的 salt,SQLite 分不出库旁的 -wal 是不是它的。先换后删时,在两步之间崩溃会把旧库的
         -wal 留在新库旁,之后任何一次 `Memory.open` 都把它重放进新库,摘要回到还原前的值,回滚静默
         失效,close 时还会把重放的内容检查点写死进主文件。先删后换则两个崩溃点都安全:换之前崩溃,
-        旧库仍是完整可开的(没有打开的端口,上一次 close 已合并 WAL,库旁本来就没有日志);换之后崩溃,
-        库旁已经没有日志。"""
+        旧库仍是完整可开的;换之后崩溃,库旁已经没有日志。
+
+        "换之前崩溃,旧库完整"有一个前提:这里删掉的 -wal 里没有只存在于 WAL 的已提交写入。上一次正常
+        关闭时它成立(close 合并 WAL 并删掉日志)。上一次若被 SIGKILL,库旁可能留着含已提交、未合并帧
+        的 -wal,这里会把它删掉。之所以仍然安全,是调用方在任何打开之前都先重试 `restore_from`:
+        `mindagent.rounds._close_round` 先回滚再写终态,`mindagent.deployment` 重入时"副本在就先覆盖
+        再 open",都在人格锁里。所以不会有别的路径在重试之前先打开这个库,把未合并的帧读成数据。"""
         library = self._path(persona_id)
         if self._open.get(persona_id, 0) > 0:
             raise MemoryFailureError("restore_from: persona has an open port", transient=False)
         path = Path(path)
         if not path.exists():
             raise MemoryFailureError("restore_from: no such backup", transient=False)
+        _require_library_file(path, "restore_from")
         with _translated(), tempfile.TemporaryDirectory() as tmp:
             copy = Path(tmp) / "source.db"
             _copy_library(path, copy)
@@ -391,10 +416,16 @@ class StarlingDeploymentStore:
     def digest_of(self, path: Path) -> str:
         """只读地算一个库文件的摘要(解析器与种子都用)。不在原地打开:`Memory.open` 会跑迁移、写 WAL,
         而种子库只读(5.3 节)、起点副本是提交点,算摘要不能改它们的字节。所以连同 -wal 拷进临时目录,
-        在副本上算。摘要与打开时用的 agent 名无关。"""
+        在副本上算。摘要与打开时用的 agent 名无关。
+
+        **`path` 必须静止:调用期间没有任何连接在写它。** 主文件与 -wal 分两次拷,在写的库可能拷出
+        不对应任何提交点的文件对。端口开着但没在写时,写入还在 -wal 里,连 -wal 一起拷才对;在写时
+        不支持。今天的调用方都满足:`backup_to` 末尾算的是刚写完的副本,解析器与种子算的是只读的种子库。
+        文件不存在、0 字节、文件头不对,都在拷贝之前抛非瞬态。"""
         path = Path(path)
         if not path.exists():
             raise MemoryFailureError("digest_of: no such library", transient=False)
+        _require_library_file(path, "digest_of")
         with _translated(), tempfile.TemporaryDirectory() as tmp:
             copy = Path(tmp) / "library.db"
             _copy_library(path, copy)
