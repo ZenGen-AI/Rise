@@ -978,7 +978,7 @@ def test_switches_without_round_or_admit_build_no_deployment_memory(store, monke
 
 def test_the_stand_in_memory_logs_its_backend(store, caplog):
     import logging
-    from factory.memory_runtime import stand_in_deployment_memory
+    from factory.memory_runtime import memory_wiring
     with caplog.at_level(logging.INFO, logger="factory.memory_runtime"):
-        stand_in_deployment_memory(store.repo_root)
+        memory_wiring(store.repo_root, {}, deployment=True)           # 启动日志在选后端处记一次,不在造替身处
     assert "memory backend: stand-in" in caplog.text

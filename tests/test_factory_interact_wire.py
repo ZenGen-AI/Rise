@@ -1667,12 +1667,12 @@ def test_a_seeded_interact_directive_fails_without_a_memory_config(world, tmp_pa
 
 
 def test_the_interact_assembly_logs_the_stand_in_memory_backend(world, tmp_path, caplog):
-    with caplog.at_level(logging.INFO, logger="factory.wire"):
+    with caplog.at_level(logging.INFO, logger="factory.memory_runtime"):
         assemble(world, FactoryOptions(interact=True, endpoint="gpu-2"), env=_env(tmp_path)).close()
     assert "memory backend: stand-in" in caplog.text
 
 
 def test_an_assembly_without_interact_does_not_log_a_memory_backend(world, caplog):
-    with caplog.at_level(logging.INFO, logger="factory.wire"):
+    with caplog.at_level(logging.INFO, logger="factory.memory_runtime"):
         assemble(world, FactoryOptions()).close()
     assert "memory backend" not in caplog.text

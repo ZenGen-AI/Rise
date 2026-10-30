@@ -32,7 +32,7 @@ from mindtrainer.dispatch import make_mindtrainer_dispatcher
 if TYPE_CHECKING:  # factory.agent 与 factory.memory_runtime 拖进 grpc 与 mindagent,只在类型检查时导入
     from factory.agent import AgentRuntime
     from factory.interact_policy import OpponentSwitch
-    from factory.memory_runtime import DeploymentMemory
+    from factory.memory_runtime import DeploymentMemory, MemoryWiring, TrainingCopies
 
 _log = logging.getLogger("factory.wire")
 
@@ -127,6 +127,9 @@ class Assembly:
     # --executor roll 时才有(设计 FC-15);mock 路径下两者都是 None,Assembly 与改动前等价
     executor_factory: Callable[[str], object] | None = None
     converter: object | None = None
+    # Starling 时清扫训练副本的函数(返回删了几项);替身与不需要记忆的路径是 None。
+    # assemble 只交出它、不调它:清扫要等持仓库锁,由 run(经 run_daemon 的 on_locked)与 reconcile_one_tick 调用。
+    sweep: Callable[[], int] | None = None
 
     def close(self) -> None:
         """逆序收尾。一个收尾函数抛异常不能跳过其余几个,也不能盖住装配中途的原异常。"""
@@ -141,8 +144,34 @@ INTERACT_TURN_TIMEOUT_S = 90.0     # 设计源 6.4 节:训练位策略 HTTP 60 �
 INTERACT_MESSAGE_TIMEOUT_S = 90.0  # 客户端相邻两条服务端消息的等待上限(设计源 6.4 节)
 
 
+def memory_wiring(repo_root: Path, env: Mapping[str, str], *, deployment: bool) -> MemoryWiring:
+    """按 RISMFORGE_MEMORY_CONFIG 选记忆后端,真实现在 `factory.memory_runtime.memory_wiring`。
+
+    这里只是薄的转发,保证 `factory.wire` 上有这个名字(装配与测试都从这里取)而不在导入期拖进 mindagent:
+    `factory.cli` 顶层导入本模块,而不带 --enable 的入口不许载入 mindagent(Ruling 16)。"""
+    from factory.memory_runtime import memory_wiring as _impl   # 惰性:拖进 mindagent(Ruling 16)
+
+    return _impl(repo_root, env, deployment=deployment)
+
+
+def deploy_turn_timeout_s(*, interact: bool, starling: bool) -> float | None:
+    """共用运行时里「服务端等一次提交」的上限(设计二 6.4 节、FC-31);None 即保持 AgentRuntime 的默认 5 秒。
+
+    `--interact` 开着取 90 秒(训练位策略 HTTP 加记忆最坏的一轮),与 `--enable agent` 同开也是它:两条路共用一个运行时,
+    取较大值。只有 `--enable agent` 且是 Starling 时取 40 秒(`DEPLOY_MEMORY_TURN_TIMEOUT_S`,单一来源在
+    `factory.memory_runtime`)。替身没有网络调用,保持现值。"""
+    if interact:
+        return INTERACT_TURN_TIMEOUT_S
+    if starling:
+        from factory.memory_runtime import DEPLOY_MEMORY_TURN_TIMEOUT_S   # 惰性:拖进 mindagent(Ruling 16)
+
+        return DEPLOY_MEMORY_TURN_TIMEOUT_S
+    return None
+
+
 def _shared_runtime(
     store: GitStore, options: FactoryOptions, keys: frozenset[str],
+    *, turn_timeout_s: float | None, training_copies: TrainingCopies | None,
 ) -> tuple[AgentRuntime | None, OpponentSwitch | None]:
     """`--interact` 或 `--enable agent` 时造那唯一的 AgentRuntime(进程内 loopback 实时服务端),否则 (None, None)。
 
@@ -152,27 +181,31 @@ def _shared_runtime(
 
     --interact 时运行时拿到的对手后端工厂是一个可切换的 OpponentSwitch:vLLM 对手要用会话里才有的 ServiceHandle,
     所以运行时先带着空开关造好,策略上下文进入时装上真工厂、退出时卸下(见 factory.interact_policy)。
-    卸下的开关给的是运行时原来的罐头后端,所以共用运行时上的部署会话行为不变。"""
+    卸下的开关给的是运行时原来的罐头后端,所以共用运行时上的部署会话行为不变。
+
+    turn_timeout_s 为 None 时不传,保持 AgentRuntime 的默认值(见 `deploy_turn_timeout_s`)。training_copies 只在
+    --interact 时传:部署会话没登记给训练 run,用不到训练副本。"""
     if not options.interact and "start_agent_round" not in keys:
         return None, None
     from factory.agent import AGENT_CONFIG, AgentRuntime, read_agent_settings   # 惰性:拖进 grpc 与 mindagent
 
     lines = read_agent_settings(store)[1] if store.exists(AGENT_CONFIG) else ()
+    kwargs: dict = {} if turn_timeout_s is None else {"turn_timeout_s": turn_timeout_s}
     if options.interact:
         from factory.interact_policy import OpponentSwitch
 
         switch = OpponentSwitch(lines)
-        return AgentRuntime(store, lines, turn_timeout_s=INTERACT_TURN_TIMEOUT_S,
-                            message_timeout_s=INTERACT_MESSAGE_TIMEOUT_S,
-                            opponent_backend_factory=switch), switch
-    return AgentRuntime(store, lines), None
+        return AgentRuntime(store, lines, message_timeout_s=INTERACT_MESSAGE_TIMEOUT_S,
+                            opponent_backend_factory=switch, training_copies=training_copies, **kwargs), switch
+    return AgentRuntime(store, lines, **kwargs), None
 
 
 def _interact_wiring(
     store: GitStore, options: FactoryOptions, runtime: AgentRuntime, switch: OpponentSwitch,
-    environ: Mapping[str, str],
+    environ: Mapping[str, str], memory: MemoryWiring,
 ) -> dict:
-    """`--interact` 要交给派发器的东西:策略工厂、它所用端点的名字,以及解起点记忆的替身解析器。
+    """`--interact` 要交给派发器的东西:策略工厂、它所用端点的名字,以及解起点记忆的解析器(来自 `memory`:
+    替身或 Starling)。训练副本也经 `memory.training_copies` 交给策略工厂;启动日志在 `memory_wiring` 里记过一次,这里不再记。
 
     端点只选一次:点名的或唯一的那个。同一个端点既给 policy_context 起服务,也作为 policy_endpoint
     写进 training_run.policy_backend,所以记录里的端点就是服务实际起在的端点。配置错一律 FactoryConfigError。"""
@@ -180,7 +213,6 @@ def _interact_wiring(
     from factory.compute_config import build_compute_client, read_endpoints_config, read_host_map, select_endpoint
     from factory.interact_checks import check_interact_config
     from factory.interact_policy import make_policy_factory
-    from factory.memory_runtime import stand_in_memory_resolver
 
     check_interact_config(store, environ)          # 设计 90 拒绝项 2 到 9,先于端点与主机映射。只作启动门槛:
     # opponent 段不在这里取,策略上下文每次进入时自己从树里重读(装配之后改了也生效)
@@ -188,12 +220,12 @@ def _interact_wiring(
     client = build_compute_client(endpoint, read_host_map(env=environ))
     policy_factory = make_policy_factory(
         store=store, runtime=runtime, switch=switch, client=client, endpoint=endpoint, env=environ,
+        training_copies=memory.training_copies,
     )
-    _log.info("memory backend: stand-in")
     return {
         "policy_factory": policy_factory,
         "policy_endpoint": endpoint.endpoint_id,
-        "memory_resolver": stand_in_memory_resolver,
+        "memory_resolver": memory.memory_resolver,
     }
 
 
@@ -341,24 +373,36 @@ def assemble(
     environ = os.environ if env is None else env
     if not keys:
         # --interact 单独用:没有处理器和评估器,但有运行时要收尾
-        runtime, switch = _shared_runtime(store, options, keys)
+        memory = memory_wiring(store.repo_root, environ, deployment=False)        # 配置有问题在这里退出码 2,先于造运行时
+        runtime, switch = _shared_runtime(
+            store, options, keys,
+            turn_timeout_s=deploy_turn_timeout_s(interact=True, starling=memory.backend == "starling"),
+            training_copies=memory.training_copies,
+        )
         try:
-            wiring = _interact_wiring(store, options, runtime, switch, environ)
+            wiring = _interact_wiring(store, options, runtime, switch, environ, memory)
         except BaseException:
             runtime.close()          # 还没起过服务端,关它只是把状态收干净
             raise
-        return Assembly(_dispatcher(options, runtime, **wiring), {}, None, False, closers=(runtime.close,))
+        return Assembly(_dispatcher(options, runtime, **wiring), {}, None, False,
+                        closers=(runtime.close,), sweep=memory.sweep)
     table = default_builders() if builders is None else builders
     missing = sorted(keys - set(table))
     if missing:
         raise FactoryConfigError(f"no handler builder for {missing}")
     evaluator = build_mock_evaluator(store)
-    # 未设 RISMFORGE_MEMORY_CONFIG 走替身;计划 B 第 7 步在这里按配置换成 Starling
-    deployment_memory = None
-    if keys & {"start_agent_round", "admit_proposal"}:
-        from factory.memory_runtime import stand_in_deployment_memory   # 惰性:拖进 mindagent(Ruling 16)
-        deployment_memory = stand_in_deployment_memory(store.repo_root)
-    runtime, switch = _shared_runtime(store, options, keys)
+    # 记忆后端只在需要时选(--interact,或启用了轮次与收录处理器之一);没设 RISMFORGE_MEMORY_CONFIG 走替身。
+    # 其余入口不读这个变量。早于 _shared_runtime:运行时的等提交上限随后端取值。
+    needs_deployment = bool(keys & {"start_agent_round", "admit_proposal"})
+    memory = None
+    if options.interact or needs_deployment:
+        memory = memory_wiring(store.repo_root, environ, deployment=needs_deployment)
+    runtime, switch = _shared_runtime(
+        store, options, keys,
+        turn_timeout_s=deploy_turn_timeout_s(
+            interact=options.interact, starling=memory is not None and memory.backend == "starling"),
+        training_copies=None if memory is None else memory.training_copies,
+    )
     ctx = BuildContext(
         store=store,
         accept_mock_evidence=options.allow_mock_evidence,
@@ -368,13 +412,13 @@ def assemble(
         log_dir=None if log_dir is None else Path(log_dir),
         repo_commit=resolve_repo_commit(options.repo_commit),
         runtime=runtime,
-        deployment_memory=deployment_memory,
+        deployment_memory=None if memory is None else memory.deployment,
     )
     if runtime is not None:
         ctx.register_closer(runtime.close)         # 登记一次;构造器只取用
     try:
         handlers = {key: table[key](ctx) for key in sorted(keys)}
-        wiring = _interact_wiring(store, options, runtime, switch, environ) if options.interact else {}
+        wiring = _interact_wiring(store, options, runtime, switch, environ, memory) if options.interact else {}
     except BaseException:
         try:
             _close_all(ctx.closers)
@@ -387,6 +431,7 @@ def assemble(
         evaluator=evaluator,
         accept_mock_evidence=options.allow_mock_evidence,
         closers=tuple(ctx.closers),
+        sweep=None if memory is None else memory.sweep,
     )
 
 
@@ -404,11 +449,13 @@ def run(
     a = assemble(store, options, env=env, log_dir=log_dir, builders=builders)
     try:
         if not a.closed_loop:
-            run_daemon(store, interval_s, max_ticks=max_ticks, dispatcher=a.dispatcher, evaluator=a.evaluator)
+            run_daemon(store, interval_s, max_ticks=max_ticks, dispatcher=a.dispatcher, evaluator=a.evaluator,
+                       on_locked=a.sweep)
             return
         run_daemon(
             store, interval_s, max_ticks=max_ticks, dispatcher=a.dispatcher,
             handlers=a.handlers, evaluator=a.evaluator, accept_mock_evidence=a.accept_mock_evidence,
+            on_locked=a.sweep,          # 清扫训练副本要等持锁(另一个守护进程可能正在用);run_daemon 在第一个 tick 前调
         )
     finally:
         a.close()          # --interact 单独用时没有处理器,但运行时仍要收尾
@@ -428,6 +475,8 @@ def reconcile_one_tick(
     with acquire_repo_lock(repo_root):
         a = assemble(store, options, env=env, log_dir=log_dir, builders=builders)
         try:
+            if a.sweep is not None:
+                a.sweep()          # 持锁之后、第一个动作之前:上一个进程崩溃时留下的训练副本在这里清掉
             if not a.closed_loop:
                 # --evaluator someval 不开闭环,但评估器必须交给调和循环,否则 request_diagnostic 走占位桩
                 return reconcile_once(store, dispatcher=a.dispatcher, evaluator=a.evaluator)

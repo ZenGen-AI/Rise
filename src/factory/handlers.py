@@ -25,6 +25,8 @@ from factory.agent import (
     read_agent_settings,
 )
 from factory.configio import preflight, read_tree_config
+from factory.memory_runtime import DEPLOY_MEMORY_PER_TURN_S
+from factory.wire import deploy_turn_timeout_s
 from mindagent.admit import make_admit_proposal_handler
 from mindagent.library import check_memory_library_empty
 from mindagent.rounds import make_start_round_handler
@@ -89,13 +91,19 @@ def _checked_memory_library(ctx) -> None:
 def _agent(ctx) -> Handler:
     _checked_memory_library(ctx)
     config, lines = read_agent_settings(ctx.store)
+    mem = ctx.deployment_memory
+    starling = mem.runtime["backend"] == "starling"
     runtime = ctx.runtime
     if runtime is None:
-        runtime = AgentRuntime(ctx.store, lines)
+        # assemble 总会造共用运行时;走到这里的是手工拼的 BuildContext。等提交的上限与 assemble 同一个判法
+        timeout_s = deploy_turn_timeout_s(interact=False, starling=starling)
+        runtime = AgentRuntime(ctx.store, lines, **({} if timeout_s is None else {"turn_timeout_s": timeout_s}))
         ctx.register_closer(runtime.close)
     # ctx.runtime 非空时是 assemble 造的共用运行时(--interact 与 agent 开关同开),它的收尾已登记过
     bridge = ctx.bridge("agent") if _has_bridge_role(ctx.store, "agent") else None
-    mem = ctx.deployment_memory
+    # Starling:整条流的 deadline 按 max_turns × 40 秒折算(FC-31),训练路的 max_turns × 90 由轨迹源自己传;
+    # 替身不传,保持 AgentRuntime 的缺省
+    extra = {"stream_deadline_s": config.max_turns * DEPLOY_MEMORY_PER_TURN_S} if starling else {}
     return make_start_round_handler(
         config=config,
         client_factory=runtime.client_factory,
@@ -106,6 +114,7 @@ def _agent(ctx) -> Handler:
         memory_layout=mem.layout,
         memory_runtime=mem.runtime,
         scratch_store_factory=mem.scratch_store_factory,
+        **extra,
     )
 
 

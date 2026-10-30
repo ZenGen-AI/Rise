@@ -17,6 +17,9 @@
 
 运行时身份里没有记忆根目录:同一份库搬了目录不是另一个实验,路径进了哈希会让换机即 T3。
 
+组合根按记忆配置选后端(`memory_wiring`,设计二 5.1、6.2、6.4 节,第 10 节拒绝项):没设 RISMFORGE_MEMORY_CONFIG 走替身,
+设了就装配 Starling,配置有任何问题在装配期抛 `FactoryConfigError`(命令行退出码 2),不退回替身静默跑。
+
 部署记忆(设计二第 9 节):轮次处理器与门② 共用的一份 DeploymentMemory。替身的根目录在这棵工作树的
 git 目录里(与仓库锁 rismforge.lock 同处):不进工作树、不进提交,跨进程重启保留,所以起点副本与门② 收录
 的记忆不随进程退出丢失;一棵树一个 git 目录,两个仓库混写同一个根的问题在替身上不存在。
@@ -27,7 +30,7 @@ import copy
 import logging
 import shutil
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -37,7 +40,15 @@ from actio.memory_port import PERSONA_ID_PATTERN, DeploymentMemoryStore, MemoryF
 from actio.trace import TRACE_SCHEMA_V2
 from controlplane.daemon import DirectiveFailedError
 from controlplane.lock import git_dir
-from factory.memory_config import MemoryConfig
+from factory.errors import FactoryConfigError
+from factory.memory_config import (
+    MEMORY_CONFIG_ENV,
+    MemoryConfig,
+    check_api_key,
+    claim_memory_root,
+    read_memory_config,
+    starling_install_source,
+)
 from mindagent.memory_layout import MemoryLayout
 from simulator.realtime.validation import validate_episode_id
 
@@ -87,9 +98,9 @@ def stand_in_memory_root(repo_root: Path) -> Path:
 
 
 def stand_in_deployment_memory(repo_root: Path) -> DeploymentMemory:
-    """替身部署记忆:FileTupleStore(<根>/deploy) 与 MemoryLayout(<根>) 共用一个根,运行时身份是替身那份的拷贝。"""
+    """替身部署记忆:FileTupleStore(<根>/deploy) 与 MemoryLayout(<根>) 共用一个根,运行时身份是替身那份的拷贝。
+    启动日志不在这里记:选后端是 `memory_wiring` 的事,它只记一次。"""
     root = stand_in_memory_root(repo_root)
-    _log.info("memory backend: stand-in")
     return DeploymentMemory(FileTupleStore(root / "deploy"), MemoryLayout(root),
                             copy.deepcopy(STAND_IN_MEMORY_RUNTIME), FileTupleStore)
 
@@ -381,3 +392,79 @@ class TrainingCopies:
                 continue
             removed += 1
         return removed
+
+
+# ---------------- 组合根选后端 ----------------
+
+# 设计二 6.4 节、FC-31:接上 Starling 后部署的一轮最坏多 20 秒(recall 嵌入 1 次,remember 抽取 3 次,embed_pending 嵌入 1 批,
+# 每次至多 4 秒),所以服务端等一次提交放宽到 40 秒,整条流的 deadline 按 max_turns × 每轮 40 秒折算。替身没有网络调用,
+# 保持 AgentRuntime 默认的 5 秒与 15 秒。
+DEPLOY_MEMORY_TURN_TIMEOUT_S = 40.0
+DEPLOY_MEMORY_PER_TURN_S = 40.0
+
+_INSTALL_HINT = "run pip install '.[memory]' (or uv sync --extra memory)"
+
+
+@dataclass(frozen=True)
+class MemoryWiring:
+    """组合根按记忆配置选出的后端:装配 `assemble` 要的全部东西。
+
+    `deployment` 只在调用方要部署记忆(启用 start_agent_round 或 admit_proposal)时非空;`training_copies` 与 `sweep`
+    只有 Starling 才有。`sweep` 只交出函数、不在装配时调:清扫要等持仓库锁(`run_daemon(on_locked=)`、
+    `reconcile_one_tick` 的锁内),另一个守护进程可能正在用那些副本。"""
+
+    backend: str
+    deployment: DeploymentMemory | None
+    memory_resolver: Callable[[str | None, tuple[str, ...]], tuple[dict[str, str], dict]]
+    training_copies: TrainingCopies | None
+    sweep: Callable[[], int] | None
+
+
+def memory_wiring(repo_root: Path, env: Mapping[str, str], *, deployment: bool) -> MemoryWiring:
+    """读 RISMFORGE_MEMORY_CONFIG 选后端,只在这里记一次启动日志。日志与异常文字都不含记忆根目录与端点地址(第 10 节)。
+
+    - 没设(或空串):替身。`deployment` 为真才造替身的部署记忆。
+    - 设了,按序:Starling 的安装来源(未安装、editable 在这里拒绝,先于任何对 `actio.memory_starling` 的导入与对记忆
+      根目录的写)、`OPENAI_API_KEY` 非空、认领记忆根目录(被另一个仓库占用就拒绝)、导入 `actio.memory_starling`。
+      装了包但 C++ 扩展载不进来(`ImportError`)译成与「没装」同一条安装提示的 `FactoryConfigError`。"""
+    config = read_memory_config(env=env, repo_root=repo_root)
+    if config is None:
+        _log.info("memory backend: stand-in")
+        return MemoryWiring(
+            "stand-in", stand_in_deployment_memory(repo_root) if deployment else None,
+            stand_in_memory_resolver, None, None,
+        )
+    install = starling_install_source()
+    check_api_key(env)
+    claim_memory_root(config.root, repo_root)
+    try:
+        from actio.memory_starling import (
+            StarlingDeploymentStore,
+            StarlingEndpoints,
+            extraction_prompts_digest,
+            starling_version,
+        )
+    except ImportError as exc:
+        raise FactoryConfigError(
+            f"{MEMORY_CONFIG_ENV} is set but Starling cannot be loaded ({type(exc).__name__}); {_INSTALL_HINT}"
+        ) from None
+    endpoints = StarlingEndpoints(
+        extraction_base_url=config.extraction_base_url, extraction_model=config.extraction_model,
+        embedding_base_url=config.embedding_base_url, embedding_model=config.embedding_model,
+        embedding_dim=config.embedding_dim, timeout_ms=config.timeout_ms, max_retries=config.max_retries,
+    )
+    runtime = starling_memory_runtime(
+        config, version=starling_version(), install_source=install, prompts_digest=extraction_prompts_digest(),
+    )
+    layout = StarlingLayout(config.root)
+    copies = TrainingCopies(layout, endpoints)
+    deployment_memory = None
+    if deployment:
+        deployment_memory = DeploymentMemory(
+            StarlingDeploymentStore(layout.deploy_dir(), endpoints=endpoints),
+            MemoryLayout(config.root, suffix=".db"),
+            copy.deepcopy(runtime),
+            lambda path: StarlingDeploymentStore(path, endpoints=endpoints),
+        )
+    _log.info("memory backend: starling")
+    return MemoryWiring("starling", deployment_memory, starling_memory_resolver(layout, runtime), copies, copies.sweep)
