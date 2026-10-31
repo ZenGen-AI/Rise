@@ -34,6 +34,11 @@ API_KEY_ENV = "OPENAI_API_KEY"
 STARLING_DIST = "starling-memory"
 DEFAULT_TIMEOUT_MS = 4000
 DEFAULT_MAX_RETRIES = 0
+# 一次记忆网络调用(含重试)的最坏耗时上限:timeout_ms × (max_retries + 1) 不得超过它。外层时限都按"每次至多 4 秒"
+# 折算,写死在三处:factory.memory_runtime.DEPLOY_MEMORY_TURN_TIMEOUT_S(部署 40 秒)、
+# factory.interact_policy.OPPONENT_TIMEOUT_S(对手 25 秒)、factory.wire.INTERACT_TURN_TIMEOUT_S(--interact 90 秒)。
+# 放宽这里之前先改那三处,否则内层不再先于外层超时。
+MAX_MEMORY_CALL_MS = 4000
 
 REQUIRED_KEYS = (
     "root", "extraction_base_url", "extraction_model",
@@ -170,6 +175,11 @@ def read_memory_config(*, env: Mapping[str, str] | None = None, repo_root: Path)
     embedding_dim = _check_int("embedding_dim", data["embedding_dim"], minimum=1)
     timeout_ms = _check_int("timeout_ms", data.get("timeout_ms", DEFAULT_TIMEOUT_MS), minimum=1)
     max_retries = _check_int("max_retries", data.get("max_retries", DEFAULT_MAX_RETRIES), minimum=0)
+    if timeout_ms * (max_retries + 1) > MAX_MEMORY_CALL_MS:
+        raise FactoryConfigError(
+            f"memory config: timeout_ms × (max_retries + 1) must not exceed {MAX_MEMORY_CALL_MS} ms; "
+            "outer turn budgets assume at most 4 s per memory call"
+        )
     return MemoryConfig(
         root=root, extraction_base_url=extraction_base_url, extraction_model=extraction_model,
         embedding_base_url=embedding_base_url, embedding_model=embedding_model,

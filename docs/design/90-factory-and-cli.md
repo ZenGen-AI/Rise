@@ -579,7 +579,7 @@ TypeScript 命令行:`rismforge <review|approve|reject|confirm|status> [id] [rea
 | 9 | 对手用 `external_api` 时凭证环境变量在场 | 与 `factory.bridges` 同一口径:凭证在装配期解析,缺就起不来;异常只报变量名 |
 | 10 | `policy` 与 `policy_factory` 不同时给 | 两个来源说不清谁生效,宁可报错。组合根从不给具体的 `policy`,所以这一条从命令行够不到,装配期没有可检查的:把关的是派发器自己抛的 `ValueError`,测试钉住的也是它 |
 | 11 | `--enable` 含 `plan`、`scheduler.yaml` 的 `allow_interact` 为真时,必须同时传 `--interact` [已落地] | 规划器可能写出 interact 指令,而没有 `--interact` 时派发必然判 `failed`,闭环停住。这是启动时就看得出的配置矛盾,不留到第一条指令。错误信息点名缺 `--interact`,并说明二选一:加 `--interact`,或把 `allow_interact` 关掉 |
-| 12 | 环境变量 `RISMFORGE_MEMORY_CONFIG` 一旦设置,就指向仓库外的 0600 普通文件,键恰好合规,地址不带 `user:password@` | 文件不存在、缺键、多余键、权限过宽、路径在仓库里、地址带 userinfo。报错只写键名与路径,不回显取值 |
+| 12 | 环境变量 `RISMFORGE_MEMORY_CONFIG` 一旦设置,就指向仓库外的 0600 普通文件,键恰好合规,地址不带 `user:password@` | 文件不存在、缺键、多余键、权限过宽、路径在仓库里、地址带 userinfo、`timeout_ms × (max_retries + 1)` 超过 4000 毫秒(外层时限按每次记忆调用至多 4 秒折算)。报错只写键名与路径,不回显取值 |
 | 13 | 记忆配置设置后,`OPENAI_API_KEY` 非空 | Starling 固定读这个变量,空则抽取与嵌入必败。报错只写变量名 |
 | 14 | 产物树里的 `memory_library/` 为空,配置在不在场都查(只在 `agent`、`admit` 构造器里) | 旧目录不迁移,`load_library` 不再读它;非空就有记忆条目无人认领,拒绝启动并要求人工处理 |
 | 15 | 记忆配置设置后,Starling 不是 editable 安装 | editable 安装的源码目录随时在变,运行时身份无从钉住 |

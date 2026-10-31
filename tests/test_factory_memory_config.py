@@ -106,6 +106,26 @@ def test_bad_keys_are_refused(tmp_path, change, needle):
     assert needle in str(info.value) and "s3cret" not in str(info.value)
 
 
+@pytest.mark.parametrize("timeout_ms, max_retries", [(4000, 0), (2000, 1), (1000, 3)])
+def test_a_memory_call_budget_up_to_four_seconds_is_accepted(tmp_path, timeout_ms, max_retries):
+    cfg = _read(tmp_path, _write(tmp_path, _payload(tmp_path, timeout_ms=timeout_ms, max_retries=max_retries)))
+    assert (cfg.timeout_ms, cfg.max_retries) == (timeout_ms, max_retries)
+
+
+@pytest.mark.parametrize("change", [
+    {"timeout_ms": 4001}, {"timeout_ms": 2001, "max_retries": 1}, {"timeout_ms": 10000},
+    {"max_retries": 1},                                    # 默认 timeout_ms=4000 加一次重试即 8 秒
+])
+def test_a_memory_call_budget_over_four_seconds_is_refused(tmp_path, change):
+    """外层时限(部署 40 秒、对手 25 秒、--interact 90 秒)按每次记忆网络调用至多 4 秒折算;超出就不再是内层先超时。"""
+    with pytest.raises(FactoryConfigError) as info:
+        _read(tmp_path, _write(tmp_path, _payload(tmp_path, **change)))
+    msg = str(info.value)
+    assert "timeout_ms" in msg and "max_retries" in msg and "4000" in msg
+    if "timeout_ms" in change:
+        assert str(change["timeout_ms"]) not in msg                  # 只写键名与上限,不回显取值
+
+
 def test_the_file_must_be_private_absolute_present_and_outside_the_repo(tmp_path):
     good = _payload(tmp_path)
     with pytest.raises(FactoryConfigError, match="chmod 600"):
