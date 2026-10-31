@@ -755,3 +755,60 @@ def test_a_same_id_rerun_after_a_client_abort_backs_off_and_succeeds_against_a_r
     (ep,) = _run(store, env.make_factory(message_timeout_s=0.5), mem, admission_wait_s=10.0)
     assert ep.id == EID and ep.terminated_reason == "max_turns"
     assert "role_backend_unavailable" in env.rejected
+
+
+# ---------------- 修复波次 A:close 失败(终审 M-1) ----------------
+
+class _CloseFailingStore(FileTupleStore):
+    """开出的端口 close 时先真关(计数照常归零,restore_from 不被挡),再抛给定的异常。"""
+
+    def __init__(self, root, *, exc):
+        super().__init__(root)
+        self._exc = exc
+
+    def open(self, persona_id):
+        port = super().open(persona_id)
+        real_close, exc = port.close, self._exc
+
+        def close():
+            real_close()
+            raise exc
+
+        port.close = close
+        return port
+
+
+@pytest.mark.parametrize("boom", [MemoryFailureError("checkpoint at /secret/db", transient=False),
+                                  OSError("disk full at /secret/db")])
+def test_a_close_failure_after_a_successful_run_is_a_round_failure_reporting_only_the_class(store, tmp_path, boom):
+    from mindagent.errors import AgentRoundFailedError
+    m = SimpleNamespace(store=_CloseFailingStore(tmp_path / "cf" / "deploy", exc=boom), layout=MemoryLayout(tmp_path / "cf"))
+    with pytest.raises(AgentRoundFailedError) as info:
+        _run(store, _Factory(), m)
+    assert info.value.point == "mindagent.deployment.memory"
+    assert type(boom).__name__ in info.value.reason and "secret" not in info.value.reason
+    assert m.layout.snapshot(ROUND, EID, "pa").exists()                # 没走到提交点:副本留给轮次回滚
+
+
+def test_a_transient_close_failure_propagates_unchanged_like_other_management_calls(store, tmp_path):
+    # 与 _memory_op 同一语义(见 test_a_transient_memory_management_failure_still_propagates_unchanged)
+    boom = MemoryFailureError("checkpoint", transient=True)
+    m = SimpleNamespace(store=_CloseFailingStore(tmp_path / "cf" / "deploy", exc=boom), layout=MemoryLayout(tmp_path / "cf"))
+    with pytest.raises(MemoryFailureError) as info:
+        _run(store, _Factory(), m)
+    assert info.value is boom
+
+
+def test_a_close_failure_does_not_mask_the_original_exception(store, tmp_path, caplog):
+    m = SimpleNamespace(store=_CloseFailingStore(tmp_path / "cf" / "deploy",
+                                                 exc=MemoryFailureError("checkpoint", transient=False)),
+                        layout=MemoryLayout(tmp_path / "cf"))
+
+    class Broken(Echo):
+        def respond_guided(self, *a):
+            raise RuntimeError("model bug")
+
+    with caplog.at_level("WARNING", logger="mindagent.deployment"):
+        with pytest.raises(RuntimeError, match="model bug"):          # 原异常优先,close 失败只记 warning
+            _run(store, _Factory(), m, make=_make(backend=Broken()))
+    assert "MemoryFailureError" in caplog.text and "checkpoint" not in caplog.text

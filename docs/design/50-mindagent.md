@@ -698,6 +698,7 @@ def load_library(store) -> LibraryState: ...
 | 部署会话的记忆瞬态失败:终止原因 `role_memory_unavailable`,或实例抛 `transient` 为真的 MemoryFailureError | T1 | 整条重跑,重试前关实例与端口、用起点副本覆盖人格库;用尽后上抛,轮次 `pending` | 无;重启后的 tick 重入 |
 | 部署会话的记忆确定性失败:终止原因 `role_memory_failure`,或实例抛 `transient` 为假的 MemoryFailureError(含 MemoryEventConflict、MemoryClosedError) | T3 | 不重跑;先回滚在途 episode,再轮次 `failed` | `failure-agent-<model>.yaml` |
 | 验证重放(快照段与基线、候选的重放)里的 MemoryFailureError,例如嵌入端点不可用时 recall 抛的瞬态失败 | 瞬态延后;其余 T3 | 瞬态:抛 `DeferredError`,轮次留 `pending`,不写树,守护进程退避重试,重入时部署 episode 复用;其余:轮次 `failed`(失败点 `mindagent.rounds.verify`),只报类名。两种都照样关验证实例、删验证快照与临时目录 | 瞬态无;其余 `failure-agent-<model>.yaml` |
+| 部署尝试收尾关实例或端口失败 | T3(瞬态原样上抛) | 尝试本身成功时按管理面同一语义:非瞬态 MemoryFailureError 与 OSError 改抛 `AgentRoundFailedError`(失败点 `mindagent.deployment.memory`,只报类名),瞬态原样上抛;尝试已有异常在途时不盖掉它,close 失败只记 warning。验证收尾关实例失败只记 warning,不影响轮次结果 | `failure-agent-<model>.yaml`(T3 时) |
 | 门② 记忆抽取失败 | T1(`timeout`、`transport_failure`);其余类别 T2 或 T3 | 瞬态:事件不放弃,提案留 `approved`,抛 `DeferredError` 退避重试。其余类别一条都没提交时(T2):事件先 `abandoned`,提案 `approved → rejected`。部分已提交时(T3):失败的那条留 `pending`,提案留 `approved`,不延后;之后的触发见到这份记录就返回,不再抽取 | `failure-admit-<提案>.yaml`;部分收录的 T3 记在 `failure-admit-<提案>-partial.yaml` |
 | 门② 记忆收录的其他异常 | T1(瞬态)或 T2 | 事件不放弃,提案留在 `approved`,下个 tick 重入补收据 | `failure-admit-<提案>.yaml` |
 | 门② 收录时库锁被占,或任何轮次有未提交起点副本(只含技能的提案同样延后) | 延后 | 抛 `DeferredError`:不写树、状态不动,提案留在 `approved`,按退避重试 | 无 |
@@ -745,13 +746,13 @@ def load_library(store) -> LibraryState: ...
 | 测试文件 | 用例数 | 覆盖 |
 |---|---|---|
 | `tests/test_ma_config_library.py` [已落地] | 31 | 配置校验、库版本 8 个反例、静态检查、`memory_library/` 非空的装配期把关 |
-| `tests/test_ma_deployment.py` [已落地] | 55 | 落盘 id、轨迹校验、复用、T1 重跑、实例异常、重试回滚、崩溃重入、准入被拒退避 |
+| `tests/test_ma_deployment.py` [已落地] | 59 | 落盘 id、轨迹校验、复用、T1 重跑、实例异常、重试回滚、崩溃重入、准入被拒退避、close 失败 |
 | `tests/test_ma_analysis.py` [已落地] | 19 | 判定、阈值等号、`not` 包裹、库外技能 |
 | `tests/test_ma_proposals.py` [已落地] | 20 | 规则模板、严格解析、重试、成本条数 |
 | `tests/test_ma_verify.py` [已落地] | 8 | 精准命中、触发过宽、优先级压不过 |
 | `tests/test_ma_packaging.py` [已落地] | 8 | 筛选、编号、重入不改写 |
 | `tests/test_ma_admit.py` [已落地] | 49 | 三个崩溃点、T2、5 种坏 run id、记忆增量、抽取失败按类别分两路与部分失败、库锁与在途副本延后 |
-| `tests/test_ma_rounds.py` [已落地] | 53 | 空库沉默、R18、R19 重入、取代、读不出、过期提案、人格库锁、失败回滚、验证快照、验证重放的记忆异常 |
+| `tests/test_ma_rounds.py` [已落地] | 54 | 空库沉默、R18、R19 重入、取代、读不出、过期提案、人格库锁、失败回滚、验证快照、验证重放的记忆异常与收尾 close 失败 |
 | `tests/test_ma_e2e.py` [已落地] | 1 | 第 6 章走查例子 |
 | `tests/test_ma_memory_layout.py` [已落地] | 12 | 目录布局、人格 id 与路径校验、人格库锁 |
 | `tests/test_ma_deployment_starling.py` [已落地] | 7 | 真 Starling 上的部署重试、崩溃重入、门② 抽取失败;装了 extra `memory` 才跑 |

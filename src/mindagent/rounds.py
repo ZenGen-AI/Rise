@@ -22,7 +22,7 @@
   失败记录。驱动器自己抛的覆盖失败不再回滚。瞬态失败与其余异常不回滚:轮次留 pending,重入时由驱动器
   "副本在就先覆盖"处理。
 - 验证重放在部署库的验证快照上做:基线与候选各从快照恢复一份临时副本,实例只读;轮次结束即删,
-  snapshots/<round_id>/ 空了也删。
+  snapshots/<round_id>/ 空了也删。收尾关验证实例失败只记 warning,不抛(终审 M-1)。
 - 记忆层的确定性错误不从处理器逃出(终审 I-2):部署驱动器把管理面与副本文件操作的永久失败改抛
   AgentRoundFailedError(失败点 mindagent.deployment.memory),验证快照段同样(mindagent.rounds.verify),都判 T3
   并回滚;验证段(快照与重放)里的瞬态 MemoryFailureError 改抛 DeferredError,轮次留 pending、守护进程退避重试;绑定人格 id 拼不出锁路径(ActioDataError)判 T3、不回滚(失败点 mindagent.rounds.persona)。
@@ -31,6 +31,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 import re
 import shutil
 from collections.abc import Callable
@@ -66,6 +67,7 @@ from simulator.datamodel import Persona
 from simulator.store_adapter import read_scenario
 
 ROUND_TYPE = "agent_round"
+_log = logging.getLogger(__name__)
 _ROUND_FILE = re.compile(r"agent-round-(zengen-v(\d+))\.yaml$")
 
 BackendFactory = Callable[[str, "BigRef | None"], object]
@@ -479,7 +481,11 @@ def make_start_round_handler(
                 raise AgentRoundFailedError(f"verify replay: {cls}", point="mindagent.rounds.verify") from exc
         finally:
             for inst in built:
-                inst.close()
+                try:
+                    inst.close()
+                except Exception as exc:
+                    # 终审 M-1:验证实例只读、临时副本随后整个删掉,关不上不影响轮次结果,也不能盖掉在途的异常
+                    _log.warning("verify replay: closing a replay instance failed: %s", type(exc).__name__)
             verify_snap.unlink(missing_ok=True)
             shutil.rmtree(scratch_root, ignore_errors=True)
             _rmdir_if_empty(verify_snap.parent)

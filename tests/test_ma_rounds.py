@@ -886,3 +886,27 @@ def test_a_permanent_memory_failure_in_verification_replay_fails_the_round_t3(st
     fr = _assert_failed(store, "mindagent.rounds.verify", "MemoryFailureError")
     assert "/secret" not in fr.payload["reason"]
     assert not (mem.layout.root / "snapshots" / ROUND).exists()          # 验证收尾照常清掉
+
+
+def test_a_close_failure_in_verification_cleanup_does_not_change_the_round_result(store, mem, caplog):
+    from actio.memory_port import MemoryFailureError
+
+    class CloseFailingScratch(FileTupleStore):
+        def open(self, persona_id):
+            port = super().open(persona_id)
+            real_close = port.close
+
+            def close():
+                real_close()
+                raise MemoryFailureError("checkpoint at /secret/db", transient=False)
+
+            port.close = close
+            return port
+
+    _skill(store, GOAL)
+    with caplog.at_level("WARNING", logger="mindagent.rounds"):
+        _tick(store, _verify_handler(mem, CloseFailingScratch))
+    env = store.read_product(agent_round_file("zengen-v1"))
+    assert env.status == "executed" and env.payload["proposals"]          # 轮次结果不受影响
+    assert "MemoryFailureError" in caplog.text and "/secret" not in caplog.text
+    assert not (mem.layout.root / "snapshots" / ROUND).exists()

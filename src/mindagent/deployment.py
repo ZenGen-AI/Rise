@@ -13,6 +13,7 @@ snapshots/<round_id>/<episode_id>-<persona_id>,每次尝试新开端口、新造
 """
 from __future__ import annotations
 
+import logging
 import math
 import time
 from collections.abc import Callable, Mapping
@@ -129,6 +130,7 @@ def _reusable(episode: Episode, agent_slot: str, skill_version: str, recorded_di
 
 MEMORY_POINT = "mindagent.deployment.memory"
 _T = TypeVar("_T")
+_log = logging.getLogger(__name__)
 
 
 def _memory_op(what: str, call: Callable[[], _T]) -> _T:
@@ -144,6 +146,15 @@ def _memory_op(what: str, call: Callable[[], _T]) -> _T:
         raise AgentRoundFailedError(f"{what}: {type(exc).__name__}", point=MEMORY_POINT) from exc
     except OSError as exc:
         raise AgentRoundFailedError(f"{what}: {type(exc).__name__}", point=MEMORY_POINT) from exc
+
+
+def _close_after_failure(what: str, close: Callable[[], None]) -> None:
+    """原异常在途时关实例或端口(终审 M-1):close 再失败也不盖掉原异常,只记一条 warning(只报类名)。
+    没有原异常在途时用 _memory_op(what, close),close 失败按管理面的同一语义改抛。"""
+    try:
+        close()
+    except Exception as exc:
+        _log.warning("%s failed while another exception propagates: %s", what, type(exc).__name__)
 
 
 def _restore(memory_store: DeploymentMemoryStore, persona_id: str, snap: Path,
@@ -291,7 +302,8 @@ def run_deployment_episodes(
       原异常原样上抛,不重试、不包装、不覆盖,与进程崩溃同效。
     - 部署记忆管理面与副本文件操作(建副本目录、backup、open、pending、abandon、删副本)的永久失败
       (MemoryFailureError 非瞬态、OSError)抛 AgentRoundFailedError(失败点 mindagent.deployment.memory,
-      只报类名),轮次处理器判 T3 并回滚(见 _memory_op)。
+      只报类名),轮次处理器判 T3 并回滚(见 _memory_op)。每次尝试收尾关实例与端口也按这一语义;
+      有原异常在途(尝试失败、实例自己抛错)时 close 失败不盖掉原异常,只记 warning(终审 M-1)。
     - 创建被拒且原因是 role_backend_unavailable(同 id 的旧会话还在服务端收尾,或名额满)时,先在同一次
       尝试里退避重建(见 ADMISSION_WAIT_S),不计入重试次数、不记 failed_attempts;admission_wait_s 用完仍被拒
       才按上一条算一次 T1 失败。sleep 与 clock 只为测试注入。
@@ -354,22 +366,29 @@ def run_deployment_episodes(
                 )
                 failure: _AttemptFailed | None = None
                 port = _memory_op(f"open {persona_id}", lambda: memory_store.open(persona_id))
+                # 先关实例与端口:restore_from 要求该人格没有打开的端口。close 失败(终审 M-1)没有原异常在途时
+                # 按 _memory_op 改抛,有原异常在途时不盖它、只记 warning
                 try:
                     instance = make_instance(f"{round_id}/{eid}", port)
                     try:
                         raw = _attempt(instance, client_factory, scenario, assignment, personas, agent_slot,
                                        episode_id=eid, deadline_s=stream_deadline_s,
                                        admission_wait_s=admission_wait_s, sleep=sleep, clock=clock)
-                    finally:
-                        instance.close()  # 先关实例与端口:restore_from 要求该人格没有打开的端口
+                    except BaseException:
+                        _close_after_failure(f"close instance for {eid}", instance.close)
+                        raise
+                    _memory_op(f"close instance for {eid}", instance.close)
                 except _AttemptFailed as exc:
                     failure = exc
                     failed_attempts.append({
                         "episode_id": eid, "attempt": attempt,
                         "reason": exc.reason, "detail": exc.detail,
                     })
-                finally:
-                    port.close()  # 幂等;兜住 make_instance 自己抛出、端口没交给实例的情况
+                except BaseException:
+                    # 兜住 make_instance 自己抛出、端口没交给实例的情况;close 幂等
+                    _close_after_failure(f"close port of {persona_id}", port.close)
+                    raise
+                _memory_op(f"close port of {persona_id}", port.close)
                 if failure is None:
                     break
                 _restore(memory_store, persona_id, snap, start, eid)
