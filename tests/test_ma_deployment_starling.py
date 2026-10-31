@@ -207,7 +207,7 @@ def test_no_pending_rows_survive_an_episode_and_the_next_start_snapshot_is_clean
 
 def test_a_transient_admission_extraction_failure_defers_and_keeps_the_event_pending(admit_store, mem):
     """终审 I-1:假端点回 500,真 Starling 把它归 transport_failure(瞬态)。一条都没提交过也不放弃事件、不拒提案:
-    写 T1、抛 DeferredError;抽取恢复后重入收录完。确定性类别走 rejected 的那条只有替身用例,假端点给不出确定性类别。
+    写 T1、抛 DeferredError;抽取恢复后重入收录完。确定性类别那两条见下面 malformed_keys 的用例。
     替身:test_a_transient_extraction_failure_defers_without_abandoning_and_reentry_admits。"""
     mem.failing.add(f"{PID}#2")
     _put(admit_store, increments=SKILL_AND_MEMORY)
@@ -245,3 +245,42 @@ def test_a_later_admission_extraction_failure_defers_and_converges(admit_store, 
     assert proposal.status == "effective"
     assert set(proposal.payload["admitted_statements"]) == {KEY, f"{PID}#2"}
     assert mem.store.pending_events("pa") == []
+
+
+def test_a_deterministic_admission_extraction_failure_rejects_and_abandons_the_event(admit_store, mem):
+    """假端点的 malformed_keys:general fact 那一遍回不是 JSON 数组的内容,真 Starling 判抽取失败、类别为空,
+    适配器记 unknown,门② 当确定性。唯一一条记忆增量:事件 abandoned、提案 rejected、失败记录 T2。
+    替身:test_a_deterministic_extraction_failure_of_a_single_increment_rejects。"""
+    mem.fake.malformed_keys.add(KEY)
+    _put(admit_store, increments=[{"kind": "memory", "definition": FIRST}])
+    _admit(admit_store, mem)                                           # 不抛
+    proposal = admit_store.read_product(proposal_file(PID))
+    assert proposal.status == "rejected" and "unknown" in proposal.payload["reject_reason"]
+    fr = admit_store.read_product(failure_record_file("run-003", f"admit-{PID}"))
+    assert (fr.payload["category"], fr.payload["point"]) == ("T2", "mindagent.admit.memory")
+    assert mem.store.pending_events("pa") == []                        # 不是 pending:已放弃
+    mem.fake.malformed_keys.clear()
+    with pytest.raises(MemoryEventConflict):                           # abandoned 是终态
+        mem.store.remember_event("pa", KEY, FIRST["text"], interlocutor="pb")
+    assert not admit_store.exists(library_state_file())
+
+
+def test_a_deterministic_failure_after_a_commit_is_t3_and_reentry_does_not_extract_again(admit_store, mem):
+    """部分收录:第 1 条 committed,第 2 条撞 malformed_keys(确定性)。写 T3、提案留 approved、不抛延后;
+    下一个 tick 入口见到 T3 记录就返回,假端点的 chat_calls 不增加。
+    替身:test_a_deterministic_failure_after_a_commit_is_t3_and_reentry_does_not_extract_again。"""
+    second = f"{PID}#2"
+    mem.fake.malformed_keys.add(second)
+    _put(admit_store, increments=[{"kind": "memory", "definition": FIRST}, {"kind": "memory", "definition": SECOND}])
+    _admit(admit_store, mem)                                           # 不抛 DeferredError
+    assert admit_store.read_product(proposal_file(PID)).status == "approved"
+    fr = admit_store.read_product(failure_record_file("run-003", f"admit-{PID}-partial"))
+    assert (fr.payload["category"], fr.payload["point"]) == ("T3", "mindagent.admit.memory")
+    assert fr.payload["reason"] == f"partial admission: {second} unknown after 1 committed"
+    assert mem.store.pending_events("pa") == [second]                  # 不放弃,等人处理
+    assert not admit_store.exists(library_state_file())
+    calls, head = mem.fake.chat_calls, admit_store._git("rev-parse", "HEAD")
+    _admit(admit_store, mem)                                           # 下一个 tick
+    assert mem.fake.chat_calls == calls                                # 没有再抽取
+    assert admit_store._git("rev-parse", "HEAD") == head               # 树也没动
+    assert admit_store.read_product(proposal_file(PID)).status == "approved"

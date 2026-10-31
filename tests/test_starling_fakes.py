@@ -122,6 +122,23 @@ def test_fail_keys_work_for_in_place_changes_and_for_whole_assignment():
         assert _chat(fake, _belief_prompt("ep#3"))[0] == 200
 
 
+def _general_fact_prompt(key="ep#0", speaker="pb", utterance="我担心预算超支"):
+    head = starling_fakes._GENERAL_FACT_PROMPT_HEAD
+    return f"{head}\n\nPassage:\n[{key}] {speaker}：{utterance}"
+
+
+def test_malformed_keys_break_only_the_general_fact_pass_of_that_key():
+    with FakeOpenAI(dim=64) as fake:
+        fake.malformed_keys.add("ep#1")
+        status, body = _chat(fake, _general_fact_prompt("ep#1"))
+        assert status == 200 and body["choices"][0]["message"]["content"] == "not json"
+        assert _answer(_chat(fake, _general_fact_prompt("ep#2"))[1]) == []          # 别的 key 照旧
+        [belief] = _answer(_chat(fake, _belief_prompt("ep#1"))[1])                   # 信念那一遍照旧
+        assert belief["object"] == "我担心预算超支"
+        fake.malformed_keys = set()                                                  # 整体赋空:恢复
+        assert _answer(_chat(fake, _general_fact_prompt("ep#1"))[1]) == []
+
+
 def test_assigning_fail_keys_keeps_the_same_synced_set_object():
     with FakeOpenAI(dim=64) as fake:
         before = fake.fail_keys

@@ -4,6 +4,13 @@
 - POST .../embeddings:对 input 逐条用 fake_vector 给向量(余弦只来自共有词面)。
 - POST .../chat/completions:按提示词开头判断是哪一遍抽取。信念抽取把「[key] 说话方：原话」
   抽成一条信念;另外两遍(general fact、episodic)一律回 "[]"。
+- 两个按事件 key 的故障开关,在 Starling 730e415 上得到两种类别:
+  - fail_keys:信念那一遍回 500,Starling 判 transport_failure(rise 当瞬态)。
+  - malformed_keys:general fact 那一遍回 200 加一段不是 JSON 数组的内容,事件抽取失败、failure_category
+    为空串,rise 的适配器记成 unknown(门② 当确定性)。信念那一遍照常抽出、照常落库。
+  为什么不在信念那一遍回坏内容:rise 走 Starling 的旧抽取路径(`semantic_claim_contract` 关),那条路不填
+  failure_category,`memory_ops.cpp` 的 remember_commit 把信念那一遍的任何失败都补成 transport_failure;
+  缺必填字段的数组又被宽松的解析器算成零条语句的成功。只有 general fact 那一遍的失败不带类别。
 
 服务端跑在**子进程**里,不在测试进程的线程里。原因:Starling 合并提交 20de8a1 的
 SemanticRetriever.vector_recall 绑定没有释放 GIL,Memory.recall 在等查询嵌入的 HTTP 响应时
@@ -41,6 +48,11 @@ _BELIEF_PROMPT_HEAD = "You are an extractor for a Statement-based memory system.
 # C++ 侧把段落拼成 "[" + key + "] " + text,text 形如「说话方：原话」
 _SEGMENT = re.compile(r"\[([^\]\n]+)\] ([^：\n]+)：([^\n]+)")
 _CONTROL = "/__fake__/"
+_KEY_SETS = ("fail_keys", "malformed_keys")
+# Starling python/starling/extractor/general_fact_prompt.py 里 general fact 抽取提示词的开头
+_GENERAL_FACT_PROMPT_HEAD = "You are a general-fact extractor for a Statement-based memory system."
+# malformed_keys 命中时 general fact 那一遍的回复:200、合法的 chat.completion,内容里没有 JSON 数组
+_MALFORMED_ANSWER = "not json"
 # 等子进程打印 PORT 行的期限(秒);子进程在导入阶段卡住时不让整个测试会话挂死
 _START_TIMEOUT_S = 10.0
 
@@ -82,7 +94,8 @@ def fake_vector(text: str, *, dim: int, salt: str = "") -> list[float]:
 def _serve(dim: int) -> None:
     lock = threading.Lock()
     state = {"chat_calls": 0, "embedding_calls": 0}
-    cfg = {"fail_embeddings": False, "fail_keys": frozenset(), "chat_delay_s": 0.0, "salt": ""}
+    cfg = {"fail_embeddings": False, "fail_keys": frozenset(), "malformed_keys": frozenset(),
+           "chat_delay_s": 0.0, "salt": ""}
 
     def bump(name: str) -> None:
         with lock:
@@ -117,7 +130,7 @@ def _serve(dim: int) -> None:
             if path == _CONTROL.rstrip("/") + "/config":
                 with lock:
                     for name, value in payload.items():
-                        cfg[name] = frozenset(value) if name == "fail_keys" else value
+                        cfg[name] = frozenset(value) if name in _KEY_SETS else value
                 self._reply(200, {})
             elif path.endswith("/embeddings"):
                 self._embeddings(payload)
@@ -143,25 +156,26 @@ def _serve(dim: int) -> None:
         def _chat(self, payload: dict) -> None:
             bump("chat_calls")
             with lock:
-                fail_keys, delay = cfg["fail_keys"], cfg["chat_delay_s"]
+                fail_keys, malformed, delay = cfg["fail_keys"], cfg["malformed_keys"], cfg["chat_delay_s"]
             users = [m for m in payload.get("messages", []) if m.get("role") == "user"]
             content = users[0].get("content", "") if users else ""
             if delay:
                 time.sleep(delay)
             answer = "[]"
-            if isinstance(content, str) and content.startswith(_BELIEF_PROMPT_HEAD):
-                found = _SEGMENT.search(content)
-                if found:
-                    key, speaker, utterance = found.groups()
-                    if key in fail_keys:
-                        self._reply(500, {"error": {"message": "extraction failed"}})
-                        return
-                    answer = json.dumps([{
-                        "holder": "self", "holder_perspective": "FIRST_PERSON",
-                        "subject": f"cog-{speaker}", "predicate": "responsible_for",
-                        "object": utterance, "modality": "BELIEVES", "polarity": "POS",
-                        "nesting_depth": 0,
-                    }], ensure_ascii=False)
+            found = _SEGMENT.search(content) if isinstance(content, str) else None
+            if found and content.startswith(_BELIEF_PROMPT_HEAD):
+                key, speaker, utterance = found.groups()
+                if key in fail_keys:
+                    self._reply(500, {"error": {"message": "extraction failed"}})
+                    return
+                answer = json.dumps([{
+                    "holder": "self", "holder_perspective": "FIRST_PERSON",
+                    "subject": f"cog-{speaker}", "predicate": "responsible_for",
+                    "object": utterance, "modality": "BELIEVES", "polarity": "POS",
+                    "nesting_depth": 0,
+                }], ensure_ascii=False)
+            elif found and content.startswith(_GENERAL_FACT_PROMPT_HEAD) and found.group(1) in malformed:
+                answer = _MALFORMED_ANSWER
             self._reply(200, {
                 "id": "chatcmpl-fake", "object": "chat.completion", "model": payload.get("model", "fake-extract"),
                 "choices": [{"index": 0, "finish_reason": "stop",
@@ -193,7 +207,7 @@ def _serve(dim: int) -> None:
 # ---------------- 测试进程里的句柄 ----------------
 
 class _SyncedSet(set):
-    """fail_keys:任何改动都同步给子进程。"""
+    """fail_keys、malformed_keys:任何改动都同步给子进程。"""
 
     def __init__(self, push):
         super().__init__()
@@ -224,9 +238,9 @@ for _name in ("add", "discard", "remove", "pop", "clear", "update", "difference_
 class FakeOpenAI:
     """with FakeOpenAI(dim=256) as fake: ... 。
 
-    四个开关 fail_embeddings、chat_delay_s、salt、fail_keys 可在运行中改,改完立即同步给服务端子进程。
-    fail_keys 既可就地改(add/discard/clear/update、|= 等),也可整体赋值(fake.fail_keys = {"ep#1"}):
-    赋值是把内容换进同一个集合,不换对象。
+    五个开关 fail_embeddings、chat_delay_s、salt、fail_keys、malformed_keys 可在运行中改,改完立即同步给服务端子进程。
+    fail_keys 与 malformed_keys 既可就地改(add/discard/clear/update、|= 等),也可整体赋值
+    (fake.fail_keys = {"ep#1"}):赋值是把内容换进同一个集合,不换对象。两者作用在不同的抽取遍上,见模块文档。
     chat_calls、embedding_calls 每次读取都向子进程现取;with 退出后读到的是退出时的终值。
     """
 
@@ -236,6 +250,7 @@ class FakeOpenAI:
         self._chat_delay_s = 0.0
         self._salt = ""
         self._fail_keys = _SyncedSet(self._push)
+        self._malformed_keys = _SyncedSet(self._push)
         self._proc: subprocess.Popen | None = None
         self._port = 0
         self._log_path: Path | None = None
@@ -254,10 +269,21 @@ class FakeOpenAI:
 
     @fail_keys.setter
     def fail_keys(self, value) -> None:
+        self._replace(self._fail_keys, value)
+
+    @property
+    def malformed_keys(self) -> set[str]:
+        return self._malformed_keys
+
+    @malformed_keys.setter
+    def malformed_keys(self, value) -> None:
+        self._replace(self._malformed_keys, value)
+
+    def _replace(self, target: _SyncedSet, value) -> None:
         # 先复制:`fake.fail_keys |= {...}` 会把就地改完的同一个集合再赋回来,直接 clear 会清掉它自己。
         keys = set(value)
-        set.clear(self._fail_keys)          # 用基类方法,不触发逐次同步,最后只推一次
-        set.update(self._fail_keys, keys)
+        set.clear(target)                   # 用基类方法,不触发逐次同步,最后只推一次
+        set.update(target, keys)
         self._push()
 
     @property
@@ -335,6 +361,7 @@ class FakeOpenAI:
             return
         self._request("POST", _CONTROL + "config", {
             "fail_embeddings": self._fail_embeddings, "fail_keys": sorted(self.fail_keys),
+            "malformed_keys": sorted(self.malformed_keys),
             "chat_delay_s": self._chat_delay_s, "salt": self._salt,
         })
 
