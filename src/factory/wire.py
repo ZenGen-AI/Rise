@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import logging
 import os
-import subprocess
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -58,16 +57,13 @@ CODE_ROOT = Path(__file__).resolve().parents[2]  # src/factory/wire.py -> 代码
 
 
 def resolve_repo_commit(override: str | None, *, code_root: Path = CODE_ROOT) -> str | None:
-    """--repo-commit 优先;否则 git -C <代码仓库根> rev-parse HEAD;不是 git 仓库或没有 git 时返回 None。"""
-    if override is not None:
-        return override
-    try:
-        out = subprocess.run(["git", "-C", str(code_root), "rev-parse", "HEAD"],
-                             capture_output=True, text=True, check=False)
-    except OSError:
-        return None
-    commit = out.stdout.strip()
-    return commit if out.returncode == 0 and commit else None
+    """--repo-commit 优先;否则 git -C <代码仓库根> rev-parse HEAD;不是 git 仓库或没有 git 时返回 None。
+
+    实现放在 controlplane.code_version:mindtrainer 侧的分层规则不许它导入 factory,而训练记录也要
+    写同一个代码版本。这里保留旧名字,装配与测试仍从这里取。"""
+    from controlplane.code_version import resolve_code_commit
+
+    return resolve_code_commit(override, code_root=code_root)
 
 
 @dataclass(frozen=True)
@@ -231,11 +227,13 @@ def _interact_wiring(
 
 def _dispatcher(options: FactoryOptions, runtime: AgentRuntime | None, **kwargs):
     """--interact 时给派发器注入实时客户端(并一律带数据生产器,「按种子生成」一路要靠它合成)。
-    策略工厂与端点名由 _interact_wiring 经 kwargs 带进来。"""
+    策略工厂与端点名由 _interact_wiring 经 kwargs 带进来;repo_commit 由装配方给(派发器不得导入 factory
+    自己查),写进训练记录的 code_versions。"""
     if options.interact:
         assert runtime is not None
         kwargs["client_factory"] = runtime.client_factory
         kwargs.setdefault("data_producer", TemplateDataProducer())
+    kwargs.setdefault("repo_commit", resolve_repo_commit(options.repo_commit))
     return make_mindtrainer_dispatcher(**kwargs)
 
 
@@ -274,7 +272,10 @@ def _assemble_roll(store: GitStore, options: FactoryOptions, *, env: Mapping[str
     if options.evaluator == "someval":
         evaluator = _build_someval_evaluator(store, client, endpoint, eval_config, dataset_sha)
     return Assembly(
-        make_mindtrainer_dispatcher(executor_factory=executor_factory, converter=converter),
+        make_mindtrainer_dispatcher(
+            executor_factory=executor_factory, converter=converter,
+            repo_commit=resolve_repo_commit(options.repo_commit),
+        ),
         {}, evaluator, False,
         executor_factory=executor_factory, converter=converter,
     )
@@ -368,8 +369,11 @@ def assemble(
 
         check_plan_needs_interact(store)          # 设计 90 拒绝项 11
     if not keys and not options.interact:
-        # 与 mindtrainer.wire.run 逐字节相同的路径:不读配置、不注入别的
-        return Assembly(make_mindtrainer_dispatcher(), {}, None, False)
+        # 与 mindtrainer.wire.run 逐字节相同的路径:不读配置、不注入别的;代码版本两边写的是同一个
+        return Assembly(
+            make_mindtrainer_dispatcher(repo_commit=resolve_repo_commit(options.repo_commit)),
+            {}, None, False,
+        )
     environ = os.environ if env is None else env
     if not keys:
         # --interact 单独用:没有处理器和评估器,但有运行时要收尾

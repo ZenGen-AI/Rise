@@ -196,6 +196,46 @@ def test_a_dispatch_crash_then_retry_resumes_from_the_checkpoint(store):
     assert store.read_product(candidate_checkpoint_file(RUN)).status == "pending_review"
 
 
+def test_the_dispatcher_hands_the_code_version_to_the_orchestrator(store, monkeypatch):
+    """派发器不自己算代码版本:装配方给什么就传什么,取不到(None)也照传,由编排器决定不追加。"""
+    from mindtrainer import dispatch as dispatch_module
+
+    seen = []
+    real = dispatch_module.resume_or_run
+
+    def spy(cfg, **kwargs):
+        seen.append(kwargs)
+        return real(cfg, **kwargs)
+
+    monkeypatch.setattr(dispatch_module, "resume_or_run", spy)
+    _directive(store, payload={"target_dimension": "tom", "recipe_ref": "", "training_config": _cfg_dict()})
+    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(repo_commit="c" * 40))
+    (kwargs,) = seen
+    assert kwargs["repo_commit"] == "c" * 40
+    assert _record(store).payload["code_versions"] == ["c" * 40]
+
+
+def test_a_dispatcher_without_a_code_version_does_not_touch_the_field(store):
+    _directive(store, payload={"target_dimension": "tom", "recipe_ref": "", "training_config": _cfg_dict()})
+    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher())
+    assert "code_versions" not in _record(store).payload
+
+
+def test_a_dispatch_on_a_new_commit_appends_and_keeps_resuming(store):
+    """同一个派发器换一次代码版本:续训照常放行(只记不拦),记录里按顺序两个提交。"""
+    _directive(store, payload={"target_dimension": "tom", "recipe_ref": "", "training_config": _cfg_dict()})
+    with pytest.raises(SimulatedCrashError):
+        reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
+            repo_commit="a" * 40, executor_factory=lambda run_id: MockExecutor(crash_at_step=1)))
+    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(repo_commit="a" * 40))
+    assert _record(store).payload["code_versions"] == ["a" * 40]
+
+    # 已 executed:再派发走 noop,记录一个字节都不改
+    before = _record(store)
+    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(repo_commit="b" * 40))
+    assert _record(store) == before
+
+
 def test_a_later_round_can_train_on_a_dataset_that_lives_under_another_run(store):
     """晋级后的下一轮是新的 run(run-2),数据集仍挂在 run-1 下:数据所在的 run 要从清单 id 解出来。"""
     _directive(store, run_id="run-2", payload={"target_dimension": "tom", "recipe_ref": "",

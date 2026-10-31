@@ -96,6 +96,50 @@ def test_to_dict_is_plain_data_and_does_not_alias():
     assert run.curve_summary["curve"]["mean"] == 0.5 and run.failure["category"] == "T2"
 
 
+# ---------------- code_versions ----------------
+
+def test_code_versions_start_empty():
+    assert _run().code_versions == []
+
+
+def test_round_trip_keeps_code_versions_in_order():
+    run = _run(code_versions=["a" * 40, "b" * 40])
+    assert TrainingRun.from_dict(run.to_dict()) == run
+    assert TrainingRun.from_dict(run.to_dict()).code_versions == ["a" * 40, "b" * 40]
+
+
+def test_the_code_version_key_is_written_only_when_there_is_one():
+    assert list(_run().to_dict()) == _LEGACY_KEYS   # 空列表与没有这个字段的记录逐键相同
+    assert "code_versions" not in _run().to_dict()
+    assert _run(code_versions=["a" * 40]).to_dict()["code_versions"] == ["a" * 40]
+
+
+def test_a_payload_without_the_key_reads_back_as_empty():
+    payload = _run().to_dict()
+    assert "code_versions" not in payload
+    assert TrainingRun.from_dict(payload).code_versions == []
+
+
+def test_code_versions_to_dict_does_not_alias():
+    versions = ["a" * 40]
+    run = _run(code_versions=versions)
+    d = run.to_dict()
+    d["code_versions"].append("b" * 40)
+    assert run.code_versions == ["a" * 40]
+    back = TrainingRun.from_dict(run.to_dict())
+    back.code_versions.append("c" * 40)
+    assert run.code_versions == ["a" * 40]
+
+
+def test_a_record_written_before_the_field_replays_byte_for_byte(store, tmp_path):
+    """类 docstring 的承诺:加字段之前写下的记录,读入再序列化后逐字节不变。"""
+    path = write_training_run(store, _run(checkpoint_step=2))
+    before = (tmp_path / path).read_bytes()
+    assert b"code_versions" not in before
+    write_training_run(store, read_training_run(store, "run-1"))   # 读回来再写一次
+    assert (tmp_path / path).read_bytes() == before
+
+
 # ---------------- policy_backend ----------------
 
 def test_policy_backend_defaults_to_none():

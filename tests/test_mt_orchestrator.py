@@ -20,7 +20,7 @@ from mindtrainer.orchestrator import NotEnoughGroupsError, resume_or_run, run_tr
 from mindtrainer.resume import NeedsHumanError
 from mindtrainer.reward_pipeline import AttributionError, build_attribution_backend
 from mindtrainer.store_adapter import read_training_run, write_training_run
-from mindtrainer.training_config import InvalidTrainingConfigError, RewardConfig, TrainingConfig
+from mindtrainer.training_config import InvalidTrainingConfigError, RewardConfig, TrainingConfig, config_hash
 from mindtrainer.trajectory_source import (
     BatchTrajectorySource, InteractTrajectorySource, RolloutFailedError,
 )
@@ -346,6 +346,69 @@ def test_a_noop_returns_the_existing_record_and_does_not_rewrite_it(store, tmp_p
     again = _go(store, _batch_cfg(), MockExecutor(), policy_backend=BACKEND_B)
     assert again == first and again.policy_backend == BACKEND_A
     assert store.read_product(training_run_file(RUN)) == before
+
+
+# ====================== code_versions:记下被推进过的代码版本,只记不拦 ======================
+
+COMMIT_A = "a" * 40
+COMMIT_B = "b" * 40
+
+
+def test_a_new_run_records_the_code_version_it_was_advanced_on(store):
+    """一次派发里 run_training 会写好几次记录(开头、每个存点、收尾),同一个提交只出现在列表里一次。"""
+    run = _go(store, _batch_cfg(), MockExecutor(), repo_commit=COMMIT_A)
+    assert run.code_versions == [COMMIT_A]
+    assert read_training_run(store, RUN).code_versions == [COMMIT_A]
+    assert store.read_product(training_run_file(RUN)).payload["code_versions"] == [COMMIT_A]
+
+
+def test_the_code_version_is_on_the_very_first_pending_record(store):
+    with pytest.raises(SimulatedCrashError):
+        _go(store, _batch_cfg(), MockExecutor(crash_at_step=0), repo_commit=COMMIT_A)
+    pending = read_training_run(store, RUN)
+    assert pending.status == "pending" and pending.code_versions == [COMMIT_A]
+
+
+def test_redispatching_on_the_same_commit_does_not_append_a_second_entry(store):
+    with pytest.raises(SimulatedCrashError):
+        _go(store, _batch_cfg(), MockExecutor(crash_at_step=3), repo_commit=COMMIT_A)
+    assert read_training_run(store, RUN).code_versions == [COMMIT_A]   # 崩溃前那次已经记下
+    resumed = _go(store, _batch_cfg(), MockExecutor(), repo_commit=COMMIT_A)
+    assert resumed.code_versions == [COMMIT_A]
+
+
+def test_resuming_on_another_commit_appends_it_in_order_and_still_resumes(store):
+    """只记不拦:换了代码版本续训照常放行,config_hash 与 T3 的判定一个都不动。"""
+    cfg = _batch_cfg()
+    with pytest.raises(SimulatedCrashError):
+        _go(store, cfg, MockExecutor(crash_at_step=3), repo_commit=COMMIT_A)
+    resumed = _go(store, cfg, MockExecutor(), repo_commit=COMMIT_B)
+    assert (resumed.status, resumed.resume_attempts) == ("executed", 1)
+    assert resumed.code_versions == [COMMIT_A, COMMIT_B]
+    assert resumed.config_hash == config_hash(cfg)   # 续训判定用的仍是配置哈希
+    assert read_training_run(store, RUN).code_versions == [COMMIT_A, COMMIT_B]
+
+
+def test_a_restart_without_a_surviving_checkpoint_also_records_the_new_version(store):
+    with pytest.raises(SimulatedCrashError):
+        _go(store, _batch_cfg(), MockExecutor(crash_at_step=0), repo_commit=COMMIT_A)
+    assert read_training_run(store, RUN).last_checkpoint_ref is None
+    run = _go(store, _batch_cfg(), MockExecutor(), repo_commit=COMMIT_B)
+    assert run.resume_attempts == 1 and run.code_versions == [COMMIT_A, COMMIT_B]
+
+
+def test_without_a_code_version_nothing_is_appended(store):
+    run = _go(store, _batch_cfg(), MockExecutor())
+    assert run.code_versions == []
+    assert "code_versions" not in store.read_product(training_run_file(RUN)).payload
+
+
+def test_a_resume_that_cannot_name_its_commit_keeps_what_is_recorded(store):
+    with pytest.raises(SimulatedCrashError):
+        _go(store, _batch_cfg(), MockExecutor(crash_at_step=3), repo_commit=COMMIT_A)
+    resumed = _go(store, _batch_cfg(), MockExecutor())   # 取不到代码版本
+    assert resumed.code_versions == [COMMIT_A]
+    assert store.read_product(training_run_file(RUN)).payload["code_versions"] == [COMMIT_A]
 
 
 # ====================== 确定性失败 ======================

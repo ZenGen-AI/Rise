@@ -9,7 +9,7 @@ from controlplane.paths import candidate_checkpoint_file, diagnostic_report_file
 from controlplane.reconcile import CLOSED_LOOP_ACTIONS
 from factory.cli import build_parser, dev_main, main
 from factory.evaluation import EVALUATOR_CONFIG
-from factory.wire import Assembly, BuildContext, FactoryOptions, assemble
+from factory.wire import Assembly, BuildContext, FactoryOptions, assemble, resolve_repo_commit
 from factory_fixtures import (
     DATA_SPEC, Recorder, closed_loop_repo, git_head, git_log_messages, held_lock, produce_datasets,
     recording_builders, tree_files, write_directive,
@@ -110,6 +110,60 @@ def test_the_default_assembly_injects_nothing_but_the_dispatcher(twin):
     a, _ = twin
     asm = assemble(a, FactoryOptions())
     assert (asm.handlers, asm.evaluator, asm.accept_mock_evidence, asm.closed_loop) == ({}, None, False, False)
+
+
+def test_the_dispatcher_gets_the_code_version_the_options_carry(twin, monkeypatch):
+    """装配方是唯一知道代码版本的地方(派发器不得导入 factory 自己查)。--repo-commit 覆盖要一路传到
+    派发器,再由它写进训练记录的 code_versions。这里钉的是默认档(不传 --enable 的那条)。"""
+    import factory.wire as wire
+
+    seen = []
+    real = wire.make_mindtrainer_dispatcher
+
+    def spy(**kwargs):
+        seen.append(kwargs)
+        return real(**kwargs)
+
+    monkeypatch.setattr(wire, "make_mindtrainer_dispatcher", spy)
+    a, _ = twin
+    assemble(a, FactoryOptions(repo_commit="d" * 40))
+    assemble(a, FactoryOptions())
+    # 不给覆盖时取的是代码仓库的 HEAD:非空(None 只在不是 git 仓库时出现)
+    assert [kw["repo_commit"] for kw in seen] == ["d" * 40, resolve_repo_commit(None)]
+    assert seen[1]["repo_commit"] is not None
+
+
+def test_an_enabled_assembly_also_hands_the_code_version_to_the_dispatcher(tmp_path, monkeypatch):
+    import factory.wire as wire
+
+    seen = []
+    real = wire.make_mindtrainer_dispatcher
+
+    def spy(**kwargs):
+        seen.append(kwargs)
+        return real(**kwargs)
+
+    monkeypatch.setattr(wire, "make_mindtrainer_dispatcher", spy)
+    assemble(_closed(tmp_path, run_id=None), FactoryOptions(switches=("track",), repo_commit="d" * 40),
+             env={}, builders={"record_track": lambda ctx: (lambda store, action: None)})
+    assert [kw["repo_commit"] for kw in seen] == ["d" * 40]
+
+
+def test_the_roll_assembly_also_hands_the_code_version_to_the_dispatcher(real_repo, tmp_path, monkeypatch):
+    import factory.wire as wire
+
+    seen = []
+    real = wire.make_mindtrainer_dispatcher
+
+    def spy(**kwargs):
+        seen.append(kwargs)
+        return real(**kwargs)
+
+    monkeypatch.setattr(wire, "make_mindtrainer_dispatcher", spy)
+    _write_endpoints(real_repo, "gpu-1")
+    assemble(real_repo, FactoryOptions(executor="roll", repo_commit="e" * 40),
+             env=_hosts(tmp_path, "gpu-1: gpu-181\n") | _eval_env(tmp_path))
+    assert seen[-1]["repo_commit"] == "e" * 40
 
 
 def test_allow_mock_and_confirm_flags_alone_change_nothing(twin):

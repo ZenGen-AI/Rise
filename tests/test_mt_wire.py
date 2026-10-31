@@ -1,4 +1,6 @@
 """接线入口:调和循环 + MindTrainer 派发器,端到端跑一条 batch 指令。"""
+import subprocess
+
 import pytest
 
 from controlplane.daemon import reconcile_once
@@ -99,3 +101,16 @@ def test_a_second_tick_leaves_the_training_record_unchanged(repo, tmp_path):
     run(str(tmp_path / "cp"), interval_s=0, max_ticks=1)
     assert repo.read_product(f"{run_dir(RUN)}/directive.yaml").status == "executed"
     assert repo.read_product(f"{run_dir(RUN)}/training_run.yaml") == before  # 没有第二份记录,不是重新派发了一遍又碰巧写出同样的内容
+
+
+def test_the_record_says_which_rise_code_version_trained_it(repo, tmp_path):
+    """入口自己取代码仓库的 HEAD(不是产物树的 HEAD),写进训练记录;取到就一条。"""
+    from controlplane.code_version import CODE_ROOT
+
+    code_commit = subprocess.run(["git", "-C", str(CODE_ROOT), "rev-parse", "HEAD"],
+                                 capture_output=True, text=True).stdout.strip()
+    run(str(tmp_path / "cp"), interval_s=0, max_ticks=1)
+    code_versions = repo.read_product(f"{run_dir(RUN)}/training_run.yaml").payload["code_versions"]
+    assert code_versions == ([code_commit] if code_commit else [])
+    # 记的是代码仓库的提交,不是产物树自己的提交(两者在测试里是两个不同的 git 仓库)
+    assert code_versions != [repo._git("rev-parse", "HEAD").strip()]

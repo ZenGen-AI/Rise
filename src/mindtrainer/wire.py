@@ -19,17 +19,21 @@ from __future__ import annotations
 import argparse
 import sys
 
+from controlplane.code_version import resolve_code_commit
 from controlplane.daemon import run_daemon
 from controlplane.gitstore import GitStore
 from mindtrainer.dispatch import make_mindtrainer_dispatcher
 
 
 def run(repo_root: str, *, interval_s: float = 2.0, max_ticks: int | None = None) -> None:
-    """在 repo_root 上跑调和循环,下发指令时用 MindTrainer 派发器。"""
+    """在 repo_root 上跑调和循环,下发指令时用 MindTrainer 派发器。
+
+    repo_commit 取本进程所在代码仓库的 HEAD,写进训练记录的 code_versions(只记不拦)。factory 的
+    对应入口也写同一个值,所以两条入口的训练记录仍逐字节相同。"""
     store = GitStore(repo_root)
     run_daemon(
         store, interval_s, max_ticks=max_ticks,
-        dispatcher=make_mindtrainer_dispatcher(),
+        dispatcher=make_mindtrainer_dispatcher(repo_commit=resolve_code_commit(None)),
     )
 
 
