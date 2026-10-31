@@ -166,8 +166,9 @@ def test_run_number_parsers_agree(name):
 # 设计 §11 的分层规则:{源包: 不得导入的包}
 LAYER_RULES = {
     "controlplane": ("diagnostic", "mindtrainer"),
-    "mindtrainer": ("diagnostic",),
+    "mindtrainer": ("diagnostic", "actio"),
     "diagnostic": ("mindtrainer",),
+    "simulator": ("actio",),
 }
 
 
@@ -183,8 +184,9 @@ def _top_level_imports(path):
 
 
 def test_layer_rules_hold():
-    """设计 §11 的三条分层规则,在真实源码上常驻检查:controlplane 不导入 diagnostic 与 mindtrainer,
-    mindtrainer 不导入 diagnostic,diagnostic 不导入 mindtrainer。各计划里原先只有一次性 grep。"""
+    """设计 §11 的分层规则,在真实源码上常驻检查:controlplane 不导入 diagnostic 与 mindtrainer,
+    mindtrainer 不导入 diagnostic 与 actio,diagnostic 不导入 mindtrainer,simulator 不导入 actio。
+    各计划里原先只有一次性 grep。"""
     from pathlib import Path
 
     src = Path(__file__).resolve().parents[1] / "src"

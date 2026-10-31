@@ -181,7 +181,7 @@ Actio 不在上表里,它是各子系统共用的智能体框架。它的记忆�
 
 `factory` 是组合根,是唯一可以知道所有包的地方,任何包都不导入它。`mindtrainer` 不导入 `diagnostic`,因为系统只开了两处受限例外,没有 MindTrainer 与诊断评测之间的直连。OPD 是否失效由诊断侧的通用能力探针判定,MindTrainer 只如实记录系数与损失。受限的是子系统间的运行时调用,不是共享数据结构:Episode、人格等数据模型可以复用。表里的「可以导入」「不得导入」指直接导入,`trainscheduler` 经 `mindtrainer.training_config` 传递地用到 `simulator.datamodel` 是允许的。
 
-已落地的四个包今天满足这张表。`controlplane` 只有一处回指:守护进程的默认派发器与默认诊断器取自 `simulator.stubs`,形成包级循环依赖,运行时不成环,骨架桩移出之前保留。分层规则由基于语法树的导入检查测试强制 [已落地],在它落地之前靠约定和人工核对维持。表里 `simulator`、`mindtrainer` 不得导入 `actio`、`starling` 这两条今天成立。`starling` 那条有测试强制:全 `src/` 只有 `src/actio/memory_starling.py` 导入它。`actio` 那条的导入检查 [计划中]。
+已落地的四个包今天满足这张表。`controlplane` 只有一处回指:守护进程的默认派发器与默认诊断器取自 `simulator.stubs`,形成包级循环依赖,运行时不成环,骨架桩移出之前保留。分层规则由基于语法树的导入检查测试强制 [已落地],在它落地之前靠约定和人工核对维持。表里 `simulator`、`mindtrainer` 不得导入 `actio`、`starling` 这两条今天成立,都有测试强制:分层规则的导入检查覆盖 `actio` 那条,另一条检查确认全 `src/` 只有 `src/actio/memory_starling.py` 导入 `starling`。
 
 ## 4. 核心机制
 
