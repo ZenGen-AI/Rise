@@ -208,3 +208,36 @@ def test_only_actio_memory_starling_imports_starling():
                  for n, top in _top_level_imports(p)
                  if top == "starling" and p.relative_to(src).as_posix() != "actio/memory_starling.py"]
     assert offenders == []
+
+
+def _module_level_imports(path):
+    """一个 .py 文件在模块层(含模块层的 if/try 里)的绝对导入,给出完整模块路径;函数体内的惰性导入不算。"""
+    import ast
+
+    def walk(stmts):
+        for node in stmts:
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    yield node.lineno, alias.name
+            elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+                yield node.lineno, node.module
+                for alias in node.names:                       # from factory import wire
+                    yield node.lineno, f"{node.module}.{alias.name}"
+            elif isinstance(node, (ast.If, ast.Try)):
+                yield from walk(node.body)
+                yield from walk(node.orelse)
+                for h in getattr(node, "handlers", ()):
+                    yield from walk(h.body)
+                yield from walk(getattr(node, "finalbody", ()))
+
+    yield from walk(ast.parse(path.read_text(encoding="utf-8")).body)
+
+
+def test_handlers_does_not_import_wire_at_module_level():
+    """wire 在函数内导入 handlers;handlers 再在模块层导入 wire 就只差一步成环。时限常量直接取 factory.memory_runtime。"""
+    from pathlib import Path
+
+    handlers = Path(__file__).resolve().parents[1] / "src" / "factory" / "handlers.py"
+    offenders = [f"handlers.py:{n} imports {mod}" for n, mod in _module_level_imports(handlers)
+                 if mod == "factory.wire" or mod.startswith("factory.wire.")]
+    assert offenders == []

@@ -25,8 +25,7 @@ from factory.agent import (
     read_agent_settings,
 )
 from factory.configio import preflight, read_tree_config
-from factory.memory_runtime import DEPLOY_MEMORY_PER_TURN_S
-from factory.wire import deploy_turn_timeout_s
+from factory.memory_runtime import DEPLOY_MEMORY_PER_TURN_S, DEPLOY_MEMORY_TURN_TIMEOUT_S
 from mindagent.admit import make_admit_proposal_handler
 from mindagent.library import check_memory_library_empty
 from mindagent.rounds import make_start_round_handler
@@ -95,8 +94,9 @@ def _agent(ctx) -> Handler:
     starling = mem.runtime["backend"] == "starling"
     runtime = ctx.runtime
     if runtime is None:
-        # assemble 总会造共用运行时;走到这里的是手工拼的 BuildContext。等提交的上限与 assemble 同一个判法
-        timeout_s = deploy_turn_timeout_s(interact=False, starling=starling)
+        # assemble 总会造共用运行时;走到这里的是手工拼的 BuildContext。等提交的上限与 wire.deploy_turn_timeout_s
+        # 在 interact=False 时同一个判法(这里不导入 factory.wire:wire 在函数内导入本模块,反过来就成环)
+        timeout_s = DEPLOY_MEMORY_TURN_TIMEOUT_S if starling else None
         runtime = AgentRuntime(ctx.store, lines, **({} if timeout_s is None else {"turn_timeout_s": timeout_s}))
         ctx.register_closer(runtime.close)
     # ctx.runtime 非空时是 assemble 造的共用运行时(--interact 与 agent 开关同开),它的收尾已登记过
