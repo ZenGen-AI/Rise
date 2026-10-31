@@ -761,7 +761,7 @@ interact 的生成路多一条「生成、写树、回写、复校」的链路 [
 | interact 的 `timeout`、`role_backend_timeout`、`role_backend_unavailable`(对手 API 回 429、5xx,或连不上)、`persistence_failed`、传输层 UNAVAILABLE | T1 | 原地重跑,至多 `1 + max_retries_per_episode` 次;耗尽后上抛,记录保持 `pending`(经 `--interact` 入口时的去向见下方「真推理的 rollout 失败」一行) | `curve_summary["failed_rollout_attempts"]` |
 | interact 的 `role_backend_rejected`(对手 API 回 4xx,429 除外) [已落地] | T2 | 不重试,记录写 `failed`(category T2)并重抛,当轮把指令判 `failed`;与 `invalid_session` 同属编排器的 `_DETERMINISTIC_ROLLOUT_REASONS` | 训练记录 `failure`;指令 `payload["failure"]` |
 | interact 的 `role_memory_unavailable`(对手位记忆失败,瞬态类别)与 `role_memory_failure`(其余类别) [已落地] | 前者 T1,后者 T2 | 前者在轨迹源的瞬态集合里,原地重跑,次数与耗尽后的去向同 `role_backend_timeout`;后者在 `_DETERMINISTIC_ROLLOUT_REASONS`(编排器与策略上下文共用)里:不重跑,记录写 `failed`,指令判 `failed`,不延后 | 前者 `curve_summary["failed_rollout_attempts"]`;后者训练记录 `failure` 与指令 `payload["failure"]` |
-| 训练位的 recall 或 embed_pending 失败、remember 抛出的异常,瞬态类别(转换后端改抛 RoleMemoryUnavailableError) [已落地] | T1 | 轨迹源在 `_attempt` 里接住,译成瞬态的失败尝试,会话 abort,原地重跑。remember 返回 failed(含 timeout)只计数、不抛,不进这一行与下一行 | `curve_summary["failed_rollout_attempts"]` |
+| 训练位的 recall 或 embed_pending 失败、remember 抛出的异常,瞬态类别(转换后端改抛 RoleMemoryUnavailableError;`remember` 的 `failure_category` 只计数、不按它分类) [已落地] | T1 | 轨迹源在 `_attempt` 里接住,译成瞬态的失败尝试,会话 abort,原地重跑。remember 返回 failed(含 timeout)只计数、不抛,不进这一行与下一行 | `curve_summary["failed_rollout_attempts"]` |
 | 训练位的记忆失败,其余类别(改抛 RoleMemoryFailureError) [已落地] | T2 | 会话 abort。编排器把训练记录写 `failed` 后重抛,策略上下文原样放行,派发器见记录已 `failed` 就判 `DirectiveFailedError`,不延后。副本 close 超过 60 秒(等 Starling 工作线程)同样判这一类,不重试,同名目录留给下次清扫 | 训练记录 `failure`、指令 `payload["failure"]` |
 | 创建会话被拒,终止原因在瞬态集合里(准入满额,或逻辑 episode id 撞上活动会话,都是 `role_backend_unavailable`) [已落地] | T1 | 准入满额先在同一次尝试里退避重建(总等待 `ADMISSION_WAIT_S` 65 秒,不计入重试次数),仍被拒再按终止原因查瞬态集合、按条重跑;`invalid_session` 仍不重跑 | `curve_summary["failed_rollout_attempts"]` |
 | interact 的 `role_backend_failure` 等其余原因(含对手 API 的回复形状不对) | T1 或 T2,协议上不区分(与 20 篇一致) | 不按条重跑(它不在轨迹源的瞬态集合里),上抛,记录保持 `pending`,由续训上限兜底(经 `--interact` 入口时的去向见下一行) | 同上 |
@@ -871,7 +871,7 @@ interact 的 `config_hash` 覆盖配置层的东西 [已落地]:情境 id、人�
 | interact 的 episode 不会以 `goal_reached` 结束 | 依赖目标达成的奖励规则恒为 0 | 实时服务支持早停时重新评估 |
 | 真模型的单轮推理延迟 | 决定 90 秒的提交上限够不够 [计划中];不够时慢策略被当作 T1 重试,推理成本按重试次数放大 | 在真机上测训练位与站内对手的单轮延迟 |
 | 真抽取与真嵌入的单次延迟是否在 4 秒内 [计划中] | 超时的抽取落成抽取失败、记忆变少;超时的召回落成按条重跑,训练吞吐下降 | 接真实端点跑 10 轮,记录每次召回、三段抽取与嵌入的耗时 |
-| 每会话开一份记忆库对 GRPO 一步总时长的影响 [计划中] | 一步有 `groups_per_step × group_size` 条 rollout,每条每个角色位都开库、备份、删除 | 跑一步,统计开库、备份、删除的总耗时 |
+| 每会话开一份记忆库对 GRPO 一步总时长的影响 [计划中] | 一步有 `groups_per_step × group_size` 条 rollout,每条每个角色位都开库、复制、删除 | 跑一步,统计开库、复制、删除的总耗时 |
 | 一个 vLLM 进程挂两个 LoRA 的切换开销与显存余量 | 按 `--max-loras 2` 设计;切换慢或显存不足时,两位共用一个进程不成立 | 真机上同时挂两个适配器,测切换延迟与显存 |
 | `VllmServeConfig` 改成适配器列表后,真实评测运行器的调用点(`src/factory/sombench_runner.py:176`)能否原样工作 | 改坏会让 `--evaluator someval` 起不来 | 改完后跑涉及 `VllmServeConfig` 的测试,并核对该调用点 |
 | `policy_backend` 里 `trained.ref` 在 `kind` 为 `base` 时的具体形态 | 记录的可读性 | 已定:只写引用的 `uri`,不写 `sha256` [已落地] |

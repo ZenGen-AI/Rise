@@ -317,7 +317,7 @@ class SessionResources:
 - `TimeoutBackend` 改为登记在途线程：`respond` 开始时加入 `SessionResources` 的在途集合，结束时移出；超时只是调用方放弃等待，线程本身仍在集合里。
 - 驱动器进入终态（`CLOSED` 或 `FAILED`，含断开）后，由 servicer 在流结束的 `finally` 里按顺序调 `quiesce`、`join(timeout_s=60)`、`close`。
 - `join` 超时：**不 close、不删**。资源对象移交给 servicer 的滞留表（`EnvironmentServicer` 持有，准入检查就在 servicer 里做，回环服务端不经组合根就能测），并继续占住一个会话名额：servicer 的准入检查“活动会话数加滞留数小于 `max_workers`”不过就拒绝 `CreateSession`，终止原因 `role_backend_unavailable`（T1，客户端按条重跑）。滞留表每 60 秒重试一次 `join(0)`，成功后 close 并删目录。
-- 清扫：`run` 与 `reconcile` 取到仓库排他锁之后、构造实时服务端之前，删掉记忆根目录下 `runs/` 的所有子项（文件与符号链接 `unlink`、目录 `rmtree`，不跟进符号链接，删不掉的记 warning 继续）；`deploy/`、`seeds/`、`snapshots/` 不碰。`runs/` 本身是符号链接或不是目录时装配期拒绝（退出码 2）。`reconcile` 在锁内、装配之后、第一个动作之前清扫（装配只交出清扫函数，不调它）；`run` 现在是装配之后才在 `run_daemon` 里取锁（`wire.py:383`、`daemon.py:517`），所以清扫不放进装配，而是作为 `run_daemon` 取锁之后、第一个 tick 之前调用的启动钩子：`run_daemon` 新增 keyword-only 参数 `on_locked: Callable[[], None] | None = None`，取到锁后、建退避表之前调一次，抛异常则守护进程不进第一个 tick、带原因退出。实时服务端本来就在第一次需要会话时才起（`AgentRuntime.client_factory`），晚于这个钩子。此时本进程还没有会话，别的进程被仓库锁挡在外面，根目录又只属于这个仓库（5.3 节），所以没有在途副本会被误删。运行中只删滞留表 join 成功的目录，不扫目录。
+- 清扫：`run` 与 `reconcile` 取到仓库排他锁之后、起任何会话之前，删掉记忆根目录下 `runs/` 的所有子项（文件与符号链接 `unlink`、目录 `rmtree`，不跟进符号链接，删不掉的记 warning 继续）；`deploy/`、`seeds/`、`snapshots/` 不碰。`runs/` 本身是符号链接或不是目录时装配期拒绝（退出码 2）。`reconcile` 在锁内、装配之后、第一个动作之前清扫（装配只交出清扫函数，不调它）；`run` 现在是装配之后才在 `run_daemon` 里取锁（`wire.py:383`、`daemon.py:517`），所以清扫不放进装配，而是作为 `run_daemon` 取锁之后、第一个 tick 之前调用的启动钩子：`run_daemon` 新增 keyword-only 参数 `on_locked: Callable[[], None] | None = None`，取到锁后、建退避表之前调一次，抛异常则守护进程不进第一个 tick、带原因退出。实时服务端本来就在第一次需要会话时才起（`AgentRuntime.client_factory`），晚于这个钩子。此时本进程还没有会话，别的进程被仓库锁挡在外面，根目录又只属于这个仓库（5.3 节），所以没有在途副本会被误删。运行中只删滞留表 join 成功的目录，不扫目录。
 - 在途集合的操作持一把锁；`join` 不持锁等待。
 
 ### 6.3 并发上限
