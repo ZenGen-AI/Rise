@@ -327,6 +327,7 @@ def make_mindtrainer_dispatcher(
     data_producer: DataProducer | None = None,
     policy_endpoint: str | None = None,
     memory_resolver: MemoryResolver | None = None,
+    repo_commit: str | None = None,
 ) -> Dispatcher:
     """构造 MindTrainer 派发器。它只做一件事:把一条 pending 的 directive 跑成候选。
 
@@ -353,6 +354,9 @@ def make_mindtrainer_dispatcher(
       (见 _prepare_interact)。点名路与已回写的指令不经过它。
     - 确定性失败(数据不对、配置不合法、该人工介入)抛 DirectiveFailedError,调和循环把
       directive 置 failed,不再重试;其余异常原样上抛,保持 pending 等下一轮。
+    - repo_commit:本次派发推进训练所用的 rise 代码版本,写进 training_run.code_versions(新建时写入,
+      续训或重启时追加;同值只记一次)。只记不拦:config_hash 续训判定与 T3 规则一概不动。
+      派发器不得导入 factory 自己查,由装配方给;取不到就是 None,记录不改。
     """
     if policy is not None and policy_factory is not None:
         raise ValueError("pass either policy or policy_factory to make_mindtrainer_dispatcher, not both")
@@ -416,6 +420,7 @@ def make_mindtrainer_dispatcher(
                 resume_or_run(
                     cfg, store=store, run_id=run_id, make_sources=make_sources,
                     attribution=attribution, executor=executor_factory(run_id), converter=converter,
+                    repo_commit=repo_commit,
                     **extra,
                 )
         except _DETERMINISTIC as exc:

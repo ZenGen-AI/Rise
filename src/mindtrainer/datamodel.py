@@ -93,6 +93,10 @@ class TrainingRun:
     端点、各对手位的驱动与来源),读的人不必从配置里重新推导。纯 JSON 类型的字典,形状由派发器定。
     与 last_checkpoint_ref 不同,to_dict 在它为 None 时不写这个键:加字段之前写下的记录
     重新序列化后逐字节不变。
+    code_versions 是这条 run 被推进过的 rise 代码版本(提交 id),按首次出现顺序,同值只记一次。
+    它只是账,不是闸:config_hash 只钉配置,跨代码版本续训没有拦截(见 docs/design 与终审 A6);
+    记录里不止一个提交时,读的人要自己判断 checkpoint 前后两段的训练数据是否来自两种行为。
+    为空时同样不写这个键,旧记录重新序列化后逐字节不变。
     """
 
     run_id: str
@@ -105,6 +109,7 @@ class TrainingRun:
     status: str = "pending"
     failure: dict | None = None
     policy_backend: dict | None = None
+    code_versions: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         d = {
@@ -121,6 +126,8 @@ class TrainingRun:
         }
         if self.policy_backend is not None:
             d["policy_backend"] = copy.deepcopy(self.policy_backend)
+        if self.code_versions:
+            d["code_versions"] = list(self.code_versions)
         return d
 
     @classmethod
@@ -137,4 +144,5 @@ class TrainingRun:
             status=status,
             failure=copy.deepcopy(d.get("failure")),
             policy_backend=copy.deepcopy(d.get("policy_backend")),
+            code_versions=list(d.get("code_versions", [])),
         )

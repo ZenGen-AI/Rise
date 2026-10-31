@@ -145,6 +145,18 @@ def _process_step_results(
             on_step(result)
 
 
+def _with_code_version(base: TrainingRun, repo_commit: str | None) -> TrainingRun:
+    """把本次推进 run 的代码版本追加进记录,只记不拦(终审 A6 的做法 3)。
+
+    - repo_commit 为 None(装配方取不到代码版本)时原样返回,记录里 code_versions 保持原样;
+    - 已经在列表里(按值判)时不重复追加,所以同一次派发里的多次写记录只留一条;
+    - 新值追加在末尾,顺序即首次出现顺序。config_hash 与 decide_resume 一概不受影响:这不是闸。
+    """
+    if repo_commit is None or repo_commit in base.code_versions:
+        return base
+    return dataclasses.replace(base, code_versions=[*base.code_versions, repo_commit])
+
+
 def run_training(
     cfg: TrainingConfig,
     *,
@@ -158,6 +170,7 @@ def run_training(
     metric_stream_refs: list[BigRef] | None = None,
     on_step: Callable[[StepResult], None] | None = None,
     policy_backend: dict | None = None,
+    repo_commit: str | None = None,
 ) -> TrainingRun:
     """薄编排:不含判定逻辑,只调下层纯函数和协议(沿用 run_diagnostic 的做法)。
 
@@ -177,6 +190,9 @@ def run_training(
       每一步的唯一出口;指标流文件本身由调用方写,只把引用交给这里记录。
     - policy_backend:说明这条记录的数据来自哪种后端(interact 才有)。只在构造新记录时写入;
       续训沿用已有记录的值,传什么都不改,所以记录里的后端永远是第一次尝试写下的那个。
+    - repo_commit:本次推进这条 run 的代码版本,追加进 code_versions(只记不拦,见 _with_code_version)。
+      新建记录时写在第一条 pending 记录上,续训或重启时追加新值;取不到就是 None,记录不改。
+      config_hash 与续训判定不受它影响。
     """
     chash = config_hash(cfg)
     if resume_from is not None:
@@ -189,7 +205,10 @@ def run_training(
                 f"config changed since run {run_id} started "
                 f"({resume_from.config_hash[:12]} -> {chash[:12]}); resuming would not be reproducible"
             )
-    base = resume_from or TrainingRun(run_id, chash, policy_backend=copy.deepcopy(policy_backend))
+    base = _with_code_version(
+        resume_from or TrainingRun(run_id, chash, policy_backend=copy.deepcopy(policy_backend)),
+        repo_commit,
+    )
 
     reason = validate_training_config(cfg)
     if reason is not None:
@@ -388,16 +407,20 @@ def resume_or_run(
     metric_stream_refs: list[BigRef] | None = None,
     on_step: Callable[[StepResult], None] | None = None,
     policy_backend: dict | None = None,
+    repo_commit: str | None = None,
 ) -> TrainingRun:
     """入口:读已有的 training_run,交给 decide_resume 判定。
     noop 直接返回已有记录(不重写,所以记录的后端仍是第一次尝试写下的);resume / restart 带记录进入
     run_training;escalate 抛 NeedsHumanError(带原因)。没有记录就是新运行。
-    policy_backend 经 kwargs 交给 run_training,只在新建记录时生效(见 run_training)。"""
+    policy_backend 经 kwargs 交给 run_training,只在新建记录时生效(见 run_training)。
+    repo_commit 同样经 kwargs 交下去:新建时写进第一条记录,续训/重启时追加进 code_versions,只记不拦。
+    判定逻辑(decide_resume)完全不看它。"""
     existing = read_training_run(store, run_id)
     kwargs = dict(
         store=store, run_id=run_id, make_sources=make_sources, attribution=attribution,
         executor=executor, converter=converter,
         metric_stream_refs=metric_stream_refs, on_step=on_step, policy_backend=policy_backend,
+        repo_commit=repo_commit,
     )
     preflight = getattr(executor, "preflight", None)
     if existing is None:
