@@ -93,7 +93,8 @@ def read_eval_config(
     _check_private(path)
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as exc:
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        # ValueError:非法编码,以及 PyYAML 的 timestamp 构造器遇到 2024-13-45 这类值时抛的(它不是 YAMLError)
         raise FactoryConfigError(f"{path} cannot be read as YAML ({type(exc).__name__})") from None
     if not isinstance(data, dict):
         raise FactoryConfigError(f"{path} must be a mapping")

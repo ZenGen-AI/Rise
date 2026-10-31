@@ -450,6 +450,20 @@ def test_roll_with_enable_exits_2(real_repo, tmp_path, capsys):
     assert "cannot be combined" in capsys.readouterr().err
 
 
+def test_roll_with_an_unbuildable_date_in_the_eval_config_exits_2(real_repo, tmp_path, capsys):
+    """评估配置里有 2024-13-45:PyYAML 抛 ValueError,也要译成一行配置错误、退出码 2,而不是 traceback。"""
+    _write_endpoints(real_repo, "gpu-1")
+    env = _hosts(tmp_path, "gpu-1: gpu-181\n") | _eval_env(tmp_path)
+    config = tmp_path / "eval.yaml"
+    config.write_text(config.read_text(encoding="utf-8") + "x: 2024-13-45\n", encoding="utf-8")
+    before = _commit_count(real_repo)
+    code = main(["run", str(real_repo.repo_root), "--executor", "roll", "--max-ticks", "1"], env=env)
+    err = capsys.readouterr().err
+    assert code == 2
+    assert err.startswith("factory: error:") and "cannot be read as YAML" in err and "13-45" not in err
+    assert _commit_count(real_repo) == before
+
+
 def test_the_assembled_dispatcher_calls_its_factory_with_the_directive_id(real_repo, tmp_path, monkeypatch):
     """装配出的派发器不是摆设:它按指令 id 调装配时造的工厂,造出的是点名端点上的真实执行器。
 

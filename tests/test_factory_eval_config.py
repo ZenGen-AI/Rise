@@ -102,3 +102,15 @@ def test_a_symlink_is_refused(tmp_path):
     link.symlink_to(real)
     with pytest.raises(FactoryConfigError, match="symlink"):
         _read(tmp_path, link)
+
+
+@pytest.mark.parametrize("extra", ["x: 2024-13-45\n", "2024-02-31: x\n"], ids=["bad-date-value", "bad-date-key"])
+def test_a_yaml_date_the_loader_cannot_build_is_a_config_error_not_a_crash(tmp_path, extra):
+    """PyYAML 的 timestamp 构造器抛 ValueError(不是 YAMLError);与 memory_config 同口径转成 FactoryConfigError。"""
+    path = _write(tmp_path)
+    path.write_text(path.read_text(encoding="utf-8") + extra, encoding="utf-8")
+    with pytest.raises(FactoryConfigError) as info:
+        _read(tmp_path, path)
+    msg = str(info.value)
+    assert "cannot be read as YAML" in msg and "ValueError" in msg
+    assert "13-45" not in msg and "02-31" not in msg and SECRET not in msg
