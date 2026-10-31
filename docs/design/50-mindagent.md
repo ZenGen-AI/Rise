@@ -491,7 +491,7 @@ def load_library(store) -> LibraryState: ...
 | episode 的某次尝试失败要重试 | 先关本次尝试的实例与端口,再用起点副本 `restore_from` 覆盖部署库,重开端口,新造实例,再重试 | 覆盖失败的处理同上:T3,库与副本都保留 |
 | episode 成功 | 先落盘 episode,再对本 episode 留下的 `pending` 事件行逐个 `abandon_event`,最后删起点副本;删起点副本是这条 episode 的提交点。崩在放弃与删副本之间:重入先用起点副本覆盖(已放弃的行也回到起点状态)再重跑,不会撞已放弃的 key | 副本删除失败(OSError):轮次 `failed`(T3),失败收尾时回滚(回滚时覆盖失败:库与副本都不动;覆盖成功但副本删不掉:库已回到起点,只有副本保留,下次重入按未提交处理);进程在删除前崩溃:重入时这条 episode 按未提交处理,先覆盖再重跑 |
 | 轮次判 `failed`(T3) | 先对在途 episode 用起点副本 `restore_from` 回滚部署库,再删副本,再写失败记录。失败的轮次不把半截记忆留给下一轮 | 覆盖失败:库与副本都保留,照写失败记录 |
-| 第 6 步验证 | 智能体位人格 `backup_to` 到 `snapshots/<round_id>/verify-<persona_id>.db`;基线与候选各开一份副本,`replay_read_only` 为真 | 快照做不出:同起点副本做不出,轮次 `failed`,T3 |
+| 第 6 步验证 | 智能体位人格 `backup_to` 到 `snapshots/<round_id>/verify-<persona_id>.db`;基线与候选各开一份副本,`replay_read_only` 为真 | 快照做不出:同起点副本做不出,轮次 `failed`,T3。重放里的记忆异常:瞬态延后,其余 T3 |
 
 回滚安全靠独占:轮次拿着人格库锁,episode 在一个线程里顺序跑,覆盖部署库时没有别的写者。覆盖只在端口关闭之后做。`restore_from` 在该人格还有打开的端口时抛错,因为覆盖正被打开的库会写坏它。固定时钟在持久库里会倒退,所以事件时间取库内单调递增的事件序号 `seq`,序号由库在写事件行时分配,实例不计数。两条 episode 的同一句话是不同事件,因为事件 key 是 `<逻辑 episode id>#<轮次序号>`,逻辑 episode id 重试不变。部署的事件 key 前面再加轮次 id,写成 `<round_id>/deploy-...#<turn_index>`:部署库跨轮次持久,而 `deploy-<model>-<scenario>-<k>` 下一轮会重复出现,不加就撞上上一轮已 `committed` 的同 key。轮次前缀只进事件 key,`CreateSession.episode_id` 与落盘文件名仍是不带轮次的 `deploy-...`(白名单不含 `/`)。
 
@@ -697,6 +697,7 @@ def load_library(store) -> LibraryState: ...
 | 起点副本或验证快照做不出、起点副本删不掉、覆盖部署库失败;绑定人格 id 拼不出锁路径 | T3 | 轮次 `failed`;覆盖失败时库与副本都保留,覆盖成功但副本删不掉时库已回到起点、只留副本;人格 id 拼不出锁路径时一个锁都没拿到,不回滚(失败点 `mindagent.rounds.persona`) | `failure-agent-<model>.yaml` |
 | 部署会话的记忆瞬态失败:终止原因 `role_memory_unavailable`,或实例抛 `transient` 为真的 MemoryFailureError | T1 | 整条重跑,重试前关实例与端口、用起点副本覆盖人格库;用尽后上抛,轮次 `pending` | 无;重启后的 tick 重入 |
 | 部署会话的记忆确定性失败:终止原因 `role_memory_failure`,或实例抛 `transient` 为假的 MemoryFailureError(含 MemoryEventConflict、MemoryClosedError) | T3 | 不重跑;先回滚在途 episode,再轮次 `failed` | `failure-agent-<model>.yaml` |
+| 验证重放(快照段与基线、候选的重放)里的 MemoryFailureError,例如嵌入端点不可用时 recall 抛的瞬态失败 | 瞬态延后;其余 T3 | 瞬态:抛 `DeferredError`,轮次留 `pending`,不写树,守护进程退避重试,重入时部署 episode 复用;其余:轮次 `failed`(失败点 `mindagent.rounds.verify`),只报类名。两种都照样关验证实例、删验证快照与临时目录 | 瞬态无;其余 `failure-agent-<model>.yaml` |
 | 门② 记忆抽取失败 | T1(`timeout`、`transport_failure`);其余类别 T2 或 T3 | 瞬态:事件不放弃,提案留 `approved`,抛 `DeferredError` 退避重试。其余类别一条都没提交时(T2):事件先 `abandoned`,提案 `approved → rejected`。部分已提交时(T3):失败的那条留 `pending`,提案留 `approved`,不延后;之后的触发见到这份记录就返回,不再抽取 | `failure-admit-<提案>.yaml`;部分收录的 T3 记在 `failure-admit-<提案>-partial.yaml` |
 | 门② 记忆收录的其他异常 | T1(瞬态)或 T2 | 事件不放弃,提案留在 `approved`,下个 tick 重入补收据 | `failure-admit-<提案>.yaml` |
 | 门② 收录时库锁被占,或任何轮次有未提交起点副本(只含技能的提案同样延后) | 延后 | 抛 `DeferredError`:不写树、状态不动,提案留在 `approved`,按退避重试 | 无 |
@@ -750,7 +751,7 @@ def load_library(store) -> LibraryState: ...
 | `tests/test_ma_verify.py` [已落地] | 8 | 精准命中、触发过宽、优先级压不过 |
 | `tests/test_ma_packaging.py` [已落地] | 8 | 筛选、编号、重入不改写 |
 | `tests/test_ma_admit.py` [已落地] | 49 | 三个崩溃点、T2、5 种坏 run id、记忆增量、抽取失败按类别分两路与部分失败、库锁与在途副本延后 |
-| `tests/test_ma_rounds.py` [已落地] | 51 | 空库沉默、R18、R19 重入、取代、读不出、过期提案、人格库锁、失败回滚、验证快照 |
+| `tests/test_ma_rounds.py` [已落地] | 53 | 空库沉默、R18、R19 重入、取代、读不出、过期提案、人格库锁、失败回滚、验证快照、验证重放的记忆异常 |
 | `tests/test_ma_e2e.py` [已落地] | 1 | 第 6 章走查例子 |
 | `tests/test_ma_memory_layout.py` [已落地] | 12 | 目录布局、人格 id 与路径校验、人格库锁 |
 | `tests/test_ma_deployment_starling.py` [已落地] | 7 | 真 Starling 上的部署重试、崩溃重入、门② 抽取失败;装了 extra `memory` 才跑 |

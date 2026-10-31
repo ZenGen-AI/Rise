@@ -25,7 +25,7 @@
   snapshots/<round_id>/ 空了也删。
 - 记忆层的确定性错误不从处理器逃出(终审 I-2):部署驱动器把管理面与副本文件操作的永久失败改抛
   AgentRoundFailedError(失败点 mindagent.deployment.memory),验证快照段同样(mindagent.rounds.verify),都判 T3
-  并回滚;绑定人格 id 拼不出锁路径(ActioDataError)判 T3、不回滚(失败点 mindagent.rounds.persona)。
+  并回滚;验证段(快照与重放)里的瞬态 MemoryFailureError 改抛 DeferredError,轮次留 pending、守护进程退避重试;绑定人格 id 拼不出锁路径(ActioDataError)判 T3、不回滚(失败点 mindagent.rounds.persona)。
   原因只报类名。模型后端的 OSError 不在其内,照旧原样上抛、轮次留 pending。
 """
 from __future__ import annotations
@@ -258,7 +258,7 @@ _T = TypeVar("_T")
 
 def _verify_op(call: Callable[[], _T]) -> _T:
     """验证快照与它的临时副本(建目录、backup、造临时库、restore、open):永久的 MemoryFailureError 与 OSError
-    判 T3(终审 I-2),失败点 mindagent.rounds.verify,只报类名;瞬态的原样上抛,轮次留 pending。
+    判 T3(终审 I-2),失败点 mindagent.rounds.verify,只报类名;瞬态的原样上抛,由验证段外层改抛 DeferredError。
     只包这些调用:验证重放里模型后端抛的 OSError 照旧原样上抛(与部署 episode 同一约定)。"""
     try:
         return call()
@@ -461,13 +461,22 @@ def make_start_round_handler(
             return inst
 
         try:
-            _verify_op(lambda: verify_snap.parent.mkdir(parents=True, exist_ok=True))
-            _verify_op(lambda: memory_store.backup_to(agent_pid, verify_snap))
-            verifications = [
-                verify(d, findings, episodes, base_instance_factory=instance_with,
-                       personas=personas, scenarios=scenarios)
-                for d in drafts
-            ]
+            try:
+                _verify_op(lambda: verify_snap.parent.mkdir(parents=True, exist_ok=True))
+                _verify_op(lambda: memory_store.backup_to(agent_pid, verify_snap))
+                verifications = [
+                    verify(d, findings, episodes, base_instance_factory=instance_with,
+                           personas=personas, scenarios=scenarios)
+                    for d in drafts
+                ]
+            except MemoryFailureError as exc:
+                # 终审 I-2:重放里实例的 recall、digest(以及 _verify_op 原样放过的瞬态)抛的记忆异常不能越过
+                # 处理器、让守护进程以 traceback 退出。瞬态改抛 DeferredError(轮次留 pending,不写树,退避重试);
+                # 其余判 T3(失败点 mindagent.rounds.verify)。都只报类名。下面的 finally 照样关实例、删快照与临时目录
+                cls = type(exc).__name__
+                if exc.transient:
+                    raise DeferredError(f"verify replay: {cls}") from exc
+                raise AgentRoundFailedError(f"verify replay: {cls}", point="mindagent.rounds.verify") from exc
         finally:
             for inst in built:
                 inst.close()

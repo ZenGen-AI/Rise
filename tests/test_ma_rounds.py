@@ -813,3 +813,76 @@ def test_an_executed_round_leaves_no_empty_snapshot_directory(store, mem):
     env = _start(store, _handler(mem=mem))
     assert env.status == "executed" and env.payload["proposals"]
     assert not (mem.layout.root / "snapshots" / ROUND).exists()
+
+
+# ---------------- 修复波次 A:验证重放里的记忆异常(终审 I-2)与验证收尾的 close 失败(终审 M-1) ----------------
+
+class _RecallFailingScratch(FileTupleStore):
+    """验证重放的临时副本库:它开出的端口 recall 抛给定的 MemoryFailureError(替身端口注入异常);
+    close 照常关(还记下次数),所以收尾能删掉临时目录。"""
+
+    def __init__(self, root, *, exc, closes=None):
+        super().__init__(root)
+        self._exc = exc
+        self._closes = closes
+
+    def open(self, persona_id):
+        port = super().open(persona_id)
+        exc, closes = self._exc, self._closes
+
+        class Port:
+            def recall(self, query, *, limit):
+                raise exc
+
+            def remember(self, event):
+                return port.remember(event)
+
+            def embed_pending(self):
+                return port.embed_pending()
+
+            def digest(self):
+                return port.digest()
+
+            def close(self):
+                if closes is not None:
+                    closes.append(1)
+                port.close()
+
+        return Port()
+
+
+def _verify_handler(mem, scratch_factory):
+    return make_start_round_handler(config=_cfg(), client_factory=_Factory(), backend_factory=lambda m, c: Echo(),
+                                    personas_loader=_loader, memory_store=mem.store, memory_layout=mem.layout,
+                                    memory_runtime=STAND_IN_MEMORY_RUNTIME, scratch_store_factory=scratch_factory)
+
+
+def test_a_transient_memory_failure_in_verification_replay_defers_the_round(store, mem):
+    from actio.memory_port import MemoryFailureError
+    from controlplane.deferred import DeferredError
+    closes = []
+    boom = MemoryFailureError("embed endpoint http://secret/v1 down", transient=True)
+    _skill(store, GOAL)                                                  # 有草案才会验证
+    h = _verify_handler(mem, lambda root: _RecallFailingScratch(root, exc=boom, closes=closes))
+    with pytest.raises(DeferredError) as info:
+        h(store, Action(kind="start_agent_round", target_id="zengen-v1", detail={}))
+    assert "MemoryFailureError" in info.value.reason and "secret" not in info.value.reason
+    env = store.read_product(agent_round_file("zengen-v1"))
+    assert env.status == "pending"
+    assert not store.exists(failure_record_file("run-001", "agent-zengen-v1"))
+    assert closes                                                        # 验证实例照样关了
+    assert not mem.layout.verify_snapshot(ROUND, "pa").exists()          # 验证快照已删
+    assert not mem.layout.verify_scratch(ROUND).exists()                 # 临时目录已删
+    _tick(store, h)                                                      # 守护进程的 tick 接住延后,不以异常退出
+    env = _start(store, _handler(mem=mem))                               # 嵌入恢复后重入:部署 episode 复用,轮次收完
+    assert env.status == "executed" and env.payload["proposals"]
+
+
+def test_a_permanent_memory_failure_in_verification_replay_fails_the_round_t3(store, mem):
+    from actio.memory_port import MemoryFailureError
+    boom = MemoryFailureError("RuntimeError at /secret/db", transient=False)
+    _skill(store, GOAL)
+    _tick(store, _verify_handler(mem, lambda root: _RecallFailingScratch(root, exc=boom)))   # 不从 tick 逃出
+    fr = _assert_failed(store, "mindagent.rounds.verify", "MemoryFailureError")
+    assert "/secret" not in fr.payload["reason"]
+    assert not (mem.layout.root / "snapshots" / ROUND).exists()          # 验证收尾照常清掉
