@@ -38,11 +38,17 @@ def store(tmp_path):
 
 @pytest.fixture
 def mem(tmp_path):
-    failing: set[str] = set()
+    failing: dict[str, str] = {}      # 事件 key → 这次抽取失败的 failure_category;不在其中的抽取成功
+    extractions: list[str] = []       # 替身每真抽取一次(已提交的同文本事件不抽)就记下 key
+
+    def extraction_failure(ev):
+        extractions.append(ev.key)
+        return failing.get(ev.key)
+
     root = tmp_path / "mem"
     return SimpleNamespace(
-        store=FileTupleStore(root / "deploy", extraction_failure=lambda ev: "timeout" if ev.key in failing else None),
-        layout=MemoryLayout(root), failing=failing)
+        store=FileTupleStore(root / "deploy", extraction_failure=extraction_failure),
+        layout=MemoryLayout(root), failing=failing, extractions=extractions)
 
 
 def _put(store, pid=PID, status="approved", increments=None, run_id="run-003"):
@@ -219,11 +225,11 @@ def test_a_bad_or_missing_run_id_writes_no_failure_record_and_no_run_dir(store, 
 # ---------------- 记忆增量走部署库(设计二第 9 节"门② kind: memory"与"门② 失败") ----------------
 
 def test_a_failed_extraction_abandons_the_event_and_rejects_the_proposal(store, mem):
-    mem.failing.add(f"{PID}#2")
+    mem.failing[f"{PID}#2"] = "schema_failure"                        # 确定性类别,一条都没提交过
     _put(store, increments=[{"kind": "skill", "definition": SKILL}, {"kind": "memory", "definition": MEMORY}])
     _admit(store, mem)
     proposal = store.read_product(proposal_file(PID))
-    assert proposal.status == "rejected" and "timeout" in proposal.payload["reject_reason"]
+    assert proposal.status == "rejected" and "schema_failure" in proposal.payload["reject_reason"]
     fr = store.read_product(failure_record_file("run-003", f"admit-{PID}"))
     assert fr.payload["category"] == "T2"
     assert mem.store.pending_events("pa") == []
@@ -234,17 +240,22 @@ def test_a_failed_extraction_abandons_the_event_and_rejects_the_proposal(store, 
     assert not store.exists(library_state_file())
 
 
+SECOND = {"persona_id": "pa", "text": "对方养了一只猫", "interlocutor": "pb"}
+TWO_MEMORIES = [{"kind": "memory", "definition": MEMORY}, {"kind": "memory", "definition": SECOND}]
+
+
 def test_a_later_extraction_failure_after_an_earlier_commit_defers_and_then_converges(store, mem):
-    # 第 1 条记忆增量 committed、第 2 条抽取失败:不能转 rejected(已提交的放弃不了),也不能放弃第 2 条
-    # (放弃后提案留 approved,每个 tick 重入都撞 EventConflict,永不收敛)。所以第 2 条留 pending、动作延后
-    second = {"persona_id": "pa", "text": "对方养了一只猫", "interlocutor": "pb"}
-    mem.failing.add(f"{PID}#2")
-    _put(store, increments=[{"kind": "memory", "definition": MEMORY}, {"kind": "memory", "definition": second}])
-    with pytest.raises(DeferredError, match="partial admission"):
+    # 终审 I-1 改写:第 1 条记忆增量 committed、第 2 条抽取以瞬态类别(上游网络)失败。不能转 rejected
+    # (已提交的放弃不了),也不放弃第 2 条;写 T1、抛 DeferredError 退避,重入时同 key 再抽一次
+    mem.failing[f"{PID}#2"] = "transport_failure"
+    _put(store, increments=TWO_MEMORIES)
+    with pytest.raises(DeferredError, match="transport_failure"):
         _admit(store, mem)
     assert store.read_product(proposal_file(PID)).status == "approved"
     fr = store.read_product(failure_record_file("run-003", f"admit-{PID}"))
-    assert fr.payload["category"] == "T2" and "partial admission" in fr.payload["reason"]
+    assert (fr.payload["category"], fr.payload["point"]) == ("T1", "mindagent.admit.memory")
+    assert f"{PID}#2" in fr.payload["reason"] and "transport_failure" in fr.payload["reason"]
+    assert not store.exists(failure_record_file("run-003", f"admit-{PID}-partial"))
     assert mem.store.pending_events("pa") == [f"{PID}#2"]              # 留 pending,不放弃
     assert not store.exists(library_state_file())
     mem.failing.clear()                                                # 抽取恢复后重入
@@ -374,7 +385,7 @@ def test_a_skill_only_proposal_is_deferred_while_any_round_has_an_uncommitted_co
 
 def test_a_crash_after_abandoning_the_failed_event_converges_to_rejected(store, mem, monkeypatch):
     # 抽取失败:先 abandon_event、再写 rejected。崩在两者之间时,下一 tick 的 remember_event 撞上已放弃的 key
-    mem.failing.add(KEY)
+    mem.failing[KEY] = "schema_failure"
     _put(store, increments=[{"kind": "memory", "definition": MEMORY}])
     restore = _crash_on(monkeypatch, store, "proposal.yaml")
     with pytest.raises(Crash):
@@ -396,3 +407,88 @@ def test_a_conflict_on_a_committed_key_is_t2_and_leaves_the_proposal_approved(st
     assert store.read_product(proposal_file(PID)).status == "approved"
     fr = store.read_product(failure_record_file("run-003", f"admit-{PID}"))
     assert (fr.payload["category"], fr.payload["reason"]) == ("T2", f"remember {KEY}: MemoryEventConflict")
+
+
+# ---------------- 终审 I-1:门② 抽取失败按 failure_category 分两路 ----------------
+
+PARTIAL = f"admit-{PID}-partial"     # 部分收录的确定性失败(T3)单独一份记录,见 admit.py 模块 docstring
+
+
+@pytest.mark.parametrize("category", ["timeout", "transport_failure"])
+def test_a_transient_extraction_failure_defers_without_abandoning_and_reentry_admits(store, mem, category):
+    # 上游网络的抖动:不放弃事件、不拒提案,写 T1、抛 DeferredError 退避;重入时同 key 再抽一次
+    mem.failing[KEY] = category
+    _put(store, increments=[{"kind": "memory", "definition": MEMORY}])
+    with pytest.raises(DeferredError, match=category):
+        _admit(store, mem)
+    assert store.read_product(proposal_file(PID)).status == "approved"
+    assert mem.store.pending_events("pa") == [KEY]                    # 没被放弃
+    fr = store.read_product(failure_record_file("run-003", f"admit-{PID}"))
+    assert (fr.payload["category"], fr.payload["point"]) == ("T1", "mindagent.admit.memory")
+    assert KEY in fr.payload["reason"] and category in fr.payload["reason"]
+    assert MEMORY["text"] not in fr.payload["reason"]
+    del mem.failing[KEY]                                               # 抽取恢复
+    _admit(store, mem)
+    proposal = store.read_product(proposal_file(PID))
+    assert proposal.status == "effective" and set(proposal.payload["admitted_statements"]) == {KEY}
+    assert mem.extractions == [KEY, KEY]                               # 重入确实再抽了一次
+    assert mem.store.pending_events("pa") == []
+
+
+@pytest.mark.parametrize("category", ["schema_failure", "semantic_rejection", "a_category_nobody_knows"])
+def test_a_deterministic_extraction_failure_of_a_single_increment_rejects(store, mem, category):
+    mem.failing[KEY] = category
+    _put(store, increments=[{"kind": "memory", "definition": MEMORY}])
+    _admit(store, mem)                                                 # 不抛
+    proposal = store.read_product(proposal_file(PID))
+    assert proposal.status == "rejected" and category in proposal.payload["reject_reason"]
+    assert store.read_product(failure_record_file("run-003", f"admit-{PID}")).payload["category"] == "T2"
+    assert mem.store.pending_events("pa") == []
+    del mem.failing[KEY]
+    with pytest.raises(MemoryEventConflict):                          # 事件已 abandoned
+        mem.store.remember_event("pa", KEY, MEMORY["text"], interlocutor="pb")
+
+
+def test_a_deterministic_failure_after_a_commit_is_t3_and_reentry_does_not_extract_again(store, mem):
+    # 部分收录:第 1 条已 committed、第 2 条被确定性拒收。写 T3、提案留 approved、不抛延后(否则连续延后
+    # 达上限会让守护进程退出);调和循环每 tick 都会再派一次,处理器见到 T3 记录就直接返回,不再花抽取的钱
+    mem.failing[f"{PID}#2"] = "semantic_rejection"
+    _put(store, increments=TWO_MEMORIES)
+    _admit(store, mem)                                                 # 不抛 DeferredError
+    assert store.read_product(proposal_file(PID)).status == "approved"
+    fr = store.read_product(failure_record_file("run-003", PARTIAL))
+    assert (fr.payload["category"], fr.payload["point"]) == ("T3", "mindagent.admit.memory")
+    assert fr.payload["reason"] == f"partial admission: {PID}#2 semantic_rejection after 1 committed"
+    assert mem.store.pending_events("pa") == [f"{PID}#2"]              # 不放弃,等人处理
+    assert not store.exists(library_state_file())
+    extractions, head = len(mem.extractions), store._git("rev-parse", "HEAD")
+    _admit(store, mem)                                                 # 下一个 tick
+    assert len(mem.extractions) == extractions                         # 没有再抽取
+    assert store._git("rev-parse", "HEAD") == head                     # 树也没动
+    assert store.read_product(proposal_file(PID)).status == "approved"
+
+
+def test_a_partial_t3_is_recorded_even_after_an_earlier_transient_t1(store, mem):
+    # fail_once 只写一次:先 T1(瞬态延后)、再确定性部分失败时,T3 写进单独的那份记录,不被 T1 挡住
+    mem.failing[f"{PID}#2"] = "timeout"
+    _put(store, increments=TWO_MEMORIES)
+    with pytest.raises(DeferredError):
+        _admit(store, mem)
+    mem.failing[f"{PID}#2"] = "schema_failure"
+    _admit(store, mem)
+    assert store.read_product(failure_record_file("run-003", f"admit-{PID}")).payload["category"] == "T1"
+    assert store.read_product(failure_record_file("run-003", PARTIAL)).payload["category"] == "T3"
+    extractions = len(mem.extractions)
+    _admit(store, mem)
+    assert len(mem.extractions) == extractions
+
+
+@pytest.mark.parametrize("category", ["T1", "T2"])
+def test_an_earlier_t1_or_t2_record_does_not_block_reentry(store, mem, monkeypatch, category):
+    # 只有 T3 的部分收录记录挡重入:T1 是瞬态要重试,T2 是"写记忆抛异常、留 approved 重入补收据"
+    from controlplane.ledger import record_failure
+    record_failure(store, "run-003", task_id=f"admit-{PID}", category=category, point="mindagent.admit.memory",
+                   retries=0, reason="earlier")
+    _put(store, increments=[{"kind": "memory", "definition": MEMORY}])
+    _admit(store, mem)
+    assert store.read_product(proposal_file(PID)).status == "effective"

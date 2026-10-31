@@ -197,7 +197,7 @@ MindAgent 是 AgentRSI 路径的执行者:不改权重,只让技能库与记忆�
 | `verify` | 流水线 4:离线重放度量行为改变;在部署库的快照副本上只读重放 | `analysis`、Actio 实例 | [已落地] |
 | `packaging` | 流水线 5:按阈值筛选,写提案产物 | `controlplane.paths` | [已落地] |
 | `rounds` | 轮次处理器工厂,取代旧轮次;处理器开始拿人格库锁(被占抛 `DeferredError`),写 `memory_runtime` 与 `episode_digests`;把 `pending` 轮次写成终态前先回滚在途 episode | 以上全部 | [已落地] |
-| `admit` | 收录处理器工厂;记忆增量经部署记忆管理面调 `remember_event`,写前拿库锁。库锁被占,或任何轮次有未提交的起点副本(只含技能的提案同样延后),抛 `DeferredError`。抽取失败且一条记忆增量都没提交过时提案改为 `rejected` | `library`、`failures`、`memory_layout`、`controlplane.deferred`、`actio` 部署记忆管理面 | [已落地] |
+| `admit` | 收录处理器工厂;记忆增量经部署记忆管理面调 `remember_event`,写前拿库锁。库锁被占,或任何轮次有未提交的起点副本(只含技能的提案同样延后),抛 `DeferredError`。抽取失败按类别分两路:`timeout`、`transport_failure` 延后重试;其余类别一条记忆增量都没提交过时提案改为 `rejected`,部分已提交时记 T3、不再重抽 | `library`、`failures`、`memory_layout`、`controlplane.deferred`、`actio` 部署记忆管理面 | [已落地] |
 | `memory_layout` | 部署记忆根目录的磁盘布局:人格库锁、起点副本、验证快照的路径,以及门② 用的未提交副本查询 | `actio`、`controlplane.lock` | [已落地] |
 | `errors` | 本包异常:数据错误、解析耗尽、轮次失败、覆盖失败 | 无 | [已落地] |
 
@@ -540,7 +540,7 @@ def load_library(store) -> LibraryState: ...
 <!-- figure:begin 50-mindagent-admission -->
 ![提案到入库的审核链](diagrams/50-mindagent-admission.svg)
 
-**图 4　提案到入库的审核链**　验证结果先按阈值筛选,未过的写进轮次的 dropped。通过的打包成 pending_review 提案,人工在门②批准或拒绝。批准后收录处理器先校验全部增量,再写库条目、递增 library_state,最后置 effective。技能写 skill_library/,记忆经 remember_event 进该人格的 Starling 库。增量不合法记 T2 失败记录,提案留在 approved。写记忆抛异常也留在 approved,瞬态异常记 T1,其余记 T2。已有增量提交后抽取失败(部分收录)记 T2 并延后重试,提案仍留在 approved。一条都没提交就抽取失败,则放弃该事件,提案改为 rejected。人格库锁被占或有未提交的部署副本时,写库前先延后重试。
+**图 4　提案到入库的审核链**　验证结果先按阈值筛选,未过的写进轮次的 dropped。通过的打包成 pending_review 提案,人工在门②批准或拒绝。批准后收录处理器先校验全部增量,再写库条目、递增 library_state,最后置 effective。技能写 skill_library/,记忆经 remember_event 进该人格的 Starling 库。增量不合法记 T2 失败记录,提案留在 approved。写记忆抛异常也留在 approved,瞬态异常记 T1,其余记 T2。抽取失败按类别分两路:timeout、transport_failure 记 T1 并延后重试,事件不放弃,提案留在 approved。其余类别一条都没提交时放弃该事件,提案改为 rejected;已有增量提交后才失败(部分收录)记 T3,提案留在 approved 等人处理,不再重抽。人格库锁被占或有未提交的部署副本时,写库前先延后重试。
 
 <details>
 <summary>文字版:图中的节点与连线</summary>
@@ -557,7 +557,7 @@ def load_library(store) -> LibraryState: ...
 - 写库条目:技能写 skill_library/ / 记忆 remember_event 进 / 该人格的 Starling 库
 - library_state:对应版本 +1 / admitted 追加一条
 - 提案 effective:收录完成
-- T1/T2 失败记录:异常:记 T1/T2,留 approved / 部分已提交:延后重试 / 一条都没提交:rejected
+- 失败记录:异常或瞬态:留 approved / 部分已提交:T3,等人处理 / 一条都没提交:rejected
 - 提案 rejected:保留记录
 
 **连线**
@@ -572,9 +572,9 @@ def load_library(store) -> LibraryState: ...
 - 校验全部增量 → 写库条目
 - 写库条目 → library_state
 - library_state → 提案 effective
-- 校验全部增量 → T1/T2 失败记录:增量不合法
-- 写库条目 → T1/T2 失败记录:抽取失败或抛异常
-- T1/T2 失败记录 → 提案 rejected:抽取失败
+- 校验全部增量 → 失败记录:增量不合法
+- 写库条目 → 失败记录:抽取失败或抛异常
+- 失败记录 → 提案 rejected:确定性抽取失败
 
 </details>
 <!-- figure:end 50-mindagent-admission -->
@@ -596,7 +596,7 @@ def load_library(store) -> LibraryState: ...
 
 | 第 2 步的结果 | 处理 | 提案状态 |
 |---|---|---|
-| `remember_event` 返回抽取失败 | 先对该 key 调 `abandon_event`,事件行进终态 `abandoned`,以后不会被任何路径推进;再写一条 T2 失败记录。前几条增量已 `committed`、后一条才抽取失败时不放弃这一条,让它留在 `pending`,失败记录原因是 `partial admission`,处理器抛 DeferredError 按退避重试:已提交的事件放弃不了,转 `rejected` 就是被拒提案在库里留着记忆,放弃这一条又会让每次重入都撞冲突 | `approved → rejected`,带原因(一条都没提交时);留在 `approved`,退避重试(部分已提交时) |
+| `remember_event` 返回抽取失败 | 按 Starling 的 `failure_category` 分两路。`timeout`、`transport_failure` 是上游网络的瞬态:不论前面有没有提交过,都不放弃事件,写一条 T1 失败记录(原因含 key 与类别),处理器抛 DeferredError 按退避重试,重入时同 key 再抽一次。其余类别(含未知的)是确定性的:一条记忆增量都没提交过时,先对该 key 调 `abandon_event`,事件行进终态 `abandoned`,以后不会被任何路径推进,再写一条 T2 失败记录。前几条增量已 `committed`、后一条才确定性失败时不放弃这一条,让它留在 `pending`,写一条 T3 失败记录(`failure-admit-<提案>-partial`,原因 `partial admission`),不抛延后:已提交的事件放弃不了,转 `rejected` 就是被拒提案在库里留着记忆;放弃这一条又会让每次重入都撞冲突;重抽还是同样结果,退避重试只会让连续延后达上限、守护进程退出。调和循环每个 tick 仍会派收录动作,处理器一开始(拿锁之前)见到这份 T3 记录就返回,不再抽取 | 瞬态:留在 `approved`,退避重试。确定性:`approved → rejected`,带原因(一条都没提交时);留在 `approved`,等人处理(部分已提交时) |
 | `remember_event` 抛异常(库打不开、③ 的提交失败) | 不放弃事件,只写失败记录:瞬态的记忆失败写 T1,其余 T2 | 留在 `approved`,下一个 tick 重入 |
 | 库锁被占,或任何轮次有未提交起点副本 | 抛 `DeferredError`,不写树、不写失败记录、不动事件 | 留在 `approved`,退避后重试 |
 
@@ -611,7 +611,7 @@ def load_library(store) -> LibraryState: ...
 | 重入时通过的草案变少 | 编号超出本次数目的旧提案仍为 `pending_review` | 写进 `dropped`,标为 stale,审核前核对 |
 | 收录在第 2、3、4 步之间崩溃 | 提案仍 `approved` | 重入收敛:版本只加一,条目只一份 |
 | 增量不合法或库版本非数字 | T2 失败记录 `failure-admit-<提案>`,提案留在 `approved` | 人改提案;此后每次触发只读不写 |
-| 记忆抽取失败 | 一条都没提交时:事件先 `abandoned`,T2 失败记录,提案 `rejected`。部分已提交时:失败的那条留 `pending`,T2 失败记录,提案留 `approved`,抛 DeferredError | 前者终态,要重新收录需人重写提案;后者退避后重试,抽取恢复后收录完 |
+| 记忆抽取失败 | 瞬态类别(`timeout`、`transport_failure`):事件留 `pending`,T1 失败记录,提案留 `approved`,抛 DeferredError。确定性类别且一条都没提交时:事件先 `abandoned`,T2 失败记录,提案 `rejected`。确定性类别且部分已提交时:失败的那条留 `pending`,T3 失败记录,提案留 `approved`,不延后 | 瞬态的退避后重试,抽取恢复后收录完;一条都没提交的是终态,要重新收录需人重写提案;部分已提交的等人处理,之后每次触发见到 T3 记录就返回,不再抽取 |
 | 记忆收录抛异常 | 事件行留 `pending`,提案留 `approved`,写失败记录 | 下一个 tick 重入,同 key 补收据 |
 | 轮次拿不到人格库锁 | 抛 `DeferredError`,不写树,不部署 | 退避后重试;另一个轮次放锁后收敛 |
 | episode 重试 | 失败的尝试已经写下一部分记忆 | 重试前关实例与端口,用起点副本 `restore_from` 覆盖部署库,重开端口,新造实例 |
@@ -663,7 +663,7 @@ def load_library(store) -> LibraryState: ...
 | MA-16 | 一个轮次独占它绑定的每个人格库:轮次开始对 `deploy/<persona_id>.lock` 拿独占文件锁,结束释放;拿不到锁的轮次延后(`DeferredError`,不写树);episode 在一个线程里按情境、序号顺序跑 | 不加锁;episode 并行 | 两条 episode 同时写一个人格库,回滚会抹掉对方的写入;回滚覆盖只有在没有别的写者时才安全 | 两个轮次不能并行,现状本就如此;锁一直被占时动作反复延后,连续延后达上限则守护进程带原因退出 |
 | MA-17 | 记忆的唯一权威是树外的人格库(配了记忆配置时是 Starling 库,否则是替身的落盘文件);`memory_library/` 废弃,不再存记忆条目,不迁移,必须为空(装配期核对),非空则装配期拒绝启动 | 把旧目录的条目迁进人格库;两处并存 | 生成器从不产出记忆提案,所以旧目录现在为空,没有可迁的内容;两处并存会让同一条记忆有两个来源 | 记忆不能从产物树追溯,靠轮次产物里的起点摘要与运行时身份补 |
 | MA-18 | 门② 的记忆增量经 DeploymentMemoryStore.remember_event 写该人格的库,key 为 `<提案 id>#<k>`。收据是三段写入留下的事件行:① 短事务写 `pending` 行,② 事务之外 `remember` 抽取,③ 短事务改 `committed` 并填 `engram_ref` 与语句 id。崩在 ③ 之前按 `engram_ref` 查已有语句补收据;`admitted_statements` 只作证据,不作幂等依据 | 收据记在产物树里,用提案载荷判断是否已写;语句与事件行放同一个事务 | 写成功但收据没落树的崩溃,会让重入把同一条增量再抽取一次。抽取走网络,不能放进 SQLite 事务,所以拆成三段。事件行先于抽取落库,崩在任一段之后都能凭事件行与 `engram_ref` 补齐 | 收据在树外的库里,树里只有证据;崩在 ③ 之前、语句已落库时,要多查一次 `engram_ref` 才补上收据 |
-| MA-19 | 门② 记忆抽取失败:先对该 key 调 `abandon_event`,再写一条 T2 失败记录;一条记忆增量都没提交过时提案改为 `rejected`;部分已提交时不放弃失败的那条,它留 `pending`,提案留 `approved`,处理器抛 DeferredError 退避重试。`remember_event` 抛异常(库打不开、补收据的提交失败):不放弃事件,只写失败记录,提案留在 `approved` 等下个 tick 重入 | 抽取失败也留在 `approved`;抛异常也改 `rejected` | 抽取失败是确定性的,留在 `approved` 会每个 tick 重抽一次;抛异常多半是瞬态,重入补收据即可,不会二次抽取。放弃事件让被拒的提案不会复活 | 被拒的记忆增量要人重写一份提案才能再收录 |
+| MA-19 | 门② 记忆抽取失败按 Starling 的 `failure_category` 分两路。`timeout`、`transport_failure`:不放弃事件,写 T1 失败记录,处理器抛 DeferredError 退避重试。其余类别:一条记忆增量都没提交过时先对该 key 调 `abandon_event`,再写一条 T2 失败记录,提案改为 `rejected`;部分已提交时不放弃失败的那条,它留 `pending`,写 T3 失败记录,提案留 `approved`,不抛延后,之后的触发见到这份记录就返回。`remember_event` 抛异常(库打不开、补收据的提交失败):不放弃事件,只写失败记录,提案留在 `approved` 等下个 tick 重入 | 抽取失败不看类别,一律按确定性处理;部分已提交的确定性失败也退避重试;抛异常也改 `rejected` | 抽取端点的网络抖动过一会儿就好,按确定性处理会把人已批准的提案拒掉。确定性失败重抽还是同样结果:留在 `approved` 又退避重试,每次都花一次抽取,连续延后达上限还会让守护进程退出。抛异常多半是瞬态,重入补收据即可,不会二次抽取。放弃事件让被拒的提案不会复活 | 被拒的记忆增量要人重写一份提案才能再收录;部分收录的 T3 要人处理,没有放弃那一条的命令;瞬态抽取失败一直不恢复时,连续延后达上限,守护进程带原因退出 |
 | MA-20 | 审核类状态机在 Python 的 `controlplane.states` 有 `approved → rejected` 一条边,只许收录处理器走;命令行的 `REVIEW_TRANSITIONS` 不加 | 抽取失败留在 `approved`;给 `approved` 加一个失败态;两份迁移表保持一致 | 现有的 `approved` 只能去 `effective`,没有出口放一个确定性失败的提案;一条专用边不扩大状态集。命令行不加这条边,所以人不能把已批准的提案改回拒绝 | 迁移表对所有审核类产物共用,这条边对它们都合法,约束靠只有收录处理器走;两份迁移表从此有意不同 |
 | MA-21 | 部署库里的 `pending` 事件行各有主人:对话事件归产生它的 episode,门② 事件归提案;谁写的谁处理。对话事件在 episode 内重试一次,仍失败则留 `pending`;episode 成功时在落盘后、删起点副本之前对自己留下的行调 `abandon_event`,最终失败时用起点副本回滚,实例的 `close()` 不放弃 | 每条 episode 开始前统一补齐所有 `pending` 行 | 统一补齐会替别人的事件再抽一次,或把别人的事件放弃;主人明确,起点快照里就没有别人的 `pending` 行 | 进程在 episode 中途崩溃后,它留下的 `pending` 行由重入时的覆盖清掉。MA-22 规定用起点副本覆盖部署库,库回到没有这些行的状态 |
 | MA-22 | 删起点副本是 episode 的提交点:成功时先落盘 episode,再放弃本 episode 留下的 `pending` 行,再删起点副本。轮次重入时按 episode 顺序检查。起点副本还在,就说明它在途时崩溃。先关实例与端口,再用起点副本 `restore_from` 覆盖部署库,核对摘要等于 `episode_digests` 记的值(还没记过摘要时不核对,用覆盖后的摘要补记),再重跑,不重新备份起点。复用只看副本已删与 `digest_before`,不比较部署库当前摘要。覆盖失败抛 RestoreFailedError(继承 `AgentRoundFailedError`,T3),库与副本都保留 | 用 episode 文件是否存在判提交;复用时比较部署库当前摘要;崩溃后直接重跑不覆盖 | episode 文件与记忆写入不在一个事务里,需要一个单点判这条 episode 提交没有。已提交的 episode 写过记忆,库摘要本来就变了,比较当前摘要会让每条已提交的 episode 都不可复用。直接重跑会把半截记忆带进新的起点 | 落盘后、删副本前崩溃,已落盘的 episode 会重跑一遍;覆盖失败要人处理 |
@@ -697,7 +697,7 @@ def load_library(store) -> LibraryState: ...
 | 起点副本或验证快照做不出、起点副本删不掉、覆盖部署库失败;绑定人格 id 拼不出锁路径 | T3 | 轮次 `failed`;覆盖失败时库与副本都保留,覆盖成功但副本删不掉时库已回到起点、只留副本;人格 id 拼不出锁路径时一个锁都没拿到,不回滚(失败点 `mindagent.rounds.persona`) | `failure-agent-<model>.yaml` |
 | 部署会话的记忆瞬态失败:终止原因 `role_memory_unavailable`,或实例抛 `transient` 为真的 MemoryFailureError | T1 | 整条重跑,重试前关实例与端口、用起点副本覆盖人格库;用尽后上抛,轮次 `pending` | 无;重启后的 tick 重入 |
 | 部署会话的记忆确定性失败:终止原因 `role_memory_failure`,或实例抛 `transient` 为假的 MemoryFailureError(含 MemoryEventConflict、MemoryClosedError) | T3 | 不重跑;先回滚在途 episode,再轮次 `failed` | `failure-agent-<model>.yaml` |
-| 门② 记忆抽取失败 | T2 | 一条都没提交时:事件先 `abandoned`,提案 `approved → rejected`。部分已提交时:失败的那条留 `pending`,提案留 `approved`,退避重试 | `failure-admit-<提案>.yaml` |
+| 门② 记忆抽取失败 | T1(`timeout`、`transport_failure`);其余类别 T2 或 T3 | 瞬态:事件不放弃,提案留 `approved`,抛 `DeferredError` 退避重试。其余类别一条都没提交时(T2):事件先 `abandoned`,提案 `approved → rejected`。部分已提交时(T3):失败的那条留 `pending`,提案留 `approved`,不延后;之后的触发见到这份记录就返回,不再抽取 | `failure-admit-<提案>.yaml`;部分收录的 T3 记在 `failure-admit-<提案>-partial.yaml` |
 | 门② 记忆收录的其他异常 | T1(瞬态)或 T2 | 事件不放弃,提案留在 `approved`,下个 tick 重入补收据 | `failure-admit-<提案>.yaml` |
 | 门② 收录时库锁被占,或任何轮次有未提交起点副本(只含技能的提案同样延后) | 延后 | 抛 `DeferredError`:不写树、状态不动,提案留在 `approved`,按退避重试 | 无 |
 | 部署库里的 `pending` 事件行 | 不分类 | 对话事件由 MindAgent 在 episode 成功落盘后、删起点副本前放弃,最终失败则随起点副本回滚清掉;门② 事件由提案处理;抽取失败的计数进轨迹 | 部署 episode 的轨迹 `memory.extraction_failed`;库里的事件表 |
@@ -728,7 +728,7 @@ def load_library(store) -> LibraryState: ...
 | 组件 | 部署驱动器与两个处理器 | 真实 loopback 服务端、替身客户端、`ScriptedBridge` [已落地]、故障注入 |
 | 端到端 | 三轮 AgentRSI 环路加一次收录 | 真实 loopback 服务端,对手为脚本化后端 |
 | 静态 | 依赖方向、`__future__` 首行;本包不导入 `starling`(全仓库只有 `actio/memory_starling.py` 导入它) | 无 |
-| 组件 | 门② 改路:记忆增量走 `remember_event`;重入补收据不二次抽取,崩在 ③ 之前按 `engram_ref` 补;抽取失败后事件 `abandoned`、提案 `rejected`,且之后任何路径都不会把它写进记忆;部分失败留 `approved`、失败的那条留 `pending` 并延后重试,抽取恢复后收录完;一般事实(空 `interlocutor`)在替身上判 T2;抛异常后提案留 `approved` | FileTupleStore、故障注入 |
+| 组件 | 门② 改路:记忆增量走 `remember_event`;重入补收据不二次抽取,崩在 ③ 之前按 `engram_ref` 补;确定性抽取失败后事件 `abandoned`、提案 `rejected`,且之后任何路径都不会把它写进记忆;瞬态抽取失败(单条或部分已提交)事件留 `pending`、写 T1、延后重试,抽取恢复后收录完;部分已提交后确定性失败记 T3、留 `approved`,重入不再抽取;一般事实(空 `interlocutor`)在替身上判 T2;抛异常后提案留 `approved` | FileTupleStore、故障注入 |
 | 组件 | episode 重试回滚:第二次尝试前关实例与端口、`restore_from` 后人格库回到起点,摘要相同;`restore_from` 在端口未关时抛错;第二条 episode 的事件 key 前缀是它自己的逻辑 id;第二轮用同一 `deploy-<model>-<scenario>-<k>` 时事件 key 带轮次前缀,不撞上一轮已 `committed` 的 key | 真 Starling 或 FileTupleStore、故障注入 |
 | 组件 | 部署崩溃重入:episode 中途崩溃(起点副本在)重入时先覆盖再重跑;episode 已落盘但起点副本没删时同样重跑;已提交的 episode 被复用、不重跑,记忆收录后也不重跑,技能版本变了才以新逻辑 id 重跑;覆盖失败判轮次 `failed`,库与副本都保留;轮次判 `failed` 时在途 episode 被回滚 | 真 Starling 或 FileTupleStore、故障注入 |
 | 组件 | 人格库锁:第二个轮次拿不到锁时延后(`DeferredError`),树里什么都不写,放锁后照常跑;起点副本做不出判 `failed` | 临时目录 |
@@ -749,7 +749,7 @@ def load_library(store) -> LibraryState: ...
 | `tests/test_ma_proposals.py` [已落地] | 20 | 规则模板、严格解析、重试、成本条数 |
 | `tests/test_ma_verify.py` [已落地] | 8 | 精准命中、触发过宽、优先级压不过 |
 | `tests/test_ma_packaging.py` [已落地] | 8 | 筛选、编号、重入不改写 |
-| `tests/test_ma_admit.py` [已落地] | 40 | 三个崩溃点、T2、5 种坏 run id、记忆增量、抽取失败与部分失败、库锁与在途副本延后 |
+| `tests/test_ma_admit.py` [已落地] | 49 | 三个崩溃点、T2、5 种坏 run id、记忆增量、抽取失败按类别分两路与部分失败、库锁与在途副本延后 |
 | `tests/test_ma_rounds.py` [已落地] | 51 | 空库沉默、R18、R19 重入、取代、读不出、过期提案、人格库锁、失败回滚、验证快照 |
 | `tests/test_ma_e2e.py` [已落地] | 1 | 第 6 章走查例子 |
 | `tests/test_ma_memory_layout.py` [已落地] | 12 | 目录布局、人格 id 与路径校验、人格库锁 |
@@ -777,7 +777,7 @@ def load_library(store) -> LibraryState: ...
 | 记忆端口、部署记忆管理面 DeploymentMemoryStore 与 Starling 适配器(Actio 一侧) | [已落地] | 端口与落盘替身、Starling 适配器都已落地;本包依赖它们,不实现它们 |
 | 部署记忆(人格库、文件锁、起点快照、摘要、episode 复用判据)、部署实例按 episode 新造、轮次失败先回滚、已提交 episode 不随记忆收录重跑、部署路时间预算 | [已落地] | 替身与 Starling 两条路径都已接通,组合根按记忆配置选 |
 | 验证重放在快照副本上只读 | [已落地] | 基线与候选各从验证快照恢复一份临时副本 |
-| 门② 记忆增量走 `remember_event`、写前拿库锁并在锁被占时抛 `DeferredError`、抽取失败 `approved → rejected` | [已落地] | `controlplane.states` 有这条边;命令行的迁移表没有 |
+| 门② 记忆增量走 `remember_event`、写前拿库锁并在锁被占时抛 `DeferredError`、确定性抽取失败 `approved → rejected` | [已落地] | `controlplane.states` 有这条边;命令行的迁移表没有 |
 | 轮次载荷的 `memory_runtime`、`episode_digests`;记忆增量的 `definition` 是 `persona_id`、`text`、`interlocutor` 三个必填键 | [已落地] | 无 |
 
 **三条必须知道的设计取舍**
@@ -804,7 +804,7 @@ def load_library(store) -> LibraryState: ...
 | 部署记忆只做嵌入、不跑后台维护 | 没有 TTL、回放与巩固,承诺与共同点等分区不更新 | 保持可复现;对召回质量的影响列入未核实项 |
 | 两个轮次不能并行 | 人格库锁挡住第二个轮次,它的动作延后重试 | 现状本就串行 |
 | 被 `rejected` 的记忆提案不能复活 | 抽取失败的记忆增量要人重写提案 | 事件已 `abandoned`,这是有意的 |
-| 部分收录后抽取一直失败 | 收录动作一直退避重试,不收敛;没有放弃这一条的命令 | 只能等抽取恢复,或人经管理面放弃那条事件再处置提案;连续延后达上限时守护进程带原因退出 |
+| 部分收录后抽取一直失败 | 瞬态类别时收录动作一直退避重试,不收敛;确定性类别时记 T3 后提案停在 `approved`,处理器不再抽取;两种都没有放弃这一条的命令 | 瞬态的等抽取恢复,连续延后达上限时守护进程带原因退出;确定性的等人处理,要再试一次先删掉 `failure-admit-<提案>-partial.yaml` |
 | 门② 收录可能被在途轮次推迟 | 库锁被占,或任何轮次有未提交起点副本(只含技能的提案同样延后)时 `DeferredError` 延后,守护进程退避重试 | 轮次结束放锁后收录成功;连续延后有上限,达到上限守护进程带原因退出 |
 | 验证重放与线上行为不完全一致 | 快照冻结在轮次内的某一刻,线上记忆还在变 | 重放只度量行为是否按预期改变 |
 

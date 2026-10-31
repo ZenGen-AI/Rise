@@ -40,3 +40,15 @@ def fail_once(
     record_failure(store, run_id, task_id=task_id, category=category, point=point,
                    retries=retries, reason=reason)
     return True
+
+
+def recorded_category(store: GitStore, run_id: object, task_id: str) -> str | None:
+    """该 (run, task) 已有且读得出的失败记录的类别(T1/T2/T3);run_id 过不了 fail_once 的同一守卫、记录不在
+    或读不出,都返回 None。路径与 fail_once 同一个 failure_record_file。"""
+    if not isinstance(run_id, str) or not run_id or not _single_segment(run_id):
+        return None
+    env = read_or_none(store, failure_record_file(run_id, task_id))
+    if env is None:
+        return None
+    category = env.payload.get("category")
+    return category if isinstance(category, str) else None

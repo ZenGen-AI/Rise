@@ -10,9 +10,15 @@
    抽取失败要整份提案转 rejected,技能条目已写成 effective 就收不回了。
    - remember_event 抛错(库打不开、③ 写失败):记一次失败记录,提案留在 approved,不放弃事件;下一 tick
      重入时同 key 同文本返回幂等的同一批语句 id,不二次抽取。
-   - 抽取失败且本提案没有已提交的记忆:放弃该事件(终态),记 T2,提案转 rejected 并带 reject_reason。
-   - 抽取失败但前面已有记忆提交:不转 rejected(已提交的放弃不了)、也不放弃这一条,记 T2(partial
-     admission),抛 DeferredError;重入时失败的那条按 pending 行再抽一次,成功就照常收录完。
+   - 抽取失败按 failure_category 分两路(终审 I-1)。timeout、transport_failure 是上游网络的瞬态:不论前面
+     有没有提交过,都不放弃事件,记 T1(原因含 key 与类别),抛 DeferredError 退避;重入时同 key 再抽一次。
+   - 其余类别(含未知的)是确定性的。本提案没有已提交的记忆:放弃该事件(终态),记 T2,提案转 rejected 并带
+     reject_reason。前面已有记忆提交(部分收录):不转 rejected(已提交的放弃不了)、也不放弃这一条,记 T3
+     (partial admission),提案留在 approved,不抛延后,直接返回,等人处理。
+   - 部分收录的 T3 记在单独的 task id admit-<proposal_id>-partial 下:fail_once 每个 (run, task) 只写一次,
+     同一份提案先前的 T1(瞬态延后)、T2(抛异常)记录会挡住它。调和循环对 approved 提案每个 tick 都派一次
+     admit_proposal,所以处理器一开始(拿锁之前)查这份记录,类别是 T3 就直接返回,不再每 tick 抽取一次。
+     T1、T2 的记录不挡重入。run_id 过不了 fail_once 的守卫时 T3 写不下,之后每 tick 会再抽一次。
    - remember_event 撞上 MemoryEventConflict 且本提案还没有已提交的记忆:多半是上一次放弃了事件、
      没来得及写 rejected 就崩了。再调一次 abandon_event(已放弃的是空操作、已提交的会抛),成功就照常
      转 rejected;它抛就按上面的"抛错"记一次失败记录,提案不动。
@@ -38,11 +44,13 @@ from controlplane.paths import library_state_file, proposal_file, skill_file
 from controlplane.reconcile import Action
 from controlplane.states import assert_transition
 from mindagent.errors import MindAgentDataError
-from mindagent.failures import fail_once
+from mindagent.failures import fail_once, recorded_category
 from mindagent.library import LIBRARY_STATE_ID, read_library_versions, skill_id_for
 from mindagent.memory_layout import MemoryLayout
 
 MEMORY_DEFINITION_KEYS = frozenset({"persona_id", "text", "interlocutor"})
+# Starling 的抽取失败类别里上游网络的瞬态(设计源 M21);其余已知类别与未知类别都是确定性的
+TRANSIENT_EXTRACTION_CATEGORIES = frozenset({"timeout", "transport_failure"})
 
 Handler = Callable[[GitStore, Action], None]
 
@@ -107,7 +115,10 @@ def make_admit_proposal_handler(*, memory_store: DeploymentMemoryStore, memory_l
         if proposal.status != "approved":
             return  # effective 已收录;其余状态不归本处理器
         task_id = f"admit-{proposal_id}"
+        partial_task_id = f"{task_id}-partial"
         run_id = proposal.payload.get("run_id")
+        if recorded_category(store, run_id, partial_task_id) == "T3":
+            return  # 部分收录已确定性失败、等人处理:不拿锁、不再抽取(见模块 docstring 第 3 步)
         try:
             entries = _entries(proposal_id, proposal.payload.get("increments"))
             # 库版本在写任何条目之前就校验:不是十进制数字串时无法递增,按确定性失败处理
@@ -160,7 +171,8 @@ def make_admit_proposal_handler(*, memory_store: DeploymentMemoryStore, memory_l
                         memory_store.abandon_event(pid, key)
                         reject(f"extraction failed for {key}: event was abandoned earlier")
                         return
-                    if outcome.failed and not statements:
+                    transient = outcome.failed and outcome.category in TRANSIENT_EXTRACTION_CATEGORIES
+                    if outcome.failed and not statements and not transient:
                         memory_store.abandon_event(pid, key)
                 except (MemoryFailureError, OSError, ActioDataError) as exc:
                     # 不改提案、不放弃事件:留在 approved,下一 tick 重入同 key 补收据(只报类名)。
@@ -174,11 +186,17 @@ def make_admit_proposal_handler(*, memory_store: DeploymentMemoryStore, memory_l
                               category="T1" if getattr(exc, "transient", False) else "T2",
                               point="mindagent.admit.memory", retries=0, reason=why)
                     return
+                if transient:
+                    # 不放弃事件、不改提案:同 key 留 pending,退避后重入再抽一次(连续延后有上限)
+                    fail_once(store, run_id, task_id=task_id, category="T1", point="mindagent.admit.memory",
+                              retries=0, reason=f"extraction {key}: {outcome.category}")
+                    raise DeferredError(f"extraction of {key} failed transiently: {outcome.category}")
                 if outcome.failed and statements:
-                    fail_once(store, run_id, task_id=task_id, category="T2", point="mindagent.admit.memory",
-                              retries=0,
-                              reason=f"partial admission: {key} extraction failed after {len(statements)} committed")
-                    raise DeferredError(f"partial admission of {proposal_id}: {key} pending")
+                    # 确定性的部分收录:记 T3、留 approved、不抛延后;下一 tick 入口见到这份记录就返回
+                    fail_once(store, run_id, task_id=partial_task_id, category="T3",
+                              point="mindagent.admit.memory", retries=0,
+                              reason=f"partial admission: {key} {outcome.category} after {len(statements)} committed")
+                    return
                 if outcome.failed:
                     reject(f"extraction failed for {key}: {outcome.category}")
                     return

@@ -205,36 +205,38 @@ def test_no_pending_rows_survive_an_episode_and_the_next_start_snapshot_is_clean
 
 # ---------------- 门② 记忆增量(替身用例:tests/test_ma_admit.py) ----------------
 
-def test_admission_extraction_failure_rejects_the_proposal_and_abandons_the_event(admit_store, mem):
-    """替身:test_a_failed_extraction_abandons_the_event_and_rejects_the_proposal。"""
+def test_a_transient_admission_extraction_failure_defers_and_keeps_the_event_pending(admit_store, mem):
+    """终审 I-1:假端点回 500,真 Starling 把它归 transport_failure(瞬态)。一条都没提交过也不放弃事件、不拒提案:
+    写 T1、抛 DeferredError;抽取恢复后重入收录完。确定性类别走 rejected 的那条只有替身用例,假端点给不出确定性类别。
+    替身:test_a_transient_extraction_failure_defers_without_abandoning_and_reentry_admits。"""
     mem.failing.add(f"{PID}#2")
     _put(admit_store, increments=SKILL_AND_MEMORY)
-    _admit(admit_store, mem)
-    proposal = admit_store.read_product(proposal_file(PID))
-    assert proposal.status == "rejected"
-    # 原因里是 Starling 给的 failure_category;替身给 "timeout",这里不钉具体字符串,只要求有一个
-    category = proposal.payload["reject_reason"].removeprefix(f"extraction failed for {PID}#2: ")
-    assert category and category != proposal.payload["reject_reason"]
-    fr = admit_store.read_product(failure_record_file("run-003", f"admit-{PID}"))
-    assert fr.payload["category"] == "T2"
-    assert mem.store.pending_events("pa") == []
-    mem.failing.clear()
-    with pytest.raises(MemoryEventConflict):                           # abandoned 是终态,任何路径都写不进
-        mem.store.remember_event("pa", f"{PID}#2", FIRST["text"], interlocutor="pb")
-    assert not admit_store.exists(skill_file("skill-agent-round-zengen-v3-1-1"))   # 记忆先写,技能未落
-    assert not admit_store.exists(library_state_file())
-
-
-def test_a_later_admission_extraction_failure_defers_and_converges(admit_store, mem):
-    """第 1 条记忆增量 committed、第 2 条抽取失败:第 2 条留 pending(不放弃)、提案留 approved、抛 DeferredError;
-    抽取恢复后重入收录完。替身:test_a_later_extraction_failure_after_an_earlier_commit_defers_and_then_converges。"""
-    mem.failing.add(f"{PID}#2")
-    _put(admit_store, increments=[{"kind": "memory", "definition": FIRST}, {"kind": "memory", "definition": SECOND}])
-    with pytest.raises(DeferredError, match="partial admission"):
+    with pytest.raises(DeferredError, match="transport_failure"):
         _admit(admit_store, mem)
     assert admit_store.read_product(proposal_file(PID)).status == "approved"
     fr = admit_store.read_product(failure_record_file("run-003", f"admit-{PID}"))
-    assert fr.payload["category"] == "T2" and "partial admission" in fr.payload["reason"]
+    assert (fr.payload["category"], fr.payload["point"]) == ("T1", "mindagent.admit.memory")
+    assert mem.store.pending_events("pa") == [f"{PID}#2"]              # 没被放弃
+    assert not admit_store.exists(skill_file("skill-agent-round-zengen-v3-1-1"))   # 记忆先写,技能未落
+    mem.failing.clear()                                                # 抽取恢复后重入
+    _admit(admit_store, mem)
+    proposal = admit_store.read_product(proposal_file(PID))
+    assert proposal.status == "effective" and set(proposal.payload["admitted_statements"]) == {f"{PID}#2"}
+    assert admit_store.exists(skill_file("skill-agent-round-zengen-v3-1-1"))
+    assert mem.store.pending_events("pa") == []
+
+
+def test_a_later_admission_extraction_failure_defers_and_converges(admit_store, mem):
+    """第 1 条记忆增量 committed、第 2 条抽取以 transport_failure 失败(瞬态):第 2 条留 pending(不放弃)、提案留
+    approved、写 T1、抛 DeferredError;抽取恢复后重入收录完。
+    替身:test_a_later_extraction_failure_after_an_earlier_commit_defers_and_then_converges。"""
+    mem.failing.add(f"{PID}#2")
+    _put(admit_store, increments=[{"kind": "memory", "definition": FIRST}, {"kind": "memory", "definition": SECOND}])
+    with pytest.raises(DeferredError, match="transport_failure"):
+        _admit(admit_store, mem)
+    assert admit_store.read_product(proposal_file(PID)).status == "approved"
+    fr = admit_store.read_product(failure_record_file("run-003", f"admit-{PID}"))
+    assert fr.payload["category"] == "T1" and f"{PID}#2" in fr.payload["reason"]
     assert mem.store.pending_events("pa") == [f"{PID}#2"]              # 留 pending,不放弃
     assert not admit_store.exists(library_state_file())
     mem.failing.clear()                                                # 抽取恢复后重入

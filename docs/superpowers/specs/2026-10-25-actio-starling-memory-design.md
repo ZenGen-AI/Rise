@@ -109,13 +109,13 @@ MindAgent 是另一条线：底座不动参数，演化技能库与记忆库。�
 | M12 | 抽取与嵌入都走 OpenAI 兼容端点，`base_url` 与模型名写配置；密钥是 Starling 固定读的 `OPENAI_API_KEY` | 用户裁定；Starling 只认这个变量（S3、S5） | 不能为抽取和嵌入配不同的密钥 |
 | M13 | Starling 作为可选 extra `memory`，依赖钉 git 提交；未装时用替身并显式报告 | C++ 构建门槛；仓库未上 PyPI | 未装环境只测替身路径 |
 | M14 | Starling 缺的公开接口在 Starling 里补，经 PR 合入，本仓库钉合并提交 | 用户裁定；本仓库不碰 Starling 私有接口与表结构 | 依赖 Starling 先合 PR |
-| M15 | 记忆异常按 Starling 的 `failure_category` 分两个终止原因：`role_memory_unavailable`（`timeout`、`transport_failure`，T1，按条重跑）与 `role_memory_failure`（其余，T2） | 混进 `role_backend_failure` 会被译成延后反复重试（F18）；抽取端点的网络抖动不该升人工 | 分类依赖 Starling 的类别名，它改名要跟着改 |
+| M15 | 记忆异常按 `MemoryFailureError.transient`（第 10 节的穷举映射）分两个终止原因：`role_memory_unavailable`（瞬态，T1，按条重跑）与 `role_memory_failure`（其余，T2）。`remember` 返回的 `failure_category` 不变成异常，会话里只计数；门② 按它分两路：`timeout`、`transport_failure` 写 T1 并延后重试，其余按确定性处理（第 9 节） | 混进 `role_backend_failure` 会被译成延后反复重试（F18）；抽取端点的网络抖动不该升人工 | 门② 的分路依赖 Starling 的类别名，它改名要跟着改 |
 | M16 | 指导语合并进唯一的那条 system 消息 | 连续两条 system 消息不是所有兼容端点都接受 | 无 |
 | M17 | 替身与 Starling 过同一套契约测试，端口语义与规范样例先定后实现 | 先做替身再接 Starling 会长出两套语义 | 契约测试要先写 |
 | M18 | 事件 key 用逻辑 episode id，不用传输层的 session id；部署重试前先把该人格的库回滚到 episode 起点 | 重试会换 session id（F21），部署库会重复记忆 | 回滚要多一次备份与恢复 |
 | M19 | 服务端的准入检查、会话登记、滞留计数在同一把锁里完成；逻辑 episode id 要过白名单，且同一时刻只许一个活动会话用它，撞上时判瞬态 `role_backend_unavailable` | 不在一把锁里，并发 `CreateSession` 会突破上限；客户端给的 id 进目录名与主键 | 多一把锁 |
 | M20 | 部署库按人格加文件锁：一个轮次独占它绑定的每个人格库，episode 逐条顺序跑（F24） | 两条 episode 同时写一个人格库，回滚会抹掉对方的写入 | 两个轮次不能并行，现状本就如此 |
-| M21 | 记忆调用的失败映射是穷举的：Starling 类别 `timeout`、`transport_failure` 是瞬态，其余已知类别、未知类别、非 Starling 异常都是确定性 | 映射不穷举，新类别会落进错误的桶 | 新的瞬态类别出现前先按 T2 处理 |
+| M21 | 记忆调用的失败映射是穷举的：异常按第 10 节的表定 `transient`，`RecallDegradedError` 与 `embed_pending` 的嵌入失败是瞬态，其余异常都是确定性；门② 看 `remember` 返回的 `failure_category`，`timeout`、`transport_failure` 是瞬态，其余已知类别与未知类别都是确定性 | 映射不穷举，新类别会落进错误的桶 | 新的瞬态类别出现前先按确定性处理 |
 
 ## 3. 分层
 
@@ -441,7 +441,7 @@ class SessionResources:
 | 验证重放 | 每个人格从部署库 `backup_to` 到 `snapshots/<round_id>/verify-<persona_id>.db`，基线与候选各开一份快照副本，`replay_read_only=True` |
 | 门② 与在途轮次 | 收录写某人格的库之前，先拿该人格的库锁，并检查 `snapshots/` 下有没有未提交的起点副本：依次查该人格的、任何人格任何轮次的（只含技能的提案也查后一项，库版本在轮次在途时不许变）。库锁被占、该人格有未提交副本、任何人格任何轮次有未提交副本，三种都抛 `DeferredError`：守护进程不写树、按退避重试（SYS-23）。否则轮次重入时会用起点副本覆盖部署库，把刚收录的记忆抹掉，而提案已是 `effective`、不会再收录 |
 | 门② `kind: memory` | 收录时经 `DeploymentMemoryStore.remember_event` 写该人格的库，`key` 是 `<proposal_id>#<k>`。收据是三段写入（第 8 节）留下的事件行，崩在第三段之前也能按 `engram_ref` 补，所以"写成功但收据没落树"的重入不会二次抽取：重入时再调一次，得到 `idempotent` 与事件行里存的同一批语句 id。语句 id 写进提案载荷的 `admitted_statements` 只作证据，不作幂等依据；真正的收据在 Starling 的事件表里 |
-| 门② 失败 | `remember_event` 返回 `failed`（抽取失败）且一条记忆增量都没提交过时：先对该 key 调 `abandon_event`（事件行进终态 `abandoned`，以后不会被任何路径推进），再写一条 T2 失败记录，提案改为 `rejected` 并带原因；审核类状态机增加 `approved → rejected` 这一条边（F23），只许收录处理器走。`remember_event` 抛异常（库打不开、③ 写失败）时不改提案状态、不放弃事件，只写失败记录（抛瞬态 `MemoryFailureError` 写 T1，其余写 T2），留在 `approved` 让下一个 tick 重入：重入再调同 key 的 `remember_event`，按 `pending` 行的恢复规则补收据，不会二次抽取，也不会留下没有收据的语句。被拒的提案不会复活：它的事件行已是 `abandoned`。一份提案有多条记忆增量、前几条已 `committed` 而后一条抽取失败时，不转 `rejected`（已提交的事件放弃不了），也不放弃这一条：它留在 `pending`，写一条 T2 失败记录（`partial admission`），处理器抛 `DeferredError`，守护进程不写树、按退避重试；重入时前几条幂等返回收据，失败的那条再抽一次，成功就照常收录完。混合提案（记忆加技能）在一条记忆都没提交时抽取失败，整份转 `rejected`，技能条目也不落：记忆先于技能写，就是为了这个 |
+| 门② 失败 | `remember_event` 返回 `failed`（抽取失败）时按 `failure_category` 分两路。`timeout`、`transport_failure` 是上游网络的瞬态：不论前面有没有提交过，都不放弃事件、不改提案，写一条 T1 失败记录（原因含 key 与类别），处理器抛 `DeferredError`，守护进程不写树、按退避重试；重入时已提交的几条幂等返回收据，失败的那条再抽一次，成功就照常收录完。其余类别（含未知的）是确定性的：一条记忆增量都没提交过时，先对该 key 调 `abandon_event`（事件行进终态 `abandoned`，以后不会被任何路径推进），再写一条 T2 失败记录，提案改为 `rejected` 并带原因；审核类状态机增加 `approved → rejected` 这一条边（F23），只许收录处理器走。`remember_event` 抛异常（库打不开、③ 写失败）时不改提案状态、不放弃事件，只写失败记录（抛瞬态 `MemoryFailureError` 写 T1，其余写 T2），留在 `approved` 让下一个 tick 重入：重入再调同 key 的 `remember_event`，按 `pending` 行的恢复规则补收据，不会二次抽取，也不会留下没有收据的语句。被拒的提案不会复活：它的事件行已是 `abandoned`。一份提案有多条记忆增量、前几条已 `committed` 而后一条确定性失败时，不转 `rejected`（已提交的事件放弃不了），也不放弃这一条：它留在 `pending`，写一条 T3 失败记录（task id 为 `admit-<proposal_id>-partial`，原因 `partial admission: <key> <类别> after N committed`），提案留在 `approved`，不抛 `DeferredError`，等人处理：重抽还是同样结果，退避重试只会让连续延后达上限、守护进程退出。调和循环每个 tick 仍会派收录动作，处理器拿锁之前先查这份记录，是 T3 就直接返回，不再抽取；同一份提案的 T1、T2 记录不挡重入。混合提案（记忆加技能）在一条记忆都没提交时抽取失败，整份转 `rejected`，技能条目也不落：记忆先于技能写，就是为了这个 |
 | 记忆增量的形状 | `definition` 是 `{persona_id, text, interlocutor}` 三个必填键，不再是 `MemoryEntry`：`persona_id` 指明写进哪个人格的库；`text` 原样作为事件文本；`interlocutor` 是这条记忆关于谁，缺省为空串表示一般事实。收录前按这三个键严格校验，多键少键都是 T2 |
 | 旧数据 | `memory_library/` 必须为空（第 0 节），`load_library` 不再读它 |
 
