@@ -307,6 +307,45 @@ def test_a_failing_embedding_endpoint_surfaces_as_transient_failures(tmp_path):
         port.close()
 
 
+def test_a_deployment_store_write_is_recallable_on_the_next_port_without_a_round_in_between(tmp_path):
+    """门② 经管理面写进部署库的语句当场就嵌入。真机 2026-11-01:之前只写不嵌,库里 statement_vectors 0 行,
+    要等下一个部署轮次第一轮的 embed_pending 顺带补上,那一轮的召回看不到刚收录的记忆。"""
+    from actio.memory_starling import StarlingDeploymentStore
+
+    with FakeOpenAI(dim=256) as fake, offline_api_key():
+        store = StarlingDeploymentStore(tmp_path / "deploy", endpoints=fake.endpoints())
+        out = store.remember_event("pa", EV.key, EV.text, interlocutor=EV.interlocutor)
+        assert out.failed is False and len(out.stored) == 1
+        port = store.open("pa")
+        try:
+            assert [h.id for h in port.recall("预算超支怎么办", limit=3)] == list(out.stored)
+            assert port.embed_pending() == 0                  # 没有欠着的嵌入
+        finally:
+            port.close()
+
+
+def test_a_deployment_store_write_whose_embedding_fails_is_a_transient_failure_and_retries_cleanly(tmp_path):
+    """嵌入失败与端口同口径,抛 transient 的 MemoryFailureError。语句与事件已提交;门② 重入同 key 时
+    Starling 返回同一批语句 id(不二次抽取),这一次嵌入补上。"""
+    from actio.memory_starling import StarlingDeploymentStore
+
+    with FakeOpenAI(dim=256) as fake, offline_api_key():
+        store = StarlingDeploymentStore(tmp_path / "deploy", endpoints=fake.endpoints())
+        fake.fail_embeddings = True
+        with pytest.raises(MemoryFailureError) as info:
+            store.remember_event("pa", EV.key, EV.text, interlocutor=EV.interlocutor)
+        assert info.value.transient is True and "127.0.0.1" not in str(info.value)
+        chats = fake.chat_calls
+        fake.fail_embeddings = False
+        again = store.remember_event("pa", EV.key, EV.text, interlocutor=EV.interlocutor)
+        assert again.failed is False and len(again.stored) == 1 and fake.chat_calls == chats
+        port = store.open("pa")
+        try:
+            assert [h.id for h in port.recall("预算超支怎么办", limit=3)] == list(again.stored)
+        finally:
+            port.close()
+
+
 def test_close_with_a_call_in_flight_times_out_and_the_port_stays_usable_for_a_second_close(tmp_path):
     with FakeOpenAI(dim=256) as fake, offline_api_key():
         fake.chat_delay_s = 0.8       # 与 timeout_ms=2000 留 1.2 秒余量,负载高时抽取请求不会自己超时

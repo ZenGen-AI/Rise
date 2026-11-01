@@ -115,6 +115,16 @@ def _outcome(memory, res) -> RememberOutcome:
     return RememberOutcome(tuple(_hit_id(content_ids[s]) for s in res.statement_ids), False, None)
 
 
+def _embed(memory) -> int:
+    """嵌入所有还没有向量的语句,时刻取事件时钟,端口与管理面共用。返回嵌入条数。
+    Starling 只计数不抛;有失败就抛 transient 的 MemoryFailureError,失败的语句召回会少一条,不能静默。"""
+    now = (_EPOCH_AT + timedelta(seconds=memory.next_seq())).strftime("%Y-%m-%dT%H:%M:%SZ")
+    stats = memory.embed_pending(now)
+    if stats.failed > 0:
+        raise MemoryFailureError(f"embed_pending: {stats.failed} statement(s) failed to embed", transient=True)
+    return stats.embedded
+
+
 def _render(row) -> str:
     """设计源 4.4 节。落库后的 modality 与 polarity 是小写(抽取 JSON 里的大写在落库时转了小写);
     括号与逗号是全角。`StatementRow` 没有 nesting_depth,不渲染嵌套层次。"""
@@ -190,14 +200,9 @@ class StarlingMemory:
     def embed_pending(self) -> int:
         memory = self._live()
         try:
-            now = (_EPOCH_AT + timedelta(seconds=memory.next_seq())).strftime("%Y-%m-%dT%H:%M:%SZ")
-            stats = memory.embed_pending(now)
+            return _embed(memory)
         except Exception as exc:
             raise translate_failure(exc) from None
-        if stats.failed > 0:
-            # Starling 只计数不抛;失败的语句下一轮召回就少一条,不能静默。
-            raise MemoryFailureError(f"embed_pending: {stats.failed} statement(s) failed to embed", transient=True)
-        return stats.embedded
 
     def digest(self) -> str:
         memory = self._live()
@@ -399,11 +404,19 @@ class StarlingDeploymentStore:
         return port
 
     def remember_event(self, persona_id: str, key: str, text: str, *, interlocutor: str) -> RememberOutcome:
+        """写完在同一条连接上 embed_pending,与端口每轮"写后嵌入"同口径。不嵌的话门② 收录的语句没有向量,
+        召回看不到,要等下一个部署轮次首轮的 embed_pending 顺带补上(真机 2026-11-01)。
+
+        嵌入失败抛 transient 的 MemoryFailureError;此时语句与事件已提交,重入同 key 返回同一批语句 id
+        (不二次抽取),这次的 embed_pending 再补。抽取失败不嵌:没有新语句。"""
         path = self._path(persona_id)
         self._ensure_root()
         with self._short(path, agent=persona_id, extract=True) as memory:
             res = memory.remember_event(key, text, interlocutor=interlocutor, epoch=EPOCH)
-            return _outcome(memory, res)
+            outcome = _outcome(memory, res)
+            if not outcome.failed:
+                _embed(memory)
+            return outcome
 
     def abandon_event(self, persona_id: str, key: str) -> None:
         path = self._path(persona_id)

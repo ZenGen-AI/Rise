@@ -220,7 +220,7 @@ Actio 是十三个源文件的纯 Python 包,`instance` 在顶,`text` 在底,依
 | `actio/skills.py` | `Skill`、`route`、`check_library` | `triggers`、`_check`、`simulator.datamodel` | [已落地] |
 | `actio/memory.py` | `MemoryEntry`、`snapshot`、`retrieve`;TupleMemory:包 `MemoryEntry` 元组与 `retrieve` 的替身记忆,召回给出的 id 一律是内容 id,不用条目自带的 `id`;FileTupleStore:部署记忆管理面的替身实现,条目与事件表存成 JSON 文件 | `text`、`_check`;替身另依赖 `memory_port` | [已落地] |
 | `actio/memory_port.py` | 记忆端口:MemoryBackend 协议、MemoryHit、MemoryEvent、RememberOutcome、MemoryFailureError、MemoryEventConflict、MemoryClosedError,以及部署记忆管理面协议 DeploymentMemoryStore。放独立文件而不是并进 `memory.py`,因为适配器与替身都依赖它,并进去会让适配器导入 `MemoryEntry` 的校验链 | `errors` | [已落地] |
-| `actio/memory_starling.py` | StarlingMemory:包一个 `starling.Memory`,把 Starling 的行渲染成 MemoryHit,把 Starling 的失败按穷举映射成 MemoryFailureError;StarlingDeploymentStore:部署记忆管理面的 Starling 实现。唯一导入 `starling` 的文件 | `memory_port`、`errors`、第三方包 `starling` | [已落地] |
+| `actio/memory_starling.py` | StarlingMemory:包一个 `starling.Memory`,把 Starling 的行渲染成 MemoryHit,把 Starling 的失败按穷举映射成 MemoryFailureError;StarlingDeploymentStore:部署记忆管理面的 Starling 实现,`remember_event` 写完在同一条连接上 `embed_pending`(与端口每轮写后嵌入同口径;嵌入失败抛 transient,语句已提交,重入同 key 补嵌);不嵌的话门② 收录的语句要等下一个部署轮次首轮才召回得到。唯一导入 `starling` 的文件 | `memory_port`、`errors`、第三方包 `starling` | [已落地] |
 | `actio/experience.py` | `ReasoningExperience`、三级回退 | `triggers`、`_check`、`simulator.datamodel` | [已落地] |
 | `actio/trace.py` | 轨迹模式:`build_trace`、`validate_trace`;升到 actio.trace.v2,校验接受 actio.trace.v1 与 actio.trace.v2 | `errors` | [已落地] |
 | `actio/instance.py` | `instantiate`、`ActioInstance`、后端协议与适配器;实例持记忆端口,每轮读写 | 除 `memory_starling` 外的以上全部、`simulator.datamodel` | [已落地] |
