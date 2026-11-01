@@ -67,4 +67,5 @@ def test_recall_brings_back_the_related_sentence(live_port):
     assert not second.failed, f"remember q#1 failed, category={second.category}"
     assert port.embed_pending() >= 1
     hits = port.recall("谁负责鉴权", limit=1)
-    assert hits and "鉴权" in hits[0].text
+    # 按 id 判,不按字面:命中渲染的是抽取出的三元组,抽取模型可能把"鉴权"写成 auth。
+    assert hits and hits[0].id in first.stored, f"recalled {hits}, expected one of {first.stored}"
