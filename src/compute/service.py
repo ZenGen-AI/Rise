@@ -23,6 +23,9 @@ from compute.sizing import MemorySizing, check_memory_fits
 from compute.vllm_service import BASE_MODEL_NAME
 
 MAX_ATTEMPTS = 8  # 同一份配置下的尝试序号上限;满了说明旧的作业目录没人清,该人看一眼
+# 收尾时 stop 撞上 SSH 失败的重试间隔(秒)。stop 是幂等的,对已退出的作业只回状态。不重试的话,一次网络抖动
+# 就让服务留在主机上占着显存与租约,下一轮起服务只会撞上 ComputeBusyError、无限延后(真机 2026-11-01 撞过)。
+STOP_RETRY_DELAYS_S = (5.0, 20.0)
 
 
 @dataclass(frozen=True)
@@ -104,10 +107,21 @@ def serve(
         except Exception:  # noqa: BLE001  关隧道失败不挡住停服务
             pass
         if started:
-            if client.stop(job_id, grace_s=stop_grace_s).state == "running":
+            if _stop(client, job_id, stop_grace_s, sleep).state == "running":
                 # 服务还占着显存:不放租约,让训练撞不上它。租约在作业退出或丢失后会被助手判为陈旧。
                 raise ServeStopError(f"job {job_id} is still running after stop; the GPU lease was kept")
         client.lease_release(job_id)
+
+
+def _stop(client: Any, job_id: str, grace_s: float, sleep: Callable[[float], None]) -> Any:
+    """停服务;SSH 失败时按 STOP_RETRY_DELAYS_S 再试,都失败就照旧抛 TransportError(租约不放)。"""
+    for delay in (*STOP_RETRY_DELAYS_S, None):
+        try:
+            return client.stop(job_id, grace_s=grace_s)
+        except TransportError:
+            if delay is None:
+                raise
+            sleep(delay)
 
 
 def _check_memory(client: Any, cfg: Any) -> None:

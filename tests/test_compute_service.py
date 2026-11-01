@@ -244,6 +244,46 @@ def test_a_failing_stop_does_not_release_the_lease_while_the_server_may_still_ho
     assert "lease_release" not in _order(client)
 
 
+def _flaky_stop(client, failures):
+    """前 failures 次 stop 抛 TransportError(SSH 断着),之后照常停下。"""
+    from compute.errors import TransportError
+
+    real_stop = client.stop
+    seen = {"n": 0}
+
+    def stop(job_id, *, grace_s=10.0):
+        seen["n"] += 1
+        if seen["n"] <= failures:
+            client.calls.append(("stop", job_id))
+            raise TransportError("ssh: connect to host port 22: Operation timed out")
+        return real_stop(job_id, grace_s=grace_s)
+
+    client.stop = stop
+
+
+def test_a_stop_that_hits_a_short_ssh_outage_is_retried_and_then_releases_the_lease():
+    """真机 2026-11-01:收尾时 SSH 断了一次,stop 没送到,vLLM 留在主机上占着显存与租约。stop 幂等,重试是安全的。"""
+    client = FakeServiceClient()
+    _flaky_stop(client, failures=2)
+    clock = Clock()
+    _run(client, clock=clock)
+    assert _order(client)[-4:] == ["stop", "stop", "stop", "lease_release"]
+    assert clock.now == 25.0                                   # 隔 5 秒、20 秒各等一次
+    assert client.jobs[next(iter(client.jobs))].state == "exited"
+
+
+def test_a_stop_that_keeps_failing_raises_and_keeps_the_lease():
+    """重试用完仍连不上:不能确认服务已停,租约照旧不放,异常交给调用方(TransportError 是延后类)。"""
+    from compute.errors import TransportError
+
+    client = FakeServiceClient()
+    _flaky_stop(client, failures=3)
+    with pytest.raises(TransportError, match="timed out"):
+        _run(client)
+    assert _order(client)[-3:] == ["stop", "stop", "stop"]
+    assert "lease_release" not in _order(client)
+
+
 def test_a_service_that_will_not_stop_raises_the_stop_error_a_deferred_startup_error_subtype():
     """停不下来是单独的一类:调用方可以据此不再重试(重试只会撞上同一个租约),
     其余调用方仍把它当起服务失败的延后类处理。"""
