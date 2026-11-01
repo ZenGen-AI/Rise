@@ -337,6 +337,16 @@ def test_the_request_is_a_chat_completions_post_with_a_bearer_header(stub):
     body = json.loads(request["body"])
     assert body["model"] == "gpt-x"
     assert body["messages"] == chat_messages(_persona(), _scenario(), [TurnRecord(0, "a", "你好")], "b")
+    assert set(body) == {"model", "messages"}      # vLLM 才认 chat_template_kwargs;外部 API 只发标准字段
+
+
+def test_extra_body_fields_cannot_override_model_or_messages(stub):
+    stub.script.append(_ok())
+    post_chat(stub.url, "gpt-x", SECRET, [{"role": "user", "content": "hi"}], timeout_s=5.0, host_label="h",
+              extra_body={"model": "other", "messages": [], "chat_template_kwargs": {"enable_thinking": False}})
+    body = json.loads(stub.requests[0]["body"])
+    assert body["model"] == "gpt-x" and body["messages"] == [{"role": "user", "content": "hi"}]
+    assert body["chat_template_kwargs"] == {"enable_thinking": False}
 
 
 def test_empty_guidance_is_byte_identical_to_respond(stub):

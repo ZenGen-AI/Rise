@@ -214,6 +214,7 @@ def require_timeout(timeout_s: object) -> float:
 
 def post_chat(
     base_url: str, model: str, api_key: str, messages: list[dict], *, timeout_s: float, host_label: str,
+    extra_body: dict | None = None,
 ) -> str:
     """向 OpenAI 兼容的 `<base_url>/v1/chat/completions` POST 一次,返回 choices[0].message.content。
 
@@ -222,7 +223,8 @@ def post_chat(
     信息里会被抹掉,且切断异常链(from None),回溯里没有携带请求头的原异常。子类按失败的性质分:
     超时 OpponentTimeoutError(T1);暂时不可用 OpponentUnavailableError(429、5xx、连不上、中途断开;T1);
     对端明确拒绝 OpponentRejectedError(4xx,429 除外;T2);回复不是约定的形状(及其余非 200)是普通的 OpponentApiError。
-    host_label 是写进错误信息的"对端是谁"(外部 API 用 host:port,vLLM 用服务名)。"""
+    host_label 是写进错误信息的"对端是谁"(外部 API 用 host:port,vLLM 用服务名)。
+    extra_body 是并进请求体的额外字段,只给认得它们的对端用(vLLM 的 VLLM_CHAT_EXTRA);外部 API 不传。"""
     require_http_url(base_url)
     timeout = require_timeout(timeout_s)
 
@@ -239,7 +241,7 @@ def post_chat(
         """所有失败走这一处,出口前抹掉密钥(原异常的文本理论上不该含,这里是第二道防线)。"""
         return error(message.replace(api_key, "***") if api_key else message)
 
-    payload = {"model": model, "messages": messages}
+    payload = {**(extra_body or {}), "model": model, "messages": messages}
     request = urllib.request.Request(
         f"{base_url.rstrip('/')}/v1/chat/completions",
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"), method="POST",

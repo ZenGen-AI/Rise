@@ -151,6 +151,17 @@ def test_the_trained_policy_posts_the_trained_adapter_as_the_model(stub):
     body = stub.bodies()[0]
     assert body["model"] == "trained"
     assert body["messages"] == chat_messages(_persona(), _scenario(), HISTORY, "b")
+    assert body["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def test_the_opponent_on_the_same_service_also_turns_thinking_off(stub):
+    """站内 vLLM 对手与训练位同一个基座、同一个聊天模板,思考段同样要关(真机:开着时单次可到 208 秒)。"""
+    stub.script.append(_ok("不行"))
+    with _context(FakeServe(stub.url)) as policy:
+        opponent = vllm_opponent_factory(policy.handle, {"zengen-v1": "trained"}, timeout_s=5.0)(
+            RoleBinding("a", "p-a", "frozen_reference", model_ref="zengen-v1"), _scenario())
+        opponent.respond(_persona(), _scenario(), HISTORY, "a")
+    assert stub.bodies()[0]["chat_template_kwargs"] == {"enable_thinking": False}
 
 
 def test_the_policy_respond_guided_appends_guidance_and_empty_guidance_matches_respond(stub):

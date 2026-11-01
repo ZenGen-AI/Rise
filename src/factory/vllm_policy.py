@@ -27,6 +27,11 @@ from simulator.datamodel import Persona, RoleBinding, Scenario, TurnRecord
 # 一次发言的等待上限。服务端另有按回合的限时(TimeoutBackend),这一层只是不让 HTTP 无限挂着
 POLICY_TIMEOUT_S = 60.0
 
+# 并进每次请求体的字段:关掉聊天模板的思考段。基座的模板默认先写推理(强度 xhigh),推理与回复一起进
+# content,长度不可控。真机实测(eager、场景二的消息形状、各 5 次):开着时 6.4-208.3 秒、一次空回复;
+# 关掉 4.6-17.3 秒、5 次都是一句可用的话;限 max_tokens=256 时推理吃光额度,回复为空或半句。
+VLLM_CHAT_EXTRA = {"chat_template_kwargs": {"enable_thinking": False}}
+
 
 class VllmPolicy:
     """ModelBackend:向 vLLM 服务的 /v1/chat/completions 要一次发言。一次 respond 一次 POST,不重试
@@ -65,7 +70,7 @@ class VllmPolicy:
         content = post_chat(
             self.handle.base_url, self._model, self.handle.api_key,
             chat_messages(persona, scenario, history, speaker_slot, guidance),
-            timeout_s=self._timeout, host_label=self._label,
+            timeout_s=self._timeout, host_label=self._label, extra_body=VLLM_CHAT_EXTRA,
         )
         return content, None
 
