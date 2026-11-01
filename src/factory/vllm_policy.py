@@ -25,7 +25,8 @@ from simulator.backends import ModelBackend
 from simulator.datamodel import Persona, RoleBinding, Scenario, TurnRecord
 
 # 一次发言的等待上限。服务端另有按回合的限时(TimeoutBackend),这一层只是不让 HTTP 无限挂着
-POLICY_TIMEOUT_S = 60.0
+# 真机(eager,两适配器,关思考)每轮 20 到 65 秒,60 秒的上限没有余量;取 120 秒,外层随之放宽(见 factory.wire)
+POLICY_TIMEOUT_S = 120.0
 
 # 并进每次请求体的字段:关掉聊天模板的思考段。基座的模板默认先写推理(强度 xhigh),推理与回复一起进
 # content,长度不可控。真机实测(eager、场景二的消息形状、各 5 次):开着时 6.4-208.3 秒、一次空回复;

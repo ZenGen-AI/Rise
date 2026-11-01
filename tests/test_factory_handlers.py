@@ -238,6 +238,26 @@ def test_a_caller_given_deadline_overrides_the_runtime_value_for_that_client_onl
         runtime.close()
 
 
+def test_the_backend_timeout_reaches_the_server_and_is_left_to_its_default_otherwise(store, monkeypatch):
+    """--interact 放宽服务端单次后端调用(对手 HTTP 60 秒加记忆 20 秒);部署路不传,保持服务端的 60 秒。
+    收尾的 join 不跟着放宽:准入退避的 65 秒预算以服务端默认的 60 秒为前提。"""
+    import factory.agent as agent_module
+
+    seen = []
+    real = agent_module.create_server
+    monkeypatch.setattr(agent_module, "create_server", lambda *a, **kw: seen.append(kw) or real(*a, **kw))
+    wide = AgentRuntime(store, ("hi",), backend_timeout_s=90.0)
+    plain = AgentRuntime(store, ("hi",))
+    try:
+        wide.client_factory()
+        plain.client_factory()
+    finally:
+        wide.close()
+        plain.close()
+    assert seen[0]["backend_timeout_s"] == 90.0 and "backend_timeout_s" not in seen[1]
+    assert "resource_join_timeout_s" not in seen[0]
+
+
 def test_the_message_timeout_reaches_every_client_and_defaults_to_none(store):
     with_limit = AgentRuntime(store, ("hi",), message_timeout_s=90.0)
     plain = AgentRuntime(store, ("hi",))

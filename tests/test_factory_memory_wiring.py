@@ -41,8 +41,8 @@ def _fake_wiring(repo_root, sweep):
 def test_turn_timeouts_follow_section_6_4():
     assert deploy_turn_timeout_s(interact=False, starling=False) is None     # 替身:保持 5 秒
     assert deploy_turn_timeout_s(interact=False, starling=True) == 40.0
-    assert deploy_turn_timeout_s(interact=True, starling=True) == 90.0       # 同开取较大的 90
-    assert deploy_turn_timeout_s(interact=True, starling=False) == 90.0
+    assert deploy_turn_timeout_s(interact=True, starling=True) == 150.0      # 同开取较大的 150
+    assert deploy_turn_timeout_s(interact=True, starling=False) == 150.0
 
 
 def test_without_the_variable_the_wiring_is_the_stand_in_and_logs_it_once(tmp_path, caplog):

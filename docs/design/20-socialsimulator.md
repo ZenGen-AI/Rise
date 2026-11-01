@@ -143,11 +143,11 @@ SocialSimulator 的仿真部分是工厂的"社会情境发生器":它把情境�
 | 单会话最多轮次 `max_turns_cap` | 200 | `EnvironmentServicer.__init__` |
 | 等待 `CreateSession` | 10 秒 | `create_timeout_s` |
 | 等客户端提交一轮 | 30 秒 | `turn_timeout_s` |
-| 服务端后端单次调用 | 60 秒;含记忆的一轮对手发言最坏 45 秒,低于它 [已落地] | `backend_timeout_s` |
-| 客户端提交一轮的上限 | 服务端默认 30 秒;组合根给 `AgentRuntime` 默认传 5 秒,`--interact` 下传 90 秒,否则真模型一轮就超时 [已落地] | `turn_timeout_s` |
-| 客户端等相邻两条服务端消息的间隔 | 客户端默认不设限;`--interact` 下组合根传 90 秒,整条流按 `max_turns × 90` 兜底 [已落地] | 客户端 `message_timeout_s`,由 `_next_msg` 执行 |
+| 服务端后端单次调用 | 默认 60 秒;`--interact` 下组合根经 `AgentRuntime(backend_timeout_s=)` 传 90 秒(`factory.wire.INTERACT_BACKEND_TIMEOUT_S`),含记忆的一轮对手发言最坏 80 秒,低于它;部署路不传,保持 60 秒 [已落地] | `backend_timeout_s` |
+| 客户端提交一轮的上限 | 服务端默认 30 秒;组合根给 `AgentRuntime` 默认传 5 秒,`--interact` 下传 150 秒,否则真模型一轮就超时 [已落地] | `turn_timeout_s` |
+| 客户端等相邻两条服务端消息的间隔 | 客户端默认不设限;`--interact` 下组合根传 120 秒,整条流按 `max_turns × 150` 兜底 [已落地] | 客户端 `message_timeout_s`,由 `_next_msg` 执行 |
 | 并发会话上限 | 16 | `max_workers`,与 `maximum_concurrent_rpcs` 对齐;活动会话加滞留会话不得超过它 [已落地] |
-| 终态收尾等在途线程退出 | 60 秒 [已落地] | `resource_join_timeout_s`,传给 `join` 的 `timeout_s` |
+| 终态收尾等在途线程退出 | 60 秒,`--interact` 下也不跟着后端上限放宽:两个客户端的准入退避预算 `ADMISSION_WAIT_S` 取 65 秒,以 join 加 5 秒为前提;等不到的在途线程进滞留表,由回收线程重试 [已落地] | `resource_join_timeout_s`,传给 `join` 的 `timeout_s` |
 | 滞留表重试间隔 | 60 秒 [已落地] | `linger_retry_s`,零等待 `join` 的重试周期 |
 | keepalive 间隔与超时 | 30000 / 10000 毫秒 | `create_server` |
 
@@ -342,8 +342,8 @@ manifest_hash: <64 位十六进制>   # 对排序后的 episode_refs 规范化 J
 | `max_turns` | CLOSED | 运行器跑满轮次 | 正常 |
 | `goal_reached` | 只出现在批量路径 | `stop_predicate` 返回真 | 正常 |
 | `client_terminated` | CLOSED | 客户端发 `EndSession` | 正常 |
-| `timeout` | FAILED | 客户端超时未提交:`--interact` 下服务端等 90 秒;或客户端等相邻两条服务端消息超过 90 秒,由客户端本地判定 | T1 |
-| `role_backend_timeout` | FAILED | 服务端后端 60 秒未返回 | T1 |
+| `timeout` | FAILED | 客户端超时未提交:`--interact` 下服务端等 150 秒;或客户端等相邻两条服务端消息超过 120 秒,由客户端本地判定 | T1 |
+| `role_backend_timeout` | FAILED | 服务端后端 60 秒未返回(`--interact` 下 90 秒) | T1 |
 | `role_backend_unavailable` | FAILED;准入已满或逻辑 episode_id 撞上活动会话时创建被拒 | 对手 API 暂时不可用:429、5xx、连不上、连接中途断开;准入时活动加滞留会话数已达上限、同 `episode_id` 已有活动会话 | T1 [已落地] |
 | `role_backend_rejected` | FAILED | 对手 API 明确拒绝:4xx,429 除外 | T2 [已落地] |
 | `role_backend_failure` | FAILED 或创建被拒 | 后端抛其余异常(含对手 API 的回复形状不对;记忆异常已分出去 [已落地]),或工厂、解析器故障 | T1 或 T2,协议上不区分 |
@@ -453,8 +453,8 @@ SessionInfo、SessionResources、SessionClosingError 三个类型都放在 `src/
 | MindAgent | 无 | 接口②,复用客户端"客户端后说"能力,工作包 7 [已落地] | [已落地] |
 | factory | 无 | 组合根调 `create_server` 并注入 `scenario_resolver`,工作包 9 [已落地] | [已落地] |
 | factory 组合根(场景二接通) | 无 | `Scenario.opponent_script` 与 `ModelBackend` 协议:组合根据此按角色位选对手驱动 [已落地] | [已落地] |
-| factory 组合根(会话资源) | 智能体的可选 `close()`:会话资源收尾时对它持有的每个智能体直接调用一次,不经 `TimeoutBackend` 转发,没有就跳过;工厂返回未套期限的会话资源,并保证自己抛异常时不留半开的库;工厂造资源时把 `session_id` 到 run id 的对应记进第二张登记表,终态删除,落盘只查它 | 新的工厂签名与 `on_session_closed` 带 `session_id`;组合根在取到仓库排他锁之后、起任何会话之前,只清扫记忆根目录下 `runs/` 的子项;`--interact` 装配给 `AgentRuntime` 传 `turn_timeout_s` 90 秒,并给每个 Actio 实例外套记忆异常转换后端 | [已落地] |
-| MindTrainer 与 MindAgent 的客户端(会话身份) | 无 | `create_session` 的可选 `episode_id`;客户端相邻两条消息之间的等待上限 90 秒,由 `--interact` 装配的运行时给客户端;`role_memory_unavailable` 进各自的瞬态集合,`role_memory_failure` 不进;创建被拒按终止原因查各自的瞬态集合,不再一律判不可重跑,所以准入满与 `episode_id` 撞上活动会话的两种 `role_backend_unavailable` 会按条重跑 | [已落地] |
+| factory 组合根(会话资源) | 智能体的可选 `close()`:会话资源收尾时对它持有的每个智能体直接调用一次,不经 `TimeoutBackend` 转发,没有就跳过;工厂返回未套期限的会话资源,并保证自己抛异常时不留半开的库;工厂造资源时把 `session_id` 到 run id 的对应记进第二张登记表,终态删除,落盘只查它 | 新的工厂签名与 `on_session_closed` 带 `session_id`;组合根在取到仓库排他锁之后、起任何会话之前,只清扫记忆根目录下 `runs/` 的子项;`--interact` 装配给 `AgentRuntime` 传 `turn_timeout_s` 150 秒、`backend_timeout_s` 90 秒,并给每个 Actio 实例外套记忆异常转换后端 | [已落地] |
+| MindTrainer 与 MindAgent 的客户端(会话身份) | 无 | `create_session` 的可选 `episode_id`;客户端相邻两条消息之间的等待上限 120 秒,由 `--interact` 装配的运行时给客户端;`role_memory_unavailable` 进各自的瞬态集合,`role_memory_failure` 不进;创建被拒按终止原因查各自的瞬态集合,不再一律判不可重跑,所以准入满与 `episode_id` 撞上活动会话的两种 `role_backend_unavailable` 会按条重跑 | [已落地] |
 | MindTrainer 派发器(场景二接通) | 无 | 生成器与 `write_scenario`、`write_persona`:生成路据此写入情境与人格,再回写指令 [已落地] | [已落地] |
 
 工作包 6 对本文接口的改动如下。
@@ -540,11 +540,11 @@ SessionInfo、SessionResources、SessionClosingError 三个类型都放在 `src/
 | 同一条流上第二次 `CreateSession` | 已在跑的第一个会话判 FAILED、不落盘,整条流以 `invalid_session` 结束 | 原始协议客户端收到 `invalid_session`;库客户端一条流只发一次创建,碰不到这种情况 | 一次会话用一条新流 |
 | 创建前就提交或结束会话,或连上后 10 秒内没有 `CreateSession` | 不启动驱动器,以 `invalid_session` 结束 | 原始协议客户端收到 `invalid_session`;库客户端的 `submit_turn` 在创建前调用是用法错误,不保证给出 `SessionRejectedError` | 先创建,再提交 |
 | 工厂或解析器抛非 `LookupError` 异常 | 不启动驱动器 | `SessionRejectedError`,`role_backend_failure` | 调用方决定是否重试 |
-| 客户端超时未提交(`--interact` 下服务端等 90 秒) | FAILED,不落盘 | `EndSession(timeout)` | MindTrainer 整条重跑,有上限 |
-| 对手后端 60 秒未返回 | FAILED,底层线程跑完后结果丢弃;线程登记在会话资源里,终态收尾等它退出,等不到则资源滞留 [已落地] | `EndSession(role_backend_timeout)` | 整条重跑,有上限 |
+| 客户端超时未提交(`--interact` 下服务端等 150 秒) | FAILED,不落盘 | `EndSession(timeout)` | MindTrainer 整条重跑,有上限 |
+| 对手后端 60 秒未返回(`--interact` 下 90 秒) | FAILED,底层线程跑完后结果丢弃;线程登记在会话资源里,终态收尾等它退出,等不到则资源滞留 [已落地] | `EndSession(role_backend_timeout)` | 整条重跑,有上限 |
 | 对手位后端抛出瞬态的记忆失败 [已落地] | FAILED,不落盘 | `EndSession(role_memory_unavailable)` | 整条重跑,有上限;用尽后抛 `RolloutFailedError` |
 | 对手位后端抛出确定性的记忆失败 [已落地] | FAILED,不落盘 | `EndSession(role_memory_failure)` | 不重跑,抛 `RolloutFailedError`;MindTrainer 把指令判 `failed`,不进延后通道 |
-| 客户端相邻两条服务端消息的间隔超过 90 秒 [已落地] | 客户端 abort 后,服务端按断连判 FAILED | 客户端自判 `timeout` | 整条重跑,有上限 |
+| 客户端相邻两条服务端消息的间隔超过 120 秒(`--interact`) [已落地] | 客户端 abort 后,服务端按断连判 FAILED | 客户端自判 `timeout` | 整条重跑,有上限 |
 | 对手 API 回 429、5xx,或连不上、连接中途断开 | FAILED | `EndSession(role_backend_unavailable)` | 整条重跑,有上限;用尽后抛 `RolloutFailedError` |
 | 对手 API 回其余 4xx | FAILED | `EndSession(role_backend_rejected)` | 不重跑,抛 `RolloutFailedError`;MindTrainer 把训练记录写 `failed` |
 | 对手后端抛其余异常(含回复形状不对) | FAILED | `EndSession(role_backend_failure)` | MindTrainer 不重试,抛 `RolloutFailedError` |
@@ -623,17 +623,19 @@ interact 会话前的准备 [已落地]。下表是派发器与组合根在起�
 
 | 预算 | 改前 | 改后 | 为什么够用 |
 |---|---|---|---|
-| 客户端等相邻两条服务端消息的间隔(`_next_msg`) | 无,只有整条流的 deadline | 90 秒(`--interact` 装配传入;客户端默认不设限),整条流按 `max_turns × 90` 兜底 [已落地] | 每条对手发言是一条消息,间隔以单个对手轮为界:对手一轮上限 60 秒,加推送往返仍低于 90 秒 |
-| 服务端后端单次调用 | 60 秒 | 不改 | 对手一轮最坏 45 秒:HTTP 25 秒加记忆最坏 20 秒,低于 60 秒 |
-| 对手 HTTP | 25 秒 | 不改 | 低于服务端的 60 秒,线程在服务端放弃之前自己结束 |
+| 客户端等相邻两条服务端消息的间隔(`_next_msg`) | 无,只有整条流的 deadline | 120 秒(`--interact` 装配传入;客户端默认不设限),整条流按 `max_turns × 150` 兜底 [已落地] | 每条对手发言是一条消息,间隔以单个对手轮为界:对手一轮上限 90 秒,加推送往返仍低于 120 秒 |
+| 服务端后端单次调用 | 60 秒 | `--interact` 下 90 秒(`INTERACT_BACKEND_TIMEOUT_S`);默认与部署路仍 60 秒 [已落地] | 对手一轮最坏 80 秒:HTTP 60 秒加记忆最坏 20 秒,低于 90 秒 |
+| 对手 HTTP | 25 秒 | 60 秒 [已落地] | 低于服务端的 90 秒,线程在服务端放弃之前自己结束 |
 | 记忆单次网络调用 | 无 | 4 秒,不重试 [已落地] | 一轮五次:召回嵌入查询词一次,写入抽取三次,嵌入一批;最坏合计 20 秒 |
-| 训练位策略 HTTP | 120 秒 | 60 秒 [已落地] | 训练位一轮最坏 80 秒:HTTP 60 秒加记忆最坏 20 秒,低于服务端等提交的 90 秒;120 秒会先超过它 |
-| 终态等在途线程的 `join` | 无 | 60 秒 [已落地] | 等不到就滞留,收尾不会无限阻塞;滞留重试间隔同为 60 秒 |
-| 服务端等客户端提交一轮(`turn_timeout_s`) | 30 秒(`--interact`) | 90 秒 [已落地] | 训练位一轮最坏 80 秒,低于 90 秒;30 秒装不下含记忆的训练位一轮 |
+| 训练位策略 HTTP | 60 秒 | 120 秒 [已落地] | 训练位一轮最坏 140 秒:HTTP 120 秒加记忆最坏 20 秒,低于服务端等提交的 150 秒 |
+| 终态等在途线程的 `join` | 无 | 60 秒,`--interact` 下也不改 [已落地] | 等不到就滞留,收尾不会无限阻塞;滞留重试间隔同为 60 秒。不随后端上限放宽:准入退避预算 `ADMISSION_WAIT_S` 65 秒以 join 加 5 秒为前提,被放弃的对手调用跑满 80 秒时它的线程进滞留表,由回收线程收走。滞留只占名额、不占 episode id(同 id 判重只看活动表),所以同 id 的重跑不被它挡住 |
+| 服务端等客户端提交一轮(`turn_timeout_s`) | 90 秒(`--interact`) | 150 秒 [已落地] | 训练位一轮最坏 140 秒,低于 150 秒 |
+
+2026-11-02 这组 `--interact` 值整体放宽过一次(改前:训练位 60 秒、对手 25 秒、后端 60 秒、等提交与相邻消息都是 90 秒)。真机在 161 上用 eager、两个适配器、关思考跑场景二,8 条 episode 每轮 20 到 65 秒,最慢的贴着训练位 60 秒的上限,没有余量。可选的还有在 system 里限发言长度(会改训练数据的分布)与开图优化(两个适配器时 vLLM 起不来),选了放宽。代价:会话更慢时也照样等,卡死的会话发现得更晚、占名额更久。
 
 记忆最坏值按调用次数算。一次写入顺序发三次抽取。语义召回要嵌入一次查询词。所以一轮五次网络调用,每次 4 秒。
 
-两个 90 秒方向相反,互不嵌套。服务端等的是客户端的一次提交。客户端等的是相邻两条服务端消息之间的间隔,每条对手发言都是一条消息,所以一轮里有几个对手都不叠加。
+服务端等提交的 150 秒与客户端等相邻消息的 120 秒方向相反,互不嵌套。服务端等的是客户端的一次提交。客户端等的是相邻两条服务端消息之间的间隔,每条对手发言都是一条消息,所以一轮里有几个对手都不叠加。
 
 客户端限时的做法。收消息的 `_next_msg` 在接收线程里用带超时的队列取消息,计的是相邻两条服务端消息之间的间隔。超时视作 `timeout`(T1,按条重跑)并 abort 会话(客户端本地合成 `EndSession(reason="timeout")`,由既有收尾处理;不抛异常,否则会被分类成不可重跑的 `client_protocol_error`)。
 
@@ -666,7 +668,7 @@ interact 会话前的准备 [已落地]。下表是派发器与组合根在起�
 | SS-21 | 记忆失败拆成 `role_memory_unavailable`(T1,按条重跑)与 `role_memory_failure`(T2,不重跑);驱动器只认两个异常基类并按它们分支,基类定义在 `backend_timeout.py`;组合根的转换后端接 actio 的记忆失败总基类,子类一并映射,按 `transient` 改抛继承这两个基类的异常 [已落地] | 并入 `role_backend_failure` | 并入后会被译成延后反复重试;记忆端点的网络抖动不该升人工;模拟器不导入 `actio`,只认异常基类 | 瞬态与确定性的映射由后端侧维护,新的瞬态类别出现前按 T2 处理 |
 | SS-22 | 对手位的记忆库是会话私有副本,路径含 `session_id`;每个库同一时刻只有一个写者:驱动器一个线程,每个角色位至多一次在途调用 [已落地] | 同一人格的对手位共用一个库 | 两个会话或两个位同时写一个库,互相覆盖;个体隔离靠文件,不靠过滤 | 同一人格在两个位同时出现时开两份副本,磁盘多占 |
 | SS-23 | 进程里的后端线程总数以会话名额约束:不超过 `max_workers × (len(bindings) + 1)`;滞留资源占名额,滞留数达到 `max_workers` 时拒绝所有新会话,日志每分钟报一次滞留数 [已落地] | 滞留不占名额;强杀线程 | Python 的 daemon 线程杀不掉,名额是能给出的最强上界 | 挂死的后端一直占名额,由人重启进程 |
-| SS-24 | 时间预算逐层递增:客户端等相邻两条消息 90 秒、服务端等客户端提交 90 秒(两者方向相反、互不嵌套)、服务端后端 60 秒、对手 HTTP 25 秒、记忆单次网络调用 4 秒、训练位策略 HTTP 60 秒 [已落地] | 客户端只有整条流的 deadline;服务端等提交保持 30 秒;训练位 HTTP 保持 120 秒 | 训练位一轮最坏 80 秒,30 秒与 120 秒都装不下;没有相邻消息限时,服务端失联时客户端只能等整条流 deadline | 慢的真模型一轮若超时,判 T1 按条重跑,训练变慢 |
+| SS-24 | `--interact` 的时间预算逐层递增:客户端等相邻两条消息 120 秒、服务端等客户端提交 150 秒(两者方向相反、互不嵌套)、服务端后端 90 秒、对手 HTTP 60 秒、记忆单次网络调用 4 秒、训练位策略 HTTP 120 秒;收尾 join 仍 60 秒 [已落地] | 客户端只有整条流的 deadline;保持 2026-11-02 之前的 90/90/60/25/60;在 system 里限发言长度 | 真机(eager、两个适配器)每轮 20 到 65 秒,原先训练位 60 秒的上限没有余量;放宽后训练位一轮最坏 140 秒低于 150 秒,对手一轮最坏 80 秒低于 90 秒。限发言长度会改训练数据的分布。没有相邻消息限时,服务端失联时客户端只能等整条流 deadline | 慢的真模型一轮若超时,判 T1 按条重跑,训练变慢;卡死的会话要多等才被发现,占名额更久 |
 | SS-25 | 逻辑 episode id 由客户端经 `CreateSession.episode_id` 传入,服务端落盘的 episode 用它当 id,没给时仍是 `ep-<session_id>`;落盘归属按 `session_id` 查,不按情境 id [已落地] | 沿用服务端生成的 id;按情境 id 路由落盘 | 重试会换 `session_id`,而下游需要一个跨重试不变的身份;情境被注销时仍在跑的会话要能落到自己的 run | 客户端要自己保证 id 合法且唯一,服务端靠白名单与活动唯一兜底 |
 | SS-26 | 同一逻辑 episode_id 撞上活动会话判 `role_backend_unavailable`(T1),格式不合白名单才判 `invalid_session`(T2)。活动从准入登记起,到 servicer 收尾完或移交滞留表为止 [已落地] | 撞上也判 `invalid_session` | 客户端 abort 后旧会话要等泄流线程与在途调用退出才进终态,立刻重试必撞上它,这是暂时的;判 T2 会让按条重跑的重试直接失败 | 客户端要把这条 T1 加进瞬态集合,否则不会重跑 |
 | SS-27 | `TimeoutBackend` 由 servicer 用会话资源套,工厂返回的后端未套期限;`close` 由资源对它持有的每个智能体直接调,不经包装层转发 [已落地] | 工厂返回时已套期限;`TimeoutBackend` 转发 `close` | 现状 `servicer.py` 就在服务端套;在途线程登记在资源里,套的人必须拿着资源;包装层转发 `close` 会让收尾依赖包装层的实现 | 工厂的测试看不到期限;资源要持有未套的智能体引用 |
@@ -697,7 +699,7 @@ interact 会话前的准备 [已落地]。下表是派发器与组合根在起�
 | 同 `episode_id` 已有活动会话 [已落地] | T1 | 不调工厂,以 `role_backend_unavailable` 拒绝 | 客户端的失败尝试记录 |
 | 终态 `join` 超时 [已落地] | 不分类 | 资源进滞留表,不关不删,占一个会话名额 | 滞留数每分钟一行日志;每 60 秒重试一次零等待的 `join` |
 | 会话副本目录删除失败 [已落地] | 不分类 | 记日志,继续收尾 | 服务端日志;下次 `run` 或 `reconcile` 启动时清扫 |
-| 客户端相邻两条服务端消息的间隔超过 90 秒 [已落地] | T1 | 客户端判 `timeout` 并 abort,服务端按断连判 FAILED | 客户端的失败尝试记录 |
+| 客户端相邻两条服务端消息的间隔超过 120 秒(`--interact`) [已落地] | T1 | 客户端判 `timeout` 并 abort,服务端按断连判 FAILED | 客户端的失败尝试记录 |
 | 第 N+1 个并发会话 | T1 | gRPC `RESOURCE_EXHAUSTED` | 客户端看到传输错误 |
 | T1 重试耗尽 | 仍是 T1 | MindTrainer 抛 `RolloutFailedError`,训练记录与指令保持 `pending` | 无失败记录;下一次派发续训,续训次数耗尽后才升级为 T3 |
 | 点名的情境 `purpose` 不是 `training`;点名的情境或人格不在树里;点名只写了一半 [已落地] | 配置错误 | 组合根装配期退出码 2,不进派发 | 无产物,启动即退出 |
@@ -796,7 +798,7 @@ interact 会话前的准备 [已落地]。下表是派发器与组合根在起�
 | 准入同锁、滞留表、启动清扫 | [已落地] | 活动加滞留不超过 `max_workers`;滞留数每分钟一行日志;清扫只删记忆根目录下 `runs/` 的子项 |
 | `CreateSession.episode_id` 与白名单 | [已落地] | 落盘 episode 用逻辑 id;同 id 活动唯一,撞上判 `role_backend_unavailable`(T1) |
 | 两个记忆失败终止原因 | [已落地] | `role_memory_unavailable`(T1)、`role_memory_failure`(T2) |
-| 客户端相邻两条消息的等待上限 90 秒;`--interact` 的 `turn_timeout_s` 传 90 秒 | [已落地] | 超时译成 `timeout`(T1) |
+| 客户端相邻两条消息的等待上限 120 秒;`--interact` 的 `turn_timeout_s` 传 150 秒、`backend_timeout_s` 传 90 秒 | [已落地] | 超时译成 `timeout`(T1) |
 
 | 局限 | 影响 | 缓解 |
 |---|---|---|
@@ -819,9 +821,9 @@ interact 会话前的准备 [已落地]。下表是派发器与组合根在起�
 | 驱动选择的配置键 [已落地] | `model_backend` 只有三个合法值,没有「固定对话」 | 已定:角色位加可选 `driver`(`vllm` / `external_api` / `scripted`),缺省按 `model_backend` 推;`scripted` 必须显式写,且可与 `frozen_reference` 并存,此时 `model_ref` 只作身份标签 |
 | 固定对话循环的实现位置 [已落地] | 循环是新行为,现有用法依赖「(无更多发言)」 | 已定:`ScriptedBackend` 加默认关闭的 `loop` 参数,只有本次装配处传 `loop=True` |
 | 外部 API 对手的速率上限与成本 [计划中] | 限流表现为超时时,`role_backend_timeout` 的按条重跑次数会耗尽;表现为 429 或 5xx 时走 `role_backend_unavailable`,同样按条重跑,次数耗尽后整条训练延后、续训次数耗尽后升 T3。重跑是立即重发、没有退避,限流持续时几次重跑会连续撞上同一道限流 | 按实际供应商压测 |
-| 站内 vLLM 同时服务训练位与对手位时的单次延迟 [计划中] | 能否稳在 `backend_timeout_s` 内 | 真机测两个 LoRA 并发的延迟 |
+| 站内 vLLM 同时服务训练位与对手位时的单次延迟 [已落地] | 能否稳在 `backend_timeout_s` 内 | 2026-11-01/02 真机已测:161 上一个 vLLM 进程挂训练位与对手两个适配器(eager、关思考段),场景二 8 条 episode、38 个请求全 200,每轮 20 到 65 秒;据此把 `--interact` 的后端上限放宽到 90 秒、训练位 HTTP 到 120 秒(见 SS-24) |
 | 每会话开一份记忆库对一个 GRPO 步总时长的影响 [计划中] | 会话启动变慢,拖长训练步 | 跑一步 `groups_per_step × group_size` 条 rollout,统计开库、备份、删除的总耗时 |
-| 真抽取与真嵌入的单次延迟是否在 4 秒内 [计划中] | 对手一轮最坏 45 秒的估算依赖它;超时的抽取落成抽取失败,超时的召回落成 `role_memory_unavailable` | 接真端点跑 10 轮,记每次记忆调用的耗时 |
+| 真抽取与真嵌入的单次延迟是否在 4 秒内 [计划中] | 对手一轮最坏 80 秒(HTTP 60 秒加记忆 20 秒)的估算依赖它;超时的抽取落成抽取失败,超时的召回落成 `role_memory_unavailable` | 接真端点跑 10 轮,记每次记忆调用的耗时 |
 
 明确不做的事:SocialSimulator 不决定"是否启动会话",那是 ControlPlane 的决策;不写训练奖励;不做诊断打分;不在实时服务内部持久化。
 

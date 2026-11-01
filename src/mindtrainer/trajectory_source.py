@@ -22,8 +22,9 @@ from simulator.store_adapter import read_persona, read_scenario
 # 参数是这条 rollout 的逻辑 episode id(见 logical_episode_id)。
 PolicyForRollout = Callable[[str], AbstractContextManager[ModelBackend]]
 
-# 设计源 6.4 节"客户端每轮等待 90 秒":按 max_turns_per_episode 乘出整条会话的流 deadline。
-PER_TURN_DEADLINE_S = 90.0
+# 一轮的最坏耗时取各轮上限中较大的那个:训练位的服务端等提交 150 秒(对手轮 90 秒),见 factory.wire。
+# 按 max_turns_per_episode 乘出整条会话的流 deadline。
+PER_TURN_DEADLINE_S = 150.0
 
 
 def logical_episode_id(run_id: str, step: int, scenario_id: str, k: int) -> str:

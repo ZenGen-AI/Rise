@@ -3,7 +3,7 @@
 | 项 | 内容 |
 |---|---|
 | 一句话 | 权重级训练子系统:读训练指令与数据集清单,跑 SFT 与 GRPO 加 OPD,产出候选 checkpoint,崩溃后从存点续训 |
-| 状态 | 部分落地:配置、两种轨迹源、奖励管线、分组、mock 执行器、续训、编排、派发器、数据合成接线 [已落地];ROLL LoRA SFT 真实执行器与适配器导出转换器 [已落地],已由 `factory run --executor roll` 装配,已在真实主机上从训练指令端到端跑到待审候选一次(单段两步训练加导出),多段与续训尚未在真机上跑过;数据合成的失败留痕仍只有指令的 `failure` 字段,没有独立的失败记录产物(统一写入函数不在本包);场景二接通 [已落地]:interact 指令经 `--interact` 在真实入口跑完,训练位由 vLLM 上的真实模型说话,训练仍是 mock(策略工厂、一个 vLLM 进程挂最多两个 LoRA、按指令起停、`policy_backend` 训练记录块),端到端测试用本机 HTTP 替身代替 vLLM,真机未跑;服务停不掉时的收尾判 T2、不开 `--interact` 时失败原因点名该开关 [已落地];带记忆的场景二 [已落地]:训练位是带记忆的智能体,起点记忆摘要与记忆运行时身份进 `config_hash`,每条 rollout 从同一起点出发,`--interact` 下服务端等提交与客户端等相邻消息各 90 秒;记忆后端缺省是替身,设了记忆配置才装配 Starling,真端点的延迟与每会话开库的耗时未核实;真实 GRPO 加 OPD 训练 [推迟] |
+| 状态 | 部分落地:配置、两种轨迹源、奖励管线、分组、mock 执行器、续训、编排、派发器、数据合成接线 [已落地];ROLL LoRA SFT 真实执行器与适配器导出转换器 [已落地],已由 `factory run --executor roll` 装配,已在真实主机上从训练指令端到端跑到待审候选一次(单段两步训练加导出),多段与续训尚未在真机上跑过;数据合成的失败留痕仍只有指令的 `failure` 字段,没有独立的失败记录产物(统一写入函数不在本包);场景二接通 [已落地]:interact 指令经 `--interact` 在真实入口跑完,训练位由 vLLM 上的真实模型说话,训练仍是 mock(策略工厂、一个 vLLM 进程挂最多两个 LoRA、按指令起停、`policy_backend` 训练记录块),端到端测试用本机 HTTP 替身代替 vLLM,真机未跑;服务停不掉时的收尾判 T2、不开 `--interact` 时失败原因点名该开关 [已落地];带记忆的场景二 [已落地]:训练位是带记忆的智能体,起点记忆摘要与记忆运行时身份进 `config_hash`,每条 rollout 从同一起点出发,`--interact` 下服务端等提交 150 秒、客户端等相邻消息 120 秒(按真机延迟定);记忆后端缺省是替身,设了记忆配置才装配 Starling,真端点的延迟与每会话开库的耗时未核实;真实 GRPO 加 OPD 训练 [推迟] |
 | 所在层 | 计算层 |
 | 代码位置 | `src/mindtrainer`;`src/mindtrainer/data_spec.py`、`src/mindtrainer/data_producer.py`;真实执行器与转换器在 `src/mindtrainer/roll_executor.py` 与 `src/mindtrainer/roll_converter.py`,经 `src/compute` 调远端主机 |
 | 基线提交 | `b826440`(2026-10-21) |
@@ -424,7 +424,7 @@ GRPO 与 OPD 只有一个方法,因为两者在同一个训练 step 里联合更
 |---|---|---|
 | ControlPlane | 派发缝、`DirectiveFailedError` 的 `category`、非审核类状态机、`GitStore.write_product` 对相同内容空操作 | 派发器签名;候选的 id、状态与 `checkpoint_ref` 形状 |
 | SocialSimulator 数据集 | `verify_manifest` 逐条校验;`episode_group_id` 是分组键 | 无 |
-| SocialSimulator 实时服务 | 一条流一次会话;终止原因;`on_session_closed` 落盘 episode;流 deadline 由轨迹源按 `max_turns_per_episode × 90 秒` 算 [已落地];`--interact` 下服务端等提交 90 秒、客户端等相邻两条服务端消息 90 秒,`CreateSession` 带可选 `episode_id`;创建被拒的终止原因在瞬态集合里就按条重跑(准入满额,或逻辑 episode id 撞上活动会话,都是 `role_backend_unavailable`) [已落地] | 客户端放弃会话时调用 `abort()`,不发 EndSession |
+| SocialSimulator 实时服务 | 一条流一次会话;终止原因;`on_session_closed` 落盘 episode;流 deadline 由轨迹源按 `max_turns_per_episode × 150 秒` 算 [已落地];`--interact` 下服务端等提交 150 秒、单次后端调用 90 秒、客户端等相邻两条服务端消息 120 秒,`CreateSession` 带可选 `episode_id`;创建被拒的终止原因在瞬态集合里就按条重跑(准入满额,或逻辑 episode id 撞上活动会话,都是 `role_backend_unavailable`) [已落地] | 客户端放弃会话时调用 `abort()`,不发 EndSession |
 | 审核门①与晋级 | 候选进入 `pending_review` 后由人审核 | `latest_promoted_checkpoint` 从晋级版本解析下一轮的 `base_checkpoint_ref` |
 | TrainScheduler | 按 `dsm-<run>-<阶段>` 写 `stage_manifest_refs` 与 `data_spec` | `validate_training_config`、`load_config_from_directive` 与 `data_spec` 解析 |
 | factory | 无 | 用 `make_mindtrainer_dispatcher` 组装,并注入数据生产器;`--interact` 时另注入 `client_factory` 与 `policy_factory`;造训练位 Actio 实例并外套记忆异常转换后端,注入 `memory_resolver`;清扫记忆根目录下 `runs/` 的子项,不碰 `deploy/`、`seeds/`、`snapshots/`:`reconcile` 在锁内、装配之后、第一个动作之前清扫,`run` 在 `run_daemon` 取锁之后、第一个 tick 之前的启动钩子里清扫 [已落地] |
@@ -533,23 +533,24 @@ vLLM 服务按指令起停,不常驻。一条 interact 指令派发时起服务,
 
 ### 5.4 超时口径
 
-真实模型的一次调用比罐头后端慢得多,默认超时是按罐头后端定的。`--interact` 下的口径如下表。训练位一轮的最坏耗时超过 60 秒,所以两个等待上限都取 90 秒;记忆最坏值按调用次数算:一轮五次网络调用,每次 4 秒。
+真实模型的一次调用比罐头后端慢得多,默认超时是按罐头后端定的。`--interact` 下的口径如下表。记忆最坏值按调用次数算:一轮五次网络调用,每次 4 秒。这组值 2026-11-02 按真机延迟整体放宽过一次(改前:训练位 60 秒、对手 25 秒、后端 60 秒、等提交与相邻消息都是 90 秒):161 上 eager、两个适配器、关思考段,场景二 8 条 episode 每轮 20 到 65 秒,最慢的贴着训练位原先 60 秒的上限。
 
 | 口径 | 默认 | `--interact` 下 |
 |---|---|---|
-| 单次角色后端调用 | 60 秒(`src/simulator/realtime/server.py` 的 `backend_timeout_s`) | 60 秒 |
-| 服务端等客户端提交一轮(`turn_timeout_s`) | `AgentRuntime` 默认传 5 秒 | 90 秒,由 `src/factory/wire.py` 的 `INTERACT_TURN_TIMEOUT_S` 传入,必须大于训练位一轮的最坏耗时 |
-| 客户端等相邻两条服务端消息 | 不限,只有整条流的 deadline | 90 秒,超时视作 `timeout`(T1,按条重跑)并 abort 会话 |
-| 整条 gRPC 流的 deadline | 固定 15 秒(`src/factory/agent.py` 的 `INTERACT_DEADLINE_S`) | 由轨迹源按 `max_turns_per_episode × 90 秒` 算(常量 `PER_TURN_DEADLINE_S` 取 90 秒),经 `client_factory(deadline_s=)` 传入;不改运行时的 `interact_deadline_s`,所以同开时部署会话不借用训练的值 |
-| HTTP 上限:训练位策略、对手 | 不适用,只在 `--interact` 下用 | 训练位 60 秒(`src/factory/vllm_policy.py` 的 `POLICY_TIMEOUT_S`),对手 25 秒(`src/factory/interact_policy.py` 的 `OPPONENT_TIMEOUT_S`)[已落地] |
+| 单次角色后端调用 | 60 秒(`src/simulator/realtime/server.py` 的 `backend_timeout_s`) | 90 秒,由 `src/factory/wire.py` 的 `INTERACT_BACKEND_TIMEOUT_S` 经 `AgentRuntime(backend_timeout_s=)` 传入;部署路不传,仍是 60 秒 |
+| 服务端等客户端提交一轮(`turn_timeout_s`) | `AgentRuntime` 默认传 5 秒 | 150 秒,由 `src/factory/wire.py` 的 `INTERACT_TURN_TIMEOUT_S` 传入,必须大于训练位一轮的最坏耗时 |
+| 客户端等相邻两条服务端消息 | 不限,只有整条流的 deadline | 120 秒(`INTERACT_MESSAGE_TIMEOUT_S`),高于后端调用的 90 秒;超时视作 `timeout`(T1,按条重跑)并 abort 会话 |
+| 整条 gRPC 流的 deadline | 固定 15 秒(`src/factory/agent.py` 的 `INTERACT_DEADLINE_S`) | 由轨迹源按 `max_turns_per_episode × 150 秒` 算(常量 `PER_TURN_DEADLINE_S` 取 150 秒,不低于等提交与后端调用两个上限),经 `client_factory(deadline_s=)` 传入;不改运行时的 `interact_deadline_s`,所以同开时部署会话不借用训练的值 |
+| HTTP 上限:训练位策略、对手 | 不适用,只在 `--interact` 下用 | 训练位 120 秒(`src/factory/vllm_policy.py` 的 `POLICY_TIMEOUT_S`),对手 60 秒(`src/factory/interact_policy.py` 的 `OPPONENT_TIMEOUT_S`)[已落地] |
 | 记忆单次网络调用 | 不适用 | 4 秒:Starling 的 `timeout_ms` 配 4000、`max_retries` 配 0。一轮五次:召回嵌入查询词一次,写入抽取三次,嵌入一批 |
 | 创建会话 | 10 秒(`create_timeout_s`) | 不变 |
-| 一轮的最坏耗时 | 不适用 | 对手位约 45 秒(HTTP 25 秒加记忆最坏 20 秒),低于服务端后端调用的 60 秒;训练位约 80 秒(HTTP 60 秒加记忆最坏 20 秒),低于服务端等提交的 90 秒 |
+| 一轮的最坏耗时 | 不适用 | 对手位约 80 秒(HTTP 60 秒加记忆最坏 20 秒),低于服务端后端调用的 90 秒;训练位约 140 秒(HTTP 120 秒加记忆最坏 20 秒),低于服务端等提交的 150 秒 |
+| 服务端收尾等在途线程的 `join` | 60 秒(`resource_join_timeout_s`) | 不变:准入退避预算 `ADMISSION_WAIT_S` 65 秒以它加 5 秒为前提;被放弃的对手调用跑得比它久时,线程进滞留表,由回收线程收走 |
 | 训练位副本 close 的等待 | 不适用 | 60 秒,与服务端 join 同值;超时抛 FactoryMemoryFailureError(RoleMemoryFailureError 的子类),编排器判 T2,这条 rollout 不重试。close 抛其他异常同样译成它、不重试,即使 rollout 本身已结束:close 失败说明副本库状态不可信 |
 
-两个 90 秒方向相反,互不嵌套。服务端等的是客户端的一次提交。客户端等的是相邻两条服务端消息的间隔。每条对手发言都是一条消息,所以一轮里有几个对手都不叠加。外层上限高于内层最坏耗时,内层先超时,外层才看得到分类过的失败。
+等提交的 150 秒与等相邻消息的 120 秒方向相反,互不嵌套。服务端等的是客户端的一次提交。客户端等的是相邻两条服务端消息的间隔。每条对手发言都是一条消息,所以一轮里有几个对手都不叠加。外层上限高于内层最坏耗时,内层先超时,外层才看得到分类过的失败。
 
-单次后端调用超时归 `role_backend_timeout`,是 T1,整条重跑,至多 `1 + max_retries_per_episode` 次。对手 API 回 429、5xx 或连不上归 `role_backend_unavailable`,同样是 T1、同样重跑;回其余 4xx 归 `role_backend_rejected`,是 T2,不重跑、训练记录写 `failed`;回复形状不对仍归 `role_backend_failure`,不重跑、记录保持 `pending` [已落地]。对手位的记忆失败另有两个终止原因 [已落地]:瞬态的归 `role_memory_unavailable`(T1,按条重跑),确定性的归 `role_memory_failure`(T2,不重跑),见第 8 章。真机延迟没有数据,提交上限够不够用列入本文的未核实项。第 5.1 至 5.4 节的签名、参数形状与默认值已按代码核实。
+单次后端调用超时归 `role_backend_timeout`,是 T1,整条重跑,至多 `1 + max_retries_per_episode` 次。对手 API 回 429、5xx 或连不上归 `role_backend_unavailable`,同样是 T1、同样重跑;回其余 4xx 归 `role_backend_rejected`,是 T2,不重跑、训练记录写 `failed`;回复形状不对仍归 `role_backend_failure`,不重跑、记录保持 `pending` [已落地]。对手位的记忆失败另有两个终止原因 [已落地]:瞬态的归 `role_memory_unavailable`(T1,按条重跑),确定性的归 `role_memory_failure`(T2,不重跑),见第 8 章。真机延迟已测过一次(见本节开头),上面的值据此定;会话轮数或上下文明显变长时要重测。第 5.1 至 5.4 节的签名、参数形状与默认值已按代码核实。
 
 ## 6. 关键流程
 
@@ -727,7 +728,7 @@ interact 的生成路多一条「生成、写树、回写、复校」的链路 [
 | MT-23 | 训练位的副本目录与事件 key 用逻辑 episode id,经 `CreateSession` 的可选字段 `episode_id` 传给服务端;`InteractTrajectorySource` 的参数 `policy` 因此改名 `policy_for_rollout`,入参是逻辑 episode id,不保留旧参数名,`_attempt` 在 `create_session` 之前进入它、随 `with` 块退出,固定后端用 `nullcontext` 包一层 [已落地] | 用服务端的 `session_id`;同时接受 `policy` 与 `policy_for_rollout` | 重试会换 `session_id`,而副本目录要在 `create_session` 之前确定;逻辑 id 在重试间不变,事件 key 才稳定。两个入口并存,调用方一不小心就让训练位绕过每条 rollout 的记忆副本,而且不报错 | 客户端给的 id 会进目录名与事件主键,服务端校验字符、长度并拒绝同一 id 的第二个活动会话;传固定后端的调用点都用 `nullcontext` 包一层 |
 | MT-24 | 训练位的记忆失败经 simulator 的两个异常基类 RoleMemoryUnavailableError 与 RoleMemoryFailureError 到达轨迹源;组合根给训练位 Actio 实例外套一层转换后端,按 `transient` 改抛;瞬态的按条重跑,确定性的判 T2、不延后 [已落地] | `mindtrainer` 导入 `actio` 的异常类;把记忆失败并进 `role_backend_failure` | 分层不许 `mindtrainer` 导入 `actio`;并进 `role_backend_failure` 会被策略上下文译成延后,确定性的记忆故障反复重试直到升 T3,抽取端点的网络抖动又不该升人工 | 组合根多一层转换后端;分类依赖 Starling 的类别名,它改名要跟着改 |
 | MT-25 | 轨迹源对 `create_session` 被拒,按终止原因查瞬态集合,不再一律判不可重跑;瞬态集合加 `role_memory_unavailable` [已落地] | 保持一律不可重跑 | 轨迹源此前对 `SessionRejectedError` 一律判不可重跑。服务端准入检查满额时以 `role_backend_unavailable` 拒绝创建,它是 T1;客户端若一律不重跑,这条 T1 实际变成整条失败 | 轨迹源的瞬态集合与部署侧的副本要保持相等,由现有的一致性测试钉住 |
-| MT-26 | `--interact` 下服务端等客户端提交一轮的上限、客户端等相邻两条服务端消息的上限都取 90 秒;训练位策略 HTTP 上限 60 秒;记忆单次网络调用 4 秒、不重试 [已落地] | 沿用 30 秒;只放宽一个方向 | 训练位一轮最坏约 80 秒(HTTP 60 秒加记忆 20 秒),30 秒会让带记忆的训练位每轮都被判超时;外层上限高于内层最坏耗时,内层先超时,外层才看得到分类过的失败 | 慢策略要等到 90 秒才被判超时,T1 重跑的单次代价变大 |
+| MT-26 | `--interact` 下服务端等客户端提交一轮 150 秒、客户端等相邻两条服务端消息 120 秒、服务端单次后端调用 90 秒;训练位策略 HTTP 上限 120 秒、对手 60 秒;记忆单次网络调用 4 秒、不重试 [已落地] | 沿用 30 秒;只放宽一个方向;保持 2026-11-02 之前的 90/90/60/60/25;在 system 里限发言长度 | 真机(eager、两个适配器)每轮 20 到 65 秒,原先训练位 60 秒的上限没有余量;训练位一轮最坏约 140 秒(HTTP 120 秒加记忆 20 秒),对手约 80 秒(HTTP 60 秒加记忆 20 秒);外层上限高于内层最坏耗时,内层先超时,外层才看得到分类过的失败。限发言长度会改训练数据的分布 | 慢策略要等到 150 秒才被判超时,T1 重跑的单次代价变大;卡死的会话占名额更久 |
 
 ## 8. 失败处理与可观测
 
@@ -869,7 +870,7 @@ interact 的 `config_hash` 覆盖配置层的东西 [已落地]:情境 id、人�
 | 长跑 rollout 的 keepalive | 死连接可能不被及时发现 | 构造断连场景压测 |
 | 对手模型只以 `model_ref` 字符串记录 | 对手版本没有制品锚定 | 要锚定就得给 `model_ref` 加带 sha256 的引用形式;RecipeStore 的校验目前只要求它是具体 id,不校验哈希 [计划中] |
 | interact 的 episode 不会以 `goal_reached` 结束 | 依赖目标达成的奖励规则恒为 0 | 实时服务支持早停时重新评估 |
-| 真模型的单轮推理延迟 | 决定 90 秒的提交上限够不够 [计划中];不够时慢策略被当作 T1 重试,推理成本按重试次数放大 | 在真机上测训练位与站内对手的单轮延迟 |
+| 真模型的单轮推理延迟 | 决定提交上限够不够 [已落地];不够时慢策略被当作 T1 重试,推理成本按重试次数放大 | 2026-11-01/02 已在真机测过:eager、两个适配器、关思考段,每轮 20 到 65 秒,38 个请求全 200;据此放宽到训练位 HTTP 120 秒、等提交 150 秒(见 5.4 节)。轮数或上下文明显变长时重测 |
 | 真抽取与真嵌入的单次延迟是否在 4 秒内 [计划中] | 超时的抽取落成抽取失败、记忆变少;超时的召回落成按条重跑,训练吞吐下降 | 接真实端点跑 10 轮,记录每次召回、三段抽取与嵌入的耗时 |
 | 每会话开一份记忆库对 GRPO 一步总时长的影响 [计划中] | 一步有 `groups_per_step × group_size` 条 rollout,每条每个角色位都开库、复制、删除 | 跑一步,统计开库、复制、删除的总耗时 |
 | 一个 vLLM 进程挂两个 LoRA 的切换开销与显存余量 | 按 `--max-loras 2` 设计;切换慢或显存不足时,两位共用一个进程不成立 | 真机上同时挂两个适配器,测切换延迟与显存 |

@@ -36,7 +36,8 @@ DEFAULT_TIMEOUT_MS = 4000
 DEFAULT_MAX_RETRIES = 0
 # 一次记忆网络调用(含重试)的最坏耗时上限:timeout_ms × (max_retries + 1) 不得超过它。外层时限都按"每次至多 4 秒"
 # 折算,写死在三处:factory.memory_runtime.DEPLOY_MEMORY_TURN_TIMEOUT_S(部署 40 秒)、
-# factory.interact_policy.OPPONENT_TIMEOUT_S(对手 25 秒)、factory.wire.INTERACT_TURN_TIMEOUT_S(--interact 90 秒)。
+# factory.interact_policy.OPPONENT_TIMEOUT_S(对手 60 秒,低于 INTERACT_BACKEND_TIMEOUT_S 的 90 秒)、
+# factory.wire.INTERACT_TURN_TIMEOUT_S(--interact 150 秒)。
 # 放宽这里之前先改那三处,否则内层不再先于外层超时。
 MAX_MEMORY_CALL_MS = 4000
 

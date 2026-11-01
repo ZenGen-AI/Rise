@@ -152,6 +152,7 @@ class AgentRuntime:
     def __init__(self, store: GitStore, opponent_lines: tuple[str, ...], *, turn_timeout_s: float = 5.0,
                  interact_deadline_s: float = INTERACT_DEADLINE_S,
                  message_timeout_s: float | None = None,
+                 backend_timeout_s: float | None = None,
                  stub_factory=pb2_grpc.EnvironmentServiceStub,
                  opponent_backend_factory: Callable[[RoleBinding, Scenario], ModelBackend] | None = None,
                  training_copies: TrainingCopies | None = None) -> None:
@@ -169,6 +170,7 @@ class AgentRuntime:
         self._timeout = turn_timeout_s
         self._deadline = interact_deadline_s
         self._message_timeout = message_timeout_s
+        self._backend_timeout = backend_timeout_s     # None:服务端的默认 60 秒
         self._stub_factory = stub_factory
         self._opponent_backend_factory = opponent_backend_factory
         self._training_copies = training_copies
@@ -342,6 +344,9 @@ class AgentRuntime:
             if self._server is None:
                 self._server = create_server(
                     self._backends, port=0, turn_timeout_s=self._timeout,
+                    # 只放宽后端调用上限,收尾的 join 仍是服务端默认 60 秒:准入退避的 65 秒预算以它为前提
+                    # (ADMISSION_WAIT_S ≥ join + 5)。等不到的在途线程进滞留表,由回收线程重试
+                    **({} if self._backend_timeout is None else {"backend_timeout_s": self._backend_timeout}),
                     scenario_resolver=lambda sid: read_scenario(self._store, sid),
                     on_session_closed=self._on_session_closed,
                 )

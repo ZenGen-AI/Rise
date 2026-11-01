@@ -81,7 +81,7 @@ if TYPE_CHECKING:       # 只给类型注解用:运行时不导入 factory.memor
     from factory.memory_runtime import TrainingCopies
 
 TRAINED_ADAPTER = "trained"          # 训练位在 vLLM 服务里的适配器名;站内对手的适配器名就是它的 model_ref
-OPPONENT_TIMEOUT_S = 25.0            # 对手发言的 HTTP 上限,低于服务端后端调用上限 60 秒:25 秒加一轮记忆最坏 20 秒
+OPPONENT_TIMEOUT_S = 60.0            # 对手发言的 HTTP 上限:60 秒加一轮记忆最坏 20 秒,低于服务端后端调用上限 90 秒(factory.wire)
 
 OpponentFactory = Callable[[RoleBinding, Scenario], ModelBackend]
 

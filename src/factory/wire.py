@@ -136,8 +136,11 @@ class Assembly:
         return bool(self.handlers)
 
 
-INTERACT_TURN_TIMEOUT_S = 90.0     # 设计源 6.4 节:训练位策略 HTTP 60 秒加一轮记忆最坏 20 秒;默认的 5 秒是给罐头后端定的
-INTERACT_MESSAGE_TIMEOUT_S = 90.0  # 客户端相邻两条服务端消息的等待上限(设计源 6.4 节)
+# --interact 的时间预算(设计源 6.4 节),外层必须高于内层的最坏耗时,内层才先超时、外层看到分类过的失败。
+# 真机(eager,两适配器)每轮 20 到 65 秒,2026-11-02 从 60/25/60/90/90 整体放宽到下面这组。
+INTERACT_TURN_TIMEOUT_S = 150.0     # 服务端等一次提交:训练位策略 HTTP 120 秒加一轮记忆最坏 20 秒;默认的 5 秒是给罐头后端定的
+INTERACT_BACKEND_TIMEOUT_S = 90.0   # 服务端单次后端调用:对手 HTTP 60 秒加一轮记忆最坏 20 秒
+INTERACT_MESSAGE_TIMEOUT_S = 120.0  # 客户端相邻两条服务端消息:间隔以一个对手轮为界,高于后端调用上限
 
 
 def memory_wiring(repo_root: Path, env: Mapping[str, str], *, deployment: bool) -> MemoryWiring:
@@ -192,6 +195,7 @@ def _shared_runtime(
 
         switch = OpponentSwitch(lines)
         return AgentRuntime(store, lines, message_timeout_s=INTERACT_MESSAGE_TIMEOUT_S,
+                            backend_timeout_s=INTERACT_BACKEND_TIMEOUT_S,
                             opponent_backend_factory=switch, training_copies=training_copies, **kwargs), switch
     return AgentRuntime(store, lines, **kwargs), None
 
