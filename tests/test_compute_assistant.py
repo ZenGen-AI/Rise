@@ -456,3 +456,31 @@ def test_hash_tree_exclude_drops_the_named_file_and_nothing_else(tmp_path: Path)
     assert client.hash_tree(f"{work_root}/d", "full", exclude=(".exported",)) != bare
 
 
+def test_hash_tree_skip_pycache_ignores_bytecode_but_not_sources(tmp_path: Path):
+    """源码树的内容指纹:跑过一次就会多出 __pycache__,不能因此变号;源码改了仍要变号。"""
+    client, work_root = _local_client(tmp_path)
+    client.put(f"{work_root}/src/pkg/m.py", b"x = 1\n")
+    clean = client.hash_tree(f"{work_root}/src", "full", skip_pycache=True)
+    assert clean == client.hash_tree(f"{work_root}/src", "full")       # 没有字节码时两种口径相同
+    client.put(f"{work_root}/src/pkg/__pycache__/m.cpython-312.pyc", b"\x00bytecode")
+    client.put(f"{work_root}/src/pkg/stray.pyc", b"\x00bytecode")
+    assert client.hash_tree(f"{work_root}/src", "full") != clean
+    assert client.hash_tree(f"{work_root}/src", "full", skip_pycache=True) == clean
+    client.put(f"{work_root}/src/pkg/m.py", b"x = 2\n")
+    assert client.hash_tree(f"{work_root}/src", "full", skip_pycache=True) != clean
+
+
+def test_hash_tree_refuses_a_non_boolean_skip_pycache(tmp_path: Path):
+    call = _make_caller(tmp_path / "work")
+    (tmp_path / "work" / "d").mkdir(parents=True)
+    err = call.raw("hash-tree", path=str(tmp_path / "work" / "d"), mode="full", skip_pycache="yes")
+    assert not err["ok"] and err["error"] == "bad_request"
+
+
+def test_probe_reports_host_memory_and_disk(tmp_path: Path):
+    """转换前的内存预检靠它;之前 ComputeClient 没有 probe,转换器的预检被静默跳过。"""
+    client, _ = _local_client(tmp_path)
+    reply = client.probe()
+    assert set(reply) >= {"mem_available_gib", "disk_free_gib"} and reply["disk_free_gib"] > 0
+
+

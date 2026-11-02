@@ -16,14 +16,15 @@ from dataclasses import dataclass, field
 
 from compute.client import ComputeClient, JobSpec
 from compute.endpoint import ComputeEndpoint
-from compute.errors import HelperError, TransportError
+from compute.errors import ComputeError, HelperError, TransportError
+from compute.roll_env import version_hint as _version_hint
 from controlplane.envelope import BigRef
 from mindtrainer.datamodel import StepResult
 from mindtrainer.executor import CheckpointCorruptError
 from mindtrainer.training_config import InvalidTrainingConfigError
 from simulator.datamodel import Episode
 
-LAUNCHER_VERSION = "v2"  # 进 job_id 的哈希;改了启动命令的拼法就要改它(v2:固定存点根目录并给作业独立的 Ray 临时目录;v1:入口改到 scripts/qwen38/、解释器改 python3)
+LAUNCHER_VERSION = "v3"  # 进 job_id 的哈希;改了启动命令的拼法就要改它(v3:cwd 改到作业目录,ROLL 由系统部署;v2:固定存点根目录并给作业独立的 Ray 临时目录;v1:入口改到 scripts/qwen38/、解释器改 python3)
 TRAIN_SCRIPT = "scripts/qwen38/run_sft_validation.py"  # 相对 roll_root;ROLL4ZenGen 仓库里的真实位置
 METRIC_PREFIX = "metrics_tag:"  # V2 未核实:ROLL 的逐步指标行前缀,主机验证后改这里
 MAX_ATTEMPTS = 8  # 同一 job_id 下的尝试序号上限,与 max_resume_attempts 分开记账(设计 §5.2)
@@ -83,6 +84,12 @@ class RollExecutor:
     client: ComputeClient
     endpoint: ComputeEndpoint
     run_id: str
+    # 运行环境的记账(compute.roll_env.RollEnv.record()):ROLL 提交、环境摘要、镜像、依赖指纹。
+    # 组合根部署好之后给;进 job_id、存点 fetch_hint,并作为 backend_record 写进新建的训练记录。
+    # None(直接构造执行器的既有测试)时三处都不带它。
+    roll_record: dict | None = None
+    # 第一次 preflight 前调一次(见 preflight);None 时什么都不做。
+    on_first_preflight: Callable[[RollExecutor], None] | None = None
 
     supported_phases = frozenset({"sft"})  # 设计 §5.1:真实后端本轮只做 SFT
     checkpoint_type = "roll_ssh"  # 跨模式续训检查比对的就是它(设计 §6.1)
@@ -94,12 +101,38 @@ class RollExecutor:
 
     _base_uri: str | None = field(default=None, init=False, repr=False)
     _stage_ref: BigRef | None = field(default=None, init=False, repr=False)
+    _runtime_bound: bool = field(default=False, init=False, repr=False)
 
     # ---------- 协议:资源与存点 ----------
 
     def preflight(self) -> None:
-        """GPU、内存、磁盘检查。不取租约、不终止任何进程(设计 §3.3、D8)。"""
+        """GPU、内存、磁盘检查。不取租约、不终止任何进程(设计 §3.3、D8)。
+
+        第一次调用时先跑 on_first_preflight(组合根用它部署 ROLL、建容器、bind_runtime)。编排器在动执行器之前
+        一定先调 preflight(新建与续训都是),所以 load、run_sft_stage、存点回认用到的都是派生端点与它的客户端。
+        部署的确定性失败(ComputeError:submodule 不对、依赖指纹不符、镜像不在、导入自检失败)译成
+        InvalidTrainingConfigError,指令判 T2;TransportError 这类延后错误原样上抛,下一次再试。"""
+        if self.on_first_preflight is not None and not self._runtime_bound:
+            try:
+                self.on_first_preflight(self)
+            except ComputeError as exc:
+                raise InvalidTrainingConfigError(f"the ROLL runtime is not usable: {exc}") from exc
+            self._runtime_bound = True
         self.client.preflight()
+
+    def bind_runtime(self, client: ComputeClient, endpoint: ComputeEndpoint, roll_record: dict) -> None:
+        """换上部署好的运行环境:派生端点(roll_root、sft_template、launch_prefix 指向系统建的容器)、
+        绑在它上面的客户端、版本记账。组合根在第一次用到执行器之前调一次(见 factory.wire)。"""
+        self.client = client
+        self.endpoint = endpoint
+        self.roll_record = dict(roll_record)
+
+    @property
+    def backend_record(self) -> dict | None:
+        """写进新建训练记录 policy_backend 的那一份:哪个执行器、哪个端点、哪套 ROLL 环境。"""
+        if self.roll_record is None:
+            return None
+        return {"executor": "roll", "endpoint": self.endpoint.endpoint_id, **self.roll_record}
 
     def load(self, checkpoint_ref: BigRef) -> None:
         """只做校验与记录,不占 GPU(设计 §5.1)。
@@ -218,10 +251,12 @@ class RollExecutor:
 
         # 2. 作业身份。run_id 与起点存点必须进哈希,否则起点不同而数据相同的两次续训
         #    会撞同一目录(设计 §5.2 第 4 步)。last_step 是开区间终点。
+        #    运行环境(ROLL 提交、依赖、镜像)也进哈希:换了 ROLL 就是另一个作业,不会接上旧版本的成功记录。
         job_id = hashlib.sha256(
             "\0".join([
                 self.run_id, self._base_uri, str(first_step), str(last_step),
                 hashlib.sha256(data).hexdigest(), self.endpoint.sft_template, LAUNCHER_VERSION,
+                (self.roll_record or {}).get("roll_env", ""),
             ]).encode("utf-8")
         ).hexdigest()[:16]
 
@@ -257,8 +292,10 @@ class RollExecutor:
         # Ray 用 Unix 域套接字,路径上限 107 字节,ROLL 因此要求 ROLL_RAY_TEMP_DIR 至多 37 个字符
         # (ray_temp_dir.py)。work_root 可以很长,所以不能放在它下面;用 job_id 的前 8 位区分作业,
         # 否则两个作业会共用一个 Ray 会话。B1 的第一次尝试就死在这里。
+        # cwd 是这次作业自己的目录(助手在拉起子进程之前就建好了):sft_lora.yaml 的 logging_dir 是相对路径
+        # ./output/logs,cwd 放在 ROLL 树里会把日志与缓存写进部署目录(v3 之前就是这样)。
         spec = JobSpec(
-            argv=tuple(argv), cwd=self.endpoint.roll_root,
+            argv=tuple(argv), cwd=f"{work}/jobs/{attempt_id}",
             env={"ROLL_RAY_TEMP_DIR": f"/tmp/ray-{job_id[:8]}"},
         )
 
@@ -285,6 +322,7 @@ class RollExecutor:
                 "format": "roll_lora_legacy",
                 "job_id": attempt_id,
                 "step": last_step,
+                **_version_hint(self.roll_record),
             },
         )
         return results

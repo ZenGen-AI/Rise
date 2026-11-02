@@ -74,7 +74,22 @@ def test_the_export_is_a_python_call_with_paths_passed_by_environment():
         assert not any(value in part for part in spec.argv)
     assert spec.env["ROLL_EXPORT_BASE"] == "/srv/models/qwen-4b"
     assert spec.env["ROLL_EXPORT_OUT"].startswith("/srv/rise/work/exports/")
-    assert spec.cwd == "/srv/roll"
+    # cwd 是作业自己的目录,不是 ROLL 部署目录:后者在容器里只读,导出顺带写的缓存不能落进去
+    job_id = client.run_calls[0][0]
+    assert spec.cwd == f"/srv/rise/work/jobs/{job_id}"
+
+
+def test_a_bound_runtime_puts_the_roll_version_into_the_export_hint():
+    """部署好的运行环境:导出的 fetch_hint 多两项版本记账;产物目录照旧按源存点寻址。"""
+    client = _exporting_client()
+    converter = _converter(client)
+    derived = fake_endpoint(roll_root="/srv/rise/work/deps/roll-8b94504ef476")
+    converter.bind_runtime(client, derived, {"roll_commit": "8b" * 20, "roll_env": "abcdef012345",
+                                             "image_id": "sha256:" + "1" * 64, "dependencies": {}})
+    ref = converter.convert(_ref())
+    assert ref.uri == f"ssh://gpu-1/srv/rise/work/exports/{SHA[:8]}"
+    assert ref.fetch_hint["roll_commit"] == "8b" * 20 and ref.fetch_hint["roll_env"] == "abcdef012345"
+    assert "image_id" not in ref.fetch_hint
 
 
 def test_the_export_program_calls_the_real_entry_point_with_the_arguments_b2_proved():

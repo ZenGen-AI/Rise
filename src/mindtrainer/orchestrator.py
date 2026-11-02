@@ -426,6 +426,10 @@ def resume_or_run(
     if existing is None:
         if preflight is not None:
             preflight()  # ComputeBusyError 走延后通道:此时 run 记录一个字节都没写
+        if policy_backend is None:
+            # 真实执行器的后端记账(哪个 ROLL、哪套环境)要到 preflight 绑好运行环境之后才有,所以在这里取。
+            # MockExecutor 没有这个属性,policy_backend 仍是 None,既有记录逐字节不变。
+            kwargs["policy_backend"] = getattr(executor, "backend_record", None)
         return run_training(cfg, **kwargs)
     _check_backend_match(store, existing, cfg, executor)
     intact = (

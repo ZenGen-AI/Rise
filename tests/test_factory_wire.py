@@ -317,7 +317,7 @@ _ENDPOINT = {
     "launch_prefix": [], "base_model_path": "/srv/models/qwen-4b",
     "heldout_jsonl": "/srv/roll/data/heldout.jsonl", "sft_template": "/srv/roll/configs/sft_lora.yaml",
     "min_free_host_mem_gib": 12.0, "min_free_disk_gib": 50.0,
-    "poll_seconds": 10.0, "job_timeout_seconds": 3600.0,
+    "poll_seconds": 10.0, "job_timeout_seconds": 3600.0, "host_deps_root": "/srv/deps",
 }
 
 
@@ -441,6 +441,69 @@ def test_roll_misconfiguration_fails_at_assembly_not_at_the_first_tick(real_repo
     with pytest.raises(FactoryConfigError):
         assemble(real_repo, opts, env=env)
     assert _commit_count(real_repo) == before  # 树里一个字节都没写
+
+
+def test_roll_needs_host_deps_root_and_says_so_at_assembly(real_repo, tmp_path):
+    """容器要只读挂 Megatron-LM 与 fla,它们在 host_deps_root 下;缺了就在第一个 tick 之前报错。
+    不开 --executor roll 的端点(interact、SoMEval)不写这个键也照常读。"""
+    from controlplane.envelope import Envelope, OwnerRef
+    from controlplane.paths import compute_endpoints_file
+    from factory.errors import FactoryConfigError
+
+    item = {k: v for k, v in _ENDPOINT.items() if k != "host_deps_root"}
+    real_repo.write_product(compute_endpoints_file(), Envelope(
+        id="cfg-compute-endpoints", type="config", version=1, created_at="2026-10-17T00:00:00Z",
+        created_by=OwnerRef(), status="effective", schema_version=1, payload={"endpoints": [item]}), "endpoints")
+    with pytest.raises(FactoryConfigError, match="host_deps_root"):
+        assemble(real_repo, FactoryOptions(executor="roll"), env=_hosts(tmp_path, "gpu-1: gpu-181\n") | _eval_env(tmp_path))
+
+
+def test_roll_defers_the_deployment_to_the_first_dispatch(real_repo, tmp_path, monkeypatch):
+    """装配期不碰远端:部署与建容器发生在执行器第一次 preflight;确定性失败判 T2(InvalidTrainingConfigError),
+    执行器与转换器拿到的是同一份派生端点。"""
+    import factory.wire as wire
+    from compute.errors import ComputeError
+    from mindtrainer.training_config import InvalidTrainingConfigError
+
+    calls = []
+
+    class FakeCache:
+        def __init__(self, result):
+            self.result = result
+
+        def get(self):
+            calls.append("get")
+            if isinstance(self.result, Exception):
+                raise self.result
+            return self.result
+
+    _write_endpoints(real_repo, "gpu-1")
+    env = _hosts(tmp_path, "gpu-1: gpu-181\n") | _eval_env(tmp_path)
+
+    monkeypatch.setattr(wire, "_roll_runtime_cache", lambda *a: FakeCache(ComputeError("image is not on the host")))
+    asm = assemble(real_repo, FactoryOptions(executor="roll"), env=env)
+    assert calls == []
+    with pytest.raises(InvalidTrainingConfigError, match="image is not on the host"):
+        asm.executor_factory("run-1").preflight()
+
+    from compute.endpoint import ComputeEndpoint
+    from compute.roll_deploy import RollRuntime
+    from compute.roll_env import RollEnv
+    derived = ComputeEndpoint(**{**_ENDPOINT, "launch_prefix": ["docker", "exec", "-i", "forge-roll-x"],
+                                 "roll_root": "/srv/rise/work/deps/roll-8b94504ef476"})
+    runtime = RollRuntime(derived, RollEnv(roll_commit="8b94504ef476373a05ce6b7196134b2d78cb0c42",
+                                           roll_tree="0" * 64), "forge-roll-x")
+    # 绑定先于预检:预检走的是绑上去的客户端,所以它只要有 preflight 就够(不连 ssh)
+    bound_client = type("BoundClient", (), {"preflight": lambda self: None})()
+    monkeypatch.setattr(wire, "_roll_runtime_cache", lambda *a: FakeCache((runtime, bound_client)))
+    asm = assemble(real_repo, FactoryOptions(executor="roll"), env=env)
+    executor = asm.executor_factory("run-2")
+    executor.preflight()
+    executor.preflight()
+    assert calls == ["get", "get", "get"]          # 失败那次不缓存;成功后第二次 preflight 不再部署
+    assert executor.endpoint.roll_root == "/srv/rise/work/deps/roll-8b94504ef476"
+    assert asm.converter.endpoint is executor.endpoint and asm.converter.client is bound_client
+    assert executor.backend_record["roll_commit"] == "8b94504ef476373a05ce6b7196134b2d78cb0c42"
 
 
 def test_roll_and_a_closed_loop_switch_are_mutually_exclusive(real_repo, tmp_path):

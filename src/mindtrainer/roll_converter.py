@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from compute.client import ComputeClient, JobSpec
 from compute.endpoint import ComputeEndpoint
 from compute.errors import ComputeBusyError, HelperError
+from compute.roll_env import version_hint as _version_hint
 from controlplane.envelope import SHA256_HEX, BigRef
 from mindtrainer.executor import CheckpointCorruptError
 
@@ -59,6 +60,15 @@ class RollLoraConverter:
 
     client: ComputeClient
     endpoint: ComputeEndpoint
+    # 运行环境的记账,同 RollExecutor.roll_record;进导出的 fetch_hint。产物目录仍按源存点寻址:
+    # 源存点的 job_id 已经绑定了 ROLL 版本,同一份存点在两个 ROLL 版本下导出的是同一份适配器。
+    roll_record: dict | None = None
+
+    def bind_runtime(self, client: ComputeClient, endpoint: ComputeEndpoint, roll_record: dict) -> None:
+        """同 RollExecutor.bind_runtime:换上派生端点、它的客户端与版本记账。"""
+        self.client = client
+        self.endpoint = endpoint
+        self.roll_record = dict(roll_record)
 
     def convert(self, ref: BigRef) -> BigRef:
         if not ref.uri.startswith("ssh://"):
@@ -96,9 +106,10 @@ class RollLoraConverter:
         # 3. 写进自己的 tmp 目录。token 让并发的两次转换互不覆盖。
         tmp_dir = f"{export_dir}.tmp-{uuid.uuid4().hex[:8]}"
         job_id = _job_identity(ref.sha256, tmp_dir)
+        # cwd 是作业自己的目录:ROLL 部署目录在容器里只读,转换顺带写的缓存不能落进去
         spec = JobSpec(
             argv=("python3", "-c", EXPORT_PROGRAM),
-            cwd=self.endpoint.roll_root,
+            cwd=f"{work}/jobs/{job_id}",
             env={
                 "CUDA_VISIBLE_DEVICES": "",  # 设计 §6.2 第 1 步:纯 CPU
                 "ROLL_EXPORT_BASE": self.endpoint.base_model_path,
@@ -150,13 +161,11 @@ class RollLoraConverter:
     def _require_host_memory(self) -> None:
         """空闲主机内存不足按忙处理(设计 §6.2 第 1 步)。
 
-        V15:`probe` 的应答字段名待主机核实;拿不到读数时放行而不是硬拦——
-        预检本身不该成为新的失败源,真不够的话转换会在远端 OOM,那是 T1 可重试。
+        读不到 MemAvailable(助手给 None)时放行而不是硬拦:预检本身不该成为新的失败源,
+        真不够的话转换会在远端 OOM,那是 T1 可重试。
+        之前这里用 getattr(client, "probe", None),而真 ComputeClient 没有 probe,预检被静默跳过。
         """
-        probe = getattr(self.client, "probe", None)
-        if probe is None:
-            return
-        free = probe().get("mem_available_gib")
+        free = self.client.probe().get("mem_available_gib")
         if free is None:
             return
         if float(free) < self.endpoint.min_free_host_mem_gib:
@@ -184,6 +193,7 @@ class RollLoraConverter:
                 "base_model_path": self.endpoint.base_model_path,
                 "requires": "native-vllm-lora",  # 需要 ROLL 的 vLLM 补丁(设计 V3)
                 "source_checkpoint_sha256": source.sha256,
+                **_version_hint(self.roll_record),
             },
         )
 

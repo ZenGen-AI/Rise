@@ -49,6 +49,9 @@ class ComputeEndpoint:
     min_free_disk_gib: float
     poll_seconds: float
     job_timeout_seconds: float
+    # 依赖源码副本(Megatron-LM、fla)的父目录,宿主机路径。只有 --executor roll 用它,
+    # 由 compute.roll_deploy 只读挂进系统建的容器;旧的 endpoints.yaml 不写这个键也照常读。
+    host_deps_root: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "launch_prefix", check_launch_prefix(self.launch_prefix))
@@ -57,6 +60,8 @@ class ComputeEndpoint:
         for name in ("work_root", "roll_root", "base_model_path", "heldout_jsonl"):
             if not is_clean_abs_path(getattr(self, name)):
                 raise ComputeError(f"{name} must be an absolute path below / without '..'")
+        if self.host_deps_root is not None and not is_clean_abs_path(self.host_deps_root):
+            raise ComputeError("host_deps_root must be an absolute path below / without '..'")
         if not isinstance(self.sft_template, str) or not self.sft_template:
             raise ComputeError("sft_template must be a non-empty string")
         for name in ("min_free_host_mem_gib", "min_free_disk_gib"):

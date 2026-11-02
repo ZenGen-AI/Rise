@@ -34,6 +34,8 @@ _ENDPOINT_KEYS = (
     "heldout_jsonl", "sft_template", "min_free_host_mem_gib", "min_free_disk_gib",
     "poll_seconds", "job_timeout_seconds",
 )
+# 可选键:不写时取数据类的缺省。host_deps_root 只有 --executor roll 要,缺了在装配期报错(factory.wire)。
+_OPTIONAL_ENDPOINT_KEYS = ("host_deps_root",)
 
 
 def read_endpoints_config(store: GitStore) -> list[ComputeEndpoint]:
@@ -54,7 +56,7 @@ def read_endpoints_config(store: GitStore) -> list[ComputeEndpoint]:
             raise FactoryConfigError(f"{COMPUTE_ENDPOINTS_FILE} item {index} must be a mapping")
         keys = set(item)
         missing = key_names(set(_ENDPOINT_KEYS) - keys)
-        unknown = key_names(keys - set(_ENDPOINT_KEYS))
+        unknown = key_names(keys - set(_ENDPOINT_KEYS) - set(_OPTIONAL_ENDPOINT_KEYS))
         if missing or unknown:
             raise FactoryConfigError(
                 f"{COMPUTE_ENDPOINTS_FILE} item {index}: missing {missing}, unknown {unknown}"

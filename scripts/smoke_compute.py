@@ -19,7 +19,7 @@
   4 预检     租约空闲、主机内存与磁盘够、GPU 上没有别的计算进程       [只读]
   5 空作业   起一个 `echo`,轮询到退出,取日志尾巴                     [远端写 work_root/jobs/<id>/]
   6 基座     hash-tree(sampled)base_model_path                      [只读,目录大时要几十秒]
-  7 路径     roll_root 下训练脚本与导出脚本是否存在                   [只读]
+  7 路径     本机 ROLL submodule 可打包、留出集在、依赖副本指纹对    [只读;ROLL 由训练时部署,这里不部署]
 
 不做:不取 GPU 租约、不跑训练、不导出、不删任何东西。第 5 步会留下 work_root/jobs/smoke-*/,
 需要时自己删(这个脚本不删,与「绝不清理非本任务创建的东西」同一个原则)。
@@ -48,8 +48,12 @@ from factory.compute_config import (  # noqa: E402
 )
 from factory.errors import FactoryConfigError  # noqa: E402
 
-from mindtrainer.roll_executor import TRAIN_SCRIPT  # noqa: E402  训练入口,与执行器用同一个常量,不会各写各的
-EXPORT_SCRIPT = "mcore_adapter/src/mcore_adapter/models/converter/post_converter.py"  # 导出是 LoRAHFConverter 的 Python 调用,没有命令行脚本
+import compute.roll_env as roll_env  # noqa: E402  依赖清单在调用时读(测试会换掉它)
+from compute.roll_deploy import _host_tree as host_tree  # noqa: E402  与部署时同一个口径
+from compute.roll_source import pinned_roll_commit, roll_archive  # noqa: E402
+
+# rise 仓库根:ROLL submodule 在它下面。RISMFORGE_RISE_ROOT 只给本脚本的测试用,真用时不设。
+REPO_ROOT = Path(os.environ.get("RISMFORGE_RISE_ROOT") or Path(__file__).resolve().parent.parent)
 
 
 class Stop(Exception):
@@ -148,22 +152,31 @@ def run(repo_root: str, endpoint_name: str | None, *, local: bool) -> int:
         return f"{ep.base_model_path} sampled 摘要 {digest[:12]}…"
 
     def scripts():
+        """--executor roll 之前要有的东西。ROLL 本身由系统从 submodule 部署,不再查端点里的 roll_root;
+        这里查部署要用的输入:钉住的 ROLL 能打包、留出集在、依赖副本与钉住的指纹一致。只读,不部署。"""
         ep = ctx["ep"]
-        roll = ep.roll_root.rstrip("/")
         missing = []
-        for rel, what in ((TRAIN_SCRIPT, "训练入口"), (EXPORT_SCRIPT, "导出转换器模块")):
-            path = f"{roll}/{rel}"
-            # 用 get 探测存在性会把整个脚本读回来;hash-tree 又只认目录。用 `test -f` 走一个最小作业最省。
-            r = ctx["client"]._transport.run(["test", "-f", path], timeout=30.0)
-            if r.returncode != 0:
-                missing.append(f"{what} {path}")
-        for p in (ep.sft_template, ep.heldout_jsonl):
-            r = ctx["client"]._transport.run(["test", "-f", p], timeout=30.0)
-            if r.returncode != 0:
-                missing.append(p)
+        try:
+            commit = pinned_roll_commit(REPO_ROOT)
+            roll_archive(REPO_ROOT, commit)
+        except ComputeError as exc:
+            raise Stop(f"本机的 ROLL submodule 不能用:{exc}") from None
+        r = ctx["client"].host_run(["test", "-f", ep.heldout_jsonl], timeout=30.0)
+        if r.returncode != 0:
+            missing.append(ep.heldout_jsonl)
+        if ep.host_deps_root is None:
+            missing.append("端点的 host_deps_root(Megatron-LM 与 fla 的父目录)")
+        else:
+            for dep in roll_env.DEPENDENCIES:
+                path = f"{ep.host_deps_root.rstrip('/')}/{dep.name}"
+                try:
+                    if host_tree(ctx["client"], path) != dep.fingerprint:
+                        missing.append(f"{path}(内容与钉住的 {dep.fingerprint[:12]} 不符)")
+                except ComputeError:
+                    missing.append(path)
         if missing:
-            raise Stop("远端找不到:" + "; ".join(missing))
-        return "训练入口、导出脚本、SFT 模板、留出集都在"
+            raise Stop("远端缺:" + "; ".join(missing))
+        return f"ROLL {commit[:12]} 可部署,留出集与依赖副本都对"
 
     steps = [
         ("配置", configure), ("连通", reach), ("助手", helper), ("预检", preflight),
@@ -178,8 +191,7 @@ def run(repo_root: str, endpoint_name: str | None, *, local: bool) -> int:
         return 1
     print("\n全部通过。远端上留有 work_root/bin/ 与 work_root/jobs/" + ctx.get("job_id", "smoke-*")
           + "/,需要时自己清。")
-    print("这只说明链路通;RollExecutor 里标 V__ 的占位(训练脚本真实参数、--max-steps 能否截到段尾、"
-          "--resume 路径层级、导出脚本入口)还没核实,要在真训练的第一次输出上看。")
+    print("这只说明链路通;ROLL 的部署、训练容器与导入自检在 --executor roll 第一次派发时才做。")
     return 0
 
 

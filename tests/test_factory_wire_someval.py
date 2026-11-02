@@ -20,7 +20,7 @@ ENDPOINT = {
     "endpoint_id": "gpu-1", "work_root": "/work", "roll_root": "/work/roll", "launch_prefix": [],
     "base_model_path": "/models/base", "heldout_jsonl": "/work/heldout.jsonl", "sft_template": "t",
     "min_free_host_mem_gib": 1.0, "min_free_disk_gib": 1.0, "poll_seconds": 1.0,
-    "job_timeout_seconds": 60.0,
+    "job_timeout_seconds": 60.0, "host_deps_root": "/deps",
 }
 
 

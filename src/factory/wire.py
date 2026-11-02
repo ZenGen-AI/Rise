@@ -263,15 +263,27 @@ def _assemble_roll(store: GitStore, options: FactoryOptions, *, env: Mapping[str
 
     environ = os.environ if env is None else env
     endpoint = select_endpoint(read_endpoints_config(store), options.endpoint)
-    client = build_compute_client(endpoint, read_host_map(env=environ))
+    if endpoint.host_deps_root is None:
+        raise FactoryConfigError(
+            f"endpoint {endpoint.endpoint_id!r} has no host_deps_root; --executor roll mounts the Megatron-LM "
+            "and fla sources from there into the training container"
+        )
+    hosts = read_host_map(env=environ)
+    client = build_compute_client(endpoint, hosts)
     eval_config = read_eval_config(env=environ, repo_root=store.repo_root)
     dataset_sha = _sombench_sha(eval_config)
     row_gate = make_train_gate(load_index_file(eval_config.index_path, dataset_sha))
+    roll_runtime = _roll_runtime_cache(endpoint, hosts, client)
+    converter = RollLoraConverter(client=client, endpoint=endpoint)
+
+    def bind(target) -> None:
+        # 第一次派发时才部署 ROLL、建容器(碰远端、耗时),不在装配期;执行器与转换器共用同一份
+        runtime, bound_client = roll_runtime.get()
+        target.bind_runtime(bound_client, runtime.endpoint, runtime.env.record())
 
     def executor_factory(run_id: str) -> RollExecutor:
-        return RollExecutor(client=client, endpoint=endpoint, run_id=run_id, row_gate=row_gate)
-
-    converter = RollLoraConverter(client=client, endpoint=endpoint)
+        return RollExecutor(client=client, endpoint=endpoint, run_id=run_id, row_gate=row_gate,
+                            on_first_preflight=lambda target: (bind(target), bind(converter)))
     evaluator = None
     if options.evaluator == "someval":
         evaluator = _build_someval_evaluator(store, client, endpoint, eval_config, dataset_sha)
@@ -283,6 +295,29 @@ def _assemble_roll(store: GitStore, options: FactoryOptions, *, env: Mapping[str
         {}, evaluator, False,
         executor_factory=executor_factory, converter=converter,
     )
+
+
+def _roll_runtime_cache(endpoint, hosts, client):
+    """`--executor roll` 的运行时:钉住的 ROLL(rise HEAD 里的 submodule gitlink)部署到端点上、起好容器。
+
+    返回 RollRuntimeCache,第一次 get() 才做远端的事。读 submodule、打包在本机,失败(没初始化、工作树脏、
+    HEAD 不是钉住的提交)和远端的确定性失败一样是 ComputeError,由 _BoundOnPreflight 译成 T2。
+    返回 (RollRuntime, 绑在派生端点上的客户端):派生端点的 launch_prefix 进的是系统建的容器,
+    所以要另造一个客户端;它与原客户端同一个 ssh 别名。"""
+    from compute.roll_deploy import RollRuntimeCache, ensure_roll_env, tree_digest
+    from compute.roll_env import RollEnv
+    from compute.roll_source import pinned_roll_commit, roll_archive
+    from factory.compute_config import build_compute_client
+
+    def build():
+        commit = pinned_roll_commit(CODE_ROOT)
+        archive = roll_archive(CODE_ROOT, commit)
+        roll_env = RollEnv(roll_commit=commit, roll_tree=tree_digest(archive))
+        runtime = ensure_roll_env(client, endpoint, roll_env, archive)
+        return runtime, build_compute_client(runtime.endpoint, hosts)
+
+    return RollRuntimeCache(build)
+
 
 
 def _sombench_sha(eval_config) -> str:

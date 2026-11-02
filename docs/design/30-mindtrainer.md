@@ -399,6 +399,12 @@ class StagedExecutor(TrainingExecutor, Protocol):
 
 ROLL 一步实际消耗 `数据并行度 × 梯度累积 × 每卡批大小` 行(实测为 8×1×1,即 8 行)。训练脚本要求实际步数恰好等于 `max_steps`,凑不够整批时 `drop_last` 会静默丢行或直接拒绝;这里的「一步」(`sft_batch_size` 个剧集,每个展开成若干行)与 ROLL 的「一步」不是同一个概念,上文的行数预检就是为此而设,目前尚未实现 [计划中]。
 
+**ROLL 的来源与运行环境 [已落地]。** ROLL4ZenGen 是本仓库的 git submodule(`third_party/ROLL4ZenGen`,钉在 `8b94504`),版本以 rise HEAD 里的 gitlink 为准:暂存而未提交的改动不算,submodule 工作树不在钉住的提交上或有改动时拒绝训练。远端的 ROLL 不再由人手工放:第一次派发时,组合根把钉住的提交按 `git archive` 打包(只含 `roll`、`mcore_adapter`、`scripts`、`setup.py`、`pyproject.toml`,约 7.5 MB;`data/` 与文档不上传),经宿主机解到 `<work_root>/deps/roll-<提交前 12 位>`,写完成标记后原子改名;标记对、目录指纹(`hash-tree full`,跳过 `__pycache__`)等于归档的指纹就跳过。主机连不上 GitHub 也没关系(181 就连不上),代码从本机推过去。
+
+训练容器也由系统建,名字由 `docker run` 的完整参数算出(`forge-roll-<12 位>`),参数变了就是新容器,旧容器原样留着;系统只碰自己这个前缀的容器,从不停、不删。镜像钉住 id(`roll-lab:snap1`),Megatron-LM 与 fla 用主机上已经验证过的源码副本,只读挂进容器,每次部署前核对内容指纹。Megatron 副本是 ROLL 补丁清单的前 11 步,缺最后一步 `checkpoint_padding`(只影响优化器存点里的填充值),这是 181 上跑通单段训练的那一份,有意沿用。部署目录在容器里也只读挂载,作业的 cwd 是各自的作业目录(`sft_lora.yaml` 的 `logging_dir` 是相对路径,v3 之前 cwd 在 ROLL 树里,日志与缓存都写进了检出目录)。
+
+部署的确定性失败(submodule 不对、镜像不在、依赖指纹不符、导入自检失败、挡路的目录)判指令 `failed`(T2);SSH 断开走延后通道。运行环境进作业身份(`LAUNCHER_VERSION` 为 v3,`job_id` 的哈希含环境摘要),换了 ROLL 版本就是另一个作业。存点与导出的 `fetch_hint` 带 `roll_commit` 与 `roll_env`,新建训练记录的 `policy_backend` 写下执行器、端点、ROLL 提交、环境摘要、镜像与两份依赖的指纹;续训时只记不拦,与 `code_versions` 一样。
+
 转换器同样在真实主机上对一份真实存点(22 GB)跑过。导出是 `convert_checkpoint_to_hf` 的 Python 调用,ROLL4ZenGen 里没有命令行入口,最初假定的导出脚本(ROLL 仓库下 scripts 目录里的 export_lora_for_vllm.py)并不存在。转换器用 `python3 -c` 执行一段固定的程序文本,三个路径只经环境变量传入,所以 `argv` 里没有任何来自存点引用的字符串;`low_mem=False` 是适配器导出唯一合法的取值。ROLL 自带说明里直接构造 LoRAHFConverter 类的示例已经过时,它的构造函数现在要求 `verbose` 参数,照抄会抛 `TypeError`。作业身份包含程序文本的哈希,改了程序就是另一个作业,不会撞上旧程序留下的成功记录。实测:产物含 148,808 个 BF16 张量,`lora_A` 与 `lora_B` 各 74,404 个,布局标记为 `qwen4_exp_vllm_2d`,转换用时 22.9 秒,主机内存峰值 5.37 GiB,不创建 CUDA 上下文;经转换器整条流程(落到临时目录、算 `full` 哈希、写完成标记、原子改名)用时 47.8 秒,第二次调用 4.8 秒并返回同一个引用,没有重做导出。
 GRPO 与 OPD 只有一个方法,因为两者在同一个训练 step 里联合更新。`StepResult.step` 是执行器自己的全局计数,编排器发现它与自己的 step 不一致时抛 `RuntimeError`。
 
@@ -866,6 +872,7 @@ interact 的 `config_hash` 覆盖配置层的东西 [已落地]:情境 id、人�
 | 一步的行数:`数据并行度 × 梯度累积 × 每卡批大小` 与 `sft_batch_size` 个剧集展开后的行数是否对得上 | 对不上时 `drop_last` 静默丢行,或训练脚本以「实际步数不等于 max_steps」拒绝 | 实现 `validate_sft_data` 预检;真机上已确认恰好 8 行一步时通过 |
 | 存点与导出产物的属主 | 容器内是 root,存点与导出目录里的权重文件权限为 `-rw-------`,宿主机上的普通用户读不了;若 vLLM 服务以别的用户或在别的容器里运行,读不到适配器 | 起 vLLM 服务时核对运行用户;或用 `docker run --user` 让容器以宿主机用户运行,并核对镜像内路径的写权限 |
 | 远端 Python 版本 | 助手按 3.8 语法写,实际版本更低则无法运行 | 在验证主机上跑一次助手的 `probe` |
+| `8b94504` 的 ROLL 在真机上训练 | 181 上跑通的是 `759de0e`;`8b94504` 多 4 个提交,其中 SFT 遇到 `<think>` 时拆开监督目标、验证集不够一个批时提前报错。我们的训练数据没有 `<think>`,留出集 256 行够单机 8 卡一个批,按说不受影响 | 在 181 上用系统部署的 ROLL 跑一次场景一 |
 | 真实执行器下续训是否逐字节等价 | 取决于优化器与随机数状态是否存点、浮点归约顺序 | 真实执行器上做崩溃注入 |
 | 长跑 rollout 的 keepalive | 死连接可能不被及时发现 | 构造断连场景压测 |
 | 对手模型只以 `model_ref` 字符串记录 | 对手版本没有制品锚定 | 要锚定就得给 `model_ref` 加带 sha256 的引用形式;RecipeStore 的校验目前只要求它是具体 id,不校验哈希 [计划中] |

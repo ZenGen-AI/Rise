@@ -608,7 +608,8 @@ checkpoint 等大体量内容不进 git,只存引用 `{uri, sha256, size_bytes, 
 | 层 | 内容 | 位置 | 进 git |
 |---|---|---|---|
 | 可复现性配置 | 后端选择、模型名、提示模板版本、重试策略 | `control-plane/config/` | 进 |
-| 环境配置 [已落地] | 远程服务器的路径与阈值:工作目录、ROLL 检出目录、基座与留出集路径、预检阈值、轮询间隔与作业超时 | `control-plane/compute/endpoints.yaml` | 进,不含秘密;人工写,`install_defaults` 不安装 |
+| 环境配置 [已落地] | 远程服务器的路径与阈值:工作目录、基座与留出集路径、依赖源码副本的父目录(`host_deps_root`,只有 `--executor roll` 要)、预检阈值、轮询间隔与作业超时。ROLL 代码不再由人放上主机:`--executor roll` 从本仓库的 submodule 部署钉住的版本,端点里的 `roll_root` 与 `sft_template` 只剩 `--interact` 与 SoMEval 在用 | `control-plane/compute/endpoints.yaml` | 进,不含秘密;人工写,`install_defaults` 不安装 |
+| ROLL 运行环境 [已落地] | ROLL4ZenGen 的版本(rise 仓库 HEAD 里 `third_party/ROLL4ZenGen` 的 gitlink)、训练镜像 id、Megatron-LM 与 fla 源码副本的内容指纹、容器参数 | ROLL 是 git submodule;其余是 `src/compute/roll_env.py` 的代码常量 | 进:改任何一项要改代码、过评审,训练记录的 `policy_backend` 记下实际用的那一份 |
 | 主机映射 [已落地] | `endpoint_id` 到 ssh 别名,主机、端口、用户与密钥都在 `~/.ssh/config` | 本机文件,路径由环境变量 `RISMFORGE_COMPUTE_HOSTS` 指定 | 不进:地址一旦进了提交就清不掉 |
 | 本机记忆配置 | 记忆库根目录、抽取与嵌入的端点和模型 | 树外,路径由 `RISMFORGE_MEMORY_CONFIG` 指定,权限 0600 | 不进;密钥是 `OPENAI_API_KEY` |
 | 凭证 | API token、SSH 口令 | 环境变量或被忽略的本地文件 | 绝不进 |

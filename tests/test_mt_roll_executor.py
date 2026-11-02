@@ -300,6 +300,57 @@ def test_stage_checkpoint_reference_carries_the_roll_hint():
     assert ref.fetch_hint["type"] == "roll_ssh"
     assert ref.fetch_hint["format"] == "roll_lora_legacy"
     assert len(ref.sha256) == 64
+    assert "roll_commit" not in ref.fetch_hint       # 没绑运行环境:形状与 v3 之前相同
+
+
+RECORD = {"roll_commit": "8b" * 20, "roll_env": "abcdef012345", "image_id": "sha256:" + "1" * 64,
+          "dependencies": {"Megatron-LM": "16819e70677d", "fla": "2ef8d23a54d1"}}
+
+
+def _bound(client: FakeClient, *, record=RECORD) -> RollExecutor:
+    executor = _executor(client)
+    derived = fake_endpoint(roll_root="/srv/rise/work/deps/roll-8b8b8b8b8b8b",
+                            sft_template="/srv/rise/work/deps/roll-8b8b8b8b8b8b/scripts/qwen38/configs/sft_lora.yaml",
+                            launch_prefix=("docker", "exec", "-i", "forge-roll-abcdef012345"))
+    executor.bind_runtime(client, derived, record)
+    return executor
+
+
+def test_a_bound_runtime_runs_the_deployed_roll_and_records_its_version():
+    """部署好的运行环境:训练入口在部署目录里,存点 fetch_hint 带版本两项,backend_record 给训练记录。"""
+    client = FakeClient()
+    hook = _ckpt_hook(1); hook.client = client; client.job_hook = hook
+    executor = _bound(client)
+    executor.load(_base_ref(client))
+    executor.run_sft_stage([[_episode("e0")]], first_step=0, trained_slot="a", prior_batches=[])
+    argv = client.run_calls[0][1].argv
+    assert argv[1] == "/srv/rise/work/deps/roll-8b8b8b8b8b8b/scripts/qwen38/run_sft_validation.py"
+    assert dict(zip(argv, argv[1:]))["--config"].endswith("/scripts/qwen38/configs/sft_lora.yaml")
+    ref = executor.save_checkpoint("step-1")
+    assert (ref.fetch_hint["roll_commit"], ref.fetch_hint["roll_env"]) == ("8b" * 20, "abcdef012345")
+    assert executor.backend_record == {"executor": "roll", "endpoint": "gpu-1", **RECORD}
+
+
+def test_another_roll_environment_is_another_job():
+    """运行环境进 job_id:换了 ROLL 版本不会接上旧版本的成功作业。"""
+    ids = []
+    for env in ("abcdef012345", "999999999999"):
+        client = FakeClient()
+        hook = _ckpt_hook(1); hook.client = client; client.job_hook = hook
+        executor = _bound(client, record={**RECORD, "roll_env": env})
+        executor.load(_base_ref(client))
+        executor.run_sft_stage([[_episode("e0")]], first_step=0, trained_slot="a", prior_batches=[])
+        ids.append(client.run_calls[0][0])
+    assert ids[0] != ids[1]
+
+
+def test_the_job_runs_in_its_own_directory_not_in_the_roll_tree():
+    """sft_lora.yaml 的 logging_dir 是相对路径;cwd 在 ROLL 树里会把日志写进只读的部署目录。"""
+    client = FakeClient()
+    hook = _ckpt_hook(1); hook.client = client; client.job_hook = hook
+    _staged(client, [[_episode("e0")]])
+    job_id, spec, *_ = client.run_calls[0]
+    assert spec.cwd == f"/srv/rise/work/jobs/{job_id}"
 
 
 def test_the_checkpoint_reference_follows_the_location_the_script_reported():

@@ -537,12 +537,18 @@ def cmd_hash_tree(req):
     exclude = req.get("exclude", [])
     if not isinstance(exclude, list) or not all(isinstance(name, str) and name for name in exclude):
         raise Failure("bad_request", "exclude must be a list of relative file names")
+    # 源码树(ROLL、依赖副本)里的 __pycache__ 随 Python 版本与是否跑过而变,不该进内容指纹
+    skip_pycache = req.get("skip_pycache", False)
+    if not isinstance(skip_pycache, bool):
+        raise Failure("bad_request", "skip_pycache must be a boolean")
     if not os.path.isdir(top):
         raise Failure("not_found", "no such directory")
     entries = []
     for base, dirs, names in os.walk(top, followlinks=False):
-        dirs.sort()
+        dirs[:] = sorted(d for d in dirs if not (skip_pycache and d == "__pycache__"))
         for name in sorted(names):
+            if skip_pycache and name.endswith((".pyc", ".pyo")):
+                continue
             full = os.path.join(base, name)
             rel = os.path.relpath(full, top).replace(os.sep, "/")
             if rel in exclude:

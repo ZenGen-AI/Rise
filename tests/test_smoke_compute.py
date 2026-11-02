@@ -18,37 +18,87 @@ from controlplane.paths import compute_endpoints_file
 
 SCRIPT = Path(__file__).parent.parent / "scripts" / "smoke_compute.py"
 LINUX = Path("/proc/meminfo").exists()
+GIT = ("-c", "user.email=t@example.com", "-c", "user.name=t", "-c", "protocol.file.allow=always")
+
+# 脚本作为子进程跑。rise 根由 RISMFORGE_RISE_ROOT 指到测试世界里的假仓库;依赖指纹是代码常量,
+# 子进程里先换成测试世界的值再进脚本的 main。不能依赖开发机上 rise 仓库此刻的 git 状态。
+BOOT = (
+    "import json, os, runpy, sys\n"
+    "sys.path.insert(0, os.environ['SMOKE_SRC'])\n"
+    "import compute.roll_env as e\n"
+    "e.DEPENDENCIES = tuple(e.Dependency(n, m, f) for n, m, f in json.loads(os.environ['SMOKE_DEPS']))\n"
+    "sys.argv = [os.environ['SMOKE_SCRIPT'], *sys.argv[1:]]\n"
+    "runpy.run_path(os.environ['SMOKE_SCRIPT'], run_name='__main__')\n"
+)
+
+
+def _git(cwd, *args):
+    subprocess.run(["git", *GIT, *args], cwd=cwd, check=True, capture_output=True)
+
+
+def _fake_rise(tmp_path: Path) -> Path:
+    """一个挂着假 ROLL submodule 的 rise 仓库(提交过 gitlink,工作树干净)。"""
+    from compute.roll_source import ROLL_SUBMODULE
+
+    from compute.roll_source import ROLL_PATHS
+
+    roll = tmp_path / "roll-upstream"
+    for top in ROLL_PATHS:                          # git archive 对不存在的路径直接失败,所以每项都要有
+        path = roll / top if "." in top else roll / top / "__init__.py"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(top)
+    (roll / "roll" / "__init__.py").write_text("x")
+    _git(roll, "init", "-q")
+    _git(roll, "add", ".")
+    _git(roll, "commit", "-qm", "roll")
+    rise = tmp_path / "rise"
+    rise.mkdir()
+    _git(rise, "init", "-q")
+    _git(rise, "submodule", "add", "-q", str(roll), ROLL_SUBMODULE)
+    _git(rise, "commit", "-qm", "add roll")
+    return rise
 
 
 @pytest.fixture
 def world(tmp_path):
     """一个假的"远端":本机上的一棵目录树,加指向它的端点配置与主机映射。"""
-    # 目录布局与 ROLL4ZenGen 的真实布局一致(scripts/qwen38/ 下的训练入口、mcore_adapter 下的转换器模块)
-    for sub in ("model", "roll/scripts/qwen38", "roll/mcore_adapter/src/mcore_adapter/models/converter", "work"):
+    import json
+
+    import compute.job_tool as job_tool
+
+    for sub in ("model", "work"):
         (tmp_path / sub).mkdir(parents=True)
     (tmp_path / "model" / "config.json").write_text("{}")
-    for rel in ("roll/scripts/qwen38/run_sft_validation.py",
-                "roll/mcore_adapter/src/mcore_adapter/models/converter/post_converter.py",
-                "sft.yaml", "heldout.jsonl"):
-        (tmp_path / rel).write_text("")
+    (tmp_path / "heldout.jsonl").write_text("")
+    deps = []
+    for name, mount in (("Megatron-LM", "/r2n/megatron"), ("fla", "/r2n/fla")):
+        (tmp_path / "deps" / name).mkdir(parents=True)
+        (tmp_path / "deps" / name / "m.py").write_text(name)
+        fp = job_tool.cmd_hash_tree({"path": str(tmp_path / "deps" / name), "mode": "full",
+                                     "skip_pycache": True})["sha256"]
+        deps.append([name, mount, fp])
     store = GitStore(str(tmp_path / "cp"))
     store.init()
     item = {
-        "endpoint_id": "local-1", "work_root": str(tmp_path / "work"), "roll_root": str(tmp_path / "roll"),
+        "endpoint_id": "local-1", "work_root": str(tmp_path / "work"), "roll_root": "/unused",
         "launch_prefix": [], "base_model_path": str(tmp_path / "model"),
-        "heldout_jsonl": str(tmp_path / "heldout.jsonl"), "sft_template": str(tmp_path / "sft.yaml"),
+        "heldout_jsonl": str(tmp_path / "heldout.jsonl"), "sft_template": "/unused/sft.yaml",
         "min_free_host_mem_gib": 0.1, "min_free_disk_gib": 0.1, "poll_seconds": 0.3, "job_timeout_seconds": 60.0,
+        "host_deps_root": str(tmp_path / "deps"),
     }
     store.write_product(compute_endpoints_file(), Envelope(
         id="cfg-compute-endpoints", type="config", version=1, created_at="2026-10-17T00:00:00Z",
         created_by=OwnerRef(), status="effective", schema_version=1, payload={"endpoints": [item]}), "endpoints")
     hosts = tmp_path / "hosts.yaml"
     hosts.write_text("local-1: whatever\n")
-    return tmp_path, str(tmp_path / "cp"), {**os.environ, "RISMFORGE_COMPUTE_HOSTS": str(hosts)}
+    env = {**os.environ, "RISMFORGE_COMPUTE_HOSTS": str(hosts), "SMOKE_DEPS": json.dumps(deps),
+           "RISMFORGE_RISE_ROOT": str(_fake_rise(tmp_path)), "SMOKE_SCRIPT": str(SCRIPT),
+           "SMOKE_SRC": str(SCRIPT.parent.parent / "src")}
+    return tmp_path, str(tmp_path / "cp"), env
 
 
 def _smoke(repo, env, *extra):
-    return subprocess.run([sys.executable, str(SCRIPT), repo, "--local", *extra],
+    return subprocess.run([sys.executable, "-c", BOOT, repo, "--local", *extra],
                           capture_output=True, text=True, env={**env, "PYTHONDONTWRITEBYTECODE": "1"})
 
 
@@ -81,8 +131,15 @@ def test_the_script_never_asks_for_the_gpu_lease(world, monkeypatch):
         acquired.append(holder)
         return original(self, holder, **kw)
 
+    import json
+
+    import compute.roll_env as roll_env
+
     monkeypatch.setattr(ComputeClient, "lease_acquire", spy)
     tmp, repo, env = world
+    monkeypatch.setenv("RISMFORGE_RISE_ROOT", env["RISMFORGE_RISE_ROOT"])
+    monkeypatch.setattr(roll_env, "DEPENDENCIES", tuple(
+        roll_env.Dependency(n, m, f) for n, m, f in json.loads(env["SMOKE_DEPS"])))
     spec = importlib.util.spec_from_file_location("smoke_compute_under_test", SCRIPT)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -93,15 +150,18 @@ def test_the_script_never_asks_for_the_gpu_lease(world, monkeypatch):
 
 @pytest.mark.parametrize("break_what,step", [
     ("model", 6),
-    ("export", 7),
+    ("dependency", 7),
+    ("submodule", 7),
 ])
 def test_the_first_failure_stops_the_run_and_exits_1(world, break_what, step):
     tmp, repo, env = world
     if break_what == "model":
         (tmp / "model" / "config.json").unlink()
         (tmp / "model").rmdir()
+    elif break_what == "dependency":
+        (tmp / "deps" / "fla" / "m.py").write_text("patched by hand")
     else:
-        (tmp / "roll/mcore_adapter/src/mcore_adapter/models/converter/post_converter.py").unlink()
+        (tmp / "rise" / "third_party" / "ROLL4ZenGen" / "roll" / "__init__.py").write_text("edited in place")
     r = _smoke(repo, env)
     assert r.returncode == 1
     done = _steps(r.stdout)

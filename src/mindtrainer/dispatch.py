@@ -415,7 +415,7 @@ def make_mindtrainer_dispatcher(
                     make_sources = _interact_sources(
                         store, cfg, manifests, client_factory, stack.enter_context(scope), run_id
                     )
-                    # 只有 interact 记后端;batch 不传,既有 training_run 逐字节不变
+                    # 只有 interact 记推理后端;batch 不传,由执行器自己的后端记账补上(见 resume_or_run)
                     extra["policy_backend"] = _policy_backend(cfg, policy_endpoint)
                 resume_or_run(
                     cfg, store=store, run_id=run_id, make_sources=make_sources,

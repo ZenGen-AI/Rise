@@ -142,10 +142,22 @@ class ComputeClient:
         self._call("put", path=path, content_b64=base64.b64encode(data).decode("ascii"),
                    sha256=hashlib.sha256(data).hexdigest(), executable=executable)
 
-    def hash_tree(self, path: str, mode: str, *, exclude: Sequence[str] = ()) -> str:
-        """exclude:不进哈希的相对文件名(例如转换产物里记录这个哈希的完成标记)。"""
-        extra = {"exclude": list(exclude)} if exclude else {}
+    def hash_tree(self, path: str, mode: str, *, exclude: Sequence[str] = (), skip_pycache: bool = False) -> str:
+        """exclude:不进哈希的相对文件名(例如转换产物里记录这个哈希的完成标记)。
+        skip_pycache:跳过 __pycache__ 目录与 .pyc/.pyo(源码树的内容指纹用,见 compute.roll_env)。"""
+        extra: dict = {"exclude": list(exclude)} if exclude else {}
+        if skip_pycache:
+            extra["skip_pycache"] = True
         return str(self._call("hash-tree", timeout=3600.0, path=path, mode=mode, **extra)["sha256"])
+
+    def probe(self) -> dict:
+        """助手 probe 的原样结果:mem_available_gib(读不到为 None)、disk_free_gib(在 work_root 上量)。"""
+        return self._call("probe")
+
+    def host_run(self, argv: Sequence[str], *, stdin: bytes = b"", timeout: float = 120.0) -> RunResult:
+        """在宿主机上跑一条固定 argv,不经 launch_prefix(容器的建、起、查只能在宿主机上做;
+        gpu_process_count 是同一路数)。调用方负责 argv 里每个值都经过校验。"""
+        return self._transport.run(list(argv), stdin=stdin, timeout=timeout)
 
     def get(self, path: str) -> bytes:
         """读一个小文件(完成标记、tracker)。文件不在抛 HelperError(code='not_found')。"""
