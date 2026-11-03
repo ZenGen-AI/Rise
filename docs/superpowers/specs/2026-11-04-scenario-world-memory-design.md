@@ -98,7 +98,7 @@
 | 场合 | 位置 | 判法 |
 |---|---|---|
 | 训练配置校验 | `validate_training_config` | `bindings` 里 `persona_id` 重复 → 配置错误，指令 T2 |
-| 部署配置 | `read_agent_settings` | 同上 → `FactoryConfigError`，退出码 2 |
+| 部署配置 | `read_agent_settings` | 同上，抛 `FactoryConfigError`。它有三个调用方：`factory.handlers`（轮次处理器装配）和 `factory.wire`（运行时装配）在装配期调用，出错退出码 2；`factory.interact_policy` 在每次派发时调用，把错误转成 `DirectiveFailedError`，指令判 T2 |
 | 合成的绑定 | 派发器在合成情境与人格之后、解析记忆之前 | 同上 → T2 |
 
 现有配置与测试里没有这种绑定（实测：`tests/` 下所有 `interlocutors` 字典的值都不重复）。
@@ -153,7 +153,7 @@ Starling 后端的路径相同，后缀是 `.db`。
 
 | 步 | 今天 | 改后 |
 |---|---|---|
-| 起点快照 | `backup_to(agent_persona, snap)` | `backup_to(scenario_id, snap)`，整个世界 |
+| 起点快照 | `backup_to(agent_persona, snap)` | `backup_to(scenario_id, snap)`，整个世界。文件名 `deploy-<episode_id>`，episode id 本身也以 `deploy-` 开头，所以是 `deploy-deploy-zengen-v2-s1-1.json`。双前缀让新文件名与今天的 `<episode_id>-<persona_id>` 分得开，旧布局检查靠它 |
 | 记起点摘要 | `on_episode_start(eid, {persona: digest})` | `on_episode_start(eid, digest)`，一个世界一个摘要 |
 | 每次尝试开端口 | `open(agent_persona)` | `open(scenario_id, agent_persona)` |
 | 部署对手位 | 每会话一份空 `TupleMemory` | `open(scenario_id, opponent_persona)`，服务端开，见 4.5 |
@@ -250,6 +250,7 @@ join 等不到时，服务端把资源移进滞留表，由回收线程过后再
 - 今天这条路径走不到，因为客户端副本和服务端副本在两个不同的目录。改为同一个世界之后，服务端最长要收尾 60 秒，滞留得还会更久。重试往往紧跟在一次瞬态失败之后，正是服务端收尾最慢的时候。
 - 判成确定性失败的话，一次慢收尾就会让整个训练 run 判 T2，代价不对等。
 - 判成瞬态之后，轨迹源把它记为 `role_memory_unavailable` 再重跑；重试次数用完就抛 `RolloutFailedError`，交给 `factory.interact_policy` 翻译成 `RolloutDeferredError` 走延后通道，指令保持 `pending`。守护进程退避之后，滞留的资源大多已被回收线程关掉。
+- **轨迹源要配套改一处。** 今天 `InteractTrajectorySource._attempt` 只接 `respond` 里抛出的 `RoleMemoryUnavailableError`；进入 `policy_for_rollout` 时抛的异常原样上抛，既不记失败尝试，也不重跑。改后，进入策略上下文时抛的 `RoleMemoryUnavailableError` 也记成一次瞬态失败尝试 `role_memory_unavailable`，并重跑。别的进入期异常照旧原样上抛。
 
 今天 `_held` 有一条"拒绝往被保留的目录里重建"的防线，它的语义不变：仍然拒绝，只是把类别从确定性改成瞬态。
 
@@ -327,7 +328,8 @@ class TrainingWorlds:
 | 部署 episode 开始时有别的轮次的未提交快照 | 瞬态 | `DeferredError` |
 | 恢复时服务端端口 70 秒内没关 | 确定性 | `RestoreFailedError`，库与快照保留等人 |
 | 开下一次尝试或提交时服务端端口 70 秒内没关 | 瞬态 | `DeferredError`，轮次留 pending；重入时先恢复快照 |
-| 服务端按 episode id 找不到 rollout 世界 | 确定性 | 造后端失败，会话被拒，轨迹源按现有规则分类 |
+| 服务端按 episode id 找不到 rollout 世界 | 照现有的 `role_backend_failure` 处理 | 造后端失败，会话以 `role_backend_failure` 被拒，轨迹源不重跑。`factory.interact_policy` 把它译成 `RolloutDeferredError` 走延后通道，续训上限用完后升 T3。只有绕过 `policy_for_rollout` 直接开会话的调用方会落到这里 |
+| 训练重试时同名世界还被服务端端口占着 | 瞬态 | `open_rollout` 抛 `FactoryMemoryUnavailableError`。轨迹源把它记成一次瞬态的失败尝试 `role_memory_unavailable`，原样重跑；重试用完后走延后通道 |
 | 门② 的 `(scenario_id, persona_id)` 不在部署配置里 | 确定性 | T2，提案保持原状 |
 | 绑定里人格重复 | 确定性 | 训练 T2；部署配置退出码 2 |
 | 记忆根是旧布局 | 确定性 | 装配期退出码 2 |

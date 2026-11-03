@@ -190,7 +190,7 @@ MindTrainer 分两层:入口与编排一层决定"从哪跑、跑不跑",模式�
 |---|---|---|---|
 | `src/mindtrainer/training_config.py` | `TrainingConfig` 与 `RewardConfig`、校验、`config_hash`、`phase_at`;interact 必填 `memory` 块,batch 不许有;`bindings` 里人格重复判不合法 [计划中] | `controlplane.envelope`、`simulator.datamodel` | [已落地] |
 | `src/mindtrainer/datamodel.py` | `TrajectoryBatch`、`RewardedTrajectory`、`StepResult`、`TrainingRun`;`policy_backend` 带 `memory` 块 | `simulator.datamodel` | [已落地] |
-| `src/mindtrainer/trajectory_source.py` | `BatchTrajectorySource`、`InteractTrajectorySource`、`batch_for_step`;interact 的策略参数是 `policy_for_rollout`,三元组上行,RoleMemoryUnavailableError 按条重跑、RoleMemoryFailureError 原样上抛,创建被拒按终止原因查瞬态集合 | `simulator.dataset`、实时客户端 | [已落地] |
+| `src/mindtrainer/trajectory_source.py` | `BatchTrajectorySource`、`InteractTrajectorySource`、`batch_for_step`;interact 的策略参数是 `policy_for_rollout`,三元组上行,RoleMemoryUnavailableError 按条重跑、RoleMemoryFailureError 原样上抛,创建被拒按终止原因查瞬态集合 [已落地];进入 `policy_for_rollout` 时抛的 RoleMemoryUnavailableError 也记一次瞬态失败尝试 `role_memory_unavailable` 并重跑,今天它原样上抛 [计划中] | `simulator.dataset`、实时客户端 | [已落地] |
 | `src/mindtrainer/reward_pipeline.py` | 归因、校验、组合,`run_reward_pipeline` | `simulator.dataset` | [已落地] |
 | `src/mindtrainer/grouping.py` | 按 `group_id` 分组、组内均值基线、退化组判定 | 无 | [已落地] |
 | `src/mindtrainer/executor.py` | `TrainingExecutor` 协议与 `MockExecutor` | `grouping`、`simulator.dataset` | [已落地] |
@@ -695,7 +695,7 @@ interact 的生成路多一条「生成、写树、回写、复校」的链路 [
 | 续训时配置变了 | `config_hash` 不同,抛 `NeedsHumanError`,记录不改。interact 的起点库内容、Starling 版本、抽取或嵌入模型变了,摘要或运行时身份就变,同样落在这一行 |
 | interact 的 rollout | 失败的会话整条重跑,不续接;续训时 `InteractTrajectorySource` 的 `start_step` 让情境轮转接着走 |
 | 训练位的记忆失败 [已落地] | 瞬态的整条重跑,重跑时上一次尝试的副本已随上下文退出,同名目录先删后建。确定性的不重跑,训练记录停在 `failed`(T2),指令判 `failed`,不延后。副本 close 超过 60 秒按确定性处理 |
-| 重试撞上服务端端口还没关的世界 [计划中] | 表里还登记着同名世界,说明服务端端口 70 秒内没关上。拒绝重建,抛瞬态的 `FactoryMemoryUnavailableError`,记为 `role_memory_unavailable` 再重跑;次数用完走延后通道,指令保持 `pending` |
+| 重试撞上服务端端口还没关的世界 [计划中] | 表里还登记着同名世界,说明服务端端口 70 秒内没关上。拒绝重建,抛瞬态的 `FactoryMemoryUnavailableError`。它在进入 `policy_for_rollout` 时抛出,轨迹源要把进入期的这类异常也记成一次瞬态失败尝试 `role_memory_unavailable` 再重跑(今天进入期异常原样上抛);次数用完走延后通道,指令保持 `pending` |
 | 合成中途崩溃 | 已在树里的清单不再合成;episode 写完而清单未写的阶段整段重跑覆盖,逐字节相同的文件不产生新提交 |
 
 走查例子:batch 指令在进入 step 3 时崩溃,从 `@2`(已完成两步)的存点续训,共 6 步完成;step 从 0 计。数值来自 `tests/test_mt_orchestrator.py` 的同一套夹具,经 `uv run python` 在编排器层实跑。接入守护进程时,第一次崩溃是 T1,原样上抛让守护进程退出,指令全程是 `pending`;第二次派发发生在外部监督者重启之后。
@@ -799,7 +799,7 @@ interact 的生成路多一条「生成、写树、回写、复校」的链路 [
 | 训练位的记忆失败,其余类别(改抛 RoleMemoryFailureError) [已落地] | T2 | 会话 abort。编排器把训练记录写 `failed` 后重抛,策略上下文原样放行,派发器见记录已 `failed` 就判 `DirectiveFailedError`,不延后。副本 close 超过 60 秒(等 Starling 工作线程)同样判这一类,不重试,同名目录留给下次清扫 | 训练记录 `failure`、指令 `payload["failure"]` |
 | 种子世界读不出:`seeds/<seed_id>/<scenario_id>.db` 在但打不开或摘要算不出 [计划中] | T2 | 与今天种子库打不开同一处理:派发器在进入策略上下文之前判 `failed`,不起服务。文件不存在才从空世界起 | 指令 `payload["failure"]` |
 | 重试时同名 rollout 世界还被服务端端口占着 [计划中] | T1 | 不重建,抛 `FactoryMemoryUnavailableError`,轨迹源记为 `role_memory_unavailable` 原地重跑;耗尽后的 `RolloutFailedError` 由策略上下文译成延后,指令保持 `pending` | `curve_summary["failed_rollout_attempts"]` |
-| 服务端按 `episode_id` 找不到 rollout 世界 [计划中] | 与造后端失败相同 | 会话以 `role_backend_failure` 被拒,轨迹源按现有规则分类;只有绕过 `policy_for_rollout` 直接开会话的调用方会落到这里 | 同上 |
+| 服务端按 `episode_id` 找不到 rollout 世界 [计划中] | 延后,续训上限用完升 T3 | 会话以 `role_backend_failure` 被拒,轨迹源不重跑;组合根把它译成延后,指令留 `pending`。只有绕过 `policy_for_rollout` 直接开会话的调用方会落到这里 | 同上 |
 | 删 rollout 世界前服务端端口 70 秒内没关 [计划中] | 不算失败 | 世界进保留表,文件留给启动清扫;这条 rollout 的轨迹已拿到,照常结束 | warning 日志 |
 | `bindings` 里人格重复 [计划中] | T2 | `validate_training_config` 给出原因,指令判 `failed`,不写训练记录 | 指令 `payload["failure"]` |
 | 创建会话被拒,终止原因在瞬态集合里(准入满额,或逻辑 episode id 撞上活动会话,都是 `role_backend_unavailable`) [已落地] | T1 | 准入满额先在同一次尝试里退避重建(总等待 `ADMISSION_WAIT_S` 65 秒,不计入重试次数),仍被拒再按终止原因查瞬态集合、按条重跑;`invalid_session` 仍不重跑 | `curve_summary["failed_rollout_attempts"]` |
