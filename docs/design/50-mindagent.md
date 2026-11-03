@@ -3,13 +3,13 @@
 | 项 | 内容 |
 |---|---|
 | 一句话 | 新模型晋级后,部署 Actio 实例采集经验,分析行为缺口,生成并验证技能提案,经审核门②收录进正式库 |
-| 状态 | 部分落地:配置、库读取、失败守卫、部署、分析、提案、验证、打包、轮次与收录两个处理器、调和循环触发与组合根装配 [已落地],已由 `factory run --enable agent,admit` 经 `reconcile_once` 端到端跑通;闭环里的模型后端是罐头实现(`factory.agent.CannedGuidedBackend`,不加载 checkpoint),轮次产物不记后端来源;部署记忆(经部署记忆管理面访问,配了记忆配置用 Starling,否则用落盘替身)、部署实例按 episode 新造、门② 的记忆收录改路 [已落地] |
+| 状态 | 部分落地:配置、库读取、失败守卫、部署、分析、提案、验证、打包、轮次与收录两个处理器、调和循环触发与组合根装配 [已落地],已由 `factory run --enable agent,admit` 经 `reconcile_once` 端到端跑通;闭环里的模型后端是罐头实现(`factory.agent.CannedGuidedBackend`,不加载 checkpoint),轮次产物不记后端来源;部署记忆(经部署记忆管理面访问,配了记忆配置用 Starling,否则用落盘替身)、部署实例按 episode 新造、门② 的记忆收录改路 [已落地];记忆改为一个情境一个部署世界、人格是其中的主体 [计划中] |
 | 所在层 | 计算层 |
 | 代码位置 | `src/mindagent` [已落地] |
 | 基线提交 | `b826440`(2026-10-21) |
 | 依赖 | ControlPlane(`controlplane`)、Actio(`actio`,含记忆端口、管理面与 Starling 适配器)、外部推理桥接(`inference_bridge`)、SocialSimulator(`simulator` 的数据模型、产物读写、实时环境服务客户端) |
 | 被依赖 | factory 组合根(注册两个处理器);调和循环经注入调用处理器;命令行读提案载荷 |
-| 对应实施计划 | 工作包 7(任务 80 至 89)与工作包 8、9 的触发与装配 [已落地];智能体记忆设计的第 5 步(部署记忆、轮次摘要、快照重放、门② 改路,替身路径)[已落地];Starling 部署管理面:第 7 步 [已落地] |
+| 对应实施计划 | 工作包 7(任务 80 至 89)与工作包 8、9 的触发与装配 [已落地];智能体记忆设计的第 5 步(部署记忆、轮次摘要、快照重放、门② 改路,替身路径)[已落地];Starling 部署管理面:第 7 步 [已落地];记忆按情境世界组织 [计划中] |
 
 ## 0. 系统速览
 
@@ -28,7 +28,7 @@
 | TrainScheduler | 决策执行器:装配上下文、校验决策、构造训练指令、提名配方 | 控制层 | [已落地],含策略经验(默认关) |
 | TrainPlanner | 决策学习者:经可插拔后端给出下一轮训练决策 | 控制层 | [已落地],默认后端经桥接调用命令行模型 |
 
-共享基础设施有五个。**Actio** 是带技能库与显式记忆的智能体框架,每次响应附带激活轨迹;记忆由内嵌的 **Starling** 提供,一个人格一个树外 SQLite 库,可选 extra `memory` [已落地]。**外部推理桥接**用命令行调用外部强模型。**远端计算层** `compute` 经 SSH 在远端 GPU 主机上跑作业 [已落地]。**ROLL** 是分布式训练引擎,**vLLM** 是推理引擎。V1 经远端计算层接入 ROLL 的 LoRA SFT [已落地](由 `--executor roll` 装配,已在真实主机上从指令跑到候选一次)与 vLLM 推理服务 [已落地](命令拼装、SSH 隧道、服务生命周期;真机端到端待补)。已落地部分仍由确定性 mock 顶替。真实 GRPO 加 OPD 训练与真实 judge [推迟]。
+共享基础设施有五个。**Actio** 是带技能库与显式记忆的智能体框架,每次响应附带激活轨迹;记忆由内嵌的 **Starling** 提供,可选 extra `memory` [已落地]:今天一个人格一个树外 SQLite 库 [已落地];改为一个模拟世界一个库、人格是其中的主体(部署一个情境一个世界,训练一条 rollout 一个世界)[计划中]。**外部推理桥接**用命令行调用外部强模型。**远端计算层** `compute` 经 SSH 在远端 GPU 主机上跑作业 [已落地]。**ROLL** 是分布式训练引擎,**vLLM** 是推理引擎。V1 经远端计算层接入 ROLL 的 LoRA SFT [已落地](由 `--executor roll` 装配,已在真实主机上从指令跑到候选一次)与 vLLM 推理服务 [已落地](命令拼装、SSH 隧道、服务生命周期;真机端到端待补)。已落地部分仍由确定性 mock 顶替。真实 GRPO 加 OPD 训练与真实 judge [推迟]。
 
 **状态标记。** **[已落地]** 表示代码在主干上且有测试。**[计划中]** 表示设计与实施计划已定,代码还没写。**[推迟]** 表示明确不在 V1 范围内。图只画目标系统,不标进展,进展只看正文的状态标记。
 
@@ -101,6 +101,8 @@ MindAgent 是 AgentRSI 路径的执行者:不改权重,只让技能库与记忆�
 
 智能体记忆设计给部署实例加上记忆 [已落地]。Starling 是内嵌的 SQLite 记忆库,配了记忆配置时每个绑定人格在仓库之外有一个库文件;没配时用落盘的 FileTupleStore 替身。记忆跨轮次持久累积。本包经 Actio 的部署记忆管理面 DeploymentMemoryStore 访问人格库,不导入 Starling。门② 批准的记忆增量写进同一个人格库,不再写进产物树。
 
+今天一个绑定人格一个库 [已落地]。改为一个情境一个部署世界,这个情境绑定的人格都是其中的主体 [计划中]。智能体位与部署对手位都在世界里跨会话积累记忆;今天对手位每会话一份空记忆 [已落地]。理由:同一情境的几个人身处同一个世界,一人一库把他们拆进了平行世界。
+
 ## 2. 目标、非目标与约束
 
 结论:V1 只做"技能提案 → 行为验证 → 人工审核 → 收录"这一条环路,其余能力推迟。
@@ -116,6 +118,7 @@ MindAgent 是 AgentRSI 路径的执行者:不改权重,只让技能库与记忆�
 | MA-G5 | 批准的提案收录进正式库,库版本加一 | `library_state` 版本递增,`admitted` 记下来源提案 |
 | MA-G6 | 两个处理器在任一崩溃点重入都收敛 | 故障注入测试:不重复部署、不重复写提案、不重复递增 |
 | MA-G7 | 部署记忆跨轮次累积;episode 失败重试不重复记忆;验证重放的基线与候选看到同一份记忆 | 故障注入测试:重试前部署库摘要回到 episode 起点;轮次判 `failed` 后在途 episode 的半截记忆被回滚;记忆增量重入不二次抽取 |
+| MA-G8 | 部署对手位跨会话积累记忆,尝试失败时与智能体位一起回滚 [计划中] | 故障注入测试:对手位跨两条部署 episode 记得上一次;某次尝试失败后两个位的写入都回滚 |
 
 **非目标与推迟项**
 
@@ -129,6 +132,10 @@ MindAgent 是 AgentRSI 路径的执行者:不改权重,只让技能库与记忆�
 | 留出集验证 | [推迟] | 验证用触发提案的同一批 episode,过拟合说明写进 `notes` |
 | AgentRSI 配方自动提名 | [推迟] | 轮次产物记下锚定字段,人工写配方候选 |
 | 运行中轮次被新模型打断 | [推迟] | 轮次同步执行,下次触发时才置 superseded |
+| 共享感知(在场的人都记住同一句话) | [推迟] | 每个实例只写他人的发言,写在自己的主体名下;以后接 Starling 的感知授权 |
+| 跨情境共享一个人格的记忆 | 不做 | 同一人格在两个情境里是两个世界里的两个主体 [计划中] |
+| 部署世界的 Starling 实现 | [推迟] | 世界化先在落盘替身上做 [计划中];Starling 记忆服务落地后只换后端实现,协议与本包不动 |
+| 迁移旧布局的部署库与快照 | 不做 | 记忆根是旧布局时组合根拒绝启动(`FactoryConfigError`,退出码 2),写明要清空的目录 [计划中] |
 
 **质量属性与硬约束**
 
@@ -191,14 +198,14 @@ MindAgent 是 AgentRSI 路径的执行者:不改权重,只让技能库与记忆�
 | `config` | 冻结配置 `AgentConfig`,找出 Actio 占的角色位 | `simulator.datamodel` | [已落地] |
 | `library` | 读正式库与库版本,推出收录后的条目 id;`LibraryState` 没有 `memories`,不读 `memory_library/` | `actio`、`controlplane.paths` | [已落地] |
 | `failures` | 判"读不出"、校验 run id、只记一次失败记录 | `controlplane.ledger` | [已落地] |
-| `deployment` | 流水线 1:经接口②跑部署 episode 并落盘;收实例工厂 make_instance,每次尝试开端口、造实例、跑、关实例;每条 episode 开始前备份起点,重试前 `restore_from` 回滚 | 实时环境服务客户端、`store_adapter`、`memory_layout`、`actio` 部署记忆管理面 | [已落地] |
+| `deployment` | 流水线 1:经接口②跑部署 episode 并落盘;收实例工厂 make_instance,每次尝试开端口、造实例、跑、关实例;每条 episode 开始前备份起点,重试前 `restore_from` 回滚;改为按情境世界备份与回滚,恢复、重开端口与提交前等世界的端口全关 [计划中] | 实时环境服务客户端、`store_adapter`、`memory_layout`、`actio` 部署记忆管理面 | [已落地] |
 | `analysis` | 流水线 2:跨 episode 统计行为缺口 | `actio.signals`、`actio.triggers` | [已落地] |
 | `proposals` | 流水线 3:规则模板或桥接生成技能草案 | `actio.skills`、`inference_bridge` | [已落地] |
-| `verify` | 流水线 4:离线重放度量行为改变;在部署库的快照副本上只读重放 | `analysis`、Actio 实例 | [已落地] |
+| `verify` | 流水线 4:离线重放度量行为改变;在部署库的快照副本上只读重放;改为每个情境一份验证快照,按 episode 的情境取实例 [计划中] | `analysis`、Actio 实例 | [已落地] |
 | `packaging` | 流水线 5:按阈值筛选,写提案产物 | `controlplane.paths` | [已落地] |
-| `rounds` | 轮次处理器工厂,取代旧轮次;处理器开始拿人格库锁(被占抛 `DeferredError`),写 `memory_runtime` 与 `episode_digests`;把 `pending` 轮次写成终态前先回滚在途 episode | 以上全部 | [已落地] |
-| `admit` | 收录处理器工厂;记忆增量经部署记忆管理面调 `remember_event`,写前拿库锁。库锁被占,或任何轮次有未提交的起点副本(只含技能的提案同样延后),抛 `DeferredError`。抽取失败按类别分两路:`timeout`、`transport_failure` 延后重试;其余类别一条记忆增量都没提交过时提案改为 `rejected`,部分已提交时记 T3、不再重抽 | `library`、`failures`、`memory_layout`、`controlplane.deferred`、`actio` 部署记忆管理面 | [已落地] |
-| `memory_layout` | 部署记忆根目录的磁盘布局:人格库锁、起点副本、验证快照的路径,以及门② 用的未提交副本查询 | `actio`、`controlplane.lock` | [已落地] |
+| `rounds` | 轮次处理器工厂,取代旧轮次;处理器开始拿人格库锁(被占抛 `DeferredError`),写 `memory_runtime` 与 `episode_digests`;把 `pending` 轮次写成终态前先回滚在途 episode;人格库锁改为情境世界锁,`episode_digests` 改为一条 episode 一个世界摘要 [计划中] | 以上全部 | [已落地] |
+| `admit` | 收录处理器工厂;记忆增量经部署记忆管理面调 `remember_event`,写前拿库锁。库锁被占,或任何轮次有未提交的起点副本(只含技能的提案同样延后),抛 `DeferredError`。抽取失败按类别分两路:`timeout`、`transport_failure` 延后重试;其余类别一条记忆增量都没提交过时提案改为 `rejected`,部分已提交时记 T3、不再重抽。改为增量带 `scenario_id`,写前拿所涉情境的世界锁;未提交副本的全局等待不变 [计划中] | `library`、`failures`、`memory_layout`、`controlplane.deferred`、`actio` 部署记忆管理面 | [已落地] |
+| `memory_layout` | 部署记忆根目录的磁盘布局:人格库锁、起点副本、验证快照的路径,以及门② 用的未提交副本查询;改为世界锁、整世界的起点快照加 `.world` 旁注文件、每个情境一份验证快照 [计划中] | `actio`、`controlplane.lock` | [已落地] |
 | `errors` | 本包异常:数据错误、解析耗尽、轮次失败、覆盖失败 | 无 | [已落地] |
 
 **依赖方向规则**
@@ -211,7 +218,7 @@ MindAgent 是 AgentRSI 路径的执行者:不改权重,只让技能库与记忆�
 
 ## 4. 数据模型与状态机
 
-结论:MindAgent 写五类产物;轮次走非审核类状态机,提案走审核类状态机。部署记忆放在产物树之外的人格库里。
+结论:MindAgent 写五类产物;轮次走非审核类状态机,提案走审核类状态机。部署记忆放在产物树之外的人格库里 [已落地],改为按情境世界组织 [计划中]。
 
 **实体表**
 
@@ -223,8 +230,9 @@ MindAgent 是 AgentRSI 路径的执行者:不改权重,只让技能库与记忆�
 | `ProposalDraft` [已落地] | `finding_id`、`increments`、`generator` | V1 只有一个 `kind: skill` 增量 |
 | `Verification` [已落地] | `method`、`episodes`、`fired_on_motivating`、`fired_elsewhere`、`notes`、可选 `quality_notes` | `method` 固定为 `replay_behavior` |
 | 部署记忆库 | 每个绑定人格一个树外库文件(Starling 的 `.db` 或替身的 `.json`);库内事件表的 `seq` 是持久的单调时钟 | 轮次独占;库不进产物树,不能从 git 历史追溯 |
-| 起点快照 | 某条部署 episode 开始前的人格库副本,加它的逻辑摘要 | 摘要记进轮次产物;副本在 episode 成功后删 |
-| 部署记忆管理面 | DeploymentMemoryStore:按人格 id 开端口、写与放弃门② 事件、列 `pending` 事件、备份、覆盖、算摘要 | 在 `actio`,本包只调它;两个实现 StarlingDeploymentStore、FileTupleStore;`restore_from` 在该人格还有打开的端口时抛 MemoryFailureError |
+| 部署世界 [计划中] | 一个 `scenario_id` 一个树外库文件;这个情境绑定的全部人格是主体,每条记忆与事件行带主体 | 端口绑定 (世界, 主体),召回只返回本主体的记忆;同一世界里同一主体只开一个可写端口 [计划中] |
+| 起点快照 | 某条部署 episode 开始前的人格库副本,加它的逻辑摘要;改为整个情境世界的副本 [计划中] | 摘要记进轮次产物;副本在 episode 成功后删 |
+| 部署记忆管理面 | DeploymentMemoryStore:按人格 id 开端口、写与放弃门② 事件、列 `pending` 事件、备份、覆盖、算摘要 | 在 `actio`,本包只调它;两个实现 StarlingDeploymentStore、FileTupleStore;`restore_from` 在该人格还有打开的端口时抛 MemoryFailureError。改为按世界 id 管,`restore_from` 在该世界还有任何打开的端口时拒绝,另有 `wait_closed` [计划中] |
 
 | `AgentConfig` 字段 [已落地] | `max_turns` | `episodes_per_scenario` | `max_retries_per_episode` | `min_support` / `min_ratio` | 验证阈值 | `max_parse_retries` |
 |---|---|---|---|---|---|---|
@@ -250,8 +258,15 @@ MindAgent 是 AgentRSI 路径的执行者:不改权重,只让技能库与记忆�
 | `deploy/<persona_id>.lock` | 人格库的独占文件锁 | 轮次处理器;门② 收录处理器 | 处理器开始拿,返回或抛出时放;门② 写该人格库前也拿同一把 | [已落地] |
 | `snapshots/<round_id>/<episode_id>-<persona_id>.db` | 某条 episode 的起点副本 | 部署驱动器 | episode 落盘后删,删除是提交点;重试与崩溃重入前用它 `restore_from` 覆盖部署库;门② 收录前查有无未提交副本(任何人格、任何轮次) | [已落地] |
 | `snapshots/<round_id>/verify-<persona_id>.db` | 验证快照,基线与候选各开一份副本 | 验证器 | 验证结束即删 | [已落地] |
+| `deploy/<scenario_id>.db` | 部署世界:这个情境全部主体的记忆与事件行 | 部署实例与服务端的对手位经端口;收录处理器 | 持久,跨轮次累积 | [计划中] |
+| `deploy/<scenario_id>.lock` | 世界锁,取代人格库锁 | 轮次处理器拿本轮全部情境的;门② 拿所涉情境的 | 同人格库锁 | [计划中] |
+| `snapshots/<round_id>/deploy-<episode_id>.db` | 某条 episode 的起点快照,整个世界 | 部署驱动器 | 同起点副本,删除是提交点 | [计划中] |
+| `snapshots/<round_id>/deploy-<episode_id>.world` | 旁注文件,内容是 `scenario_id`;回滚读它找到世界 | 部署驱动器 | 与快照同生同删 | [计划中] |
+| `snapshots/<round_id>/verify-<scenario_id>.db` | 验证快照,一个情境一份 | 验证器 | 验证结束即删 | [计划中] |
 
 库文件名用人格 id,因为人格才是个体。对手位的实例每会话一份空记忆,不读写部署库。
+
+库文件名改为情境 id [计划中]:情境是模拟世界的单位,人格是其中的主体。部署对手位改由服务端开部署世界的端口,跨会话积累记忆 [计划中]。快照文件名里没有人格,属于哪个世界由旁注文件给出,不解析 episode id [计划中]。记忆根下有旧布局时组合根拒绝启动(`FactoryConfigError`,退出码 2),写明要清空的目录 [计划中]。不迁移:旧部署库只来自验证,悄悄留着会让人以为它还在用。
 
 **轮次状态**:`pending → executed | failed`。终态再触发是空操作。`failed` 用 `payload.failure.category` 区分三种:`T3` 是真失败,`superseded` 是被新模型取代。
 
@@ -297,10 +312,13 @@ payload:
 |---|---|---|
 | `memory_runtime` | 记忆运行时身份:后端(`starling` 或 `stand-in`)、Starling 版本与安装来源、抽取与嵌入的端点和模型、重试与超时、轨迹模式 | [已落地] |
 | `episode_digests` | `{episode_id: {persona_id: 起点摘要}}`;每条 episode 开始前写回一次,轮次产物本来就逐步回写。只记智能体位人格;部署对手位每会话一份空 TupleMemory,不进摘要。人格库锁覆盖全部绑定人格 | [已落地] |
+| `episode_digests` [计划中] | 改为 `{episode_id: 世界摘要}`:一条 episode 只属于一个情境,一个世界一个摘要,覆盖全部主体;世界锁覆盖本轮全部情境 | [计划中] |
 
 读轮次产物的人不必翻库文件,就知道每条 episode 的记忆从哪来。库不在产物树里,这两个键是记忆身份在树里的唯一留痕。
 
 记忆增量的 `definition` 是 `persona_id`、`text`、`interlocutor` 三个必填键,不再是 `MemoryEntry`。`persona_id` 指明写进哪个人格的库,`text` 原样作事件文本,`interlocutor` 是这条记忆关于谁,空串表示一般事实(替身库收不了一般事实:空串在登记前就被拒,判 T2,提案留 `approved`)。收录前严格校验,多键少键都是 T2。收录处理器把写成功的语句 id 记进提案载荷的 `admitted_statements`,只作证据,不作幂等依据。
+
+`definition` 改为 `scenario_id`、`persona_id`、`text`、`interlocutor` 四个必填键 [计划中]。`scenario_id` 指世界,`persona_id` 指主体。`scenario_id` 过路径段白名单;`(scenario_id, persona_id)` 必须是部署配置里绑定的一对,否则 T2 [计划中]。今天没有代码生成记忆增量,只有手写提案与测试带它,所以只改校验与写入。
 
 **不变量**
 
@@ -318,10 +336,15 @@ payload:
 | MA-I10 | 事件 key `<提案 id>#<k>` 只由收录处理器推进;`abandoned` 的 key 不再被任何路径写进记忆 |
 | MA-I11 | 某条部署 episode 的起点副本还在,它就未提交;副本不在而 episode 文件在,它已提交 |
 | MA-I12 | 门② 收录时,所涉人格的库锁空闲,且没有任何轮次的未提交起点副本(只含技能的提案同样遵守后一条);否则不收录 |
+| MA-I13 | 一个轮次独占本轮全部情境的部署世界:按 `scenario_id` 排序拿世界锁,取代 MA-I8 的人格库锁 [计划中] |
+| MA-I14 | 一个世界里同一主体只开一个可写端口;同一人格在一个情境里占两个角色位时拒绝 [计划中] |
+| MA-I15 | 部署事件 key 是 `<round_id>/<部署 episode id>#<turn_index>@<主体>`;门② 的 key 仍是 `<提案 id>#<k>` [计划中] |
+| MA-I16 | 部署轮次在一个世界里开新 episode 前,这个世界没有别的轮次留下的未提交起点快照 [计划中] |
+| MA-I17 | 对一个世界 `restore_from` 时,这个世界没有打开的端口,客户端与服务端开的都算 [计划中] |
 
 ## 5. 接口契约
 
-结论:对外只有两个处理器工厂,各返回一个形状为 `Callable[[GitStore, Action], None]` 的处理器;以下签名 [已落地]。部署记忆的契约落在 Actio 一侧,本包一侧的签名在入口与流水线函数里。
+结论:对外只有两个处理器工厂,各返回一个形状为 `Callable[[GitStore, Action], None]` 的处理器;以下签名 [已落地]。部署记忆的契约落在 Actio 一侧,本包一侧的签名在入口与流水线函数里。标 [计划中] 的签名来自设计,施工时可能微调。
 
 **入口**
 
@@ -341,6 +364,8 @@ def make_admit_proposal_handler(*, memory_store, memory_layout) -> Callable[[Git
 轮次处理器的 `action.target_id` 是模型 id `zengen-vN`,收录处理器的是提案 id;两者都不读 `detail`。
 
 三个注入的工厂 [已落地]:`client_factory()` 每条会话新建一个客户端,可选的关键字参数 `deadline_s` 给这一条流的 deadline;`backend_factory` 取 `model_id` 与 `checkpoint_ref`,每次新建模型后端,每次部署尝试一份、验证时基线与候选各一份;验证器的 `base_instance_factory` 取 `extra_skills`,每次返回新的 Actio 实例,传空元组得到基线(处理器内部用快照副本造它)。部署实例的 `profile` 是 `{model_id, round_id}`。
+
+验证器的工厂改为 `base_instance_factory(extra_skills, scenario_id)` [计划中]。它从这个情境的验证快照恢复一个临时世界,开智能体位主体的只读端口 [计划中]。
 
 部署驱动器收实例工厂与部署记忆管理面,不收现成的实例:
 
@@ -365,6 +390,31 @@ class DeploymentMemoryStore(Protocol):   # 在 actio,一个人格一个库,按�
 ```
 
 处理器工厂多收的四个记忆参数见上。验证重放的基线与候选各从验证快照恢复一份临时副本,实例只读。
+
+管理面改为按世界 id 管库 [计划中],签名如下:
+
+```python
+class DeploymentMemoryStore(Protocol):   # 一个情境一个世界,端口绑定 (世界, 主体)
+    def open(self, world_id: str, holder: str) -> MemoryBackend: ...
+    def remember_event(self, world_id, holder, key, text, *, interlocutor) -> RememberOutcome: ...
+    def abandon_event(self, world_id, key) -> None: ...
+    def pending_events(self, world_id) -> list[str]: ...
+    def backup_to(self, world_id, path) -> str: ...        # 整个世界
+    def restore_from(self, world_id, path) -> str: ...     # 该世界有打开的端口就拒绝
+    def digest(self, world_id) -> str: ...                 # 覆盖全部主体
+    def wait_closed(self, world_id, timeout_s) -> bool: ...  # 端口数降到 0 返回 True
+```
+
+| 项 [计划中] | 规则 |
+|---|---|
+| 标识 | `world_id` 是 `scenario_id`,`holder` 是人格 id;两者都拼进文件名,过同一份 `PERSONA_ID_PATTERN` 白名单 [计划中] |
+| 端口 | `MemoryBackend` 五个方法不变,签名里没有主体;召回只返回本主体名下的记忆 [计划中] |
+| `wait_closed` | 计管理面实例内打开着的端口,含别的线程开的;超时返回假 [计划中] |
+| 共用 | 组合根只造一个管理面,交给部署驱动器、门② 与服务端三方共用 [计划中] |
+| `restore_from` | 该世界还有任何打开的端口时抛 MemoryFailureError(`transient` 为假);别的世界开着端口不影响 [计划中] |
+| 按世界的操作 | `abandon_event`、`pending_events` 不分主体,因为事件 key 已带主体 [计划中] |
+| 起点回调 | `on_episode_start(eid, digest)`,一条 episode 一个世界摘要 [计划中] |
+| 收录校验 | 收录处理器要读到部署配置的情境与绑定,才能判 `(scenario_id, persona_id)` 是否绑定;由组合根注入 [计划中] |
 
 **流水线函数**
 
@@ -406,10 +456,13 @@ def load_library(store) -> LibraryState: ...
 | ControlPlane | 路径函数、`ledger.record_failure`、状态迁移检查、`GitStore` 写入内容不变不提交 [已落地] | 两个处理器的名字、位置与形状;终态由处理器自己写回 |
 | Actio | `instantiate`、`respond` 返回三元组、`library_version`、`validate_trace`、`referenced_signals`、内置信号、技能与记忆的 id 前缀 `skill-`、`mem-` [已落地]。`instantiate` 多收逻辑 `episode_id`,实例多 `close()` | 正式库里的技能条目格式;库版本为字符串;`persona_id` 对应的人格库在记忆根目录下 |
 | Actio 的部署记忆管理面 | DeploymentMemoryStore 七个方法按人格 id 管库,实现是 StarlingDeploymentStore 与 FileTupleStore。`remember_event` 按事件 key 幂等,收据是三段写入的事件行。`backup_to` 备份出自洽的单文件副本,`restore_from` 在该人格还有打开的端口时抛 MemoryFailureError | 只经它访问人格库;FileTupleStore 也落盘,提交点协议在两个实现上一样成立 |
+| Actio 的部署记忆管理面(按世界)[计划中] | 八个方法按世界 id 管库,`open(world_id, holder)`;`wait_closed` 等世界的端口全关;`restore_from` 在该世界还有任何打开的端口时抛 MemoryFailureError | 同一个管理面实例由部署驱动器、门② 与服务端共用 |
 | Actio 的记忆失败 | `recall`、`embed_pending` 的失败与 `remember` 抛出的异常是 MemoryFailureError,`transient` 分真假。MemoryEventConflict、MemoryClosedError 是它的子类,`transient` 为假。`remember` 返回 `failed` 只计数、不抛 | 本包直接接这个异常类:瞬态按条回滚重跑,确定性判轮次 `failed`(T3) |
-| SocialSimulator | 实时环境服务客户端的"客户端后说"、`submit_turn` 带激活轨迹、回显自己轮次时保留轨迹、`write_episode` [已落地]。`CreateSession` 的可选 `episode_id` 字段:部署的逻辑 episode id `deploy-<model>-<scenario>-<k>` 重试不变,服务端据此落盘;事件 key 另带的轮次前缀不进这个字段。同一个 `episode_id` 仍有活动会话时,创建被拒为瞬态 `role_backend_unavailable`;格式不合白名单才是 `invalid_session`。“活动”从准入登记起,到 servicer 收尾完或移交滞留表为止 | 部署会话的 `purpose` 固定为 `deployment_simulation`;Actio 占 `self_play` 位;对手位的 Actio 实例每会话一份空记忆;创建被拒按终止原因查瞬态集合,不再一律不可重跑。`role_backend_unavailable`(准入满或 episode id 撞上活动会话)先在同一次尝试里退避重建(总等待 65 秒,不计入重试次数),仍被拒再按条重跑 |
+| SocialSimulator | 实时环境服务客户端的"客户端后说"、`submit_turn` 带激活轨迹、回显自己轮次时保留轨迹、`write_episode` [已落地]。`CreateSession` 的可选 `episode_id` 字段:部署的逻辑 episode id `deploy-<model>-<scenario>-<k>` 重试不变,服务端据此落盘;事件 key 另带的轮次前缀不进这个字段。同一个 `episode_id` 仍有活动会话时,创建被拒为瞬态 `role_backend_unavailable`;格式不合白名单才是 `invalid_session`。“活动”从准入登记起,到 servicer 收尾完或移交滞留表为止 | 部署会话的 `purpose` 固定为 `deployment_simulation`;Actio 占 `self_play` 位;对手位的 Actio 实例每会话一份空记忆 [已落地],部署对手位改为开部署世界的端口 [计划中];创建被拒按终止原因查瞬态集合,不再一律不可重跑。`role_backend_unavailable`(准入满或 episode id 撞上活动会话)先在同一次尝试里退避重建(总等待 65 秒,不计入重试次数),仍被拒再按条重跑 |
+| SocialSimulator(部署对手位)[计划中] | 服务端造部署会话资源时按 `info.episode_id` 查 `AgentRuntime` 的部署登记表,拿到 `round_id`,以 `(scenario_id, persona_id)` 开部署世界的端口;会话终态随 `SessionResources.close` 关端口。查不到登记时对手位照旧用空 `TupleMemory`,记一条 warning | 部署驱动器开会话前经组合根注入的入口登记 episode id 到轮次 id,会话终态后注销 [计划中] |
 | 外部推理桥接 | `complete(prompt, *, run_id, task_id)`、`BridgeError` 带 `category` 与 `attempts`、每次成功调用记一条成本 [已落地] | 传入非空 `run_id`;每次尝试用不同 `task_id` |
 | factory 组合根 | 注入配置、客户端工厂、模型后端工厂、人格加载器、可选桥接 [已落地];读树外记忆配置,把部署记忆管理面交给本包:配置在场用 StarlingDeploymentStore(根目录是配置里的 `root`),不在场用 FileTupleStore,根目录是 `<git 目录>/rismforge-memory`(与 `rismforge.lock` 同处,不入树、跨重启保留;不用临时目录,每次重启换空库会让崩溃重入与门② 收录失效);部署会话的时间预算随配置在场与否取值 | 按名字 `mindagent.rounds.make_start_round_handler` 取工厂 [已落地];启动时 `memory_library/` 必须为空 |
+| factory 组合根(部署世界)[计划中] | 只造一个部署记忆管理面,交给两个处理器与服务端的 `AgentRuntime`(可选参数 `deployment_store`,只在启用部署轮次时传);`AgentRuntime` 持部署登记表;记忆根是旧布局、或部署配置里同一人格占两个角色位时拒绝启动(`FactoryConfigError`,退出码 2) | 无新增 |
 | 命令行 | 无 | 上表的提案载荷键 |
 
 ## 6. 关键流程
@@ -465,15 +518,17 @@ def load_library(store) -> LibraryState: ...
 | 步 | 名称 | 做什么 | 出口 |
 |---|---|---|---|
 | 1 | 产生动作 | 调和循环发现最新 effective 模型缺轮次或轮次 `pending`,产生 `start_agent_round` | 进入 2 |
-| 2 | 读轮次产物 | 终态直接返回;否则对每个绑定人格拿人格库文件锁(写任何东西之前);文件在但读不出,整份重写为 `failed`(T3) | 已终态:空操作;拿不到锁:抛 `DeferredError`,不写树,退避重试 |
-| 3 | 取代旧轮次 | 版本低于最新 effective 的 `pending` 轮次置 `failed`,类别 `superseded`;过期动作本身同样处理 | 被取代:不记失败记录;写终态前先回滚并拿该轮次绑定人格的库锁,锁被占则抛 `DeferredError`、不写终态 |
+| 2 | 读轮次产物 | 终态直接返回;否则对每个绑定人格拿人格库文件锁(写任何东西之前)[已落地],改为按 `scenario_id` 排序拿本轮全部情境的世界锁 [计划中];文件在但读不出,整份重写为 `failed`(T3) | 已终态:空操作;拿不到锁:抛 `DeferredError`,不写树,退避重试 |
+| 3 | 取代旧轮次 | 版本低于最新 effective 的 `pending` 轮次置 `failed`,类别 `superseded`;过期动作本身同样处理 | 被取代:不记失败记录;写终态前先回滚并拿该轮次绑定人格的库锁(改为该轮次情境的世界锁 [计划中]),锁被占则抛 `DeferredError`、不写终态 |
 | 4 | 绑定并写 pending | 读模型产物(须 `effective`、`links` 至少两项)与正式库,写 `pending` 轮次产物,带 `memory_runtime` 与 `episode_digests`(重入时继承) | 模型不合法:`failed`,无失败记录 |
-| 5 | 部署 episode | 已落盘且每个 agent 轮次轨迹的技能版本一致的 episode 直接复用,其余新建会话;每次尝试新造实例;复用只比技能版本,另看起点副本是否已删、`digest_before` 是否等于记录的摘要 | 瞬态:上抛;不可重跑:`failed`;起点副本做不出或覆盖失败:`failed`(T3);确定性的记忆失败:`failed`(T3) |
-| 6 | 分析 · 提案 · 验证 | 求发现,出草案,离线重放;桥接只出现在提案生成;重放在人格库的快照副本上只读进行 | 确定性错误或任何桥接失败:`failed` |
+| 5 | 部署 episode | 已落盘且每个 agent 轮次轨迹的技能版本一致的 episode 直接复用,其余新建会话;每次尝试新造实例;复用只比技能版本,另看起点副本是否已删、`digest_before` 是否等于记录的摘要 [已落地];改为不比较 `digest_before` [计划中] | 瞬态:上抛;不可重跑:`failed`;起点副本做不出或覆盖失败:`failed`(T3);确定性的记忆失败:`failed`(T3);世界里有别的轮次留下的未提交起点快照:`DeferredError` [计划中] |
+| 6 | 分析 · 提案 · 验证 | 求发现,出草案,离线重放;桥接只出现在提案生成;重放在人格库的快照副本上只读进行;改为每个情境一份验证快照 [计划中] | 确定性错误或任何桥接失败:`failed` |
 | 7 | 筛选并打包 | 按阈值筛选,通过的写 `pending_review` 提案 | 被筛掉的记进 `dropped` |
 | 8 | 轮次 executed | 写 `episode_ids`、`findings`、`proposals`、`dropped`,置 `executed`;处理器返回时放人格库锁(验证快照在第 6 步结束时已删) | 终态 |
 
 **episode 复用的判据**:已落盘的 episode 除技能版本外,还要两项同时成立才复用。它的起点副本已不在,说明它已提交。首个智能体轮次轨迹的 `memory.digest_before` 等于 `episode_digests` 里该人格的摘要。不比较部署库当前的摘要,因为已提交的 episode 写过记忆,库摘要本来就变了。两项不全成立就重跑。
+
+复用判据改为四项同时成立 [计划中]:episode 已落盘,起点快照已删,`episode_digests[eid]` 有值,技能版本一致。首个智能体轮次的 `digest_before` 仍写进轨迹,不再参与判据 [计划中]。理由:三个及以上角色位时,别的对手可能先于智能体位写入世界。例如 C 先开口、B 第二、智能体位 A 第三,A 首轮时世界里已有 B 写下的 C 的话。复用防的是同一 episode id 下世界起点不同;起点摘要与删快照在同一轮次里一一对应,足以判定。
 
 **已提交的 episode 不随记忆收录重跑**:记忆版本不参与复用判断。已提交 episode 的事件已是 `committed`,同一逻辑 id 重跑会让对手的新发言撞上 MemoryEventConflict,召回还会看到自己“未来”的记忆。只有技能版本变了才重跑。重跑用新的逻辑 id `deploy-{model}-{scenario}-{k}-s{技能版本}`,事件 key 随之不同。新一轮第一次运行用不带后缀的 base id;只有 base 已提交且技能版本旧了才用 `-s<版本>`。
 
@@ -493,7 +548,45 @@ def load_library(store) -> LibraryState: ...
 | 轮次判 `failed`(T3) | 先对在途 episode 用起点副本 `restore_from` 回滚部署库,再删副本,再写失败记录。失败的轮次不把半截记忆留给下一轮 | 覆盖失败:库与副本都保留,照写失败记录 |
 | 第 6 步验证 | 智能体位人格 `backup_to` 到 `snapshots/<round_id>/verify-<persona_id>.db`;基线与候选各开一份副本,`replay_read_only` 为真 | 快照做不出:同起点副本做不出,轮次 `failed`,T3。重放里的记忆异常:瞬态延后,其余 T3 |
 
+改为按情境世界后,上表的动作这样变 [计划中]:
+
+| 时刻 | 今天 [已落地] | 改为 [计划中] |
+|---|---|---|
+| 处理器开始 | 拿每个绑定人格的 `deploy/<persona_id>.lock` | 按 `scenario_id` 排序拿本轮全部情境的 `deploy/<scenario_id>.lock`,取不到抛 `DeferredError` [计划中] |
+| 每条 episode 开始前 | `backup_to(agent_persona, snap)` | 先确认该世界没有别的轮次的未提交起点快照,再 `backup_to(scenario_id, snap)` 备份整个世界,旁写 `.world` 文件 [计划中] |
+| 记起点摘要 | `on_episode_start(eid, {persona: digest})` | `on_episode_start(eid, digest)`,一个世界一个摘要 [计划中] |
+| 每次尝试开端口 | `open(agent_persona)` | 先 `wait_closed`,再 `open(scenario_id, agent_persona)` [计划中] |
+| 部署对手位 | 每会话一份空 `TupleMemory` | 服务端 `open(scenario_id, opponent_persona)`,随会话终态关 [计划中] |
+| 尝试失败要重试 | 关端口,`restore_from(agent_persona, snap)` | 关客户端端口,`wait_closed` 等服务端端口也关,再 `restore_from(scenario_id, snap)` [计划中] |
+| episode 成功 | 放弃本 episode 前缀的 `pending` 行,删快照 | 先 `wait_closed`,再按世界列 `pending` 行;前缀 `<round_id>/<eid>#` 让对手位留下的行一并放弃 [计划中] |
+| 第 6 步验证 | 智能体位人格一份 `verify-<persona_id>` | 本轮每个情境世界各一份 `verify-<scenario_id>` [计划中] |
+
+**别的轮次的未提交快照** [计划中]:部署轮次在一个世界里开新 episode 前,这个世界不能有别的轮次留下的未提交起点快照。回滚一个世界会退掉快照之后的全部写入,所以快照与回滚之间不能有别的动作写这个世界。正常流程里不会出现这种快照。守护进程一次只处理一个动作。轮次处理器开头先跑 `supersede_stale_rounds`,回滚更旧的 `pending` 轮次并删掉快照。
+
+| 情形 [计划中] | 为什么快照还在 | 守卫的作用 |
+|---|---|---|
+| 别的轮次回滚失败(`RestoreFailedError`) | 库与快照有意留给人处理 | 本轮不写这个世界,免得人恢复那份快照时连本轮的写入一起退掉 |
+| 别的轮次的产物读不出 | `supersede_stale_rounds` 跳过读不出的产物 | 同上 |
+
+两种情形都要人处理,所以守卫抛 `DeferredError`,原因写出快照所在的轮次 id 与“需要人工恢复或删除快照” [计划中]。守护进程连续延后 20 次后带着这条原因退出(`controlplane.daemon.DeferredExhaustedError`),这是有意的:让人看到。本轮自己的快照不算,重入时“快照在就先恢复”的路径不变。门② 保留今天的全局等待,不论快照属于哪个世界。
+
+**等世界的端口全关** [计划中]:部署对手位的端口由服务端开,在 `Interact` 的 finally 里由另一个线程收尾。收尾先 quiesce,再 join 在途后端线程(`resource_join_timeout_s`),最后关端口。驱动器因此在三个时刻先调 `wait_closed`,等这个世界的端口全关 [计划中]:
+
+| 等待点 [计划中] | 上限 | 超时的处理 |
+|---|---|---|
+| `restore_from` 之前 | `SESSION_CLOSE_WAIT_S` = 70 秒,即服务端 join 上限 60 秒加 10 秒余量 [计划中] | 按 `RestoreFailedError` 处理,T3,库与快照都保留等人 |
+| 开下一次尝试之前 | 同上 | 瞬态:抛 `DeferredError`,轮次留 `pending`,守护进程退避重入,重入时快照在就先恢复 [计划中] |
+| episode 提交之前 | 同上 | 同上,按瞬态处理 [计划中] |
+
+join 等不到时,服务端把资源移进滞留表,由回收线程过后再关。这时等待也会超时,落进上表的处理。
+
 回滚安全靠独占:轮次拿着人格库锁,episode 在一个线程里顺序跑,覆盖部署库时没有别的写者。覆盖只在端口关闭之后做。`restore_from` 在该人格还有打开的端口时抛错,因为覆盖正被打开的库会写坏它。固定时钟在持久库里会倒退,所以事件时间取库内单调递增的事件序号 `seq`,序号由库在写事件行时分配,实例不计数。两条 episode 的同一句话是不同事件,因为事件 key 是 `<逻辑 episode id>#<轮次序号>`,逻辑 episode id 重试不变。部署的事件 key 前面再加轮次 id,写成 `<round_id>/deploy-...#<turn_index>`:部署库跨轮次持久,而 `deploy-<model>-<scenario>-<k>` 下一轮会重复出现,不加就撞上上一轮已 `committed` 的同 key。轮次前缀只进事件 key,`CreateSession.episode_id` 与落盘文件名仍是不带轮次的 `deploy-...`(白名单不含 `/`)。
+
+事件 key 改为 `<前缀>#<turn_index>@<主体>`,主体是写入方的人格 id [计划中]。部署的前缀仍是 `<round_id>/<部署 episode id>`,门② 的 key 仍是 `<提案 id>#<k>`,以提案 id 开头,不会与对话 key 相撞。理由:实例只写别人的发言,三个及以上角色位时同一轮会被两个主体各写一次。一个世界只有一张事件表,不带主体就撞 key,替身会把第二条当成幂等重写而丢掉。情境的角色位数没有上限,`simulator.runner.run_episode` 按 `turn_index % n_roles` 轮流发言。
+
+部署对手位靠登记拿到轮次 id [计划中]。`simulator.realtime.validation.validate_episode_id` 只允许 `[A-Za-z0-9._-]`,装不下 `<round_id>/`。部署驱动器开会话前向 `AgentRuntime` 登记 episode id 到轮次 id 的映射,会话终态后注销 [计划中]。服务端按 `info.episode_id` 查表,拼成 `<round_id>/<episode_id>` 作对手位实例的 episode id。查不到就按没有部署记忆处理:对手位用空 `TupleMemory`,记一条 warning。
+
+只有绕过部署驱动器直接开会话的调用方会查不到 [计划中]。提交时按前缀 `<round_id>/<eid>#` 放弃 `pending` 行,对手位留下的行一并放弃,提交逻辑不用改。
 
 **部署会话的失败分类**(第 5 步,[已落地])
 
@@ -529,11 +622,13 @@ def load_library(store) -> LibraryState: ...
 | 量 | 定义 |
 |---|---|
 | 重放对象 | 发现引用的动机 episode;对手原话照抄,agent 轮次由实例重新生成 |
-| 基线实例 | 当前库;记忆是人格库快照的一份副本,`replay_read_only` 为真,不写记忆 |
+| 基线实例 | 当前库;记忆是人格库快照的一份副本,`replay_read_only` 为真,不写记忆;改为按 episode 的情境取这个情境的基线实例 [计划中] |
 | 候选实例 | 当前库加草案技能(优先级 100);记忆是同一份快照的另一份副本,所以基线与候选看到同一份记忆 |
 | 动机轮次 | 重放中该信号在 agent 发言前为真的 agent 轮次 |
 | `fired_on_motivating` | 候选在动机轮次上选中草案技能的比例,分母为 0 记 0.0 |
 | `fired_elsewhere` | 候选在动机 episode 其余 agent 轮次上选中草案技能的比例 |
+
+验证重放改为按情境世界 [计划中]。分析器按信号聚合全部 episode,所以一个发现引用的 episode 会跨情境。所有 episode 跑完后,本轮每个情境世界各拍一份 `verify-<scenario_id>` 验证快照。`verify()` 回放每个 episode 时按 `episode.scenario_id` 取这个情境的基线与候选实例,同一情境的实例在一次调用里复用 [计划中]。指标照旧对全部 episode 累计,清理照旧在 finally 里关实例、删全部验证快照与临时世界。
 
 **提案到收录**
 
@@ -585,12 +680,14 @@ def load_library(store) -> LibraryState: ...
 
 | 步 | 名称 | 做什么 | 重入时 |
 |---|---|---|---|
-| 1 | 校验全部增量 | 每个增量按技能或记忆格式解析;任一不合法则一条不写;记忆增量的 `definition` 恰好是 `persona_id`、`text`、`interlocutor` 三个键,多键少键都不合法;`persona_id` 要过人格 id 的字符白名单,`text` 非空,`interlocutor` 是字符串 | 再校验一次 |
-| 2 | 写库条目 | 按增量顺序写入:技能写 `skill_library/`,状态 `effective`,`links = [提案 id]`;记忆先拿该人格的库锁,再经 DeploymentMemoryStore.remember_event 写库,key 为 `<提案 id>#<k>` | 技能条目已存在就跳过;记忆同 key 再调得到事件行里存的同一批语句 id,不二次抽取。混合提案(记忆加技能)的记忆先于技能写:记忆抽取失败要整份拒绝,技能条目也不落,技能已写成 `effective` 就收不回了 |
+| 1 | 校验全部增量 | 每个增量按技能或记忆格式解析;任一不合法则一条不写;记忆增量的 `definition` 恰好是 `persona_id`、`text`、`interlocutor` 三个键,多键少键都不合法;`persona_id` 要过人格 id 的字符白名单,`text` 非空,`interlocutor` 是字符串;改为另带 `scenario_id`,且 `(scenario_id, persona_id)` 是部署配置里绑定的一对,否则 T2 [计划中] | 再校验一次 |
+| 2 | 写库条目 | 按增量顺序写入:技能写 `skill_library/`,状态 `effective`,`links = [提案 id]`;记忆先拿该人格的库锁(改为所涉情境的世界锁 [计划中]),再经 DeploymentMemoryStore.remember_event 写库,key 为 `<提案 id>#<k>` | 技能条目已存在就跳过;记忆同 key 再调得到事件行里存的同一批语句 id,不二次抽取。混合提案(记忆加技能)的记忆先于技能写:记忆抽取失败要整份拒绝,技能条目也不落,技能已写成 `effective` 就收不回了 |
 | 3 | 更新 `library_state` | 有技能增量时技能版本加一,有记忆增量时记忆版本加一(计的是门② 记忆收录次数),追加一条 `admitted` | `admitted` 已有该提案则跳过 |
 | 4 | 提案 effective | `approved → effective` | 已 `effective`:空操作 |
 
 **门② 与在途轮次**:收录写某人格的库之前,先拿该人格的库锁,锁被占就抛 `DeferredError`。再查 `snapshots/` 下有没有未提交的起点副本:不论提案含技能还是记忆,不论副本属于哪个人格、哪个轮次,有就同样抛 `DeferredError`。延后时守护进程不写树、提案留在 `approved`、按退避重试。记忆提案的理由:轮次重入时会用起点副本覆盖部署库,把刚收录的记忆抹掉,而提案已是 `effective`,不会再收录。只含技能的提案的理由:技能版本一变,在途轮次重入会重跑已提交的 episode 并记下新记忆,随后在途那条的起点副本把这些记忆覆盖掉。
+
+人格库锁改为所涉情境的世界锁 [计划中];未提交副本的检查保持全局,不论快照属于哪个世界。
 
 记忆增量在第 2 步的失败有三条出口:
 
@@ -620,6 +717,9 @@ def load_library(store) -> LibraryState: ...
 | 覆盖部署库失败 | 文件系统错误或摘要对不上 | 轮次 `failed`(T3),库与副本都保留,等人处理 |
 | 收录门② 时库锁被占,或任何轮次有未提交起点副本(只含技能的提案同样延后) | 抛 `DeferredError`,不写树,提案留 `approved` | 退避后重试;轮次放锁、副本删掉后收录成功 |
 | 轮次判 `failed`(T3)时有在途 episode | 先 `restore_from` 回滚,再删副本,再写失败记录 | 下一轮从干净的人格库开始 |
+| 部署 episode 开始时世界里有别的轮次的未提交起点快照 [计划中] | 抛 `DeferredError`,原因写出那个轮次 id | 人工恢复或删除那份快照;连续延后达上限守护进程带原因退出 |
+| 恢复前服务端端口在等待上限内没关 [计划中] | `RestoreFailedError`,T3 | 库与快照都保留,等人处理 |
+| 开下一次尝试或提交前服务端端口在等待上限内没关 [计划中] | `DeferredError`,轮次留 `pending` | 守护进程退避重入,快照在就先恢复 |
 
 **走查例子**
 
@@ -646,7 +746,7 @@ def load_library(store) -> LibraryState: ...
 | R18 | 任何 `BridgeError` [已落地] 都让轮次 `failed` 并记 T3;非桥接瞬态原样上抛 | 桥接 T1 也留 `pending` | 桥接自己已退避重试,留 `pending` 会让守护循环无限空转外部推理 | 外部工具短暂不可用也让这一轮 `failed`,要人删轮次产物重开 |
 | R19 | `start_agent_round` 在"无轮次或轮次 `pending`"时都触发,处理器负责写终态,重入必须幂等 | 只在无轮次时触发 | 否则瞬态失败或进程被杀留下的 `pending` 永不再派发 | 处理器会被连续唤醒,全靠幂等键挡重复长任务 |
 | MA-1 | 部署 episode 由驱动器用客户端重建的 Episode 改 id 落盘 | 服务端关闭钩子落盘 | 钩子拿不到模型 id、情境内序号与 run;确定性 id 就是幂等键 | 落盘 episode 没有对手内心独白;要它得改成服务端按会话 id 关联 |
-| MA-2 | 已落盘 episode 只在每个 agent 轮次轨迹的技能版本与当前实例一致时复用,另看起点副本已删与 `digest_before` 等于记录的摘要 | 有就复用;记忆版本也参与比较 | 两次重入之间若有技能收录,旧 episode 会把已修好的缺口再报一遍;记忆收录不让已提交的 episode 重跑,理由见 MA-25 | 技能库在轮次中途变化时多跑一遍部署;判错则起点副本还在的 episode 多跑一遍 |
+| MA-2 | 已落盘 episode 只在每个 agent 轮次轨迹的技能版本与当前实例一致时复用,另看起点副本已删与 `digest_before` 等于记录的摘要 | 有就复用;记忆版本也参与比较 | 两次重入之间若有技能收录,旧 episode 会把已修好的缺口再报一遍;记忆收录不让已提交的 episode 重跑,理由见 MA-25 | 技能库在轮次中途变化时多跑一遍部署;判错则起点副本还在的 episode 多跑一遍;`digest_before` 一项将由 MA-34 取代 [计划中] |
 | MA-3 | 配置是注入的冻结数据类,实际取值写进轮次产物 | 本包自己读树内配置 | 本包不读树,`config/agent.yaml` 由组合根读出并注入;轮次产物里的取值足够复现 | 改阈值要重启守护进程 |
 | MA-4 | 缺口定义为"选中的技能不针对该信号";`selected` 为空不算 | 没有选中也算缺口 | 没有路由谈不上路由错 | 空库永远长不出第一条技能,要人放 |
 | MA-5 | 候选技能触发条件、层级、优先级由发现决定,桥接只写指导语与描述 | 外部模型写完整技能 | 否则无法保证候选针对这个信号 | 库里有优先级高于 100 的同类技能时,候选会被筛掉 |
@@ -658,23 +758,33 @@ def load_library(store) -> LibraryState: ...
 | MA-11 | 库版本必须是十进制数字串 | 允许任意字符串标识 | 收录要按整数加一;不在入口挡住会在 `int()` 处崩守护进程 | 想用非数字版本标识要改校验与递增规则 |
 | MA-12 | 轮次产物读不出时处理器自己重写为 `failed`,不抛 | 抛出由人处理 | 抛出会让守护进程退出、重启再触发,形成崩溃循环 | 人手改坏的轮次产物被整份覆盖,原文只在 git 历史里 |
 | MA-13 | 写失败记录前校验 run id 为单个路径段且 run 目录存在 | 直接写 | run id 来自树内数据;含斜杠会抛错,不存在会凭空建目录 | 这类失败只在产物上可见,观测命令看不到 |
-| MA-14 | 部署记忆持久,跨轮次累积;事件时间取库内单调递增的事件序号,不取固定时钟;每条 episode 记一份起点摘要;验证重放在人格库的快照副本上只读,基线与候选各开一份 | 每轮从空库开始;固定时钟;重放直接读部署库 | 固定时钟在持久库里会倒退;重放要让基线与候选看到同一份记忆,又不能改部署库 | 重放与线上行为不完全一致,因为线上记忆还在随 episode 变 |
+| MA-14 | 部署记忆持久,跨轮次累积;事件时间取库内单调递增的事件序号,不取固定时钟;每条 episode 记一份起点摘要;验证重放在人格库的快照副本上只读,基线与候选各开一份 | 每轮从空库开始;固定时钟;重放直接读部署库 | 固定时钟在持久库里会倒退;重放要让基线与候选看到同一份记忆,又不能改部署库 | 重放与线上行为不完全一致,因为线上记忆还在随 episode 变;按人格的验证快照将由 MA-37 取代 [计划中] |
 | MA-15 | 事件 key 用逻辑 episode id(重试不变),不用传输层的会话 id;episode 的某次尝试失败要重试时,先用起点副本覆盖人格库 | key 用会话 id;重试不回滚 | 重试会换会话 id,按会话 id 记的事件在重试里全是新事件,部署库会重复记忆;回滚让重试从同一个起点开始 | 每条 episode 多一次备份,失败时多一次覆盖 |
-| MA-16 | 一个轮次独占它绑定的每个人格库:轮次开始对 `deploy/<persona_id>.lock` 拿独占文件锁,结束释放;拿不到锁的轮次延后(`DeferredError`,不写树);episode 在一个线程里按情境、序号顺序跑 | 不加锁;episode 并行 | 两条 episode 同时写一个人格库,回滚会抹掉对方的写入;回滚覆盖只有在没有别的写者时才安全 | 两个轮次不能并行,现状本就如此;锁一直被占时动作反复延后,连续延后达上限则守护进程带原因退出 |
+| MA-16 | 一个轮次独占它绑定的每个人格库:轮次开始对 `deploy/<persona_id>.lock` 拿独占文件锁,结束释放;拿不到锁的轮次延后(`DeferredError`,不写树);episode 在一个线程里按情境、序号顺序跑 | 不加锁;episode 并行 | 两条 episode 同时写一个人格库,回滚会抹掉对方的写入;回滚覆盖只有在没有别的写者时才安全 | 两个轮次不能并行,现状本就如此;锁一直被占时动作反复延后,连续延后达上限则守护进程带原因退出;人格库锁将由 MA-31 取代 [计划中] |
 | MA-17 | 记忆的唯一权威是树外的人格库(配了记忆配置时是 Starling 库,否则是替身的落盘文件);`memory_library/` 废弃,不再存记忆条目,不迁移,必须为空(装配期核对),非空则装配期拒绝启动 | 把旧目录的条目迁进人格库;两处并存 | 生成器从不产出记忆提案,所以旧目录现在为空,没有可迁的内容;两处并存会让同一条记忆有两个来源 | 记忆不能从产物树追溯,靠轮次产物里的起点摘要与运行时身份补 |
 | MA-18 | 门② 的记忆增量经 DeploymentMemoryStore.remember_event 写该人格的库,key 为 `<提案 id>#<k>`。收据是三段写入留下的事件行:① 短事务写 `pending` 行,② 事务之外 `remember` 抽取,③ 短事务改 `committed` 并填 `engram_ref` 与语句 id。崩在 ③ 之前按 `engram_ref` 查已有语句补收据;`admitted_statements` 只作证据,不作幂等依据 | 收据记在产物树里,用提案载荷判断是否已写;语句与事件行放同一个事务 | 写成功但收据没落树的崩溃,会让重入把同一条增量再抽取一次。抽取走网络,不能放进 SQLite 事务,所以拆成三段。事件行先于抽取落库,崩在任一段之后都能凭事件行与 `engram_ref` 补齐 | 收据在树外的库里,树里只有证据;崩在 ③ 之前、语句已落库时,要多查一次 `engram_ref` 才补上收据 |
 | MA-19 | 门② 记忆抽取失败按 Starling 的 `failure_category` 分两路。`timeout`、`transport_failure`:不放弃事件,写 T1 失败记录,处理器抛 DeferredError 退避重试。其余类别:一条记忆增量都没提交过时先对该 key 调 `abandon_event`,再写一条 T2 失败记录,提案改为 `rejected`;部分已提交时不放弃失败的那条,它留 `pending`,写 T3 失败记录,提案留 `approved`,不抛延后,之后的触发见到这份记录就返回。`remember_event` 抛异常(库打不开、补收据的提交失败):不放弃事件,只写失败记录,提案留在 `approved` 等下个 tick 重入 | 抽取失败不看类别,一律按确定性处理;部分已提交的确定性失败也退避重试;抛异常也改 `rejected` | 抽取端点的网络抖动过一会儿就好,按确定性处理会把人已批准的提案拒掉。确定性失败重抽还是同样结果:留在 `approved` 又退避重试,每次都花一次抽取,连续延后达上限还会让守护进程退出。抛异常多半是瞬态,重入补收据即可,不会二次抽取。放弃事件让被拒的提案不会复活 | 被拒的记忆增量要人重写一份提案才能再收录;部分收录的 T3 要人处理,没有放弃那一条的命令;瞬态抽取失败一直不恢复时,连续延后达上限,守护进程带原因退出 |
 | MA-20 | 审核类状态机在 Python 的 `controlplane.states` 有 `approved → rejected` 一条边,只许收录处理器走;命令行的 `REVIEW_TRANSITIONS` 不加 | 抽取失败留在 `approved`;给 `approved` 加一个失败态;两份迁移表保持一致 | 现有的 `approved` 只能去 `effective`,没有出口放一个确定性失败的提案;一条专用边不扩大状态集。命令行不加这条边,所以人不能把已批准的提案改回拒绝 | 迁移表对所有审核类产物共用,这条边对它们都合法,约束靠只有收录处理器走;两份迁移表从此有意不同 |
 | MA-21 | 部署库里的 `pending` 事件行各有主人:对话事件归产生它的 episode,门② 事件归提案;谁写的谁处理。对话事件在 episode 内重试一次,仍失败则留 `pending`;episode 成功时在落盘后、删起点副本之前对自己留下的行调 `abandon_event`,最终失败时用起点副本回滚,实例的 `close()` 不放弃 | 每条 episode 开始前统一补齐所有 `pending` 行 | 统一补齐会替别人的事件再抽一次,或把别人的事件放弃;主人明确,起点快照里就没有别人的 `pending` 行 | 进程在 episode 中途崩溃后,它留下的 `pending` 行由重入时的覆盖清掉。MA-22 规定用起点副本覆盖部署库,库回到没有这些行的状态 |
-| MA-22 | 删起点副本是 episode 的提交点:成功时先落盘 episode,再放弃本 episode 留下的 `pending` 行,再删起点副本。轮次重入时按 episode 顺序检查。起点副本还在,就说明它在途时崩溃。先关实例与端口,再用起点副本 `restore_from` 覆盖部署库,核对摘要等于 `episode_digests` 记的值(还没记过摘要时不核对,用覆盖后的摘要补记),再重跑,不重新备份起点。复用只看副本已删与 `digest_before`,不比较部署库当前摘要。覆盖失败抛 RestoreFailedError(继承 `AgentRoundFailedError`,T3),库与副本都保留 | 用 episode 文件是否存在判提交;复用时比较部署库当前摘要;崩溃后直接重跑不覆盖 | episode 文件与记忆写入不在一个事务里,需要一个单点判这条 episode 提交没有。已提交的 episode 写过记忆,库摘要本来就变了,比较当前摘要会让每条已提交的 episode 都不可复用。直接重跑会把半截记忆带进新的起点 | 落盘后、删副本前崩溃,已落盘的 episode 会重跑一遍;覆盖失败要人处理 |
-| MA-23 | 部署记忆的管理面 DeploymentMemoryStore 放在 `actio`,按人格 id 提供 `open`、`remember_event`、`abandon_event`、`pending_events`、`backup_to`、`restore_from`、`digest`。实现有 StarlingDeploymentStore 与 FileTupleStore(JSON 落盘)。`restore_from` 在该人格还有打开的端口时抛 MemoryFailureError。本包不导入 `starling` | MindAgent 直接导入 Starling;替身只在内存里 | 管理面在 Actio 里,依赖方向才不破。替身也落盘,提交点与回滚在两种实现上一样成立,契约测试能覆盖崩溃重入。覆盖正被打开的 SQLite 文件会写坏库,所以先确认没有打开的端口 | Actio 多出一个协议,两个实现要过同一套契约测试 |
+| MA-22 | 删起点副本是 episode 的提交点:成功时先落盘 episode,再放弃本 episode 留下的 `pending` 行,再删起点副本。轮次重入时按 episode 顺序检查。起点副本还在,就说明它在途时崩溃。先关实例与端口,再用起点副本 `restore_from` 覆盖部署库,核对摘要等于 `episode_digests` 记的值(还没记过摘要时不核对,用覆盖后的摘要补记),再重跑,不重新备份起点。复用只看副本已删与 `digest_before`,不比较部署库当前摘要。覆盖失败抛 RestoreFailedError(继承 `AgentRoundFailedError`,T3),库与副本都保留 | 用 episode 文件是否存在判提交;复用时比较部署库当前摘要;崩溃后直接重跑不覆盖 | episode 文件与记忆写入不在一个事务里,需要一个单点判这条 episode 提交没有。已提交的 episode 写过记忆,库摘要本来就变了,比较当前摘要会让每条已提交的 episode 都不可复用。直接重跑会把半截记忆带进新的起点 | 落盘后、删副本前崩溃,已落盘的 episode 会重跑一遍;覆盖失败要人处理;复用判据将由 MA-34 取代 [计划中] |
+| MA-23 | 部署记忆的管理面 DeploymentMemoryStore 放在 `actio`,按人格 id 提供 `open`、`remember_event`、`abandon_event`、`pending_events`、`backup_to`、`restore_from`、`digest`。实现有 StarlingDeploymentStore 与 FileTupleStore(JSON 落盘)。`restore_from` 在该人格还有打开的端口时抛 MemoryFailureError。本包不导入 `starling` | MindAgent 直接导入 Starling;替身只在内存里 | 管理面在 Actio 里,依赖方向才不破。替身也落盘,提交点与回滚在两种实现上一样成立,契约测试能覆盖崩溃重入。覆盖正被打开的 SQLite 文件会写坏库,所以先确认没有打开的端口 | Actio 多出一个协议,两个实现要过同一套契约测试;按人格 id 管库将由 MA-31 取代 [计划中] |
 | MA-24 | 部署实例按 episode 新造:驱动器收 make_instance(episode_id, memory),每次尝试开该人格的端口、造实例、跑会话、`close()` 实例。覆盖部署库的顺序是关实例与端口、`restore_from`、重开端口、新造实例 | 驱动器收一个现成的实例,所有 episode 共用;覆盖时不关端口 | 事件 key 的前缀是逻辑 episode id,实例构造时就要定。实例持有打开的端口,覆盖前必须先关;新造的实例才不带着上次尝试的状态 | 每次尝试多一次开关端口与造实例 |
 | MA-25 | 已提交的 episode 不随记忆收录重跑,只有技能版本变了才重跑。重跑用新的逻辑 id `deploy-{model}-{scenario}-{k}-s{技能版本}`;新一轮第一次运行用 base id | 记忆版本变也重跑;重跑沿用原逻辑 id | 已提交 episode 的事件已是 `committed`,同一逻辑 id 重跑会让对手的新发言撞上 MemoryEventConflict,召回还会看到自己“未来”的记忆。新 id 让事件 key 不同 | 技能收录后重跑的 episode 以新 id 落盘,多一份文件 |
 | MA-26 | 轮次判 `failed`(T3)时,先对在途 episode 用起点副本 `restore_from` 回滚部署库,再删副本,再写失败记录;覆盖失败时库与副本都保留 | 只写失败记录,把半截记忆留在库里 | 在途 episode 的半截记忆留在人格库里,下一轮的起点就带着它,而这些记忆没有一条完整的 episode 对应。回滚让失败的轮次不污染下一轮 | 失败路径多一次覆盖;覆盖也失败时要人处理 |
-| MA-27 | 门② 往某人格库写记忆前,先拿该人格的库锁,并检查 `snapshots/` 下有没有任何人格、任何轮次的未提交起点副本。锁被占或有未提交副本就抛 `DeferredError`,守护进程不写树、按退避重试;只含技能的提案也查后一条 | 不加锁直接写;只靠提案状态挡住 | 在途轮次重入时会用起点副本覆盖部署库,把刚收录的记忆抹掉,而提案已是 `effective`、不会再收录。锁被占对应轮次在跑,副本在而锁空对应轮次崩溃后还没重入。纯技能提案的版本变化同样会让在途轮次重跑已提交的 episode | 收录被推迟到轮次结束或崩溃重入完成之后,纯技能提案和他人格的在途副本也会推迟它 |
+| MA-27 | 门② 往某人格库写记忆前,先拿该人格的库锁,并检查 `snapshots/` 下有没有任何人格、任何轮次的未提交起点副本。锁被占或有未提交副本就抛 `DeferredError`,守护进程不写树、按退避重试;只含技能的提案也查后一条 | 不加锁直接写;只靠提案状态挡住 | 在途轮次重入时会用起点副本覆盖部署库,把刚收录的记忆抹掉,而提案已是 `effective`、不会再收录。锁被占对应轮次在跑,副本在而锁空对应轮次崩溃后还没重入。纯技能提案的版本变化同样会让在途轮次重跑已提交的 episode | 收录被推迟到轮次结束或崩溃重入完成之后,纯技能提案和他人格的在途副本也会推迟它;人格库锁将由 MA-31 取代 [计划中] |
 | MA-28 | 部署路的时间预算随记忆配置取值:只开 `--enable agent` 且是 Starling 时服务端等提交 40 秒、整条流 `max_turns` × 40 秒;`--interact` 开着时取 150 秒(两开关同开也是它,共用一个运行时取较大值,后端单次调用同理取 90 秒;流 deadline 训练与部署各用各的);不设配置(FileTupleStore)时保持默认的 5 秒与 15 秒 | 一律放宽到 40 秒;一律保持默认值 | 接上记忆后一轮最坏多 20 秒(`recall` 嵌入 1 次、`remember` 抽取 3 次、`embed_pending` 嵌入 1 批,每次至多 4 秒),默认值是按罐头后端定的。罐头后端 1 秒内返回,放宽只放宽、不拖慢 | 真实模型接进部署路时要再按它的延迟加;设小会让正常的记忆调用被判超时、整条重跑 |
 | MA-29 | 部署实例抛 MemoryFailureError 时按 `transient` 分类:为真先 `abort()` 会话,再按条回滚重跑,用尽后上抛、轮次保持 `pending`;为假轮次 `failed`(T3)。MemoryEventConflict、MemoryClosedError 是子类,`transient` 为假。`remember` 返回 `failed`(含 `failure_category` 为 `timeout`)只计数、不抛 | 一律上抛;一律判 T3;`timeout` 的写失败也抛 | 瞬态的嵌入抖动不该升人工,确定性失败重跑也不会好。写失败只少一条记忆,回复照样成立;读失败或库坏了,这一轮的指导语已不可信 | 误判瞬态会反复重跑一个永远失败的调用;误判确定性会把一次网络抖动升成人工 |
-| MA-30 | 记忆增量的 `definition` 是 `persona_id`、`text`、`interlocutor` 三个必填键,不再是 `MemoryEntry`。收录前严格校验,多键少键都是 T2 | 沿用 `MemoryEntry`(含 id、版本、置信度、关键词) | 事件文本原样进抽取,不需要条目的 id、版本与关键词。`persona_id` 指明写进哪个人格库,`interlocutor` 为空串表示一般事实 | 手写提案要按新形状写;旧形状的记忆提案收录时判 T2 |
+| MA-30 | 记忆增量的 `definition` 是 `persona_id`、`text`、`interlocutor` 三个必填键,不再是 `MemoryEntry`。收录前严格校验,多键少键都是 T2 | 沿用 `MemoryEntry`(含 id、版本、置信度、关键词) | 事件文本原样进抽取,不需要条目的 id、版本与关键词。`persona_id` 指明写进哪个人格库,`interlocutor` 为空串表示一般事实 | 手写提案要按新形状写;旧形状的记忆提案收录时判 T2;将由 MA-38 取代 [计划中] |
+| MA-31 | 部署记忆一个情境一个部署世界,这个情境绑定的人格都是主体;端口绑定 (世界, 主体),召回只返回本主体的记忆;快照、恢复、摘要按整个世界,锁按 `scenario_id` [计划中] | 一个人格一个库;所有情境共处一个世界;按主体局部恢复 | 情境是模拟世界的单位,同一情境的人身处同一个世界。所有情境一个世界会共用一条时间线,回滚一个情境会退掉别的情境。局部恢复要在多主体共享的表里逐行剔除 | 同一人格在两个情境里记忆不相通;回滚会退掉同世界里别人在快照之后的写入,靠开新 episode 前查别的轮次的未提交快照挡住 |
+| MA-32 | 部署对手位进部署世界,跨会话积累记忆,尝试失败时与智能体位一起回滚;对手位靠 `AgentRuntime` 的登记表拿到轮次 id [计划中] | 每会话一份空记忆;放宽 `CreateSession.episode_id` 白名单允许 `/` | 对手位人格也是这个世界里的人,应当记得以前的相遇。白名单拼进落盘路径,不能放宽;只按 `<eid>#` 匹配会误伤下一轮同名的 episode | 对手行为随部署次数漂移,轮次之间比较行为多一个变量;`AgentRuntime` 多维护一张登记表 |
+| MA-33 | 事件 key 改为 `<前缀>#<turn_index>@<主体>`,两个角色位时也带主体;门② 的 key 不变 [计划中] | key 不变,按主体分事件表;只在三个及以上角色位时加 | 一个世界只有一张事件表。三个及以上角色位时同一轮会被两个主体各写一次,替身把第二条当幂等重写,Starling 的 `(tenant_id, key)` 主键会冲突。统一加上让格式不随位数变 | 历史轨迹与旧库的 key 格式不同;旧数据不迁移 |
+| MA-34 | episode 复用改为:已落盘、起点快照已删、`episode_digests[eid]` 有值、技能版本一致;不再比较首轮 `digest_before` [计划中] | 保留首轮比较,只在两个角色位时用 | 三个及以上角色位时别的对手可能先于智能体位写入,首轮摘要不再等于起点。起点摘要在拍快照时记下,提交点是删快照,两者在同一轮次里一一对应 | 少一个旁证;提交点仍是删快照 |
+| MA-35 | 部署轮次在一个世界里开新 episode 前,该世界不能有别的轮次留下的未提交起点快照;有就抛 `DeferredError`,原因写出那个轮次 id 并要求人工恢复或删除快照 [计划中] | 不查;只在门② 查 | 回滚一个世界会退掉快照之后的全部写入。那份快照只在别的轮次回滚失败或产物读不出时才在,两种都要人处理 | 没人处理之前本轮一直延后,连续延后 20 次守护进程带原因退出,这是有意的 |
+| MA-36 | 驱动器在恢复前、开下一次尝试前、提交前等这个世界的端口全关,上限 `SESSION_CLOSE_WAIT_S` 70 秒;恢复前超时判 `RestoreFailedError`,其余超时按瞬态 [计划中] | 不等;只等客户端端口 | 服务端在另一个线程收尾,join 在途后端线程至多 60 秒后才关端口。覆盖正被打开的库会写坏它 | 服务端收尾慢时每次尝试多等;资源滞留时轮次反复延后或判 T3 |
+| MA-37 | 验证重放每个情境世界一份验证快照;`base_instance_factory(extra_skills, scenario_id)`;`verify()` 按 `episode.scenario_id` 取实例,指标对全部 episode 累计 [计划中] | 只拍智能体位人格的一份快照 | 一个端口只绑一个世界;一个发现引用的 episode 跨情境,因为分析器按信号聚合全部 episode。候选技能对所有情境相同,只有记忆按情境不同 | 每个情境多一份快照与一对实例 |
+| MA-38 | 记忆增量的 `definition` 改为 `scenario_id`、`persona_id`、`text`、`interlocutor` 四个必填键;`(scenario_id, persona_id)` 必须是部署配置里绑定的一对,否则 T2 [计划中] | 只带 `persona_id`,由收录处理器推出世界 | 绑定对所有情境共用,一个人格在每个情境里都是主体,只给人格推不出写进哪个世界 | 手写提案要按新形状写;三键的旧形状判 T2 |
+| MA-39 | 同一人格在一个情境里占两个角色位时拒绝,部署配置读入时退出码 2 [计划中] | 允许,两个位共用一个主体 | 共用主体就共用记忆与事件 key,与今天两个位各开一份、互不可见的行为不同,也没有使用场景 | 想让一个人格同时扮两个位的配置写不出来 |
+| MA-40 | 记忆根下是旧布局时组合根拒绝启动(`FactoryConfigError`,退出码 2),写明要清空的目录;不迁移 [计划中] | 自动迁移;静默忽略 | 旧部署库只来自验证。旧库里的记忆不会被任何世界读到,静默留着会让人以为它还在用 | 升级时要手动清空记忆根 |
 
 ## 8. 失败处理与可观测
 
@@ -703,6 +813,12 @@ def load_library(store) -> LibraryState: ...
 | 门② 记忆收录的其他异常 | T1(瞬态)或 T2 | 事件不放弃,提案留在 `approved`,下个 tick 重入补收据 | `failure-admit-<提案>.yaml` |
 | 门② 收录时库锁被占,或任何轮次有未提交起点副本(只含技能的提案同样延后) | 延后 | 抛 `DeferredError`:不写树、状态不动,提案留在 `approved`,按退避重试 | 无 |
 | 部署库里的 `pending` 事件行 | 不分类 | 对话事件由 MindAgent 在 episode 成功落盘后、删起点副本前放弃,最终失败则随起点副本回滚清掉;门② 事件由提案处理;抽取失败的计数进轨迹 | 部署 episode 的轨迹 `memory.extraction_failed`;库里的事件表 |
+| 拿不到世界锁 [计划中] | 延后 | 抛 `DeferredError`,与人格库锁被占的处理相同 | 无 |
+| 部署 episode 开始时世界里有别的轮次的未提交起点快照 [计划中] | 延后 | 抛 `DeferredError`,原因写出那个轮次 id 与“需要人工恢复或删除快照”;连续延后达上限守护进程退出 | 无 |
+| 恢复前世界的端口在 `SESSION_CLOSE_WAIT_S` 内没关 [计划中] | T3 | 按 `RestoreFailedError`,库与快照都保留 | `failure-agent-<model>.yaml` |
+| 开下一次尝试或提交前世界的端口没关 [计划中] | 延后(瞬态) | 抛 `DeferredError`,轮次留 `pending`,退避重入,快照在就先恢复 | 无 |
+| 门② 增量的 `(scenario_id, persona_id)` 不是部署配置里绑定的一对 [计划中] | T2 | 提案留在 `approved` | `failure-admit-<提案>.yaml` |
+| 记忆根是旧布局,或部署配置里同一人格占两个角色位 [计划中] | 装配期 | 组合根拒绝启动,退出码 2 | 无 |
 
 轮次的失败记录挂在绑定模型所在 run 下,task id 为 `agent-<model>`。收录的失败记录挂在提案载荷里的 `run_id` 下,task id 为 `admit-<提案 id>` [已落地]。
 
@@ -717,7 +833,7 @@ def load_library(store) -> LibraryState: ...
 | 部署 episode | 每个 agent 轮次的激活轨迹:信号、候选、选中技能、冲突、库版本 |
 | 失败记录 | 失败点、类别、重试次数、原因 |
 | 成本台账 | 每次桥接尝试一条 `external_inference` |
-| 轮次产物的 `episode_digests` | 每条 episode 开始时智能体位人格的记忆摘要,和 `memory_runtime` 一起说明记忆从哪来 |
+| 轮次产物的 `episode_digests` | 每条 episode 开始时智能体位人格的记忆摘要,和 `memory_runtime` 一起说明记忆从哪来;改为每条 episode 开始时情境世界的摘要 [计划中] |
 | 部署 episode 轨迹的 `memory` 键 | 首个智能体轮次的 `digest_before`、写入条数、抽取失败条数;计数是十进制字符串 |
 
 ## 9. 测试策略
@@ -740,6 +856,10 @@ def load_library(store) -> LibraryState: ...
 | 组件 | 部署实例抛 MemoryFailureError:瞬态按条回滚重跑,确定性判轮次 `failed`;`remember` 返回 `failed` 只计数、不抛 | 抛异常的 FileTupleStore、故障注入 |
 | 单元 | 部署路时间预算:记忆配置在场时服务端等提交 40 秒、整条流 `max_turns` × 40 秒,不设时 5 秒与 15 秒 | 组合根的装配单元测试 |
 | 状态机 | `approved → rejected` 这条边存在,且只有收录处理器走;其余审核类转移不变;命令行的 `REVIEW_TRANSITIONS` 不含这条边 | 无 |
+| 组件 [计划中] | 部署世界:对手位跨两条部署 episode 记得上一次;某次尝试失败后两个位的写入都回滚;对手位的 `pending` 行在提交时被放弃;三个角色位、智能体位第三个发言时,已提交的 episode 仍能复用 | FileTupleStore、真实 loopback 服务端 |
+| 组件 [计划中] | 别的轮次的未提交快照:快照目录里预先放一份别的轮次 id 的起点快照,本轮延后,原因写明那个轮次 | 临时目录 |
+| 组件 [计划中] | 验证重放:一个发现跨两个情境时,每个情境的 episode 都在本情境的验证世界里回放 | FileTupleStore |
+| 组件 [计划中] | 门②:增量带 `scenario_id`;不在部署配置里的 `(scenario_id, persona_id)` 判 T2;锁按世界 | FileTupleStore |
 
 **用例数**
 
@@ -781,6 +901,7 @@ def load_library(store) -> LibraryState: ...
 | 验证重放在快照副本上只读 | [已落地] | 基线与候选各从验证快照恢复一份临时副本 |
 | 门② 记忆增量走 `remember_event`、写前拿库锁并在锁被占时抛 `DeferredError`、确定性抽取失败 `approved → rejected` | [已落地] | `controlplane.states` 有这条边;命令行的迁移表没有 |
 | 轮次载荷的 `memory_runtime`、`episode_digests`;记忆增量的 `definition` 是 `persona_id`、`text`、`interlocutor` 三个必填键 | [已落地] | 无 |
+| 记忆按情境世界组织:部署世界、部署对手位进世界、世界锁、整世界快照、带主体的事件 key、新复用判据、按情境的验证快照、记忆增量带 `scenario_id`、等端口全关 | [计划中] | 先在落盘替身上做;Starling 一侧的实现随 Starling 记忆服务另做 [推迟] |
 
 **三条必须知道的设计取舍**
 
@@ -811,6 +932,9 @@ def load_library(store) -> LibraryState: ...
 | 验证重放与线上行为不完全一致 | 快照冻结在轮次内的某一刻,线上记忆还在变 | 重放只度量行为是否按预期改变 |
 | 门② 拒收后可能仍留有部分语句 | 抽取分信念、情景、一般事实三遍,三遍在一个事务里,一般事实那一遍失败时事务仍提交,信念语句已入库;门② 放弃事件、提案转 `rejected` 之后,召回仍可能查到这条记忆。适配器对抽取失败只返回空收据,看不见这些语句 | 已报 Starling issue #116:失败的遍应连同已写的语句一起回滚,或提供按 engram 撤回语句的接口;在它修好之前,门② 拒收不等于这条记忆不进库 |
 | 信念那一遍的确定性坏输出被当作瞬态 | rise 走 Starling 的旧抽取路径,信念那一遍的确定性解析失败在 Starling 侧被补成 `transport_failure`(瞬态),门② 于是反复延后重试,连续延后达上限时守护进程退出 | 同一个 issue #116:这条路径应把解析失败归为确定性类别;在那之前,操作员看到的是「收录一直延后」,不是「被拒」 |
+| 部署对手位的记忆随部署次数漂移 [计划中] | 一个情境部署得越多,对手越“认识”智能体;轮次之间比较行为多一个变量 | 验证重放不受影响:重放只跑智能体位,对手原话按存档回放,不读记忆 |
+| 别的轮次回滚失败会挡住本轮的同一世界 [计划中] | 本轮在那个世界的 episode 一直延后,连续延后达上限守护进程退出 | 人工恢复或删除那份快照;这是有意的 |
+| 共享感知与跨情境记忆不做 [推迟] | 在场的人不会都记住同一句话;同一人格在两个情境里记忆不相通 | 共享感知以后接 Starling 的感知授权 |
 
 **未核实项**
 
@@ -828,8 +952,10 @@ def load_library(store) -> LibraryState: ...
 | `backup_to` 的副本与原库在 Starling 迁移版本不同时能否打开 [计划中] | 打不开则起点副本不能用,轮次 `failed` | 在 Starling 的 PR 里加用例:旧版本库备份后用新版本打开 |
 | 不跑后台维护时,承诺与共同点等分区不更新,对召回质量的影响 [计划中] | 召回质量低于带维护的 Starling,换来可复现 | 同一组对话分别跑后台维护与只做嵌入,比较召回 |
 | 外部端点同模型名换了向量时,新写入的语句与旧语句的向量不在同一分布 [计划中] | 召回排序会变,不能复现旧向量;已存的向量不重算,所以起点摘要的核对不受影响 | 观察一个月内同一端点的向量是否稳定,再决定要不要缓存向量 |
+| 服务端关端口的耗时分布:正常收尾是否远低于 70 秒 [计划中] | 收尾常接近上限时,部署 episode 频繁延后或判 T3 | 跑 100 条部署 episode,记录每条从客户端结束到服务端端口关完的耗时 |
+| 部署对手位积累记忆后,智能体位的行为是否随部署次数漂移 [计划中] | 漂移时轮次之间的发现不可比 | 同一模型连续部署 5 轮,比较每轮的发现集合 |
 
-**明确不做**:不改模型权重;不在运行中打断轮次;不从生产日志采集经验;不自动生成记忆增量;不自动提名 AgentRSI 配方;不让机器改写人审过的提案;`memory_library/` 废弃,不迁移,它必须为空。
+**明确不做**:不改模型权重;不在运行中打断轮次;不从生产日志采集经验;不自动生成记忆增量;不自动提名 AgentRSI 配方;不让机器改写人审过的提案;`memory_library/` 废弃,不迁移,它必须为空。不迁移旧布局的部署库与快照 [计划中];不做共享感知,也不跨情境共享一个人格的记忆。
 
 ## 附 本文术语
 
@@ -846,8 +972,12 @@ def load_library(store) -> LibraryState: ...
 | 库版本 | `library_state` 里技能库与记忆库的十进制数字串版本 |
 | superseded | 轮次因更新的模型晋级而被取代,记在 `failure.category` |
 | 过期提案 | 重入后编号超出本次通过数、仍为 `pending_review` 的旧提案 |
-| 部署记忆 | 每个绑定人格一个树外人格库(配了记忆配置时是 Starling 库,否则是替身的 JSON 文件),持久,跨轮次累积 |
-| 起点快照 | 某条部署 episode 开始前人格库的副本及其逻辑摘要;重试与崩溃重入前用它覆盖部署库;删它是这条 episode 的提交点 |
+| 部署记忆 | 每个绑定人格一个树外人格库(配了记忆配置时是 Starling 库,否则是替身的 JSON 文件),持久,跨轮次累积 [已落地];改为每个情境一个部署世界 [计划中] |
+| 起点快照 | 某条部署 episode 开始前人格库的副本及其逻辑摘要;重试与崩溃重入前用它覆盖部署库;删它是这条 episode 的提交点;改为整个世界的副本 [计划中] |
 | 事件收据 | 人格库事件表里的一行,由三段写入留下:先以 `pending` 记下事件 key 与原文,抽取后改 `committed` 并填 `engram_ref` 与语句 id。同 key 再写时据此返回同一批 id,不再抽取;崩在改 `committed` 之前,按 `engram_ref` 补 |
-| 人格库锁 | `deploy/<persona_id>.lock` 的独占文件锁;处理器开始拿,返回或抛出时放,保证轮次独占人格库;门② 写该人格库前也拿同一把 |
-| 部署记忆管理面 | DeploymentMemoryStore:Actio 里按人格 id 管库的协议。本包经它开端口、写门② 事件、备份、覆盖与算摘要;实现是 StarlingDeploymentStore 与 FileTupleStore |
+| 人格库锁 | `deploy/<persona_id>.lock` 的独占文件锁;处理器开始拿,返回或抛出时放,保证轮次独占人格库;门② 写该人格库前也拿同一把;将由世界锁取代 [计划中] |
+| 部署记忆管理面 | DeploymentMemoryStore:Actio 里按人格 id 管库的协议。本包经它开端口、写门② 事件、备份、覆盖与算摘要;实现是 StarlingDeploymentStore 与 FileTupleStore;改为按世界 id 管 [计划中] |
+| 部署世界 [计划中] | 一个 `scenario_id` 一个树外库文件;这个情境绑定的人格都是其中的主体,智能体位与部署对手位都在里面跨会话积累记忆 |
+| 主体 [计划中] | 世界里的一个人格,即 holder;端口绑定 (世界, 主体),召回只返回本主体名下的记忆 |
+| 世界锁 [计划中] | `deploy/<scenario_id>.lock` 的独占文件锁;部署轮次拿本轮全部情境的,门② 拿所涉情境的 |
+| 部署登记表 [计划中] | `AgentRuntime` 里 episode id 到轮次 id 的映射;部署驱动器开会话前登记、终态后注销,服务端据此给对手位拼事件前缀 |

@@ -31,7 +31,7 @@ def build() -> Canvas:
     cm = c.box(40, 590, 215, "远端计算层 compute", "经 SSH 在远端 GPU 主机上跑作业\nGPU 租约 · 预检 · 作业控制", kind="infra", h=80)
     rv = c.box(300, 590, 160, "ROLL · vLLM", "分布式训练 · 推理引擎", kind="infra", h=80)
     ac = c.box(500, 590, 240, "Actio", "带技能库与显式记忆的智能体框架\n每次响应附带激活轨迹\nStarling 记忆", kind="infra", h=80)
-    st = c.box(800, 590, 250, "Starling", "个体记忆 · 语句级抽取 · 语义召回\nSQLite 内嵌,一个人格一个库文件", kind="infra", h=80)
+    st = c.box(800, 590, 250, "Starling", "个体记忆 · 语句级抽取 · 语义召回\nSQLite 内嵌,一个世界一个库,人格是主体", kind="infra", h=80)
 
     def fx(node, target):
         return (node.cx - target.x) / target.w

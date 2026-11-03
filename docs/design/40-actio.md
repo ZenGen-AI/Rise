@@ -3,13 +3,13 @@
 | 项 | 内容 |
 |---|---|
 | 一句话 | 把技能、推理经验与记忆渲染成指导语交给模型后端,每次响应附带激活轨迹 |
-| 状态 | [已落地]:技能、推理经验、记忆、激活轨迹与协议打通,十三个源文件,408 个用例;MindAgent 部署驱动器已装配实例,但默认入口用的仍是罐头后端,真实模型是否遵循指导语未核实,见「现状」。设计二 [已落地]:记忆改经记忆端口访问,生产实现是 Starling 适配器(可选 extra `memory`),替身是内存元组;每轮回复前 recall、回复后 remember 再只做嵌入;激活轨迹升到 actio.trace.v2;部署记忆另有只给 MindAgent 的管理面,同样有替身与 Starling 两个实现;新增 `memory_port`、`memory_starling` 两个源文件 |
+| 状态 | [已落地]:技能、推理经验、记忆、激活轨迹与协议打通,十三个源文件,408 个用例;MindAgent 部署驱动器已装配实例,但默认入口用的仍是罐头后端,真实模型是否遵循指导语未核实,见「现状」。设计二 [已落地]:记忆改经记忆端口访问,生产实现是 Starling 适配器(可选 extra `memory`),替身是内存元组;每轮回复前 recall、回复后 remember 再只做嵌入;激活轨迹升到 actio.trace.v2;部署记忆另有只给 MindAgent 的管理面,同样有替身与 Starling 两个实现;新增 `memory_port`、`memory_starling` 两个源文件。记忆按情境世界组织 [计划中]:端口绑定世界与主体,管理面按世界操作,事件 key 带主体 |
 | 所在层 | 共享基础设施 |
 | 代码位置 | `src/actio` [已落地];协议改动在 `src/simulator/realtime` 与 `src/simulator/runner.py`;记忆端口 `src/actio/memory_port.py` 与 Starling 适配器 `src/actio/memory_starling.py` [已落地] |
 | 基线提交 | `b826440`(2026-10-21) |
 | 依赖 | `simulator.datamodel`、Python 标准库;Starling 包(可选 extra `memory`,只有适配器导入)[已落地] |
 | 被依赖 | SocialSimulator(运行器把实例当后端)、MindAgent(部署驱动器、分析器、收录处理器)、factory(组合根构造训练路的全部实例)[已落地] |
-| 对应实施计划 | 工作包 6(任务 70 至 78)[已落地]。设计二的 Actio 部分:替身路径施工计划(agent-memory-standin,第 1 到 5 步中属于 Actio 的第 1 步:记忆端口、替身、每轮读写、轨迹 actio.trace.v2)[已落地];Starling 路径施工计划(agent-memory-starling,第 7 步:Starling 适配器与树外记忆配置)[已落地] |
+| 对应实施计划 | 工作包 6(任务 70 至 78)[已落地]。设计二的 Actio 部分:替身路径施工计划(agent-memory-standin,第 1 到 5 步中属于 Actio 的第 1 步:记忆端口、替身、每轮读写、轨迹 actio.trace.v2)[已落地];Starling 路径施工计划(agent-memory-starling,第 7 步:Starling 适配器与树外记忆配置)[已落地]。记忆按情境世界组织:设计已定,施工计划待写 [计划中] |
 
 ## 0. 系统速览
 
@@ -28,7 +28,7 @@
 | TrainScheduler | 决策执行器:装配上下文、校验决策、构造训练指令、提名配方 | 控制层 | [已落地],含策略经验(默认关) |
 | TrainPlanner | 决策学习者:经可插拔后端给出下一轮训练决策 | 控制层 | [已落地],默认后端经桥接调用命令行模型 |
 
-共享基础设施有五个。**Actio** 是带技能库与显式记忆的智能体框架,每次响应附带激活轨迹;记忆由内嵌的 **Starling** 提供,一个人格一个树外 SQLite 库,可选 extra `memory` [已落地]。**外部推理桥接**用命令行调用外部强模型。**远端计算层** `compute` 经 SSH 在远端 GPU 主机上跑作业 [已落地]。**ROLL** 是分布式训练引擎,**vLLM** 是推理引擎。V1 经远端计算层接入 ROLL 的 LoRA SFT [已落地](由 `--executor roll` 装配,已在真实主机上从指令跑到候选一次)与 vLLM 推理服务 [已落地](命令拼装、SSH 隧道、服务生命周期;真机端到端待补)。已落地部分仍由确定性 mock 顶替。真实 GRPO 加 OPD 训练与真实 judge [推迟]。
+共享基础设施有五个。**Actio** 是带技能库与显式记忆的智能体框架,每次响应附带激活轨迹;记忆由内嵌的 **Starling** 提供,可选 extra `memory` [已落地]:今天一个人格一个树外 SQLite 库 [已落地];改为一个模拟世界一个库、人格是其中的主体(部署一个情境一个世界,训练一条 rollout 一个世界)[计划中]。**外部推理桥接**用命令行调用外部强模型。**远端计算层** `compute` 经 SSH 在远端 GPU 主机上跑作业 [已落地]。**ROLL** 是分布式训练引擎,**vLLM** 是推理引擎。V1 经远端计算层接入 ROLL 的 LoRA SFT [已落地](由 `--executor roll` 装配,已在真实主机上从指令跑到候选一次)与 vLLM 推理服务 [已落地](命令拼装、SSH 隧道、服务生命周期;真机端到端待补)。已落地部分仍由确定性 mock 顶替。真实 GRPO 加 OPD 训练与真实 judge [推迟]。
 
 **状态标记。** **[已落地]** 表示代码在主干上且有测试。**[计划中]** 表示设计与实施计划已定,代码还没写。**[推迟]** 表示明确不在 V1 范围内。图只画目标系统,不标进展,进展只看正文的状态标记。
 
@@ -65,7 +65,9 @@ Actio 是部署态智能体的运行框架:不改模型权重,靠技能库与记
 
 它解决两个问题。其一,让同一个模型在不同技能库下给出不同的回应,技能库可以审核、可以版本化。其二,每一轮都留下"为什么这样回应"的结构化记录,即激活轨迹,供 MindAgent 跨 episode 分析行为缺口。
 
-设计二把 Actio 的用法扩到场景二(实时交互训练)。每个角色位都是一个 Actio 实例:训练位包着正在训练的模型,对手位包着原来的三种驱动。记忆属于个体:一个人格一个 Starling 库文件,库在仓库之外。Actio 经记忆端口访问记忆,每轮回复前读、回复后写。没设记忆配置时用内存元组替身。
+设计二把 Actio 的用法扩到场景二(实时交互训练)。每个角色位都是一个 Actio 实例:训练位包着正在训练的模型,对手位包着原来的三种驱动。Actio 经记忆端口访问记忆,每轮回复前读、回复后写。没设记忆配置时用内存元组替身。
+
+今天一个人格一个 Starling 库文件,库在仓库之外 [已落地]。改为一个模拟世界一个库,人格是其中的主体 [计划中]。部署一个情境一个世界,训练一条 rollout 一个世界 [计划中]。每个主体只召回自己名下的记忆 [计划中]。理由是同一情境的几个人在同一个世界里,拆成一人一库就无处表达在场与共识。
 
 Actio 不读写产物树。技能库由 MindAgent 读出来传给它,记忆端口由调用方构造好传给它,轨迹由调用方带走。它站在共享基础设施层。上游是实例化并调用它的一方:运行器、MindAgent,以及构造训练路实例的 factory 组合根。下游是模型后端与记忆库。
 
@@ -134,10 +136,13 @@ Actio 的 V1 按规则选技能、经记忆端口取记忆、把选择写进轨�
 | 技能库的产物读写、`library_state` | 不在本包 | 由 MindAgent 的收录处理器读写,本包只给字典形状 |
 | 记忆库文件的创建、副本、清扫 | 不在本包 | 由 factory 与 MindAgent 管,MindAgent 经本包的部署记忆管理面操作部署库,实例只持有端口并在 `close` 时转发 |
 | 语义检索、近义词匹配 | 由 Starling 提供 | 替身仍只做词面重叠与二字切分 |
-| 记忆按主体过滤 | [推迟] | 替身的 `retrieve` 支持 `subjects` 参数,实例不传;Starling 路径一个人格一个库,靠文件隔离 |
+| 记忆按所述对象过滤 | [推迟] | 替身的 `retrieve` 支持 `subjects` 参数,实例不传。主体之间的隔离另有规则:今天一个人格一个库,靠文件隔离 [已落地];改后同一世界里端口按主体过滤召回 [计划中] |
 | `profile` 参与决策 | [推迟] | 只深拷贝保存 |
 | 记录"后端是否照做指导语" | [推迟] | 轨迹只记录路由决定 |
 | MindTrainer 的 InteractTrain 接 Actio 实例 | [已落地] | 训练位与对手位都是实例;轨迹源接受二元组或三元组,MindTrainer 不导入 Actio |
+| 共享感知:在场的人都记住同一句话 | [推迟] | 每个实例只写他人的发言,写在自己的主体名下;以后接 Starling 的感知授权 |
+| 一个人格跨情境共享记忆 | [推迟] | 同一人格在两个情境里是两个世界里的两个主体,记忆不相通 |
+| 接 Starling 记忆服务 | 服务落地后另做 | 协议与替身先按世界改好;之后只换后端实现,协议与调用方不动 |
 
 ### 2.3 质量属性与硬约束
 
@@ -218,9 +223,9 @@ Actio 是十三个源文件的纯 Python 包,`instance` 在顶,`text` 在底,依
 | `actio/signals.py` | `SignalRegistry` 与三个内置信号 | `text`、`simulator.datamodel` | [已落地] |
 | `actio/triggers.py` | 五算子谓词语言:校验、求值、`referenced_signals` | `signals`、`simulator.datamodel` | [已落地] |
 | `actio/skills.py` | `Skill`、`route`、`check_library` | `triggers`、`_check`、`simulator.datamodel` | [已落地] |
-| `actio/memory.py` | `MemoryEntry`、`snapshot`、`retrieve`;TupleMemory:包 `MemoryEntry` 元组与 `retrieve` 的替身记忆,召回给出的 id 一律是内容 id,不用条目自带的 `id`;FileTupleStore:部署记忆管理面的替身实现,条目与事件表存成 JSON 文件 | `text`、`_check`;替身另依赖 `memory_port` | [已落地] |
-| `actio/memory_port.py` | 记忆端口:MemoryBackend 协议、MemoryHit、MemoryEvent、RememberOutcome、MemoryFailureError、MemoryEventConflict、MemoryClosedError,以及部署记忆管理面协议 DeploymentMemoryStore。放独立文件而不是并进 `memory.py`,因为适配器与替身都依赖它,并进去会让适配器导入 `MemoryEntry` 的校验链 | `errors` | [已落地] |
-| `actio/memory_starling.py` | StarlingMemory:包一个 `starling.Memory`,把 Starling 的行渲染成 MemoryHit,把 Starling 的失败按穷举映射成 MemoryFailureError;StarlingDeploymentStore:部署记忆管理面的 Starling 实现,`remember_event` 写完在同一条连接上 `embed_pending`(与端口每轮写后嵌入同口径;嵌入失败抛 transient,语句已提交,重入同 key 补嵌);不嵌的话门② 收录的语句要等下一个部署轮次首轮才召回得到。唯一导入 `starling` 的文件 | `memory_port`、`errors`、第三方包 `starling` | [已落地] |
+| `actio/memory.py` | `MemoryEntry`、`snapshot`、`retrieve`;TupleMemory:包 `MemoryEntry` 元组与 `retrieve` 的替身记忆,召回给出的 id 一律是内容 id,不用条目自带的 `id`;FileTupleStore:部署记忆管理面的替身实现,条目与事件表存成 JSON 文件;改为一个世界一份账本,条目与事件行带 `holder`,召回按 `holder` 过滤 [计划中] | `text`、`_check`;替身另依赖 `memory_port` | [已落地] |
+| `actio/memory_port.py` | 记忆端口:MemoryBackend 协议、MemoryHit、MemoryEvent、RememberOutcome、MemoryFailureError、MemoryEventConflict、MemoryClosedError,以及部署记忆管理面协议 DeploymentMemoryStore;它改为按世界操作的八个方法 [计划中]。放独立文件而不是并进 `memory.py`,因为适配器与替身都依赖它,并进去会让适配器导入 `MemoryEntry` 的校验链 | `errors` | [已落地] |
+| `actio/memory_starling.py` | StarlingMemory:包一个 `starling.Memory`,把 Starling 的行渲染成 MemoryHit,把 Starling 的失败按穷举映射成 MemoryFailureError;StarlingDeploymentStore:部署记忆管理面的 Starling 实现,`remember_event` 写完在同一条连接上 `embed_pending`(与端口每轮写后嵌入同口径;嵌入失败抛 transient,语句已提交,重入同 key 补嵌);不嵌的话门② 收录的语句要等下一个部署轮次首轮才召回得到。改为一个世界一个库,端口以 `agent=<主体>` 打开 [计划中]。唯一导入 `starling` 的文件 | `memory_port`、`errors`、第三方包 `starling` | [已落地] |
 | `actio/experience.py` | `ReasoningExperience`、三级回退 | `triggers`、`_check`、`simulator.datamodel` | [已落地] |
 | `actio/trace.py` | 轨迹模式:`build_trace`、`validate_trace`;升到 actio.trace.v2,校验接受 actio.trace.v1 与 actio.trace.v2 | `errors` | [已落地] |
 | `actio/instance.py` | `instantiate`、`ActioInstance`、后端协议与适配器;实例持记忆端口,每轮读写 | 除 `memory_starling` 外的以上全部、`simulator.datamodel` | [已落地] |
@@ -255,11 +260,12 @@ Actio 管四类实体:技能、记忆条目、推理经验、激活轨迹。前�
 | 实体 | 字段与含义 | 约束 |
 |---|---|---|
 | `Skill` [已落地] | `id`、`version`、`level`(`macro` 宏观 / `micro` 微观)、`priority`、`trigger` 触发条件、`policy_instructions` 指令、`description` | id 以 `skill-` 开头且前缀后非空;`version` 是不小于 1 的整数;`priority` 默认 0,越大越优先 |
-| `MemoryEntry` [已落地] | `id`、`version`、`subject` 主体、`content`、`timestamp`、`confidence`、`source_episode`、`keywords` | id 以 `mem-` 开头;时间戳严格为 `YYYY-MM-DDTHH:MM:SSZ`;置信度在 [0, 1],整数转 `float`。设计二里它只是替身记忆的条目 |
+| `MemoryEntry` [已落地] | `id`、`version`、`subject` 所述对象(记忆说的是谁)、`content`、`timestamp`、`confidence`、`source_episode`、`keywords` | id 以 `mem-` 开头;时间戳严格为 `YYYY-MM-DDTHH:MM:SSZ`;置信度在 [0, 1],整数转 `float`。设计二里它只是替身记忆的条目 |
 | MemoryHit [已落地] | `id`、`text` | `id` 是内容 id:Starling 一侧是 `mem-` 加规范化语句行(不含 UUID 与簿记列)sha256 的前 16 位;替身是 `mem-` 加 `[subject, content]` 的 JSON 的 sha256 前 16 位,以 `mem-` 开头所以过轨迹校验;`text` 是渲染好的一句 |
-| MemoryEvent [已落地] | `key`、`text`、`interlocutor` 对话方 | `key` 是 `<逻辑 episode id>#<turn_index>`;部署的 key 前面再加轮次 id,写成 `<round_id>/deploy-...#<turn_index>`,否则下一轮同名 episode 撞上已 `committed` 的 key。没有 `seq` 字段:事件序号由库在写事件行时分配,决定写入时钟,实例不计数 |
+| MemoryEvent [已落地] | `key`、`text`、`interlocutor` 对话方 | `key` 是 `<逻辑 episode id>#<turn_index>`;部署的 key 前面再加轮次 id,写成 `<round_id>/deploy-...#<turn_index>`,否则下一轮同名 episode 撞上已 `committed` 的 key。改为 `<前缀>#<turn_index>@<主体>`,主体是写入方的人格 id [计划中]。三个及以上角色位时,同一轮由两个主体各写一次,不带主体会撞 key。门② 的 key 不变,仍是 `<proposal_id>#<k>`。没有 `seq` 字段:事件序号由库在写事件行时分配,决定写入时钟,实例不计数 |
 | RememberOutcome [已落地] | `stored`、`failed`、`category` | `category` 取 Starling 的 `failure_category` |
-| DeploymentMemoryStore [已落地] | 按人格 id 操作的七个方法:`open`、`remember_event`、`abandon_event`、`pending_events`、`backup_to`、`restore_from`、`digest` | 只给 MindAgent 的部署记忆管理面,放在 `actio`,所以 MindAgent 不导入 `starling`。两个实现:StarlingDeploymentStore 与 FileTupleStore(JSON 落盘,替身也有提交点)。`restore_from` 在该人格还有打开的端口时抛 MemoryFailureError,`transient` 为假。人格 id 须匹配 `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`,两个实现拼路径前都校验,不合法抛 `ActioDataError` |
+| DeploymentMemoryStore [已落地] | 按人格 id 操作的七个方法:`open`、`remember_event`、`abandon_event`、`pending_events`、`backup_to`、`restore_from`、`digest`。改为按世界 id 操作的八个方法,多一个 `wait_closed`,`open` 与 `remember_event` 另收主体 [计划中] | 只给 MindAgent 的部署记忆管理面,放在 `actio`,所以 MindAgent 不导入 `starling`。两个实现:StarlingDeploymentStore 与 FileTupleStore(JSON 落盘,替身也有提交点)。`restore_from` 在该人格还有打开的端口时抛 MemoryFailureError,`transient` 为假。人格 id 须匹配 `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`,两个实现拼路径前都校验,不合法抛 `ActioDataError`。改后 `restore_from` 在该世界有任何打开的端口时拒绝,别的世界不影响;世界 id 与主体过同一个白名单 [计划中] |
+| 记忆世界 [计划中] | 一个 Starling 库或一份替身账本,里面有多个主体;主体是人格 id | 部署世界按 `scenario_id`,一个情境一个;rollout 世界按逻辑 episode id,从情境的种子世界复制;种子按 `(seed_id, scenario_id)`。快照、恢复、摘要、待处理事件、放弃事件作用于整个世界,不分主体 |
 | MemoryRuntimeIdentity [已落地] | 字典:`backend`、`starling_version`、`extraction`、`embedding`、`trace_schema` | 记录记忆行为由什么决定;换其中任一项,记忆行为就变。由组合根写进训练记录与部署轮次产物,Actio 自己只在轨迹里写 `trace_schema` |
 | `ReasoningExperience` [已落地] | `id`、`version`、`pattern`、`applies_when`、三级 `primary`、`secondary`、`fallback` | `fallback.when` 必须为 `None`,另两级必须有触发条件;id 不受前缀约束 |
 | `Tier` [已落地] | `when` 触发条件、`instructions` | 指令是非空字符串元组 |
@@ -284,7 +290,7 @@ Actio 管四类实体:技能、记忆条目、推理经验、激活轨迹。前�
 | 进摘要 | 语句表、向量表、事件表的全部列(全行,不按状态过滤),减去下一行的排除清单。向量进摘要,因为同一个模型名在外部端点上不保证给出同一个向量;事件表里已放弃的行只计 `key` 与 `state` |
 | 排除清单 | `id`、`stmt_id`、`created_at`、`updated_at`、`last_accessed`、`access_count`、`last_replayed`、`replay_count`、`last_replay_batch_id`、`retry_count`、`last_attempt_at`、`embedded_at`、`inferred_at`;`confidence_history_json` 里每个条目的 `ts`(规范化时去掉);engram 的 UUID 换成 `engram:<content_hash>`;`observed_at` 在写入端改取 engram 的 `created_at`,不随墙钟变;其他所有表 |
 | 规范化 | 引用语句 UUID 的列(`supersedes_id`、`derived_from_json`、事件表的 `statement_ids_json`、向量表 `stmt_id` 的归属)一律换成被指向语句的内容 id。指向不存在的语句时换成固定串 `missing`。每行按列名排序后写成 JSON,行之间按内容 id 排序,整体算 sha256;空库的摘要是固定值 |
-| 替身 | TupleMemory 对 `snapshot(entries)` 的结果(召回实际看到的条目,不是原始列表)逐条 `to_dict()` 去掉 `id` 后的排序列表,加事件表,算同样形状的 sha256。Starling 一侧按全行:被取代的行改为 `archived` 仍是召回候选,`volatile` 与 `pending_review` 行影响后续写入的冲突探测,所以都进摘要。两边原则一致:影响召回或后续写入的行进摘要 |
+| 替身 | TupleMemory 对 `snapshot(entries)` 的结果(召回实际看到的条目,不是原始列表)逐条 `to_dict()` 去掉 `id` 后的排序列表,加事件表,算同样形状的 sha256。Starling 一侧按全行:被取代的行改为 `archived` 仍是召回候选,`volatile` 与 `pending_review` 行影响后续写入的冲突探测,所以都进摘要。两边原则一致:影响召回或后续写入的行进摘要。改为一个世界多个主体后,摘要覆盖全部主体,替身账本行的 `holder` 进摘要 [计划中] |
 
 ### 4.2 触发条件的谓词语言
 
@@ -341,7 +347,7 @@ memory: {digest_before: <sha256>, remembered: "2", extraction_failed: "0"}
 
 | 规则 | 内容 |
 |---|---|
-| 三个值 | `memory` 恰好三个键,值都是非空字符串;`digest_before` 是这一轮 recall 之前记忆的逻辑摘要 |
+| 三个值 | `memory` 恰好三个键,值都是非空字符串;`digest_before` 是这一轮 recall 之前记忆的逻辑摘要;改后是整个世界的摘要,覆盖全部主体 [计划中] |
 | 计数是字符串 | `remembered`、`extraction_failed` 是实例构造以来的累计数,写成 ASCII 十进制串,与 `library_version` 同一规矩,经 `Struct` 往返不失真;计数随轨迹落盘,`Episode` 不加元数据字段 |
 | 新旧并存 | 凡是带记忆端口构造的实例都产出 actio.trace.v2,包括 `memories=` 简写的替身;actio.trace.v1 只剩旧的落盘 episode。消费方(分析器、`_reusable`)两者都接受;`memory_hits` 的校验不变 |
 
@@ -352,7 +358,7 @@ memory: {digest_before: <sha256>, remembered: "2", extraction_failed: "0"}
 | 激活轨迹 | episode 里每个 `TurnRecord` 的 `activation_trace` 字段 | 无,随 episode 一次写入 | SocialSimulator 的运行器 | [已落地] |
 | 技能条目 | `skill_library/` 下的 `skill` 产物 | 由 MindAgent 管 | MindAgent 收录处理器 | [已落地] |
 | 记忆条目 | `memory_library/` 下的 `memory` 产物 | 由 MindAgent 管 | 无:已废弃,记忆不再写这里,目录必须为空 | [已落地] |
-| 记忆库文件 | 仓库之外的 `<root>/…/<persona_id>.db`,每个人格一个 Starling SQLite 库 | 无,文件内部有 `pending/committed/abandoned` 事件状态(见 4.5) | 训练副本由 factory 创建,部署库由 MindAgent 经管理面创建、备份与覆盖;Actio 实例经端口读写 | [已落地] |
+| 记忆库文件 | 仓库之外的 `<root>/…/<persona_id>.db`,每个人格一个 Starling SQLite 库 [已落地]。改为一个世界一个库 [计划中]:部署 `<root>/deploy/<scenario_id>.db`,训练 `<root>/runs/<run>/<episode>.db`,种子 `<root>/seeds/<seed_id>/<scenario_id>.db`;部署替身是 `.json`,训练替身是内存里的世界对象 | 无,文件内部有 `pending/committed/abandoned` 事件状态(见 4.5) | 训练副本由 factory 创建,部署库由 MindAgent 经管理面创建、备份与覆盖;Actio 实例经端口读写;改后 rollout 世界由客户端建、删,服务端只开 [计划中] | 今天 [已落地];按世界分库 [计划中] |
 
 Actio 自身不写任何产物。技能的 `to_dict()` 原样作为产物的 `payload`;`MemoryEntry` 的 `to_dict()` 现在只供替身记忆与摘要使用。记忆库文件不进 git 树,因为原生 SQLite 带预写日志,文件字节不稳定。
 
@@ -376,6 +382,8 @@ Actio 自己没有状态机,所以本文没有状态机图。实例是冻结的:
 
 `pending` 行没有自动恢复,只在调用方再次对同一 key 调用时推进。训练副本用完即弃,不会带着 `pending` 行进下一条 rollout。部署库里的 `pending` 行各有主人:对话事件归产生它的 episode,门② 事件归提案。放弃不进端口签名,也不在 `close()` 里做:要等调用方知道这条 episode 最终成功还是失败。部署库由 MindAgent 经管理面放弃:episode 成功提交后对它留下的 `pending` 行逐个 `abandon_event`,最终失败前先用起点副本 `restore_from`,回滚后库里本来就没有这条 episode 的事件行。门② 的事件不经实例,由管理面写与放弃。
 
+改为按世界组织后 [计划中],一个部署世界里有多个主体的 `pending` 行,归属规则不变。对话事件按 key 前缀 `<round_id>/<部署 episode id>#` 归 episode,智能体位与对手位的行都在其中。提交时按前缀放弃,对手位留下的行一并放弃。回滚恢复整个世界,两个位的写入一起退掉。`pending_events` 与 `abandon_event` 按世界操作,不分主体,因为 key 已经带主体。
+
 ### 4.6 不变量
 
 1. 同一实例、同一输入,`decide` [已落地] 的结果恒定,且与技能输入顺序无关。
@@ -386,10 +394,11 @@ Actio 自己没有状态机,所以本文没有状态机图。实例是冻结的:
 6. 同一起点副本、同一输入序列,`decide` 的结果恒定。`decide` 只读记忆,不改记忆。训练副本每轮只做嵌入,不做后台维护:后台维护有随机性和负载门控,会让同一起点得到不同状态。新写的语句在 Starling 里是 `volatile`,向量召回只取 `consolidated`、`archived`,只有 `tick` 的回放会巩固它;所以适配器的 `recall` 显式放宽到 `volatile`(review 与 holder 守卫不变),代价是这些行没经回放去重,召回里可能有近重复。Starling 的 top-k 用零分行补满 k 条,适配器丢掉 `score <= 0.0` 的命中。
 7. 记忆 id 是内容 id:同样内容在任何库里得到同一个 id。所以 id 进了 prompt,相同的逻辑状态也产生相同的输入。
 8. 实例关闭后不再读写:`close` 只关库,不放弃事件;Starling 一侧先等门面在途调用返回,再合并 WAL 并关连接。之后任何调用抛 MemoryClosedError。
+9. 一个世界里同一主体只开一个可写端口,端口只召回本主体名下的记忆 [计划中]。同一人格占一个情境的两个角色位时拒绝:训练配置与合成的绑定判 T2,部署配置退出码 2 [计划中]。两个位共用主体就共用记忆与事件 key,今天两个位各开一份、互不可见,没有对应的行为。
 
 ## 5. 接口契约
 
-入口都在主干上,签名以代码为准。
+入口都在主干上,签名以代码为准。标 [计划中] 的签名来自设计,施工时可能微调。
 
 ### 5.1 入口签名
 
@@ -409,7 +418,7 @@ class GuidedBackend(Protocol):
 设计二新增的签名:
 
 ```python
-# actio.memory_port:记忆端口,一个端口实例只属于一个智能体,所以没有 holder
+# actio.memory_port:记忆端口,签名里没有 holder。今天一个端口一个库;改后打开时绑定世界与主体 [计划中]
 class MemoryBackend(Protocol):
     def recall(self, query: str, *, limit: int) -> list[MemoryHit]: ...
     def remember(self, event: MemoryEvent) -> RememberOutcome: ...
@@ -434,14 +443,28 @@ class DeploymentMemoryStore(Protocol):   # actio.memory_port;只给 MindAgent �
     def digest(self, persona_id) -> str: ...
 ```
 
+按世界操作的版本 [计划中],`world_id` 是 `scenario_id`,`holder` 是人格 id,两者过同一个白名单:
+
+```python
+class DeploymentMemoryStore(Protocol):   # [计划中] 按世界操作
+    def open(self, world_id: str, holder: str) -> MemoryBackend: ...
+    def remember_event(self, world_id, holder, key, text, *, interlocutor) -> RememberOutcome: ...
+    def abandon_event(self, world_id, key) -> None: ...
+    def pending_events(self, world_id) -> list[str]: ...
+    def backup_to(self, world_id, path) -> str: ...      # 整个世界
+    def restore_from(self, world_id, path) -> str: ...   # 该世界还有打开的端口则抛
+    def digest(self, world_id) -> str: ...               # 覆盖全部主体
+    def wait_closed(self, world_id, timeout_s) -> bool: ...  # 端口数归零为真,超时为假
+```
+
 | 入口 | 行为 | 状态 |
 |---|---|---|
 | `instantiate` | 校验技能库、记忆与经验类型、经验 id 不重复、信号已注册;库版本规范成字符串;`profile` 深拷贝 | [已落地] |
 | `instantiate` 的记忆参数 | `memory` 与 `memories` 恰好给一个,`memories` 保留为 TupleMemory 的简写,只给它时默认只读。`interlocutors` 是角色位到人格 id 的映射,事件文本用它写说话方。`episode_id` 是调用方在构造时给出的逻辑 episode id(部署时带轮次前缀 `<round_id>/deploy-...`),一个实例对应一条 episode,事件 key 以它为前缀。`memory` 可写(`replay_read_only` 为假)而没给 `episode_id` 时,`instantiate` 抛 `ActioDataError`(它是 `ValueError` 的子类):没有 key 就写不了事件,静默跳过会让训练少写记忆而不自知 | [已落地] |
 | `ActioInstance.respond` | 七步流程,返回三元组 | [已落地] |
-| `ActioInstance.respond` 的记忆步 | 在后端回复与组装轨迹之间加写记忆,成八步。自己上一次发言之后的每句他人发言按顺序 remember,再 `embed_pending` 一次。`replay_read_only` 为真时整步跳过 | [已落地] |
+| `ActioInstance.respond` 的记忆步 | 在后端回复与组装轨迹之间加写记忆,成八步。自己上一次发言之后的每句他人发言按顺序 remember,再 `embed_pending` 一次。`replay_read_only` 为真时整步跳过。事件 key 改为尾部带写入方主体,写入方是实例所占角色位的人格 id [计划中] | [已落地] |
 | `ActioInstance.decide` | 只做路由、经验、记忆,不调后端 | [已落地] |
-| `ActioInstance.decide` 的记忆项 | 经端口 recall 取命中,返回值里的记忆项是 MemoryHit 列表;只读,不改记忆 | [已落地] |
+| `ActioInstance.decide` 的记忆项 | 经端口 recall 取命中,返回值里的记忆项是 MemoryHit 列表;只读,不改记忆。改后只返回本主体名下的记忆 [计划中] | [已落地] |
 | `ActioInstance.close` | 转发给端口的 close:只关库,不放弃事件;之后任何读写抛 MemoryClosedError | [已落地] |
 | `as_guided` | 有 `respond_guided` 原样返回;只有 `respond` 套 `IgnoreGuidance` [已落地];都没有抛 `TypeError` | [已落地] |
 | `render_guidance` | 固定顺序"技能 → 经验 → 记忆",每行带来源前缀 | [已落地] |
@@ -450,6 +473,8 @@ class DeploymentMemoryStore(Protocol):   # actio.memory_port;只给 MindAgent �
 | 轨迹 actio.trace.v2 | 带记忆端口的实例产出的轨迹多一个 `memory` 键;`validate_trace` 同时接受 actio.trace.v1 与 actio.trace.v2 | [已落地] |
 | `normalize_library_version` | 整数库版本转十进制字符串,`3 → "3"` | [已落地] |
 | `route`、`retrieve`、`snapshot`、`activate` | 纯函数,供 MindAgent 离线重放 | [已落地] |
+| 管理面按世界操作 | 八个方法以 `world_id` 为键,`open`、`remember_event` 另收 `holder`;`backup_to`、`restore_from`、`digest` 作用于整个世界 [计划中] | [计划中] |
+| `wait_closed` | 这个世界打开着的端口数降到 0 返回 `True`,超过 `timeout_s` 返回 `False`;端口数在管理面实例内计,含别的线程开的端口 [计划中] | [计划中] |
 
 对外名字:
 
@@ -481,7 +506,7 @@ class DeploymentMemoryStore(Protocol):   # actio.memory_port;只给 MindAgent �
 | `SubmitTurn.activation_trace` | 新增可选 `Struct` 字段,编号 3 | [已落地] |
 | `EnvironmentServiceClient.submit_turn`、`SessionDriver.submit_turn`、`ClientDrivenBackend.submit` | 各加 `*, activation_trace=None`;客户端非 `None` 时先 SetInParent 再 update;`respond` 带轨迹返回三元组,不带仍返回二元组 | [已落地] |
 | `run_episode` | 签名不变;后端可返回长度 2 或 3 的 `tuple` 或 `list`,其余抛 `TypeError`;第三项必须是字典或空,写进 `TurnRecord` 的是深拷贝;协议层不对轨迹做数字规范化,取回什么存什么 | [已落地] |
-| `CreateSession.episode_id` | 新增可选字段,调用方给出的逻辑 episode id。Actio 的事件 key 以它为前缀,服务端落盘的 episode 也用它当 id;部署的事件 key 另带轮次前缀,这个字段与落盘文件名仍是不带轮次的 `deploy-...`(白名单不含 `/`)。重试不换 id,所以同一句话重写是同一个事件 | [已落地] |
+| `CreateSession.episode_id` | 新增可选字段,调用方给出的逻辑 episode id。Actio 的事件 key 以它为前缀,服务端落盘的 episode 也用它当 id;部署的事件 key 另带轮次前缀,这个字段与落盘文件名仍是不带轮次的 `deploy-...`(白名单不含 `/`)。重试不换 id,所以同一句话重写是同一个事件。部署对手位改为也写部署世界 [计划中]:驱动器开会话前向 `AgentRuntime` 登记 `episode_id → round_id`,服务端拼出 `<round_id>/<episode_id>` 作对手位实例的 `episode_id`;查不到时对手位照旧用空的 TupleMemory,记一条 warning | 今天 [已落地];登记表 [计划中] |
 | 训练位的三元组上行 | InteractTrain 的轨迹源接受策略返回的二元组或三元组,第三项作为 `activation_trace` 随 `submit_turn` 上行;二元组照旧 | [已落地] |
 
 ### 5.3 产物读写约定
@@ -532,9 +557,9 @@ tiers:
 | 调用 | 谁触发 | 时机 |
 |---|---|---|
 | `instantiate` | MindAgent 部署驱动器 | 每个部署轮次开始时,按绑定的库版本读好条目后 |
-| `instantiate` 带记忆端口 | factory 的 `policy_for_rollout`(训练位)、后端工厂(对手位)、MindAgent 部署驱动器 | 训练位在每条 rollout 进入时;对手位在每个会话创建时;部署在每条 episode 每次尝试开始前,由实例工厂 make_instance(episode_id, memory) 造出。三处都把逻辑 episode id 传进 `episode_id` |
+| `instantiate` 带记忆端口 | factory 的 `policy_for_rollout`(训练位)、后端工厂(对手位)、MindAgent 部署驱动器 | 训练位在每条 rollout 进入时;对手位在每个会话创建时;部署在每条 episode 每次尝试开始前,由实例工厂 make_instance(episode_id, memory) 造出。三处都把逻辑 episode id 传进 `episode_id`。部署会话的对手位改为开部署世界里本人格的端口,不再每会话一份空 TupleMemory [计划中] |
 | `respond` | MindAgent 客户端循环,或 SocialSimulator 运行器 | 轮到实例所占角色位说话时 |
-| `ActioInstance.close` | 上一行的同一调用方 | rollout、会话、episode 结束时。训练位在上下文退出时关;对手位随会话资源有序关闭;部署先关实例与端口,之后才能覆盖部署库 |
+| `ActioInstance.close` | 上一行的同一调用方 | rollout、会话、episode 结束时。训练位在上下文退出时关;对手位随会话资源有序关闭;部署先关实例与端口,之后才能覆盖部署库。改后驱动器在恢复、开下一次尝试、提交之前都先 `wait_closed`,等服务端对手位的端口关完;上限 `SESSION_CLOSE_WAIT_S` 70 秒,即服务端 join 上限 60 秒加 10 秒余量 [计划中] |
 | `validate_trace` | MindAgent 经验分析器 | 读落盘 episode,对每个 `activation_trace is not None` 的轮次 |
 
 ### 5.5 对邻居的假设
@@ -544,9 +569,9 @@ tiers:
 | `simulator.datamodel` | `Persona`、`Scenario`、`TurnRecord`(`activation_trace: dict \| None` 已存在) | 无 |
 | SocialSimulator 运行器 | 按 `ModelBackend` 的参数调用 `respond`;接受三元组 | `respond` 返回三元组,第三项是 `dict` 或 `None` |
 | SocialSimulator 实时环境服务 | 不对轨迹做数字规范化;对手轮次的轨迹与内心推理不下行;`CreateSession.episode_id` 把逻辑 episode id 带到服务端 | 轨迹没有数字,往返后相等;对手位换成 Actio 实例后,落盘 episode 里的对手轮次带轨迹 |
-| MindAgent | 按库版本读好技能再传入;每轮带轨迹调用 `submit_turn`;每条 episode 的每次尝试经管理面新造实例,先关实例与端口、后覆盖部署库 | 轨迹模式(actio.trace.v1 与 actio.trace.v2 并存)、条目字典形状、id 前缀、`normalize_library_version`;Actio 只要求库版本是非空字符串,但 MindAgent 的收录要按整数加一,只接受十进制数字串。部署记忆管理面 DeploymentMemoryStore:两个实现 StarlingDeploymentStore 与 FileTupleStore,所以 MindAgent 不导入 `starling`;`restore_from` 在该人格还有打开的端口时抛 MemoryFailureError |
-| factory 与 MindTrainer | 构造训练路的全部实例并传入记忆端口;给每个实例外套一层转换后端,接住 MemoryFailureError,按 `transient` 改抛 simulator 的两个基类。所以 simulator 与 MindTrainer 都不导入 `actio`,MindTrainer 只认策略返回的二元组或三元组 | 实例满足 `ModelBackend` 的 `respond`;关闭实例会关闭它持有的端口(不放弃事件);Actio 只抛 MemoryFailureError |
-| Starling | 公开接口,经 PR 补齐:`Memory.recall`(带 `holder`、`strict`、`include_volatile`)、`Memory.remember_event`(带 `epoch`)、`Memory.embed_pending`、`Memory.digest`、`Memory.close`、`Memory.pending_events`、`Memory.abandon_event`。训练副本由 factory 用文件复制从种子取(`copy_library`),部署副本由管理面经 `Memory.backup_to` 做出,Actio 拿到的是已打开的副本。Actio 不碰它的私有接口与表结构 | 无;Starling 不知道 Actio。未装 Starling 时适配器不可导入,没设记忆配置就用替身,设了配置而没装则装配期拒绝 |
+| MindAgent | 按库版本读好技能再传入;每轮带轨迹调用 `submit_turn`;每条 episode 的每次尝试经管理面新造实例,先关实例与端口、后覆盖部署库。改后持世界锁(键 `scenario_id`)调用管理面,取代今天的人格锁;恢复前先 `wait_closed` [计划中] | 轨迹模式(actio.trace.v1 与 actio.trace.v2 并存)、条目字典形状、id 前缀、`normalize_library_version`;Actio 只要求库版本是非空字符串,但 MindAgent 的收录要按整数加一,只接受十进制数字串。部署记忆管理面 DeploymentMemoryStore:两个实现 StarlingDeploymentStore 与 FileTupleStore,所以 MindAgent 不导入 `starling`;`restore_from` 在该人格还有打开的端口时抛 MemoryFailureError,改后按世界判 [计划中] |
+| factory 与 MindTrainer | 构造训练路的全部实例并传入记忆端口;给每个实例外套一层转换后端,接住 MemoryFailureError,按 `transient` 改抛 simulator 的两个基类。所以 simulator 与 MindTrainer 都不导入 `actio`,MindTrainer 只认策略返回的二元组或三元组。训练改为一条 rollout 一个世界,由 TrainingWorlds 管 [计划中]:客户端 `policy_for_rollout` 从种子世界复制建世界、开训练位端口;服务端按 episode id 在进程内表里找到世界、开对手位端口;客户端在服务端端口关完后删世界。组合根只造一个部署管理面,交给部署驱动器、门② 与服务端共用 [计划中]。端口数只在管理面实例内计,所以不能造两个 | 实例满足 `ModelBackend` 的 `respond`;关闭实例会关闭它持有的端口(不放弃事件);Actio 只抛 MemoryFailureError |
+| Starling | 公开接口,经 PR 补齐:`Memory.recall`(带 `holder`、`strict`、`include_volatile`)、`Memory.remember_event`(带 `epoch`)、`Memory.embed_pending`、`Memory.digest`、`Memory.close`、`Memory.pending_events`、`Memory.abandon_event`。训练副本由 factory 用文件复制从种子取(`copy_library`),部署副本由管理面经 `Memory.backup_to` 做出,Actio 拿到的是已打开的副本。改后种子按情境放在 `seeds/<seed_id>/<scenario_id>.db`,整个世界复制成 rollout 世界;端口以 `agent=<主体>` 打开同一个世界库 [计划中]。Actio 不碰它的私有接口与表结构 | 无;Starling 不知道 Actio。未装 Starling 时适配器不可导入,没设记忆配置就用替身,设了配置而没装则装配期拒绝 |
 | 模型后端 | 实现 `respond_guided`,或只实现 `respond` | 指导语列表与 history 深拷贝 |
 
 ## 6. 关键流程
@@ -682,7 +707,7 @@ Actio 内部没有重试。抽取失败的事件在同一次 `respond` 里不重
 |---|---|
 | 技能 `skill-calm` | 版本 2,`micro`,优先级 1,触发 `{"signal": "emotion_high"}`,指令"先回应对方的情绪" |
 | 技能 `skill-firm` | 版本 1,`macro`,优先级 1,同一触发条件,指令"坚持立场" |
-| 记忆 `mem-temper` | 主体 `pb`,内容"对方一急就会生气",置信度 0.9,关键词"生气" |
+| 记忆 `mem-temper` | 所述对象 `pb`,内容"对方一急就会生气",置信度 0.9,关键词"生气" |
 | 库版本 | `{"skill": 4, "memory": "mem-lib-1"}` |
 | 后端 | 罐头后端,话语是指导语用 `\|` 拼接 |
 
@@ -716,6 +741,17 @@ Actio 内部没有重试。抽取失败的事件在同一次 `respond` 里不重
 
 同一条 episode 重试时 key 不变,因为逻辑 episode id 不随传输层的会话 id 变化;所以已 `committed` 的事件再写是幂等的,不会二次抽取。
 
+改为按世界组织后 [计划中],同一个例子的差别如下。情境 id 取 `s1`,部署世界里已有的事件序号仍是 40。
+
+| 项 | 今天 [已落地] | 改后 [计划中] |
+|---|---|---|
+| 库 | `deploy/pa.db`,只有 `pa` 的记忆 | 部署世界 `deploy/s1.db`,主体 `pa` 与 `pb` 都在里面 |
+| `pa` 第 1 轮回复后写的 key | `agent-round-zengen-v2/deploy-zengen-v2-s1-1#0`,序号 41 | `agent-round-zengen-v2/deploy-zengen-v2-s1-1#0@pa`,序号 41 |
+| 对手 `pb` 第 2 轮回复后 | 写进每会话一份的空 TupleMemory,会话结束即丢 | 服务端从登记表拿到轮次 id;写 `pa` 第 1 轮的话,key `agent-round-zengen-v2/deploy-zengen-v2-s1-1#1@pb`,序号 42 |
+| `pa` 第 3 轮回复后写的 key | 同一前缀加 `#2`,序号 42 | 同一前缀加 `#2@pa`,序号 43:一个世界共用一个序号 |
+| `pa` 的召回 | 库里只有 `pa` 写的记忆 | 世界里有两个主体的记忆,`pa` 的端口只召回主体 `pa` 名下的 |
+| episode 失败回滚 | 恢复 `pa` 的库 | 恢复整个 `s1` 世界,`pa` 与 `pb` 的写入一起退掉 |
+
 ## 7. 关键决策
 
 | 编号 | 决策 | 备选 | 理由 | 判错的代价 |
@@ -734,17 +770,22 @@ Actio 内部没有重试。抽取失败的事件在同一次 `respond` 里不重
 | AC-11 | id 前缀 `skill-`、`mem-` 强制 | 不约束 | id 直接作产物文件名,不带前缀会落到库目录规则之外 | 无 |
 | AC-12 | 回显规则不改代码,测试锁住 | 在 Actio 一侧再过滤 | 现有 `_drain_ready_events` 已是"对手抹掉、自己原样" | 无 |
 | AC-13 | 记忆经记忆端口访问,端口是五个方法的协议;只有 `actio/memory_starling.py` 导入 `starling` | 实例直接持有 `starling.Memory`;`simulator` 或 factory 持有记忆,经参数递给 Actio | 记忆属于个体,不属于环境,所以放在 Actio 内部;`simulator` 与 `mindtrainer` 因此不用知道记忆的存在,依赖边界仍可用 `ast` 扫描检查 | Actio 多一个可选依赖;未装 Starling 的环境只测得到替身路径 |
-| AC-14 | 一个智能体一个 Starling 库文件,端口实例只属于一个智能体,签名里没有 holder | 多个人格共用一个库,靠 holder 过滤 | 个体隔离靠文件而不靠过滤条件;同时打开多个文件已实测互不干扰,所以不会串记忆 | 库文件数等于人格数乘副本数,文件多;清扫和备份要逐个文件做 |
+| AC-14 | 一个智能体一个 Starling 库文件,端口实例只属于一个智能体,签名里没有 holder | 多个人格共用一个库,靠 holder 过滤 | 个体隔离靠文件而不靠过滤条件;同时打开多个文件已实测互不干扰,所以不会串记忆 | 库文件数等于人格数乘副本数,文件多;清扫和备份要逐个文件做;将由 AC-25 取代 [计划中] |
 | AC-15 | 记忆状态的身份是逻辑摘要。语句表、向量表、事件表的全部列,按排除清单去掉纯簿记列后算 sha256,与文件字节无关 | 算库文件的字节哈希;按包含清单只列召回相关的字段 | 库文件字节不稳定:每次新建空库字节都不同。包含清单会漏字段,例如情感重排器用语句的 `activation` 列打分。排除清单的方向相反:新增列默认进摘要,漏掉只会让摘要过敏感,不会让它漏变化 | 摘要要读三张表;Starling 加列时要维护排除清单。向量进摘要,所以外部端点换了向量,摘要就变 |
 | AC-16 | 召回、指导语与轨迹里的记忆 id 是内容 id:`mem-` 加规范化语句行 sha256 的前 16 位,不是库里的 UUID | 直接用 Starling 的语句 UUID | UUID 不进摘要却会进 prompt,会让摘要相同而 prompt 不同,破坏"同一起点同一输入同一输出"。内容 id 以 `mem-` 开头,过现有轨迹校验 | 同一内容的两条语句得到同一个 id,替身与 Starling 一致;`memories=` 简写实例的 `memory_hits` 与今天不同,断言 `mem-1` 之类字面量的测试随之改写;规范化规则一改,历史轨迹里的 id 与新 id 对不上 |
 | AC-17 | 每轮都读写:回复前 recall,回复后对他人新发言逐条 remember,再 `embed_pending` 一次;不调 `tick`,不写自己的话 | 只读不写;每若干轮批量写;写后跑 `tick` 做后台维护 | 后台维护有随机性且受运行时负载门控,同一起点会得到不同状态,训练不可复现。自己的话已在对话历史里,再写一遍只会重复。读在前、写在后:写入嵌入后再召回,会命中对方刚说的这句本身 | 训练里没有 TTL、回放与巩固;承诺、共同点等分区不更新,对召回质量的影响未核实,见 10.3 |
-| AC-18 | 事件 key 是 `<逻辑 episode id>#<turn_index>`,部署的 key 另加轮次前缀 `<round_id>/`(部署库跨轮次持久),文本是 `<说话方人格 id>：<原话>`,key 作为前缀写进 Starling 的文本;写入时钟由库在写事件行时分配的单调序号 `seq` 推出(MemoryEvent 没有 `seq` 字段,实例不计数):`2026-01-01T00:00:00Z` 加 `seq` 秒 | key 用传输层 session id;时钟用固定时间或墙钟 | session id 每次重试都换,部署库会把重试的同一句话当新事件重复记忆;逻辑 id 重试不变,同 key 同文本是幂等的。key 进文本前缀,所以不同 episode 的同一句话是不同事件。固定时钟在持久库里会倒退,墙钟让同一起点得到不同状态 | `seq` 要和事件行在同一事务里递增;训练副本从 0 起,部署库跨轮次单调 |
+| AC-18 | 事件 key 是 `<逻辑 episode id>#<turn_index>`,部署的 key 另加轮次前缀 `<round_id>/`(部署库跨轮次持久),文本是 `<说话方人格 id>：<原话>`,key 作为前缀写进 Starling 的文本;写入时钟由库在写事件行时分配的单调序号 `seq` 推出(MemoryEvent 没有 `seq` 字段,实例不计数):`2026-01-01T00:00:00Z` 加 `seq` 秒 | key 用传输层 session id;时钟用固定时间或墙钟 | session id 每次重试都换,部署库会把重试的同一句话当新事件重复记忆;逻辑 id 重试不变,同 key 同文本是幂等的。key 进文本前缀,所以不同 episode 的同一句话是不同事件。固定时钟在持久库里会倒退,墙钟让同一起点得到不同状态 | `seq` 要和事件行在同一事务里递增;训练副本从 0 起,部署库跨轮次单调;key 格式将由 AC-26 取代 [计划中] |
 | AC-19 | 实例构造时收 keyword-only 的 `episode_id`,可写端口没有它就在 `instantiate` 抛 `ActioDataError`;`turn_index` 取自 history 里那条他人发言的 `TurnRecord.turn_index` | 事件 key 由端口自己生成;从 `CreateSession` 的回包里取 id;缺 id 时静默不写 | `respond` 的参数与 `ModelBackend` 相同,没有地方传 episode id;逻辑 episode id 只有调用方知道:训练位由 `policy_for_rollout` 传入,对手位由服务端工厂从会话信息传入,部署由驱动器传入。缺 id 静默不写,会让训练少写记忆而不自知 | 每个调用方都要把 episode id 传进构造;一个实例只对应一条 episode,不能跨 episode 复用 |
 | AC-20 | 激活轨迹升到 actio.trace.v2:八个键之外加 `memory`,内含 `digest_before`、`remembered`、`extraction_failed` 三个非空字符串,两个计数是 ASCII 十进制串;`validate_trace` 同时接受 actio.trace.v1 与 actio.trace.v2 | 在 `Episode` 上加元数据字段;计数用整数;只接受 actio.trace.v2 | `Episode` 没有元数据字段,轨迹是抽取失败计数随 episode 落盘的唯一通道。整数经 `Struct` 往返变浮点,所以与 `library_version` 同一规矩用字符串。落盘的旧 episode 是 actio.trace.v1,分析器与 `_reusable` 要继续能读 | 键集合从八个变九个,断言旧键集合的用例要改;消费方多一个分支 |
 | AC-21 | 端口的两种实现过同一套契约测试与规范样例,端口语义与样例先定后实现 | 先做替身,再接 Starling 时补测试 | 先做替身再接 Starling 会长出两套语义。样例是一份 YAML。内容:固定事件序列;每步之后的召回命中 id 顺序与摘要;同 key 同文本重写的结果;同 key 异文本抛 MemoryEventConflict;`close` 后再调抛 MemoryClosedError。两边必须给出同样的命中顺序与摘要变化曲线,摘要值本身两边不同 | 契约测试要先写;命中顺序依赖 Starling 的排序,Starling 升级后样例要重新对齐 |
 | AC-22 | 记忆调用的失败映射是穷举的。只有 `recall` 查询词嵌入失败、`embed_pending` 有嵌入失败是瞬态(两者都不静默);Starling 抛的其余异常、`sqlite3` 异常、`OSError`、任何其他异常都是确定性。MemoryEventConflict、MemoryClosedError 是 MemoryFailureError 的子类,`transient` 为假。适配器只报异常类名与类别,不带端点地址与密钥 | 一律当瞬态重试;一律当确定性;按异常类型逐个列入 | 映射不穷举,新情形会落进错误的桶。误判瞬态会反复重试一个永远失败的调用,误判确定性会把一次网络抖动升成人工。未知情形保守当确定性:确定性失败不重试,代价是停下来而不是空转 | 出现新的瞬态情形前,它先按确定性处理;Starling 改异常类型时要跟着改 |
 | AC-23 | 抽取失败不抛:`remember` 返回 `failed` 为真(含类别 `timeout`)只计数,这一轮不留该条记忆,`extraction_failed` 加一进轨迹;事件行只在抽取成功后才变成 `committed`,失败的事件留在 `pending`。只有 `recall`、`embed_pending` 的失败与 `remember` 抛出的异常才抛 MemoryFailureError | 抽取失败就抛 MemoryFailureError 中断会话;失败的事件也记成已提交 | 写失败只少一条记忆,回复照样成立;读失败或库坏了,这一轮的指导语已经不可信,所以读失败才抛。失败的事件若被记成已提交,下次重试会被当成幂等丢掉,这句话就永远没进记忆;留在 `pending`,下一次 `respond` 把它连同新发言再交给 `remember`,同 key 同文本推进该行 | 一轮会少一条记忆,序列因此和无故障时不同;失败多时只能看轨迹里的计数发现 |
-| AC-24 | 部署记忆管理面 DeploymentMemoryStore 放在 `actio`,按人格 id 操作,有 StarlingDeploymentStore 与 FileTupleStore 两个实现;`restore_from` 在该人格还有打开的端口时抛 MemoryFailureError | MindAgent 直接持有 `starling.Memory` 并自己备份;替身不落盘 | 部署库要备份、覆盖,门② 要写事件与放弃,都碰库文件。放在 `actio`,MindAgent 就不导入 `starling`,依赖边界仍可检查。替身也落盘,所以备份起点、成功后删副本的提交点协议在两种实现上一样成立。覆盖正被打开的 SQLite 文件会写坏库,所以端口没关就拒绝 | 管理面多七个方法,两个实现各要有用例钉住同样的语义;MindAgent 必须先关实例与端口再覆盖 |
+| AC-24 | 部署记忆管理面 DeploymentMemoryStore 放在 `actio`,按人格 id 操作,有 StarlingDeploymentStore 与 FileTupleStore 两个实现;`restore_from` 在该人格还有打开的端口时抛 MemoryFailureError | MindAgent 直接持有 `starling.Memory` 并自己备份;替身不落盘 | 部署库要备份、覆盖,门② 要写事件与放弃,都碰库文件。放在 `actio`,MindAgent 就不导入 `starling`,依赖边界仍可检查。替身也落盘,所以备份起点、成功后删副本的提交点协议在两种实现上一样成立。覆盖正被打开的 SQLite 文件会写坏库,所以端口没关就拒绝 | 管理面多七个方法,两个实现各要有用例钉住同样的语义;MindAgent 必须先关实例与端口再覆盖;将由 AC-27 取代 [计划中] |
+| AC-25 | 一个模拟世界一个库,人格是其中的主体;端口打开时绑定世界与主体,召回只返回本主体名下的记忆,MemoryBackend 五个方法不变。部署一个情境一个世界,训练一条 rollout 一个世界 [计划中] | 一个人格一个库;所有情境共处一个世界 | 同一情境的几个人在同一个世界里,一人一库就无处表达在场、共识与二阶 ToM。所有情境一个世界,回滚一个情境的 episode 会退掉别的情境的写入。端口签名仍不带主体,调用方不改 | 同一人格在两个情境里记忆不相通;隔离从文件改为过滤条件,契约测试要钉住同世界两主体互不召回 |
+| AC-26 | 事件 key 改为 `<前缀>#<turn_index>@<主体>`,主体是写入方的人格 id。训练前缀是逻辑 episode id,部署前缀是 `<round_id>/<部署 episode id>`,门② 的 key 不变,仍是 `<proposal_id>#<k>` [计划中] | key 不变,按主体分事件表;只在三个及以上角色位时加 | 一个世界只有一张事件表。三个及以上角色位时,A 说的同一轮由 B、C 各写一次。替身把第二次当幂等重写,第二个主体的记忆写不进去;Starling 的 `(tenant_id, key)` 主键冲突。情境的角色位数没有上限,`run_episode` 按 `turn_index % n_roles` 轮流发言。两个位时也加,key 格式不随位数变 | 历史轨迹与旧库里的 key 格式不同;旧数据不迁移 |
+| AC-27 | 部署记忆管理面按世界操作:八个方法以 `world_id` 为键,`open` 与 `remember_event` 另收 `holder`,新增 `wait_closed`;快照、恢复、摘要作用于整个世界,`restore_from` 在该世界有任何打开的端口时抛 MemoryFailureError [计划中] | 按主体局部恢复 | 局部恢复要在多主体共享的表里逐行剔除。部署对手位的端口由服务端在另一个线程里关,收尾先 join 在途后端线程,最长 60 秒;端口数只有管理面看得全,所以由它提供等待 | 回滚一个 episode 会退掉同世界里别人在快照之后的写入,由 MindAgent 的未提交快照守卫挡住;组合根只能造一个管理面,三方共用,否则端口数看不全 |
+| AC-28 | 部署对手位也写部署世界,跨会话积累记忆;驱动器开会话前向 `AgentRuntime` 登记 `episode_id → round_id`,服务端据此给对手位实例拼出带轮次的 `episode_id` [计划中] | 每会话一份空记忆;放宽 `CreateSession.episode_id` 的白名单,允许 `/` | 对手位人格也是这个世界里的人,应当记得以前的相遇。白名单拼进落盘路径,不能放宽;提交时只匹配 `<eid>#` 前缀放弃,会误伤下一轮同名的 episode | 对手行为随部署次数漂移,轮次之间比较行为多一个变量;`AgentRuntime` 多维护一张登记表 |
+| AC-29 | 同一人格在一个情境里占两个角色位时拒绝 [计划中] | 允许,两个位共用主体 | 共用主体就共用记忆与事件 key,与今天两个位各开一份、互不可见不同,也没有使用场景 | 想让一个人格同时扮两个位的配置写不出来 |
 
 ## 8. 失败处理与可观测
 
@@ -761,6 +802,8 @@ Actio 自己的失败是 T2 确定性:同样输入必然再失败,不重放。�
 | 抽取失败(`remember` 返回 `failed`,含类别 `timeout`) | 不分类 | 不抛;这一轮不留该条记忆,计数加一 | 轨迹 `memory.extraction_failed` |
 | 可写端口没给 `episode_id` | T2 | `instantiate` 抛 `ActioDataError` | 同上 |
 | 实例关闭后再调 | T2 | 抛 MemoryClosedError,它是 MemoryFailureError 的子类,`transient` 为假;本质是调用方的编程错误 | 同上 |
+| 管理面 `restore_from` 时还有打开的端口 | T2 | 抛 MemoryFailureError,`transient` 为假。今天按人格判 [已落地];改为按世界判,别的世界开着端口不影响 [计划中] | 无;由调用方 MindAgent 记 |
+| `wait_closed` 超时 [计划中] | 由调用方分类 | 返回 `False`,不抛。MindAgent 在恢复前遇到判恢复失败,库与快照保留;在开下一次尝试或提交前遇到判瞬态,轮次留 `pending` | 由调用方决定 |
 
 `MemoryFailureError.transient` 由适配器按穷举映射给出。映射不穷举,新情形会落进错误的桶,所以未知情形一律归确定性。`remember` 返回的 `failure_category` 不进这张表,它只计数、不变成异常:
 
@@ -777,7 +820,7 @@ Actio 自己的失败是 T2 确定性:同样输入必然再失败,不重放。�
 | 手段 | 能看到什么 |
 |---|---|
 | 读落盘 episode 的 `activation_trace` | 每轮命中的信号、候选技能、选中技能、冲突规则、记忆、经验级别、库版本;actio.trace.v2 另有 `memory.digest_before`、累计写入条数、累计抽取失败条数 |
-| 对比两条轨迹的 `memory.digest_before` | 判断两条 rollout 或两条 episode 是否从同一份记忆出发 |
+| 对比两条轨迹的 `memory.digest_before` | 判断两条 rollout 或两条 episode 是否从同一份记忆出发。改后它是整个世界的摘要;智能体位排在第三个及以后发言时,别的主体已先写入 [计划中]。所以首轮摘要不再等于起点摘要 |
 | 读 episode 的话语 | 指导语前缀表明哪句受了哪条技能或记忆影响(仅当后端保留前缀) |
 | `ActioInstance.decide` | 离线重放:不调后端,算出某段 history 下的选择 |
 | `validate_trace` | 判断一条落盘轨迹是否合模式 |
@@ -816,11 +859,18 @@ Actio 自己的失败是 T2 确定性:同样输入必然再失败,不重放。�
 
 需要真 Starling 的用例按可选 extra 缺失跳过。真抽取与真嵌入不进测试,因为延迟和输出都不确定。
 
+记忆按世界组织之后要加的测试 [计划中],只列 Actio 一侧:
+
+| 层次 | 对象 | 替身与测试位置 |
+|---|---|---|
+| 契约 [计划中] | 同世界两主体互不召回;世界摘要覆盖两主体;任一主体端口开着时恢复被拒,别的世界开着端口不影响;事件 key 带主体不撞 | FileTupleStore 与 StarlingDeploymentStore 过同一套契约;训练侧 TrainingWorlds 的两个实现也过同一套 |
+| 三位 [计划中] | 三个角色位的同一轮被两个主体各写一次,两条记忆都在,key 不撞 | 替身与 Starling 各一条 |
+
 ## 10. 现状、局限与未核实项
 
-`src/actio` 十三个源文件全部在主干上,协议一侧的 `SubmitTurn.activation_trace`、客户端与驱动器的参数、运行器的三元组解包也已落地;第 9 章列出的 408 个用例按文件逐个实测照数。装配位置是 MindAgent 部署驱动器的轮次处理器,它经 `factory` 的 `agent.yaml` 取罐头后端 `CannedGuidedBackend`;真实模型后端还没有接上,真实模型是否遵循指导语仍未核实,见 10.3。设计二的记忆端口、部署记忆管理面、Starling 适配器与 actio.trace.v2 都已落地:没设记忆配置时用替身,设了配置就用 Starling,没装 extra `memory` 则装配期拒绝;真端点的延迟与召回质量未核实,见 10.3。
+`src/actio` 十三个源文件全部在主干上,协议一侧的 `SubmitTurn.activation_trace`、客户端与驱动器的参数、运行器的三元组解包也已落地;第 9 章列出的 408 个用例按文件逐个实测照数。装配位置是 MindAgent 部署驱动器的轮次处理器,它经 `factory` 的 `agent.yaml` 取罐头后端 `CannedGuidedBackend`;真实模型后端还没有接上,真实模型是否遵循指导语仍未核实,见 10.3。设计二的记忆端口、部署记忆管理面、Starling 适配器与 actio.trace.v2 都已落地:没设记忆配置时用替身,设了配置就用 Starling,没装 extra `memory` 则装配期拒绝;真端点的延迟与召回质量未核实,见 10.3。记忆按情境世界组织还没写代码 [计划中]:端口绑定世界与主体,管理面按世界操作,事件 key 带主体。
 
-### 10.1 已落地
+### 10.1 已落地与计划中
 
 | 能力 | 状态 | 说明 |
 |---|---|---|
@@ -832,6 +882,9 @@ Actio 自己的失败是 T2 确定性:同样输入必然再失败,不重放。�
 | 记忆端口、替身与契约测试 | [已落地] | `memory_port.py`、TupleMemory 与管理面的 FileTupleStore;实例持端口,每轮读写,带 `episode_id` 与关闭语义(`close()` 只关库);替身与 Starling 过同一份规范样例;只用替身即可跑通 |
 | 激活轨迹 actio.trace.v2 | [已落地] | 九个键,`memory` 块三个字符串值;actio.trace.v1 与 actio.trace.v2 都接受 |
 | Starling 适配器 `memory_starling.py` | [已落地] | StarlingMemory 与 StarlingDeploymentStore;依赖 Starling 补齐的公开接口,钉在 `pyproject.toml` 的 extra `memory`;唯一导入 `starling` 的文件 |
+| 记忆按情境世界组织 | [计划中] | 端口绑定世界与主体,召回按主体过滤;管理面八个方法按世界操作,含 `wait_closed`;替身账本的条目与事件行带 `holder`,摘要覆盖全部主体 |
+| 事件 key 带主体 | [计划中] | `<前缀>#<turn_index>@<主体>`;门② 的 key 不变 |
+| 部署对手位写部署世界 | [计划中] | 经 `AgentRuntime` 的登记表拿到轮次 id,与智能体位一起回滚、一起提交 |
 
 ### 10.2 已知局限
 
@@ -843,6 +896,8 @@ Actio 自己的失败是 T2 确定性:同样输入必然再失败,不重放。�
 | 抽取失败的那一句不进记忆 | 一轮的记忆少一条,与无故障时的序列不同 | 计数进轨迹;失败的事件留 `pending`,同 key 同文本再调还会再抽 |
 | 轨迹只记录路由决定 | `IgnoreGuidance` [已落地] 包装的后端忽略指导语,轨迹照写 `selected` | 分析器把轨迹当"决定",不当"行为" |
 | 重新生成依赖锁定的 `grpcio-tools 1.84.0` | 升级会改生成物版本头 | 升级时先做不改 proto 的重新生成并比对 |
+| 快照与恢复按整个世界 [计划中] | 回滚一个 episode 会退掉同世界里别人在快照之后的写入 | MindAgent 开新部署 episode 前查这个世界有没有别的轮次留下的未提交起点快照,有就延后并写明轮次 id |
+| 部署对手位跨会话积累记忆 [计划中] | 一个情境部署得越多,对手越认识智能体;轮次之间比较行为多一个变量 | 验证重放不受影响:重放只跑智能体位,对手的话按存档原样回放,对手不读记忆 |
 
 ### 10.3 未核实项
 
@@ -855,6 +910,8 @@ Actio 自己的失败是 T2 确定性:同样输入必然再失败,不重放。�
 | 真嵌入下 `recall` 的命中质量 [计划中] | 召回无关句,指导语被带偏 | 用 SoMBench 之外的手写情境,看召回句是否相关 |
 | 不跑 `tick` 时承诺、共同点等分区不更新,对召回质量的影响 [计划中] | 召回质量低于带维护的 Starling | 同一组对话分别跑 `tick` 与只嵌入,比较召回 |
 | 外部端点同模型名换了向量时,摘要会变 [计划中] | 续训升 T3,但旧向量复现不了 | 先观察一个月内同一端点的向量是否稳定,再决定要不要加向量缓存 |
+| 服务端关端口的耗时分布:正常收尾是否远低于 70 秒 [计划中] | 超过上限时恢复判失败,下一次尝试判瞬态,轮次被延后 | 跑 100 条部署 episode,记录每条从客户端结束到服务端端口关完的耗时 |
+| 部署对手位积累记忆后,智能体位的行为是否随部署次数漂移 [计划中] | 轮次之间的发现集合混进对手记忆的影响 | 同一模型连续部署 5 轮,比较每轮的发现集合 |
 
 ### 10.4 明确不做
 
@@ -864,9 +921,10 @@ Actio 不读写产物树,不决定用哪个库版本,不对轨迹做数字规范
 |---|---|
 | 不迁移 `memory_library/` | 它现在为空,MindAgent 从不生成记忆提案;装配期检查为空,非空则拒绝启动,要人工处理 |
 | 不把记忆库放进 git 产物树 | 原生 SQLite 带预写日志,文件字节不稳定,不适合当 git 产物 |
-| 不做跨租户共享记忆 | 记忆是个体的,一个人格一个库 |
+| 不做跨租户共享记忆 | 记忆是个体的:今天一个人格一个库 [已落地];改后一个世界里每个主体只召回自己名下的记忆,主体之间不共享 [计划中] |
 | 不用 Starling 的语义检索做诊断评测 | 诊断评测的动态轨与批量数据集生产仍用裸后端,不经过 Actio |
 | 不兼容 Actio-RSI | 设计二不接外部的同名项目 |
+| 不迁移旧的记忆根布局 [计划中] | 旧数据只来自验证;装配期发现旧布局就拒绝启动,写明要清空哪个目录。静默忽略会让人以为旧记忆还在用 |
 
 ## 附 本文术语
 
@@ -874,13 +932,16 @@ Actio 不读写产物树,不决定用哪个库版本,不对轨迹做数字规范
 |---|---|
 | 技能 | 带触发条件、优先级、版本与指令的条目;命中且排第一时其指令进入指导语 |
 | 推理经验 | 带主、次、保底三级指令的条目,三级回退按触发条件逐级尝试 |
-| 显式记忆 | 带主体、内容、关键词、时间戳与置信度的条目,按词面重叠检索;设计二里它是替身记忆的条目 |
-| 记忆端口 | Actio 访问记忆的统一协议:召回、写入、只做嵌入、算摘要、关闭。一个端口实例只属于一个智能体;部署记忆另有只给 MindAgent 的管理面,按人格 id 操作 |
+| 显式记忆 | 带所述对象、内容、关键词、时间戳与置信度的条目,按词面重叠检索;设计二里它是替身记忆的条目 |
+| 记忆端口 | Actio 访问记忆的统一协议:召回、写入、只做嵌入、算摘要、关闭。一个端口实例只属于一个智能体;部署记忆另有只给 MindAgent 的管理面,按人格 id 操作。改后端口打开时绑定世界与主体,管理面按世界操作 [计划中] |
 | 替身记忆 | TupleMemory,把现有 `MemoryEntry` 元组与词面检索包成端口的实现,没设记忆配置时用它;管理面的替身是 FileTupleStore,条目与事件表存成 JSON 文件 |
 | 内容 id | 记忆命中的 id:`mem-` 加规范化语句行 sha256 的前 16 位;同样内容在任何库里得到同一个 id |
 | 逻辑摘要 | 记忆库内容的 sha256:语句、向量、事件三张表的全部列去掉纯簿记列后算出,与文件字节无关 |
-| 事件 key | 一次写记忆的稳定身份,`<逻辑 episode id>#<turn_index>`,部署的另带轮次前缀;同 key 同文本重写是幂等的 |
+| 事件 key | 一次写记忆的稳定身份,`<逻辑 episode id>#<turn_index>`,部署的另带轮次前缀;同 key 同文本重写是幂等的。改为尾部再加 `@<主体>` [计划中] |
 | 逻辑 episode id | 调用方给出的 episode 标识,重试不变,区别于每次重试都换的传输层会话 id |
+| 世界 | 一个 Starling 库或一份替身账本 [计划中];部署一个情境一个,训练一条 rollout 一个,种子按情境 |
+| 主体 | 世界里拥有记忆的人格,即端口的 holder;每个主体只召回自己名下的记忆 [计划中] |
+| 所述对象 | `MemoryEntry.subject`:一条记忆说的是谁;替身写入时取说话方的人格 id |
 | 信号 | 注册表里的纯函数 `(history, speaker_slot) -> bool` |
 | 触发条件 | 五个算子组成的谓词,引用信号或轮次数 |
 | 指导语 | Actio 渲染给模型后端的文本行列表,每行带来源前缀 |
