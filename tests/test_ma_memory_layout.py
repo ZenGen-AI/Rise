@@ -38,7 +38,7 @@ def test_the_world_tag_sits_next_to_its_snapshot_with_the_world_suffix(tmp_path)
     assert (db.parent / "deploy-m-s1-1.world").is_file()
 
 
-@pytest.mark.parametrize("bad", ["", ".", "..", "a/b", "../x"])
+@pytest.mark.parametrize("bad", ["", ".", "..", "a/b", "../x", ".hidden", "a b", "s1\n", " s1", "s\x001", "x" * 129])
 def test_scenario_ids_are_checked_before_they_reach_a_path(tmp_path, bad):
     lay = MemoryLayout(tmp_path)
     snap = lay.snapshot("r", "m-s-1")
@@ -62,13 +62,44 @@ def test_world_of_refuses_a_missing_or_corrupt_tag(tmp_path):
     with pytest.raises(MindAgentDataError, match="deploy-m-s1-1.world"):
         lay.world_of(snap)                                       # 没有旁注
     tag = snap.parent / "deploy-m-s1-1.world"
-    for bad in ("", "../x", "a/b", ".."):                        # 坏旁注不能变成路径
-        tag.write_text(bad)
-        with pytest.raises(MindAgentDataError):
+    for bad in ("", "../x", "a/b", "..", "s1\n\n", " s1", "s1 ", "s\x001", "a b", "s1\r\n", ".hidden"):
+        tag.write_bytes(bad.encode())                            # 坏旁注不能变成路径,也不能和世界 id 对不上
+        with pytest.raises(MindAgentDataError, match="snapshots/r1/deploy-m-s1-1.world"):
             lay.world_of(snap)
     tag.write_bytes(b"\xff\xfe")
-    with pytest.raises(MindAgentDataError):
+    with pytest.raises(MindAgentDataError, match="snapshots/r1/deploy-m-s1-1.world"):
         lay.world_of(snap)
+
+
+def test_world_of_errors_name_the_tag_relative_to_the_memory_root(tmp_path):
+    lay = MemoryLayout(tmp_path)
+    snap = _snap(lay, "r1", "m-s1-1")
+    (snap.parent / "deploy-m-s1-1.world").write_text("a b")
+    with pytest.raises(MindAgentDataError) as exc:
+        lay.world_of(snap)
+    assert str(tmp_path) not in str(exc.value)
+
+
+def test_a_hand_written_tag_with_one_trailing_newline_is_accepted(tmp_path):
+    lay = MemoryLayout(tmp_path)
+    snap = _snap(lay, "r1", "m-s1-1")
+    (snap.parent / "deploy-m-s1-1.world").write_text("s1\n")     # `echo s1 > x.world` 恢复丢失的旁注
+    assert lay.world_of(snap) == "s1"
+    assert lay.uncommitted_snapshots("s1") == [snap]
+    assert lay.legacy_entries(["s1"]) == []
+
+
+def test_writing_a_tag_never_adds_a_newline_and_refuses_ids_the_store_would_refuse(tmp_path):
+    lay = MemoryLayout(tmp_path)
+    snap = lay.snapshot("r1", "m-s1-1")
+    for bad in ("s1\n", "a b", ".hidden", ""):
+        with pytest.raises(ValueError):
+            lay.write_world_tag(snap, bad)
+    with pytest.raises(ValueError):
+        lay.world_lock("a b")
+    assert not snap.parent.exists()                              # 校验在落盘之前
+    lay.write_world_tag(snap, "s1")
+    assert (snap.parent / "deploy-m-s1-1.world").read_bytes() == b"s1"
 
 
 def test_uncommitted_snapshots_are_found_by_their_world_tag_not_their_name(tmp_path):

@@ -12,6 +12,8 @@
 后缀由 `suffix` 给:替身是 `.json`,真实 Starling 后端是 `.db`;`.lock` 与 `.world` 的后缀固定。
 快照文件名里没有情境也没有人格,起点快照属于哪个世界只读 `.world` 旁注,不解析文件名。
 旁注先于快照写(崩在两步之间会留下没有快照的旁注):它不算在途快照,也不算旧布局遗留。
+旁注内容就是 scenario_id,和世界 id 用同一份白名单(`PERSONA_ID_PATTERN`)校验;读旁注时只容忍末尾
+恰好一个换行(人手 `echo s1 > x.world` 恢复丢失的旁注会带它),其余空白一律当坏旁注。
 旧布局(按人格建库、没有旁注的快照)不迁移,`legacy_entries` 只负责把它们认出来。
 """
 from __future__ import annotations
@@ -22,6 +24,7 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
 
+from actio.memory_port import PERSONA_ID_PATTERN
 from controlplane.lock import hold_file_lock
 from mindagent.errors import MindAgentDataError
 
@@ -30,11 +33,18 @@ _WORLD_SUFFIX = ".world"
 
 
 def _check_segment(name: str, value: str) -> str:
-    """round_id、episode_id、scenario_id 要当一段路径用:不许含 `/`,不许是 `.`、`..`。带轮次前缀的
+    """round_id、episode_id 要当一段路径用:不许含 `/`,不许是 `.`、`..`。带轮次前缀的
     `<round_id>/deploy-...` 只进事件 key,绝不拼路径。"""
     if not isinstance(value, str) or not value or "/" in value or value in (".", ".."):
         raise ValueError(f"{name}: {value!r}")
     return value
+
+
+def _check_world(scenario_id: str) -> str:
+    """scenario_id 就是世界 id:部署库按它命名,过的是部署管理面同一份白名单。布局不接受库会拒收的世界 id。"""
+    if not isinstance(scenario_id, str) or not PERSONA_ID_PATTERN.fullmatch(scenario_id):
+        raise ValueError(f"scenario_id: {scenario_id!r}")
+    return scenario_id
 
 
 def _tag_path(snapshot: Path) -> Path:
@@ -48,7 +58,7 @@ class MemoryLayout:
     suffix: str = ".json"
 
     def world_lock(self, scenario_id: str) -> Path:
-        return self.root / "deploy" / f"{_check_segment('scenario_id', scenario_id)}.lock"
+        return self.root / "deploy" / f"{_check_world(scenario_id)}.lock"
 
     def hold_world(self, scenario_id: str) -> AbstractContextManager[None]:
         """取该情境世界的独占锁,非阻塞,被占用时抛 FileLockBusyError。"""
@@ -62,7 +72,7 @@ class MemoryLayout:
         return self._round_dir(round_id) / f"{_DEPLOY_PREFIX}{episode_id}{self.suffix}"
 
     def verify_snapshot(self, round_id: str, scenario_id: str) -> Path:
-        return self._round_dir(round_id) / f"verify-{_check_segment('scenario_id', scenario_id)}{self.suffix}"
+        return self._round_dir(round_id) / f"verify-{_check_world(scenario_id)}{self.suffix}"
 
     def verify_scratch(self, round_id: str) -> Path:
         """基线与候选各自的快照副本放它下面,轮次结束连目录删。"""
@@ -71,7 +81,7 @@ class MemoryLayout:
     def write_world_tag(self, snapshot: Path, scenario_id: str) -> None:
         """在快照旁写 `.world` 旁注(内容是 scenario_id)。快照可以还不存在:调用方先写旁注、后取备份。
         先写临时文件再改名:崩在写一半留下的空旁注会让 `world_of` 一直报错,要人来删。"""
-        _check_segment("scenario_id", scenario_id)
+        _check_world(scenario_id)
         tag = _tag_path(snapshot)
         tag.parent.mkdir(parents=True, exist_ok=True)
         tmp = tag.with_name(f".{tag.name}.tmp")
@@ -82,18 +92,26 @@ class MemoryLayout:
             tmp.unlink(missing_ok=True)
             raise
 
+    def _rel(self, path: Path) -> str:
+        """错误信息里的路径:相对记忆根,不泄露绝对路径。"""
+        try:
+            return path.relative_to(self.root).as_posix()
+        except ValueError:
+            return path.name
+
     def world_of(self, snapshot: Path) -> str:
-        """读快照的 `.world` 旁注。旁注缺失、读不出、内容不是合法的一段路径都抛 MindAgentDataError:
-        坏旁注不能变成路径,也不能当成"不属于任何世界"悄悄放过。"""
+        """读快照的 `.world` 旁注。旁注缺失、读不出、内容(去掉末尾恰好一个 `\\n` 后)过不了世界 id 白名单
+        都抛 MindAgentDataError:坏旁注不能变成路径,也不能当成"不属于任何世界"悄悄放过。
+        按字节读再解码:不做换行翻译,`s1\\r\\n` 这类内容照实判坏。"""
         tag = _tag_path(snapshot)
         try:
-            scenario_id = tag.read_text(encoding="utf-8")
+            content = tag.read_bytes().decode("utf-8")
         except (OSError, UnicodeDecodeError) as exc:
-            raise MindAgentDataError(f"快照旁注读不出: {tag}: {exc}") from exc
-        try:
-            return _check_segment("scenario_id", scenario_id)
-        except ValueError as exc:
-            raise MindAgentDataError(f"快照旁注内容不是合法的情境 id: {tag}: {scenario_id!r}") from exc
+            raise MindAgentDataError(f"快照旁注读不出: {self._rel(tag)}: {type(exc).__name__}") from exc
+        scenario_id = content[:-1] if content.endswith("\n") else content
+        if not PERSONA_ID_PATTERN.fullmatch(scenario_id):
+            raise MindAgentDataError(f"快照旁注内容不是合法的情境 id: {self._rel(tag)}: {content!r}")
+        return scenario_id
 
     def _is_snapshot(self, p: Path) -> bool:
         return p.is_file() and p.name.startswith(_DEPLOY_PREFIX) and p.name.endswith(self.suffix)
@@ -118,7 +136,7 @@ class MemoryLayout:
         """任何轮次里旁注内容等于 scenario_id 的起点快照。没有旁注的快照是旧布局遗留,不在其中
         (`legacy_entries` 报它们)。任何一份快照的旁注坏了都抛 MindAgentDataError:宁可停下,
         也不漏判一份在途快照。"""
-        _check_segment("scenario_id", scenario_id)
+        _check_world(scenario_id)
         return [p for p in self.any_uncommitted_snapshots()
                 if _tag_path(p).is_file() and self.world_of(p) == scenario_id]
 
