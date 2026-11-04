@@ -6,8 +6,8 @@
 
 异常信息只放异常类名:原异常的文字可能含端点地址,所以一律 `from None` 改抛。
 
-`StarlingDeploymentStore` 是同一个后端的部署管理面(满足 `DeploymentMemoryStore`):每个人格一个库
-`<root>/<persona_id>.db`,管理面的调用各开一条短命连接。"""
+`StarlingDeploymentStore` 是同一个后端的部署管理面(满足 `DeploymentMemoryStore`):每个世界一个库
+`<root>/<world_id>.db`,世界里的各主体以 `agent=<主体>` 打开端口,管理面的调用各开一条短命连接。"""
 from __future__ import annotations
 
 import contextlib
@@ -17,6 +17,7 @@ import json
 import os
 import shutil
 import tempfile
+import threading
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
@@ -44,6 +45,9 @@ _EPOCH_AT = datetime.fromisoformat(EPOCH)
 _ID_HEX_CHARS = 16
 # Starling 门面 `content_ids` 对本库没有的语句 id 给的占位值(与摘要里解不出引用时同一个标记)。
 _MISSING_CONTENT_ID = "missing"
+# 世界级操作(pending_events、abandon_event、digest、备份与还原)不属于任何主体,短连接用这个 agent 名开。
+# 这些操作的结果与 agent 无关(`tests/test_actio_starling_store.py` 里有一条用例钉住摘要这一点)。
+_WORLD_AGENT = "world"
 
 
 @dataclass(frozen=True)
@@ -133,8 +137,18 @@ def _render(row) -> str:
             f"（{row.modality}，置信度 {row.confidence:.2f}）")
 
 
+def _check_name(value: object, what: str) -> str:
+    """世界 id 与主体都拼进文件名或 Starling 的 agent 名,过同一份白名单。用 fullmatch:
+    模式以 $ 结尾,match 会放过 "p1\\n"。'/' 与开头的 '.' 都不许。"""
+    if not isinstance(value, str) or not PERSONA_ID_PATTERN.fullmatch(value):
+        raise ActioDataError(f"{what}: expected 1 to 128 characters of [A-Za-z0-9._-] "
+                             f"starting with a letter or digit, got {value!r}")
+    return value
+
+
 class StarlingMemory:
-    """一个人格的一个 Starling 记忆库,满足 `MemoryBackend`。
+    """一个主体(holder)在一个 Starling 世界库里的记忆端口,满足 `MemoryBackend`。holder 作 Starling 的
+    `agent=`:同一个库里各主体的语句各记在自己名下,召回只看本主体的。
 
     `memory` 是 `starling.Memory`(单测里是只有用到的几个方法的替身)。`on_close` 在 close 成功后
     调一次,给部署管理面登记端口已关用。**`on_close` 必须不抛。** 它抛时,门面已经关了、端口已置为
@@ -149,11 +163,11 @@ class StarlingMemory:
         self._closed = False
 
     @classmethod
-    def open(cls, path: Path, *, persona_id: str, endpoints: StarlingEndpoints,
+    def open(cls, path: Path, *, holder: str, endpoints: StarlingEndpoints,
              close_timeout_s: float = 60.0, on_close: Callable[[], None] | None = None) -> StarlingMemory:
         try:
             memory = starling.Memory.open(
-                str(path), agent=persona_id, llm=endpoints.make_llm(), embedder=endpoints.make_embedder())
+                str(path), agent=holder, llm=endpoints.make_llm(), embedder=endpoints.make_embedder())
         except Exception as exc:
             raise translate_failure(exc) from None
         return cls(memory, close_timeout_s=close_timeout_s, on_close=on_close)
@@ -241,7 +255,7 @@ _SQLITE_MAGIC = b"SQLite format 3\x00"
 
 def _require_library_file(path: Path, method: str) -> None:
     """拷贝或打开之前先认文件头。SQLite 把已存在的 0 字节文件当成合法的空数据库,不校验的话,
-    0 字节的"备份"(磁盘满、写副本时被 SIGKILL、手工 touch)会让 `restore_from` 把人格库清成空库,
+    0 字节的"备份"(磁盘满、写副本时被 SIGKILL、手工 touch)会让 `restore_from` 把世界库清成空库,
     而回滚接着删掉副本,原记忆就找不回来。头不对的文件同理:不是库,就不该交给 `Memory.open`。"""
     try:
         with open(path, "rb") as handle:
@@ -314,7 +328,7 @@ def library_digest(path: Path, *, close_timeout_s: float = 60.0) -> str:
 @functools.cache
 def empty_digest() -> str:
     """空库的摘要,在临时目录里开一个空库算(进程内只算一次)。摘要的格式是 Starling 的,不在 rise 里写死
-    它的值。库不存在的人格(`StarlingDeploymentStore.digest`)与"从空库起"的种子解析(`factory.memory_runtime`)
+    它的值。库不存在的世界(`StarlingDeploymentStore.digest`)与"从空库起"的种子解析(`factory.memory_runtime`)
     共用这一份。失败不进缓存:下一次调用重新算。"""
     with _translated(), tempfile.TemporaryDirectory() as tmp:
         with _short_connection(Path(tmp) / "empty.db", agent="digest", close_timeout_s=60.0) as memory:
@@ -342,12 +356,16 @@ def extraction_prompts_digest() -> str:
 
 
 class StarlingDeploymentStore:
-    """部署记忆的管理面,满足 `DeploymentMemoryStore`:每个人格一个 Starling 库 `<root>/<persona_id>.db`
-    (组合根传入 `<记忆根>/deploy`,设计源 5.3 节)。
+    """部署记忆的管理面,满足 `DeploymentMemoryStore`:每个世界一个 Starling 库 `<root>/<world_id>.db`
+    (组合根传入 `<记忆根>/deploy`,设计三 4.1、6.2 节)。世界里的各主体共用这个库,端口以 `agent=<主体>` 打开,
+    `remember_event` 也以 `agent=<holder>` 开短连接,所以语句记在 holder 名下;pending_events、abandon_event、
+    digest、备份与还原是世界级的,不分主体。
 
-    **调用方必须持该人格的人格锁。** 门面只在单个 `Memory` 内计在途调用,不串行化同一库上的多条连接;
-    管理面每次调用另开一条短命连接,与端口、与别的管理面调用并发时没有任何保护。rise 今天每个调用点都在
-    人格锁里(`mindagent.rounds._PersonaLocks`、`mindagent.admit` 的 `ExitStack`),所以本类不加自己的锁。
+    **调用方必须持该世界的世界锁(设计三 4.2 节)。** 门面只在单个 `Memory` 内计在途调用,不串行化同一库上的
+    多条连接;管理面每次调用另开一条短命连接。同一个库上的并发写由 SQLite 串行化(WAL 加 5 秒 busy_timeout),
+    所以本类不在每次写外面加锁;"先读后判断再写"这类跨调用的顺序没有保护,靠调用方的世界锁。
+    本类只有一把锁,守两样东西:每个世界打开着的端口数 `_open`(端口会在服务端线程关,驱动器线程在另一条
+    线程上 `wait_closed` 或 `restore_from`),以及 `restore_from` 的"查端口数、换文件"。
 
     端口数只在实例内计(与 `FileTupleStore` 一样),所以**组合根只造一个 store,这个假设在这里承重**:
     另一个 store 实例或另一个进程开着的连接,`restore_from` 看不见,会把它库旁的 -wal、-shm 删掉,
@@ -361,17 +379,15 @@ class StarlingDeploymentStore:
         self._root = Path(root)
         self._endpoints = endpoints
         self._close_timeout_s = close_timeout_s
-        self._open: dict[str, int] = {}      # 每个人格打开着的端口数
+        self._lock = threading.Lock()                         # 守 _open 与 restore_from 的"查数、换文件"
+        self._all_closed = threading.Condition(self._lock)    # 某个世界的端口数归零时 notify_all
+        self._open: dict[str, int] = {}                       # 每个世界打开着的端口数(不分主体),读写都要持 _lock
 
     # ---- 路径与连接 ----
 
-    def _path(self, persona_id: str) -> Path:
-        """persona_id 直接拼进文件名:用 fullmatch(模式以 $ 结尾,match 会放过 "p1\\n"),
-        '/' 与开头的 '.' 都不许。"""
-        if not isinstance(persona_id, str) or not PERSONA_ID_PATTERN.fullmatch(persona_id):
-            raise ActioDataError(f"persona_id: expected 1 to 128 characters of [A-Za-z0-9._-] "
-                                 f"starting with a letter or digit, got {persona_id!r}")
-        return self._root / f"{persona_id}.db"
+    def _path(self, world_id: str) -> Path:
+        _check_name(world_id, "world_id")
+        return self._root / f"{world_id}.db"
 
     def _ensure_root(self) -> None:
         with _translated():
@@ -384,78 +400,123 @@ class StarlingDeploymentStore:
                                endpoints=self._endpoints if extract else None) as memory:
             yield memory
 
-    def _released(self, persona_id: str) -> None:
-        """端口的 on_close:只做字典减一,不做任何可能抛的事(它抛了,计数减一就丢了)。"""
-        left = self._open.get(persona_id, 0) - 1
-        if left > 0:
-            self._open[persona_id] = left
-        else:
-            self._open.pop(persona_id, None)
+    # ---- 端口计数 ----
+
+    def _port_reserved(self, world_id: str) -> None:
+        with self._lock:
+            self._open[world_id] = self._open.get(world_id, 0) + 1
+
+    def _release_once(self, world_id: str) -> Callable[[], None]:
+        """给一个端口造它的 on_close:计数减一,归零时唤醒 `wait_closed`。只做字典减一与通知,不做任何可能抛的事
+        (它抛了,计数减一就丢了)。
+
+        **同一个端口只减一次。** 两条线程同时关同一个端口时,`StarlingMemory.close` 的"已关"判断没有锁,on_close
+        会被调两次;多减的那次会把同世界别的端口的计数也扣掉,`restore_from` 就在有端口开着时放行。所以
+        "是否已减过"的判断与减一在同一把锁里。"""
+        done = False
+
+        def release() -> None:
+            nonlocal done
+            with self._lock:
+                if done:
+                    return
+                done = True
+                left = self._open.get(world_id, 0) - 1
+                if left > 0:
+                    self._open[world_id] = left
+                else:
+                    self._open.pop(world_id, None)
+                    self._all_closed.notify_all()
+
+        return release
+
+    def _refuse_if_open(self, world_id: str, *, leftover: Path | None = None) -> None:
+        """该世界有任何主体的端口开着就拒绝(非瞬态)。`leftover` 是拒绝前要删掉的半成品。**调用时必须持 `_lock`**:
+        查数要和调用方接着做的事(拒绝,或删日志、换文件)在同一次持锁里。"""
+        if self._open.get(world_id, 0) > 0:
+            if leftover is not None:
+                leftover.unlink(missing_ok=True)
+            raise MemoryFailureError("restore_from: world has an open port", transient=False)
 
     # ---- DeploymentMemoryStore ----
 
-    def open(self, persona_id: str) -> StarlingMemory:
-        path = self._path(persona_id)
+    def open(self, world_id: str, holder: str) -> StarlingMemory:
+        path = self._path(world_id)
+        _check_name(holder, "holder")
         self._ensure_root()
-        port = StarlingMemory.open(
-            path, persona_id=persona_id, endpoints=self._endpoints, close_timeout_s=self._close_timeout_s,
-            on_close=lambda: self._released(persona_id))
-        self._open[persona_id] = self._open.get(persona_id, 0) + 1      # 打开成功后才计数
-        return port
+        release = self._release_once(world_id)
+        # 先计数再开库:开库的这段时间里,并发的 restore_from 就已经看到这个世界有端口,不会把正在被打开的
+        # 文件换掉。开库失败(坏库、打不开)时把这一次计数退掉,失败的端口不算开着。
+        self._port_reserved(world_id)
+        try:
+            return StarlingMemory.open(
+                path, holder=holder, endpoints=self._endpoints, close_timeout_s=self._close_timeout_s,
+                on_close=release)
+        except BaseException:
+            release()
+            raise
 
-    def remember_event(self, persona_id: str, key: str, text: str, *, interlocutor: str) -> RememberOutcome:
+    def remember_event(
+        self, world_id: str, holder: str, key: str, text: str, *, interlocutor: str,
+    ) -> RememberOutcome:
         """写完在同一条连接上 embed_pending,与端口每轮"写后嵌入"同口径。不嵌的话门② 收录的语句没有向量,
         召回看不到,要等下一个部署轮次首轮的 embed_pending 顺带补上(真机 2026-11-01)。
 
-        嵌入失败抛 transient 的 MemoryFailureError;此时语句与事件已提交,重入同 key 返回同一批语句 id
-        (不二次抽取),这次的 embed_pending 再补。抽取失败不嵌:没有新语句。"""
-        path = self._path(persona_id)
+        连接以 `agent=holder` 开,语句记在 holder 名下。嵌入失败抛 transient 的 MemoryFailureError;此时语句与
+        事件已提交,重入同 key 返回同一批语句 id(不二次抽取),这次的 embed_pending 再补。抽取失败不嵌:没有新语句。"""
+        path = self._path(world_id)
+        _check_name(holder, "holder")
         self._ensure_root()
-        with self._short(path, agent=persona_id, extract=True) as memory:
+        with self._short(path, agent=holder, extract=True) as memory:
             res = memory.remember_event(key, text, interlocutor=interlocutor, epoch=EPOCH)
             outcome = _outcome(memory, res)
             if not outcome.failed:
                 _embed(memory)
             return outcome
 
-    def abandon_event(self, persona_id: str, key: str) -> None:
-        path = self._path(persona_id)
+    def abandon_event(self, world_id: str, key: str) -> None:
+        path = self._path(world_id)
         if not path.exists():
             raise translate_failure(KeyError(key)) from None            # 没有库就没有这个 key
-        with self._short(path, agent=persona_id) as memory:
+        with self._short(path, agent=_WORLD_AGENT) as memory:
             memory.abandon_event(key)
 
-    def pending_events(self, persona_id: str) -> list[str]:
-        path = self._path(persona_id)
+    def pending_events(self, world_id: str) -> list[str]:
+        path = self._path(world_id)
         if not path.exists():
             return []
-        with self._short(path, agent=persona_id) as memory:
+        with self._short(path, agent=_WORLD_AGENT) as memory:
             return [p.key for p in memory.pending_events()]
 
-    def digest(self, persona_id: str) -> str:
-        path = self._path(persona_id)
+    def digest(self, world_id: str) -> str:
+        path = self._path(world_id)
         if not path.exists():
             return empty_digest()
-        with self._short(path, agent=persona_id) as memory:
+        with self._short(path, agent=_WORLD_AGENT) as memory:
             return memory.digest()
 
-    def backup_to(self, persona_id: str, path: Path) -> str:
-        """备份到 path 并返回副本的摘要。人格还没有库时先建空库,所以起点副本总是存在。
+    def backup_to(self, world_id: str, path: Path) -> str:
+        """备份整个世界到 path 并返回副本的摘要。世界还没有库时先建空库,所以起点副本总是存在。
         path 已存在就覆盖(起点副本由 MindAgent 管,覆盖是它要的语义;Starling 拒绝已存在的目标,
         所以先删),旁边残留的 -wal、-shm 一并删:它们若属于被覆盖的旧文件,会被新文件当成自己的。"""
-        library = self._path(persona_id)
+        library = self._path(world_id)
         self._ensure_root()
         path = Path(path)
-        with self._short(library, agent=persona_id) as memory:
+        with self._short(library, agent=_WORLD_AGENT) as memory:
             path.parent.mkdir(parents=True, exist_ok=True)
             for stale in (path, *(_sidecar(path, s) for s in _WAL_SUFFIXES)):
                 stale.unlink(missing_ok=True)
             memory.backup_to(path)
         return self.digest_of(path)
 
-    def restore_from(self, persona_id: str, path: Path) -> str:
-        """用 path 的内容覆盖该人格的库,返回恢复后的逻辑摘要。该人格还有打开的端口时拒绝;
-        坏备份(不存在、0 字节、文件头不对、打不开)在碰库与根目录之前就被拒,库原样不动。
+    def restore_from(self, world_id: str, path: Path) -> str:
+        """用 path 的内容覆盖该世界的库(覆盖全部主体),返回恢复后的逻辑摘要。该世界还有任何主体的端口开着时拒绝,
+        别的世界开着端口不挡;坏备份(不存在、0 字节、文件头不对、打不开)在碰库与根目录之前就被拒,库原样不动。
+
+        端口数查两次:进来先查一次,有端口就在碰任何东西之前拒绝;拷贝与生成 `.restore-partial` 不持锁(它们要开
+        Starling 连接,关连接最长等 `close_timeout_s`,持锁会把别的世界的开关端口一起拖住);删日志与换文件
+        前在锁里再查一次,查与换之间不会再有端口插进来(`open` 先计数再开库,计数拿同一把锁)。准备期间有端口
+        开了,就删掉 `.restore-partial` 后拒绝,库原样不动。
 
         不在原地打开 path:`Memory.open` 会跑迁移、写 WAL,而起点副本是提交点,字节不能变。
         所以拷到临时目录,在副本上开,`backup_to` 成库旁的 `<库>.restore-partial`(自洽的单文件),
@@ -471,11 +532,11 @@ class StarlingDeploymentStore:
         关闭时它成立(close 合并 WAL 并删掉日志)。上一次若被 SIGKILL,库旁可能留着含已提交、未合并帧
         的 -wal,这里会把它删掉。之所以仍然安全,是调用方在任何打开之前都先重试 `restore_from`:
         `mindagent.rounds._close_round` 先回滚再写终态,`mindagent.deployment` 重入时"副本在就先覆盖
-        再 open",都在人格锁里。所以不会有别的路径在重试之前先打开这个库,把未合并的帧读成数据。"""
-        library = self._path(persona_id)
-        if self._open.get(persona_id, 0) > 0:
-            raise MemoryFailureError("restore_from: persona has an open port", transient=False)
+        再 open",都在调用方持的锁里。所以不会有别的路径在重试之前先打开这个库,把未合并的帧读成数据。"""
+        library = self._path(world_id)
         path = Path(path)
+        with self._lock:
+            self._refuse_if_open(world_id)
         if not path.exists():
             raise MemoryFailureError("restore_from: no such backup", transient=False)
         _require_library_file(path, "restore_from")
@@ -483,15 +544,26 @@ class StarlingDeploymentStore:
             copy = Path(tmp) / "source.db"
             copy_library(path, copy)
             partial = _sidecar(library, ".restore-partial")
-            with self._short(copy, agent=persona_id) as memory:
+            with self._short(copy, agent=_WORLD_AGENT) as memory:
                 digest = memory.digest()             # 坏备份在这里抛:根目录与库都还没动
                 self._ensure_root()
                 partial.unlink(missing_ok=True)      # Starling 的 backup_to 遇到已存在的目标抛 FileExistsError
                 memory.backup_to(partial)
-            for suffix in _WAL_SUFFIXES:
-                _sidecar(library, suffix).unlink(missing_ok=True)
-            os.replace(partial, library)
+            with self._lock:
+                self._refuse_if_open(world_id, leftover=partial)
+                for suffix in _WAL_SUFFIXES:
+                    _sidecar(library, suffix).unlink(missing_ok=True)
+                os.replace(partial, library)
         return digest
+
+    def wait_closed(self, world_id: str, timeout_s: float) -> bool:
+        """等该世界打开着的端口数降到 0:到了返回 True,超过 timeout_s 秒返回 False。端口可以在别的线程上关。
+        不碰磁盘:没有库的世界端口数也是 0,立刻返回 True。"""
+        self._path(world_id)
+        if isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float)) or not timeout_s >= 0:
+            raise ActioDataError(f"wait_closed.timeout_s: expected a non-negative number, got {timeout_s!r}")
+        with self._all_closed:
+            return self._all_closed.wait_for(lambda: self._open.get(world_id, 0) == 0, timeout_s)
 
     # ---- 摘要 ----
 

@@ -201,7 +201,7 @@ def test_the_resolver_digests_seed_libraries_and_empty_starts(tmp_path):
     lay = StarlingLayout(tmp_path)
     with FakeOpenAI(dim=256) as fake, offline_api_key():
         seeds = StarlingDeploymentStore(tmp_path / "seeds" / "s1", endpoints=fake.endpoints())
-        seeds.remember_event("pa", "seed#0", "pb：我担心预算超支", interlocutor="pb")
+        seeds.remember_event("pa", "pa", "seed#0@pa", "pb：我担心预算超支", interlocutor="pb")
         seeded = seeds.digest("pa")
         before = (tmp_path / "seeds" / "s1" / "pa.db").read_bytes()
         resolve = starling_memory_resolver(lay, {"backend": "starling"})
@@ -284,8 +284,8 @@ def test_a_changed_embedding_vector_changes_the_seed_digest(tmp_path):
         with FakeOpenAI(dim=256) as fake, offline_api_key():
             fake.salt = salt
             store = StarlingDeploymentStore(tmp_path / salt / "seeds", endpoints=fake.endpoints())
-            store.remember_event("pa", "seed#0", "pb：我担心预算超支", interlocutor="pb")
-            port = store.open("pa")
+            store.remember_event("pa", "pa", "seed#0@pa", "pb：我担心预算超支", interlocutor="pb")
+            port = store.open("pa", "pa")
             port.embed_pending()
             port.close()
             out.append(store.digest("pa"))

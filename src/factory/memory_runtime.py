@@ -311,7 +311,7 @@ class TrainingCopies:
             # 磁盘满、权限不够:译成非瞬态的记忆失败(文字只含类名)。裸 OSError 不会被训练位一侧当成记忆失败
             raise translate_failure(exc) from None
         return StarlingMemory.open(
-            path, persona_id=persona_id, endpoints=self._endpoints, close_timeout_s=self._close_timeout_s)
+            path, holder=persona_id, endpoints=self._endpoints, close_timeout_s=self._close_timeout_s)
 
     def open_session_copy(self, run_id: str, session_id: str, slot_id: str, persona_id: str) -> StarlingMemory:
         """一个对手位在一个会话里的副本。同一会话的各位共用 `session_dir`,由调用方在会话终态 `release` 一次。

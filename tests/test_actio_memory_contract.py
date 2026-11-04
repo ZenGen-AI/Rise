@@ -18,7 +18,7 @@ def _starling_port(fresh_dir):
     from actio.memory_starling import StarlingMemory
     fresh_dir.mkdir(parents=True)
     with offline_api_key():                      # C++ 适配器在构造时读 OPENAI_API_KEY
-        return StarlingMemory.open(fresh_dir / "pa.db", persona_id="pa",
+        return StarlingMemory.open(fresh_dir / "pa.db", holder="pa",
                                    endpoints=shared_fake_openai().endpoints())
 
 

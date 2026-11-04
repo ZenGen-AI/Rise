@@ -22,7 +22,7 @@ def env(tmp_path):
     with FakeOpenAI(dim=256) as fake, offline_api_key():
         lay = StarlingLayout(tmp_path / "mem")
         seeds = StarlingDeploymentStore(tmp_path / "mem" / "seeds" / "s1", endpoints=fake.endpoints())
-        seeds.remember_event("pa", "seed#0", "pb：人手也不够", interlocutor="pb")
+        seeds.remember_event("pa", "pa", "seed#0@pa", "pb：人手也不够", interlocutor="pb")
         seeded = seeds.digest("pa")
         # 种子真的有内容:否则"复制了种子"和"建了空库"分不出来,下面几条"同一起点"的断言会空转
         assert seeded != empty_digest()

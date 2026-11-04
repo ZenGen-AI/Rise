@@ -262,7 +262,7 @@ def test_a_failure_while_opening_is_translated_and_leaks_no_path(tmp_path):
     (tmp_path / "plain-file").write_text("x", encoding="utf-8")
     with FakeOpenAI(dim=256) as fake, offline_api_key():
         with pytest.raises(MemoryFailureError) as info:
-            StarlingMemory.open(tmp_path / "plain-file" / "pa.db", persona_id="pa", endpoints=fake.endpoints())
+            StarlingMemory.open(tmp_path / "plain-file" / "pa.db", holder="pa", endpoints=fake.endpoints())
     assert info.value.transient is False and "RuntimeError" in str(info.value)
     assert str(tmp_path) not in str(info.value) and "127.0.0.1" not in str(info.value)
 
@@ -271,7 +271,7 @@ def test_a_failure_while_opening_is_translated_and_leaks_no_path(tmp_path):
 
 def test_real_hits_are_rendered_with_content_ids(tmp_path):
     with FakeOpenAI(dim=256) as fake, offline_api_key():
-        port = StarlingMemory.open(tmp_path / "pa.db", persona_id="pa", endpoints=fake.endpoints())
+        port = StarlingMemory.open(tmp_path / "pa.db", holder="pa", endpoints=fake.endpoints())
         out = port.remember(EV)
         assert out.failed is False and len(out.stored) == 1 and re.fullmatch(r"mem-[0-9a-f]{16}", out.stored[0])
         assert port.embed_pending() == 1
@@ -286,7 +286,7 @@ def test_real_hits_are_rendered_with_content_ids(tmp_path):
 def test_a_failed_extraction_is_counted_not_raised(tmp_path):
     with FakeOpenAI(dim=256) as fake, offline_api_key():
         fake.fail_keys.add(EV.key)
-        port = StarlingMemory.open(tmp_path / "pa.db", persona_id="pa", endpoints=fake.endpoints())
+        port = StarlingMemory.open(tmp_path / "pa.db", holder="pa", endpoints=fake.endpoints())
         out = port.remember(EV)
         assert (out.stored, out.failed) == ((), True) and out.category
         port.close()
@@ -294,7 +294,7 @@ def test_a_failed_extraction_is_counted_not_raised(tmp_path):
 
 def test_a_failing_embedding_endpoint_surfaces_as_transient_failures(tmp_path):
     with FakeOpenAI(dim=256) as fake, offline_api_key():
-        port = StarlingMemory.open(tmp_path / "pa.db", persona_id="pa", endpoints=fake.endpoints())
+        port = StarlingMemory.open(tmp_path / "pa.db", holder="pa", endpoints=fake.endpoints())
         assert port.remember(EV).failed is False
         fake.fail_embeddings = True
         with pytest.raises(MemoryFailureError) as embed_info:
@@ -314,9 +314,9 @@ def test_a_deployment_store_write_is_recallable_on_the_next_port_without_a_round
 
     with FakeOpenAI(dim=256) as fake, offline_api_key():
         store = StarlingDeploymentStore(tmp_path / "deploy", endpoints=fake.endpoints())
-        out = store.remember_event("pa", EV.key, EV.text, interlocutor=EV.interlocutor)
+        out = store.remember_event("s1", "pa", EV.key, EV.text, interlocutor=EV.interlocutor)
         assert out.failed is False and len(out.stored) == 1
-        port = store.open("pa")
+        port = store.open("s1", "pa")
         try:
             assert [h.id for h in port.recall("预算超支怎么办", limit=3)] == list(out.stored)
             assert port.embed_pending() == 0                  # 没有欠着的嵌入
@@ -333,13 +333,13 @@ def test_a_deployment_store_write_whose_embedding_fails_is_a_transient_failure_a
         store = StarlingDeploymentStore(tmp_path / "deploy", endpoints=fake.endpoints())
         fake.fail_embeddings = True
         with pytest.raises(MemoryFailureError) as info:
-            store.remember_event("pa", EV.key, EV.text, interlocutor=EV.interlocutor)
+            store.remember_event("s1", "pa", EV.key, EV.text, interlocutor=EV.interlocutor)
         assert info.value.transient is True and "127.0.0.1" not in str(info.value)
         chats = fake.chat_calls
         fake.fail_embeddings = False
-        again = store.remember_event("pa", EV.key, EV.text, interlocutor=EV.interlocutor)
+        again = store.remember_event("s1", "pa", EV.key, EV.text, interlocutor=EV.interlocutor)
         assert again.failed is False and len(again.stored) == 1 and fake.chat_calls == chats
-        port = store.open("pa")
+        port = store.open("s1", "pa")
         try:
             assert [h.id for h in port.recall("预算超支怎么办", limit=3)] == list(again.stored)
         finally:
@@ -349,7 +349,7 @@ def test_a_deployment_store_write_whose_embedding_fails_is_a_transient_failure_a
 def test_close_with_a_call_in_flight_times_out_and_the_port_stays_usable_for_a_second_close(tmp_path):
     with FakeOpenAI(dim=256) as fake, offline_api_key():
         fake.chat_delay_s = 0.8       # 与 timeout_ms=2000 留 1.2 秒余量,负载高时抽取请求不会自己超时
-        port = StarlingMemory.open(tmp_path / "pa.db", persona_id="pa", endpoints=fake.endpoints(),
+        port = StarlingMemory.open(tmp_path / "pa.db", holder="pa", endpoints=fake.endpoints(),
                                    close_timeout_s=0.2)
         done = []
         t = threading.Thread(target=lambda: done.append(port.remember(EV))); t.start()
@@ -416,7 +416,7 @@ def test_the_empty_digest_is_a_real_empty_library_and_is_computed_once(monkeypat
         from actio.memory_starling import StarlingDeploymentStore
         import tempfile, pathlib
         with tempfile.TemporaryDirectory() as tmp:
-            port = StarlingDeploymentStore(pathlib.Path(tmp), endpoints=fake.endpoints()).open("pa")
+            port = StarlingDeploymentStore(pathlib.Path(tmp), endpoints=fake.endpoints()).open("s1", "pa")
             try:
                 assert port.digest() == first                          # 空库的摘要就是新开一个库的摘要
             finally:
@@ -477,10 +477,10 @@ def test_no_connection_is_opened_with_a_custom_extraction(monkeypatch, tmp_path)
     monkeypatch.setattr(starling.Memory, "open", staticmethod(spy))
     with FakeOpenAI(dim=256) as fake, offline_api_key():
         store = StarlingDeploymentStore(tmp_path / "deploy", endpoints=fake.endpoints())
-        store.remember_event("pa", "k#0", "pb：我担心预算超支", interlocutor="pb")        # 带端点的短命连接
-        port = store.open("pa")                                                        # 端口
+        store.remember_event("s1", "pa", "k#0@pa", "pb：我担心预算超支", interlocutor="pb")        # 带端点的短命连接
+        port = store.open("s1", "pa")                                                        # 端口
         port.close()
-        store.digest("pa")
-        store.backup_to("pa", tmp_path / "snap.db")
+        store.digest("s1")
+        store.backup_to("s1", tmp_path / "snap.db")
         store.digest_of(tmp_path / "snap.db")
     assert len(seen) >= 5 and all(kw.get("extraction") is None for kw in seen)

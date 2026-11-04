@@ -754,7 +754,7 @@ def test_the_scope_binds_the_configured_seed_and_the_trained_copy_starts_from_it
     with FakeOpenAI(dim=256) as fake, offline_api_key():
         layout = StarlingLayout(tmp_path / "mem")
         seeds = StarlingDeploymentStore(layout.seed_dir("s1"), endpoints=fake.endpoints())
-        seeds.remember_event("pa", "seed#0", "pb：人手也不够", interlocutor="pb")
+        seeds.remember_event("pa", "pa", "seed#0@pa", "pb：人手也不够", interlocutor="pb")
         assert seeds.digest("pa") != empty_digest()                 # 种子有内容,"从种子起"才和"空库"分得开
         copies = TrainingCopies(layout, fake.endpoints(), close_timeout_s=0.2)
         _, _, factory, _ = _unit(world, tmp_path, stub, training_copies=copies)

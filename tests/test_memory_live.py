@@ -23,7 +23,7 @@ def live_port(tmp_path):
     cfg = read_memory_config(env=os.environ, repo_root=Path(__file__).resolve().parents[1])
     assert cfg is not None, "RISMFORGE_MEMORY_CONFIG must point at a real config"
     check_api_key(os.environ)
-    port = StarlingMemory.open(tmp_path / "live.db", persona_id="pa", endpoints=StarlingEndpoints(
+    port = StarlingMemory.open(tmp_path / "live.db", holder="pa", endpoints=StarlingEndpoints(
         cfg.extraction_base_url, cfg.extraction_model, cfg.embedding_base_url, cfg.embedding_model,
         cfg.embedding_dim, cfg.timeout_ms, cfg.max_retries))
     yield port, cfg.timeout_ms / 1000.0
