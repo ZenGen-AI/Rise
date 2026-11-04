@@ -617,3 +617,47 @@ def test_an_earlier_t1_or_t2_record_does_not_block_reentry(store, mem, monkeypat
     _put(store, increments=[{"kind": "memory", "definition": MEMORY}])
     _admit(store, mem)
     assert store.read_product(proposal_file(PID)).status == "effective"
+
+
+# ---------------- 整分支终审:门② 遇到坏旁注 ----------------
+
+def test_an_unreadable_world_tag_defers_admission_and_writes_nothing(store, mem, tmp_path):
+    # 任一快照的 .world 旁注坏了,uncommitted_snapshots 抛 MindAgentDataError;门② 转 DeferredError
+    # (守护进程退避、连续延后有上限),不让它越过处理器打崩守护进程。提案、库、树、失败记录都不动
+    _put(store, increments=[{"kind": "memory", "definition": MEMORY}])
+    snap = _in_flight_copy(mem, "s2", "deploy-zengen-v3-s2-1")
+    snap.with_suffix(".world").write_text("../" + "x" * 200)           # 人手改坏的旁注
+    before, head = mem.store.digest("s1"), store._git("rev-parse", "HEAD")
+    with pytest.raises(DeferredError) as exc:
+        _admit(store, mem)
+    reason = str(exc.value)
+    assert reason == ("world s1: a snapshot world tag is unreadable and needs a manual fix "
+                      "(MindAgentDataError)")
+    assert str(tmp_path) not in reason and "x" * 20 not in reason
+    assert store.read_product(proposal_file(PID)).status == "approved"
+    assert not store.exists(failure_record_file("run-003", f"admit-{PID}"))
+    assert mem.store.digest("s1") == before and store._git("rev-parse", "HEAD") == head
+
+
+def test_an_unreadable_world_tag_also_defers_a_skill_only_proposal(store, mem, monkeypatch):
+    # 只含技能的提案不走世界那圈;全局等待那处今天只列文件、不读旁注,但也照样接住:布局以后改成读旁注时
+    # 坏旁注同样不许漏出处理器。这里让它像 uncommitted_snapshots 一样逐个读旁注
+    _put(store)
+    snap = _in_flight_copy(mem, "s2", "deploy-zengen-v3-s2-1")
+    snap.with_suffix(".world").write_bytes(b"\xff\xfe")
+    real = MemoryLayout.any_uncommitted_snapshots
+
+    def reading_tags(self):
+        found = real(self)
+        for p in found:
+            self.world_of(p)
+        return found
+
+    monkeypatch.setattr(MemoryLayout, "any_uncommitted_snapshots", reading_tags)
+    head = store._git("rev-parse", "HEAD")
+    with pytest.raises(DeferredError) as exc:
+        _admit(store, mem)
+    assert str(exc.value) == ("admission: a snapshot world tag is unreadable and needs a manual fix "
+                              "(MindAgentDataError)")
+    assert store._git("rev-parse", "HEAD") == head and store.read_product(proposal_file(PID)).status == "approved"
+    assert not store.exists(failure_record_file("run-003", f"admit-{PID}"))

@@ -80,6 +80,16 @@ def test_world_of_errors_name_the_tag_relative_to_the_memory_root(tmp_path):
     assert str(tmp_path) not in str(exc.value)
 
 
+def test_a_long_bad_tag_is_cut_to_64_characters_in_the_error(tmp_path):
+    # 旁注是人手写的任意内容,会进失败原因与日志:只带前 64 个字符
+    lay = MemoryLayout(tmp_path)
+    snap = _snap(lay, "r1", "m-s1-1")
+    (snap.parent / "deploy-m-s1-1.world").write_text("a b" + "x" * 200)
+    with pytest.raises(MindAgentDataError) as exc:
+        lay.world_of(snap)
+    assert repr("a b" + "x" * 61) in str(exc.value) and "x" * 62 not in str(exc.value)
+
+
 def test_a_hand_written_tag_with_one_trailing_newline_is_accepted(tmp_path):
     lay = MemoryLayout(tmp_path)
     snap = _snap(lay, "r1", "m-s1-1")

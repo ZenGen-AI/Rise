@@ -110,7 +110,7 @@ class MemoryLayout:
             raise MindAgentDataError(f"快照旁注读不出: {self._rel(tag)}: {type(exc).__name__}") from exc
         scenario_id = content[:-1] if content.endswith("\n") else content
         if not PERSONA_ID_PATTERN.fullmatch(scenario_id):
-            raise MindAgentDataError(f"快照旁注内容不是合法的情境 id: {self._rel(tag)}: {content!r}")
+            raise MindAgentDataError(f"快照旁注内容不是合法的情境 id: {self._rel(tag)}: {content[:64]!r}")
         return scenario_id
 
     def _is_snapshot(self, p: Path) -> bool:
