@@ -233,8 +233,9 @@ def _canon(obj):
 
 
 def _digest_of(entry_dicts, event_rows):
-    """4.5 节最后一句:条目 to_dict() 去掉 id 后的排序列表加事件表,整体 sha256。"""
-    entries = sorted(({k: v for k, v in d.items() if k != "id"} for d in entry_dicts), key=_canon)
+    """4.5 节最后一句:条目 to_dict() 去掉 id、带上所属 holder(缺省 "")的排序列表加事件表,整体 sha256。"""
+    entries = sorted(({"holder": "", **{k: v for k, v in d.items() if k != "id"}} for d in entry_dicts),
+                     key=_canon)
     events = sorted(event_rows, key=lambda r: r["key"])
     return hashlib.sha256(_canon({"entries": entries, "events": events}).encode("utf-8")).hexdigest()
 
@@ -291,7 +292,7 @@ def test_tuple_memory_remember_appends_an_entry_and_keeps_an_event_table():
     entry = lambda key, subject, text, ts: {"id": "-", "version": 1, "subject": subject, "content": text,
                                             "keywords": [], "timestamp": ts, "source_episode": key,
                                             "confidence": 1.0}
-    row = lambda key, text, who, seq: {"key": key, "text": text, "interlocutor": who, "seq": seq,
+    row = lambda key, text, who, seq: {"key": key, "text": text, "interlocutor": who, "holder": "", "seq": seq,
                                        "state": "committed", "statement_ids": [content_id(who, text)],
                                        "failure_category": None}
     assert m.digest() == _digest_of(
@@ -318,20 +319,20 @@ def test_tuple_memory_is_a_memory_backend_and_rejects_a_bad_limit():
 def test_ledger_event_state_machine_pending_failed_committed_abandoned():
     led = _Ledger()
     ev = MemoryEvent("ep#1", "pb：预算不够", "pb")
-    assert led.begin(ev) is None and led.events["ep#1"]["state"] == "pending" and led.next_seq == 1
+    assert led.begin(ev, holder="") is None and led.events["ep#1"]["state"] == "pending" and led.next_seq == 1
     led.fail("ep#1", "timeout")
     assert led.events["ep#1"]["failure_category"] == "timeout" and led.events["ep#1"]["state"] == "pending"
-    assert led.begin(ev) is None and led.next_seq == 1  # pending 同文本:交给调用方再抽,不重复占序号
+    assert led.begin(ev, holder="") is None and led.next_seq == 1  # pending 同文本:交给调用方再抽,不重复占序号
     ids = led.commit("ep#1")
     assert ids == (content_id("pb", "pb：预算不够"),) and led.events["ep#1"]["failure_category"] is None
-    assert led.begin(ev) == ids and len(led.entries) == 1  # committed 幂等
+    assert led.begin(ev, holder="") == ids and len(led.entries) == 1  # committed 幂等
     with pytest.raises(MemoryEventConflict):
         led.abandon("ep#1")  # committed 放弃不了
-    assert led.begin(MemoryEvent("ep#2", "pc：好吧", "pc")) is None
+    assert led.begin(MemoryEvent("ep#2", "pc：好吧", "pc"), holder="") is None
     led.abandon("ep#2")
     led.abandon("ep#2")  # 已放弃:空操作
     with pytest.raises(MemoryEventConflict):
-        led.begin(MemoryEvent("ep#2", "pc：好吧", "pc"))  # 放弃的 key 同文本也抛
+        led.begin(MemoryEvent("ep#2", "pc：好吧", "pc"), holder="")  # 放弃的 key 同文本也抛
     with pytest.raises(MemoryFailureError) as unknown:
         led.abandon("ep#nope")
     assert unknown.value.transient is False and not isinstance(unknown.value, MemoryEventConflict)
@@ -339,9 +340,9 @@ def test_ledger_event_state_machine_pending_failed_committed_abandoned():
 
 def test_ledger_digest_keeps_only_key_and_state_for_abandoned_rows_and_round_trips_through_json():
     led = _Ledger()
-    led.begin(MemoryEvent("ep#1", "pb：预算不够", "pb"))
+    led.begin(MemoryEvent("ep#1", "pb：预算不够", "pb"), holder="")
     led.commit("ep#1")
-    led.begin(MemoryEvent("ep#2", "pc：好吧", "pc"))
+    led.begin(MemoryEvent("ep#2", "pc：好吧", "pc"), holder="")
     before = led.digest()
     led.abandon("ep#2")
     assert led.digest() != before

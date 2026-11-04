@@ -42,13 +42,19 @@ def test_both_protocols_are_checked_by_method_names():
         def close(self): return None
 
     class Store:
-        def open(self, persona_id): return Port()
-        def remember_event(self, persona_id, key, text, *, interlocutor): ...
-        def abandon_event(self, persona_id, key): ...
-        def pending_events(self, persona_id): return []
-        def backup_to(self, persona_id, path): return ""
-        def restore_from(self, persona_id, path): return ""
-        def digest(self, persona_id): return ""
+        def open(self, world_id, holder): return Port()
+        def remember_event(self, world_id, holder, key, text, *, interlocutor): ...
+        def abandon_event(self, world_id, key): ...
+        def pending_events(self, world_id): return []
+        def backup_to(self, world_id, path): return ""
+        def restore_from(self, world_id, path): return ""
+        def digest(self, world_id): return ""
+        def wait_closed(self, world_id, timeout_s): return True
+
+    class StoreWithoutWaitClosed(Store):
+        wait_closed = None  # 协议按方法名检查:缺了 wait_closed 就不是部署管理面
 
     assert isinstance(Port(), MemoryBackend) and not isinstance(object(), MemoryBackend)
     assert isinstance(Store(), DeploymentMemoryStore) and not isinstance(Port(), DeploymentMemoryStore)
+    assert not isinstance(StoreWithoutWaitClosed(), DeploymentMemoryStore)
+    assert "wait_closed" in dir(DeploymentMemoryStore)

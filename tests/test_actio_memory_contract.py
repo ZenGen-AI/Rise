@@ -23,8 +23,8 @@ def _starling_port(fresh_dir):
 
 
 PORT_FACTORIES = {
-    "tuple": lambda fresh_dir: TupleMemory(),
-    "file": lambda fresh_dir: FileTupleStore(fresh_dir).open("pa"),
+    "tuple": lambda fresh_dir: TupleMemory().world("pa"),
+    "file": lambda fresh_dir: FileTupleStore(fresh_dir).open("s1", "pa"),
     "starling": _starling_port,
 }
 

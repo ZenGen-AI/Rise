@@ -1,10 +1,12 @@
 """显式记忆:条目、按时间点取快照、按主体与关键词的词面重叠检索(闭环集成设计 §8.1),
 以及记忆端口的两个替身与它们共用的账本 _Ledger:内存里的 TupleMemory,落盘的 FileTupleStore
-(场景二记忆设计 §4.1)。"""
+(场景二记忆设计 §4.1)。账本是一个世界一份,条目与事件行都记着是哪个 holder(主体)写的
+(设计三 §3.2):召回按 holder 过滤,摘要覆盖全部 holder。"""
 from __future__ import annotations
 
 import hashlib
 import json
+import threading
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -147,6 +149,7 @@ def retrieve(
 # ---------------- 记忆端口的内存替身 ----------------
 
 _EVENT_ROW_KEYS = {"key", "text", "interlocutor", "seq", "state", "statement_ids", "failure_category"}
+_EVENT_ROW_OPTIONAL_KEYS = {"holder"}  # 读旧账本时行里没有 holder,按 "" 补
 _EVENT_STATES = ("pending", "committed", "abandoned")
 _CLOCK_ORIGIN = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -172,11 +175,12 @@ def _entry_time(seq: int) -> str:
 
 
 def _check_event_row(row: object) -> dict:
-    row = _check.require_keys(row, "memory event row", set(_EVENT_ROW_KEYS))
+    row = _check.require_keys(row, "memory event row", set(_EVENT_ROW_KEYS), set(_EVENT_ROW_OPTIONAL_KEYS))
     what = f"memory event {row['key']!r}"
     _check.text(row["key"], f"{what}.key")
     _check.text(row["text"], f"{what}.text")
     _check.text(row["interlocutor"], f"{what}.interlocutor")
+    _check.text(row.get("holder", ""), f"{what}.holder", allow_empty=True)
     if _check.integer(row["seq"], f"{what}.seq") < 0:
         raise ActioDataError(f"{what}.seq: expected an int >= 0, got {row['seq']!r}")
     if row["state"] not in _EVENT_STATES:
@@ -190,35 +194,47 @@ def _check_event_row(row: object) -> dict:
         raise ActioDataError(f"{what}.statement_ids: a {row['state']} row must "
                              f"{'have' if row['state'] == 'committed' else 'not have'} statement ids, got {ids!r}")
     _check.optional_text(row["failure_category"], f"{what}.failure_category")
-    return dict(row)
+    return {"holder": "", **row}
 
 
 class _Ledger:
-    """两个替身共用的唯一一份逻辑:条目、事件表与事件序号。TupleMemory 把它放内存,
-    FileTupleStore 把它存成 JSON,所以同样内容在两者上的命中与摘要逐值相等。"""
+    """两个替身共用的唯一一份逻辑:条目、事件表与事件序号,一个世界一份。TupleMemory 把它放内存,
+    FileTupleStore 把它存成 JSON,所以同样内容在两者上的命中与摘要逐值相等。
+
+    条目的 schema 不带 holder,账本另存 holders(条目 id → holder);不在表里的条目(构造时传入的、
+    读旧账本得到的)属于 holder ""。事件行带 holder,commit 落条目时把它记进 holders。"""
 
     def __init__(
         self,
         entries: tuple[MemoryEntry, ...] | list[MemoryEntry] = (),
         events: dict[str, dict] | None = None,
         next_seq: int = 0,
+        holders: dict[str, str] | None = None,
     ) -> None:
         if not isinstance(entries, (tuple, list)):
             raise ActioDataError(f"entries: expected a tuple or list, got {type(entries).__name__}")
         snapshot(entries)  # 逐条查类型,并让同 id 同版本的冲突在构造时就抛
         self.entries: list[MemoryEntry] = list(entries)
-        self.events: dict[str, dict] = {} if events is None else deepcopy(events)  # 不与调用方共享行
+        self.events: dict[str, dict] = {}  # 不与调用方共享行;没有 holder 的行补 ""
+        for key, row in ({} if events is None else events).items():
+            self.events[key] = {"holder": "", **deepcopy(row)}
         self.next_seq: int = next_seq
+        self.holders: dict[str, str] = {} if holders is None else dict(holders)
 
     # ---- 召回 ----
 
-    def recall(self, query: str, *, limit: int) -> list[MemoryHit]:
-        """不直接调 retrieve:它的平手裁决用条目自带 id,同一内容换个 id 进来顺序就会变,违背
+    def recall(self, query: str, *, limit: int, holder: str | None = None) -> list[MemoryHit]:
+        """holder 不是 None 时只看该主体名下的条目("" 也是一个具体的主体:构造时传入的条目都在它名下),
+        None 表示不过滤。
+
+        不直接调 retrieve:它的平手裁决用条目自带 id,同一内容换个 id 进来顺序就会变,违背
         "prompt 与轨迹不变";它也不去重,两条同内容条目会让轨迹的 memory_hits 出现重复 id。"""
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
             raise ActioDataError(f"recall.limit: expected a non-negative int, got {limit!r}")
         scored = []
         for e in snapshot(self.entries):
+            if holder is not None and self.holders.get(e.id, "") != holder:
+                continue
             n = overlap(e, query)
             if n >= 1:
                 scored.append((-n, -e.confidence, content_id(e.subject, e.content), e))
@@ -234,12 +250,14 @@ class _Ledger:
 
     # ---- 事件表 ----
 
-    def begin(self, event: MemoryEvent) -> tuple[str, ...] | None:
-        """登记事件。同 key 已 committed 且文本相同返回存下的语句 id(幂等);pending 且文本相同返回
-        None,交给调用方再抽一次;已放弃或文本不同抛 MemoryEventConflict。新 key 写一行 pending。"""
+    def begin(self, event: MemoryEvent, *, holder: str) -> tuple[str, ...] | None:
+        """登记事件,记在 holder 名下。去重键仍是 key(key 已带主体)。同 key 已 committed 且文本相同返回
+        存下的语句 id(幂等);pending 且文本相同返回 None,交给调用方再抽一次;已放弃或文本不同抛
+        MemoryEventConflict。新 key 写一行 pending。"""
         _check.text(event.key, "memory event key")
         _check.text(event.text, "memory event text")
         _check.text(event.interlocutor, "memory event interlocutor")
+        _check.text(holder, "memory event holder", allow_empty=True)
         row = self.events.get(event.key)
         if row is not None:
             if row["state"] == "abandoned":
@@ -248,7 +266,7 @@ class _Ledger:
                 raise MemoryEventConflict(f"memory event {event.key!r} already exists with a different text")
             return tuple(row["statement_ids"]) if row["state"] == "committed" else None
         self.events[event.key] = {
-            "key": event.key, "text": event.text, "interlocutor": event.interlocutor,
+            "key": event.key, "text": event.text, "interlocutor": event.interlocutor, "holder": holder,
             "seq": self.next_seq, "state": "pending", "statement_ids": [], "failure_category": None,
         }
         self.next_seq += 1
@@ -266,10 +284,12 @@ class _Ledger:
         if row["state"] == "abandoned":
             raise MemoryEventConflict(f"memory event {key!r} was abandoned")
         if row["state"] == "pending":
-            self.entries.append(MemoryEntry(
+            entry = MemoryEntry(
                 id=_entry_id(key), version=1, subject=row["interlocutor"], content=row["text"],
                 timestamp=_entry_time(row["seq"]), confidence=1.0, source_episode=key,
-            ))
+            )
+            self.entries.append(entry)
+            self.holders[entry.id] = row["holder"]
             row["state"] = "committed"
             row["statement_ids"] = [content_id(row["interlocutor"], row["text"])]
             row["failure_category"] = None
@@ -294,9 +314,11 @@ class _Ledger:
 
     def digest(self) -> str:
         """条目取 snapshot 的结果(召回实际看到的那一份)而不是原始列表:否则两个库的条目去掉 id 后
-        多重集相同、按 id 分组的版本归属不同时,摘要相同而召回不同。abandoned 行只计 key 与 state。"""
+        多重集相同、按 id 分组的版本归属不同时,摘要相同而召回不同。每条带上自己的 holder,所以主体不同的
+        同内容条目摘要不同;摘要覆盖全部 holder。abandoned 行只计 key 与 state。"""
         entries = sorted(
-            ({k: v for k, v in e.to_dict().items() if k != "id"} for e in snapshot(self.entries)),
+            ({"holder": self.holders.get(e.id, ""), **{k: v for k, v in e.to_dict().items() if k != "id"}}
+             for e in snapshot(self.entries)),
             key=_canon,
         )
         events = sorted(
@@ -310,15 +332,24 @@ class _Ledger:
         return {
             "entries": [e.to_dict() for e in self.entries],
             "events": [deepcopy(r) for r in sorted(self.events.values(), key=lambda r: r["seq"])],
+            "holders": dict(self.holders),
             "next_seq": self.next_seq,
         }
 
     @classmethod
     def from_json(cls, obj: object) -> "_Ledger":
-        obj = _check.require_keys(obj, "memory ledger", {"entries", "events", "next_seq"})
+        obj = _check.require_keys(obj, "memory ledger", {"entries", "events", "next_seq"}, {"holders"})
         if not isinstance(obj["entries"], list) or not isinstance(obj["events"], list):
             raise ActioDataError("memory ledger: entries and events must be lists")
         entries = [MemoryEntry.from_dict(d) for d in obj["entries"]]
+        holders = obj.get("holders", {})  # 旧账本没有这张表:所有条目属于 ""
+        if not isinstance(holders, dict):
+            raise ActioDataError(f"memory ledger.holders: expected a dict, got {type(holders).__name__}")
+        entry_ids = {e.id for e in entries}
+        for entry_id, who in holders.items():
+            if entry_id not in entry_ids:
+                raise ActioDataError(f"memory ledger.holders: {entry_id!r} is not an entry id")
+            _check.text(who, f"memory ledger.holders[{entry_id!r}]", allow_empty=True)
         events: dict[str, dict] = {}
         for raw in obj["events"]:
             row = _check_event_row(raw)
@@ -330,16 +361,28 @@ class _Ledger:
         next_seq = _check.integer(obj["next_seq"], "memory ledger.next_seq")
         if next_seq < 0 or any(r["seq"] >= next_seq for r in events.values()):
             raise ActioDataError(f"memory ledger.next_seq: {next_seq!r} does not exceed every event seq")
-        return cls(entries, events, next_seq)
+        return cls(entries, events, next_seq, holders)
 
 
 class TupleMemory:
-    """MemoryBackend 的内存替身:包一份 _Ledger。命中 id 一律是内容 id,不用条目自带的 id,
-    所以同一内容换个 id 进来,prompt 与轨迹不变。替身的抽取从不失败,也没有待嵌入的东西。"""
+    """MemoryBackend 的内存替身:包一份 _Ledger,端口绑定一个 holder(主体)。命中 id 一律是内容 id,
+    不用条目自带的 id,所以同一内容换个 id 进来,prompt 与轨迹不变。替身的抽取从不失败,也没有待嵌入的东西。
+
+    不带 holder 构造时 holder 是 "",构造时传入的 entries 都在它名下。world(holder) 在同一份账本上
+    取另一个主体的端口,训练替身的 rollout 世界用:一个世界一份账本,各角色位各开一个视图。"""
 
     def __init__(self, entries: tuple[MemoryEntry, ...] | list[MemoryEntry] = ()) -> None:
         self._ledger = _Ledger(entries)
+        self._holder = ""
         self._closed = False
+
+    def world(self, holder: str) -> "TupleMemory":
+        """共享本端口账本、绑定 holder 的新端口。各视图的关闭状态互相独立。"""
+        _check.text(holder, "holder", allow_empty=True)
+        view = TupleMemory()
+        view._ledger = self._ledger
+        view._holder = holder
+        return view
 
     def _live(self) -> _Ledger:
         if self._closed:
@@ -347,11 +390,11 @@ class TupleMemory:
         return self._ledger
 
     def recall(self, query: str, *, limit: int) -> list[MemoryHit]:
-        return self._live().recall(query, limit=limit)
+        return self._live().recall(query, limit=limit, holder=self._holder)
 
     def remember(self, event: MemoryEvent) -> RememberOutcome:
         ledger = self._live()
-        ids = ledger.begin(event)
+        ids = ledger.begin(event, holder=self._holder)
         if ids is None:
             ids = ledger.commit(event.key)
         return RememberOutcome(ids, False, None)
@@ -394,11 +437,20 @@ def _write_ledger(path: Path, ledger: _Ledger) -> None:
         raise MemoryFailureError(type(exc).__name__, transient=False) from None
 
 
-class FileTupleStore:
-    """DeploymentMemoryStore 的落盘替身:<root>/<persona_id>.json 存一份 _Ledger.to_json(),
-    人格还没有文件时等同空库。每个操作都是"读整份、改、写整份"。
+def _check_name(value: object, what: str) -> str:
+    """世界 id 与主体都拼进文件名,过同一份白名单。"""
+    if not isinstance(value, str) or not PERSONA_ID_PATTERN.fullmatch(value):
+        raise ActioDataError(f"{what}: expected 1 to 128 characters of [A-Za-z0-9._-] "
+                             f"starting with a letter or digit, got {value!r}")
+    return value
 
-    不加锁:替身只在单线程里用(每个部署 episode 一条线程)。
+
+class FileTupleStore:
+    """DeploymentMemoryStore 的落盘替身:<root>/<world_id>.json 存一份 _Ledger.to_json(),世界还没有文件时
+    等同空库。一个世界一个文件,各 holder(主体)的条目与事件行都在里面。每个操作都是"读整份、改、写整份"。
+
+    账本的读改写不加锁:同一世界的写入由调用方串行(每个部署 episode 一条线程)。只有打开着的端口数加锁:
+    端口会在服务端线程关,而部署驱动器在另一条线程上 wait_closed 或 restore_from。
     extraction_failure 是故障注入口:对一条事件返回非 None 的字符串,就当这次抽取以该
     failure_category 失败;缺省从不失败。"""
 
@@ -412,90 +464,125 @@ class FileTupleStore:
         # 根目录由第一次写(_write_ledger)建
         self._root = Path(root)
         self._extraction_failure = extraction_failure
-        self._open: dict[str, int] = {}  # 每个人格打开着的端口数
+        self._lock = threading.Lock()
+        self._all_closed = threading.Condition(self._lock)  # 某个世界的端口数归零时 notify_all
+        self._open: dict[str, int] = {}  # 每个世界打开着的端口数(不分主体),读写都要持 _lock
 
     # ---- 读写 ----
 
-    def _path(self, persona_id: str) -> Path:
-        """persona_id 直接拼进文件名:用 fullmatch(模式以 $ 结尾,match 会放过 "p1\n"),
+    def _path(self, world_id: str) -> Path:
+        """world_id 直接拼进文件名:用 fullmatch(模式以 $ 结尾,match 会放过 "p1\n"),
         '/' 与开头的 '.' 都不许。"""
-        if not isinstance(persona_id, str) or not PERSONA_ID_PATTERN.fullmatch(persona_id):
-            raise ActioDataError(f"persona_id: expected 1 to 128 characters of [A-Za-z0-9._-] "
-                                 f"starting with a letter or digit, got {persona_id!r}")
-        return self._root / f"{persona_id}.json"
+        _check_name(world_id, "world_id")
+        return self._root / f"{world_id}.json"
 
-    def _load(self, persona_id: str) -> _Ledger:
-        path = self._path(persona_id)
+    def _load(self, world_id: str) -> _Ledger:
+        path = self._path(world_id)
         return _read_ledger(path) if path.exists() else _Ledger()
 
-    def _save(self, persona_id: str, ledger: _Ledger) -> None:
-        _write_ledger(self._path(persona_id), ledger)
+    def _save(self, world_id: str, ledger: _Ledger) -> None:
+        _write_ledger(self._path(world_id), ledger)
+
+    # ---- 端口计数 ----
+
+    def _port_opened(self, world_id: str) -> None:
+        with self._lock:
+            self._open[world_id] = self._open.get(world_id, 0) + 1
+
+    def _port_closed(self, port: "_FilePort") -> None:
+        """关一个端口。"已关"的判断与计数在同一把锁里:两条线程同时关同一个端口不会减两次。"""
+        with self._lock:
+            if port._closed:
+                return
+            port._closed = True
+            left = self._open[port._world_id] - 1
+            if left > 0:
+                self._open[port._world_id] = left
+            else:
+                del self._open[port._world_id]
+                self._all_closed.notify_all()
 
     # ---- DeploymentMemoryStore ----
 
-    def open(self, persona_id: str) -> "_FilePort":
-        self._path(persona_id)
-        return _FilePort(self, persona_id)
+    def open(self, world_id: str, holder: str) -> "_FilePort":
+        self._path(world_id)
+        _check_name(holder, "holder")
+        return _FilePort(self, world_id, holder)
 
-    def remember_event(self, persona_id: str, key: str, text: str, *, interlocutor: str) -> RememberOutcome:
+    def remember_event(
+        self, world_id: str, holder: str, key: str, text: str, *, interlocutor: str,
+    ) -> RememberOutcome:
         """三段写入:① 登记 pending 行并落盘(行与 seq 在抽取之前就在库里);② 抽取;
         ③ 成功就重新读库、commit、落盘,失败就记下类别、落盘,返回 failed 而不抛。
         已 committed 的同文本事件直接返回存下的语句 id,不调抽取。pending 行重调一律重新抽取:
-        替身的语句在 ③ 之前不进库,没有"补收据"的分支。"""
+        替身的语句在 ③ 之前不进库,没有"补收据"的分支。事件与条目记在 holder 名下。"""
+        _check_name(holder, "holder")
         event = MemoryEvent(key, text, interlocutor)
-        ledger = self._load(persona_id)
-        ids = ledger.begin(event)
+        ledger = self._load(world_id)
+        ids = ledger.begin(event, holder=holder)
         if ids is not None:
             return RememberOutcome(ids, False, None)
-        self._save(persona_id, ledger)
+        self._save(world_id, ledger)
         category = None if self._extraction_failure is None else self._extraction_failure(event)
-        ledger = self._load(persona_id)
+        ledger = self._load(world_id)
         if category is None:
             ids = ledger.commit(key)
-            self._save(persona_id, ledger)
+            self._save(world_id, ledger)
             return RememberOutcome(ids, False, None)
         ledger.fail(key, category)
-        self._save(persona_id, ledger)
+        self._save(world_id, ledger)
         return RememberOutcome((), True, category)
 
-    def abandon_event(self, persona_id: str, key: str) -> None:
-        ledger = self._load(persona_id)
+    def abandon_event(self, world_id: str, key: str) -> None:
+        ledger = self._load(world_id)
         ledger.abandon(key)
-        self._save(persona_id, ledger)
+        self._save(world_id, ledger)
 
-    def pending_events(self, persona_id: str) -> list[str]:
-        rows = [r for r in self._load(persona_id).events.values() if r["state"] == "pending"]
+    def pending_events(self, world_id: str) -> list[str]:
+        rows = [r for r in self._load(world_id).events.values() if r["state"] == "pending"]
         return [r["key"] for r in sorted(rows, key=lambda r: r["seq"])]
 
-    def digest(self, persona_id: str) -> str:
-        return self._load(persona_id).digest()
+    def digest(self, world_id: str) -> str:
+        return self._load(world_id).digest()
 
-    def backup_to(self, persona_id: str, path: Path) -> str:
-        """把账本规范化写到 path(人格还没有文件时写空账本,所以起点副本总是存在),
+    def backup_to(self, world_id: str, path: Path) -> str:
+        """把账本规范化写到 path(世界还没有文件时写空账本,所以起点副本总是存在),
         返回读回的副本的逻辑摘要。"""
         path = Path(path)
-        _write_ledger(path, self._load(persona_id))
+        _write_ledger(path, self._load(world_id))
         return _read_ledger(path).digest()
 
-    def restore_from(self, persona_id: str, path: Path) -> str:
-        """用 path 的内容覆盖该人格的库,返回恢复后的逻辑摘要。该人格还有打开的端口时拒绝;
-        坏备份在覆盖之前就被拒,库原样不动。"""
-        self._path(persona_id)
-        if self._open.get(persona_id, 0) > 0:
-            raise MemoryFailureError("restore_from: persona has an open port", transient=False)
-        ledger = _read_ledger(Path(path))
-        self._save(persona_id, ledger)
+    def restore_from(self, world_id: str, path: Path) -> str:
+        """用 path 的内容覆盖该世界的库,返回恢复后的逻辑摘要。该世界还有任何主体的端口开着时拒绝
+        (别的世界开着端口不挡);坏备份在覆盖之前就被拒,库原样不动。检查与覆盖在同一把锁里,
+        检查之后不会再有端口插进来。"""
+        self._path(world_id)
+        with self._lock:
+            if self._open.get(world_id, 0) > 0:
+                raise MemoryFailureError("restore_from: world has an open port", transient=False)
+            ledger = _read_ledger(Path(path))
+            self._save(world_id, ledger)
         return ledger.digest()
+
+    def wait_closed(self, world_id: str, timeout_s: float) -> bool:
+        """等该世界打开着的端口数降到 0:到了返回 True,超过 timeout_s 秒返回 False。端口可以在别的线程上关。"""
+        self._path(world_id)
+        if isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float)) or not timeout_s >= 0:
+            raise ActioDataError(f"wait_closed.timeout_s: expected a non-negative number, got {timeout_s!r}")
+        with self._all_closed:
+            return self._all_closed.wait_for(lambda: self._open.get(world_id, 0) == 0, timeout_s)
 
 
 class _FilePort:
-    """FileTupleStore 发出的端口:每次调用都经 store 读写磁盘上的库,所以端口与管理面看到同一份。"""
+    """FileTupleStore 发出的端口,绑定 (世界, 主体):每次调用都经 store 读写磁盘上的库,所以端口与管理面看到
+    同一份;recall 只看本主体名下的条目,remember 写在本主体名下。"""
 
-    def __init__(self, store: FileTupleStore, persona_id: str) -> None:
+    def __init__(self, store: FileTupleStore, world_id: str, holder: str) -> None:
         self._store = store
-        self._persona_id = persona_id
-        self._closed = False
-        store._open[persona_id] = store._open.get(persona_id, 0) + 1
+        self._world_id = world_id
+        self._holder = holder
+        self._closed = False  # 只在持 store._lock 时改(_port_closed);_live 的无锁读只会早一拍或晚一拍看到
+        store._port_opened(world_id)
 
     def _live(self) -> FileTupleStore:
         if self._closed:
@@ -503,25 +590,18 @@ class _FilePort:
         return self._store
 
     def recall(self, query: str, *, limit: int) -> list[MemoryHit]:
-        return self._live()._load(self._persona_id).recall(query, limit=limit)
+        return self._live()._load(self._world_id).recall(query, limit=limit, holder=self._holder)
 
     def remember(self, event: MemoryEvent) -> RememberOutcome:
         return self._live().remember_event(
-            self._persona_id, event.key, event.text, interlocutor=event.interlocutor)
+            self._world_id, self._holder, event.key, event.text, interlocutor=event.interlocutor)
 
     def embed_pending(self) -> int:
         self._live()
         return 0
 
     def digest(self) -> str:
-        return self._live().digest(self._persona_id)
+        return self._live().digest(self._world_id)
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        left = self._store._open[self._persona_id] - 1
-        if left > 0:
-            self._store._open[self._persona_id] = left
-        else:
-            del self._store._open[self._persona_id]
+        self._store._port_closed(self)

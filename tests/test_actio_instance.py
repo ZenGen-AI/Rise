@@ -400,9 +400,9 @@ def test_close_forwards_to_the_port():
 
 def test_an_instance_over_a_file_port_reads_the_same_store_the_management_plane_writes(tmp_path):
     store = FileTupleStore(tmp_path)
-    store.remember_event("pa", "ep0:1", "对方担心预算", interlocutor="pb")
-    inst = _ported(store.open("pa"), EchoGuidance())
-    before = store.digest("pa")  # 实例回复后会写库,摘要要在 respond 之前取
+    store.remember_event("s1", "pa", "ep0:1", "对方担心预算", interlocutor="pb")
+    inst = _ported(store.open("s1", "pa"), EchoGuidance())
+    before = store.digest("s1")  # 实例回复后会写库,摘要要在 respond 之前取
     _, _, trace = inst.respond(_persona(), _scenario(), [TurnRecord(0, "b", "预算呢")], "a")
     assert len(trace["memory_hits"]) == 1 and trace["memory_hits"][0].startswith("mem-")
     assert trace["memory"]["digest_before"] == before
@@ -587,12 +587,12 @@ def test_a_shorter_history_does_not_move_the_written_turn_back_so_old_turns_are_
 
 def test_with_the_file_store_the_round_prefixed_key_lands_and_close_abandons_nothing(tmp_path):
     store = FileTupleStore(tmp_path, extraction_failure=lambda event: "timeout")
-    inst = instantiate(EchoGuidance(), skills=[], memory=store.open("pa"), episode_id="round-7/deploy-m-sc-0",
+    inst = instantiate(EchoGuidance(), skills=[], memory=store.open("s1", "pa"), episode_id="round-7/deploy-m-sc-0",
                        interlocutors={"b": "pb"}, library_version=LV, profile=None)
     _, _, t = inst.respond(_persona(), _scenario(), [B0], "a")
     assert t["memory"]["extraction_failed"] == "1"
     inst.close()
-    assert store.pending_events("pa") == ["round-7/deploy-m-sc-0#0"]  # close 只关库,不放弃
+    assert store.pending_events("s1") == ["round-7/deploy-m-sc-0#0"]  # close 只关库,不放弃
     with pytest.raises(MemoryFailureError):
         inst.respond(_persona(), _scenario(), [B0], "a")              # 端口已关:MemoryClosedError
 
@@ -617,6 +617,9 @@ _ALLOWED = ("actio", "simulator.datamodel", "__future__", "copy", "dataclasses",
 # functools 供空库摘要的进程内缓存用,都是标准库,只对本文件放宽
 _ALLOWED_MEMORY_STARLING = _ALLOWED + ("starling", "os", "tempfile", "shutil", "contextlib", "collections.abc", "functools")
 
+# memory.py 的 FileTupleStore 用 threading.Lock 与 Condition 守端口计数:端口在服务端线程关,驱动器在另一条线程上等
+_ALLOWED_MEMORY = _ALLOWED + ("threading",)
+
 
 def _allowed(mod, allowed=_ALLOWED):
     return any(mod == a or mod.startswith(a + ".") for a in allowed)
@@ -624,7 +627,7 @@ def _allowed(mod, allowed=_ALLOWED):
 
 def test_actio_only_imports_itself_simulator_datamodel_and_the_stdlib():
     for path in sorted(SRC.glob("*.py")):
-        allowed = _ALLOWED_MEMORY_STARLING if path.name == "memory_starling.py" else _ALLOWED
+        allowed = {"memory_starling.py": _ALLOWED_MEMORY_STARLING, "memory.py": _ALLOWED_MEMORY}.get(path.name, _ALLOWED)
         for mod in _imports(path):
             assert _allowed(mod, allowed), (path.name, mod)
 
