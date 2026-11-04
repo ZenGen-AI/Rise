@@ -29,6 +29,7 @@ from mindtrainer.data_producer import TemplateDataProducer
 from mindtrainer.dispatch import make_mindtrainer_dispatcher
 
 if TYPE_CHECKING:  # factory.agent 与 factory.memory_runtime 拖进 grpc 与 mindagent,只在类型检查时导入
+    from actio.memory_port import DeploymentMemoryStore
     from factory.agent import AgentRuntime
     from factory.interact_policy import OpponentSwitch
     from factory.memory_runtime import DeploymentMemory, MemoryWiring, TrainingCopies
@@ -171,6 +172,7 @@ def deploy_turn_timeout_s(*, interact: bool, starling: bool) -> float | None:
 def _shared_runtime(
     store: GitStore, options: FactoryOptions, keys: frozenset[str],
     *, turn_timeout_s: float | None, training_copies: TrainingCopies | None,
+    deployment_store: DeploymentMemoryStore | None = None,
 ) -> tuple[AgentRuntime | None, OpponentSwitch | None]:
     """`--interact` 或 `--enable agent` 时造那唯一的 AgentRuntime(进程内 loopback 实时服务端),否则 (None, None)。
 
@@ -183,13 +185,16 @@ def _shared_runtime(
     卸下的开关给的是运行时原来的罐头后端,所以共用运行时上的部署会话行为不变。
 
     turn_timeout_s 为 None 时不传,保持 AgentRuntime 的默认值(见 `deploy_turn_timeout_s`)。training_copies 只在
-    --interact 时传:部署会话没登记给训练 run,用不到训练副本。"""
+    --interact 时传:部署会话没登记给训练 run,用不到训练副本。deployment_store 只在启用了 start_agent_round 时传
+    (部署记忆的那一个管理面,与轮次处理器、门② 同一个对象):运行时据此在部署世界里开对手位的端口。"""
     if not options.interact and "start_agent_round" not in keys:
         return None, None
     from factory.agent import AGENT_CONFIG, AgentRuntime, read_agent_settings   # 惰性:拖进 grpc 与 mindagent
 
     lines = read_agent_settings(store)[1] if store.exists(AGENT_CONFIG) else ()
     kwargs: dict = {} if turn_timeout_s is None else {"turn_timeout_s": turn_timeout_s}
+    if deployment_store is not None:
+        kwargs["deployment_store"] = deployment_store
     if options.interact:
         from factory.interact_policy import OpponentSwitch
 
@@ -440,11 +445,16 @@ def assemble(
     memory = None
     if options.interact or needs_deployment:
         memory = memory_wiring(store.repo_root, environ, deployment=needs_deployment)
+    # 部署对手位进部署世界:只有轮次处理器登记部署 episode,只开 admit 时不给。与轮次处理器、门② 同一个管理面
+    deployment_store = None
+    if "start_agent_round" in keys and memory is not None and memory.deployment is not None:
+        deployment_store = memory.deployment.store
     runtime, switch = _shared_runtime(
         store, options, keys,
         turn_timeout_s=deploy_turn_timeout_s(
             interact=options.interact, starling=memory is not None and memory.backend == "starling"),
         training_copies=None if memory is None else memory.training_copies,
+        deployment_store=deployment_store,
     )
     ctx = BuildContext(
         store=store,

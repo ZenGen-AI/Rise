@@ -624,6 +624,161 @@ def test_a_factory_failure_closes_the_instances_already_built(store, monkeypatch
     assert runtime._session_runs == {}
 
 
+# ---------------- 部署会话的对手位进部署世界(设计三 3.3、4.5 节) ----------------
+
+def _world_rows(root, world):
+    """FileTupleStore 世界文件里的事件行 (key, holder, state),按 seq 排;世界还没有文件时为空。"""
+    import json
+    path = root / f"{world}.json"
+    rows = json.loads(path.read_text(encoding="utf-8"))["events"] if path.exists() else []
+    return [(r["key"], r["holder"], r["state"]) for r in rows]
+
+
+def _three_slots():
+    """客户端位 a 之外两个对手位;槽位 id 与人格 id 不同,槽位当人格用的错能从 key 的后缀上看出来。"""
+    from simulator.datamodel import RoleBinding
+    return _assignment(RoleBinding("a", "pa", "self_play"),
+                       RoleBinding("b", "pb", "frozen_reference", model_ref="x"),
+                       RoleBinding("c", "pc", "frozen_reference", model_ref="x"))
+
+
+def test_a_registered_deployment_session_opens_opponents_in_the_scenario_world(store, tmp_path):
+    from actio.memory import FileTupleStore
+    from simulator.datamodel import TurnRecord
+    deploy = FileTupleStore(tmp_path / "deploy")
+    runtime = AgentRuntime(store, ("嗯",), deployment_store=deploy)
+    runtime.register_deployment_episode("deploy-m-s1-1", "agent-round-m")
+    res = runtime._backends(_slot_info(_scenario_with(), _two_slots(), episode_id="deploy-m-s1-1"))
+    inst = res.backends["b"].instance
+    assert (inst.episode_id, inst.holder) == ("agent-round-m/deploy-m-s1-1", "pb")
+    res.backends["b"].respond(None, _scenario_with(), [TurnRecord(0, "a", "你好")], "b")
+    assert _world_rows(tmp_path / "deploy", "s1") == [("agent-round-m/deploy-m-s1-1#0@pb", "pb", "committed")]
+    assert not deploy.wait_closed("s1", 0.0)                 # 对手位的端口开在情境世界 s1 里
+    assert runtime._session_runs == {}                       # 部署会话不记落盘路由
+    res.close()
+    assert deploy.wait_closed("s1", 1.0)                     # 随会话资源关闭
+
+
+def test_each_deployment_opponent_writes_under_its_own_persona(store, tmp_path):
+    """同一轮被两个对手位各记一次:key 以各自位上的人格 id 结尾、记在各自名下,不是槽位 id,也不互换。"""
+    from actio.memory import FileTupleStore
+    from simulator.datamodel import TurnRecord
+    deploy = FileTupleStore(tmp_path / "deploy")
+    runtime = AgentRuntime(store, ("嗯",), deployment_store=deploy)
+    runtime.register_deployment_episode("deploy-m-s1-1", "agent-round-m")
+    res = runtime._backends(_slot_info(_scenario_with(), _three_slots(), episode_id="deploy-m-s1-1"))
+    history = [TurnRecord(0, "a", "你好")]
+    for slot in ("b", "c"):
+        res.backends[slot].respond(None, _scenario_with(), history, slot)
+    assert _world_rows(tmp_path / "deploy", "s1") == [
+        ("agent-round-m/deploy-m-s1-1#0@pb", "pb", "committed"),
+        ("agent-round-m/deploy-m-s1-1#0@pc", "pc", "committed"),
+    ]
+    res.close()
+    assert deploy.wait_closed("s1", 1.0)
+
+
+def test_an_unregistered_deployment_session_keeps_empty_opponents_and_warns(store, tmp_path, caplog):
+    import logging
+    from actio.memory import FileTupleStore, TupleMemory
+    from simulator.datamodel import TurnRecord
+    deploy = FileTupleStore(tmp_path / "deploy")
+    runtime = AgentRuntime(store, ("嗯",), deployment_store=deploy)
+    runtime.register_deployment_episode("deploy-m-s1-2", "agent-round-m")     # 别的 episode 登记了,不算这条
+    with caplog.at_level(logging.WARNING, logger="factory.agent"):
+        res = runtime._backends(_slot_info(_scenario_with(), _two_slots(), episode_id="deploy-m-s1-1"))
+    assert "deployment session deploy-m-s1-1 has no registered round; opponents get an empty memory" in caplog.text
+    inst = res.backends["b"].instance
+    assert isinstance(inst.memory, TupleMemory) and inst.episode_id == "deploy-m-s1-1"
+    res.backends["b"].respond(None, _scenario_with(), [TurnRecord(0, "a", "你好")], "b")
+    assert deploy.wait_closed("s1", 0.0) and _world_rows(tmp_path / "deploy", "s1") == []
+    res.close()
+
+
+def test_unregistering_a_deployment_episode_sends_later_sessions_back_to_an_empty_memory(store, tmp_path):
+    from actio.memory import FileTupleStore, TupleMemory
+    deploy = FileTupleStore(tmp_path / "deploy")
+    runtime = AgentRuntime(store, ("嗯",), deployment_store=deploy)
+    runtime.register_deployment_episode("deploy-m-s1-1", "agent-round-m")
+    runtime.unregister_deployment_episode("deploy-m-s1-1")
+    runtime.unregister_deployment_episode("deploy-m-s1-1")                    # 没登记过也不报错
+    res = runtime._backends(_slot_info(_scenario_with(), _two_slots(), episode_id="deploy-m-s1-1"))
+    assert isinstance(res.backends["b"].instance.memory, TupleMemory)
+    res.close()
+
+
+def test_a_training_session_never_opens_deployment_ports(store, tmp_path):
+    """会话登记给了训练 run 就走训练路,哪怕它的 episode id 也在部署登记表里。"""
+    from actio.memory import FileTupleStore, TupleMemory
+    deploy = FileTupleStore(tmp_path / "deploy")
+    runtime = AgentRuntime(store, ("嗯",), deployment_store=deploy)
+    runtime.register_session("s1", "run-1")
+    runtime.register_deployment_episode("run-1-grpo0-s1-r0", "agent-round-m")
+    res = runtime._backends(_slot_info(_scenario_with(), _two_slots()))
+    assert isinstance(res.backends["b"].instance.memory, TupleMemory)
+    assert deploy.wait_closed("s1", 0.0)
+    res.close()
+
+
+def test_a_failure_after_opening_a_deployment_port_closes_it_before_reraising(store, tmp_path, monkeypatch):
+    import factory.agent as agent_mod
+    from actio.memory import FileTupleStore
+    deploy = FileTupleStore(tmp_path / "deploy")
+    real = agent_mod.memory_role_backend
+    calls = []
+
+    def second_fails(*args, **kwargs):
+        calls.append(kwargs["holder"])
+        if len(calls) == 2:
+            raise RuntimeError("instance exploded")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(agent_mod, "memory_role_backend", second_fails)
+    runtime = AgentRuntime(store, ("嗯",), deployment_store=deploy)
+    runtime.register_deployment_episode("deploy-m-s1-1", "agent-round-m")
+    with pytest.raises(RuntimeError, match="instance exploded"):
+        runtime._backends(_slot_info(_scenario_with(), _three_slots(), episode_id="deploy-m-s1-1"))
+    assert calls == ["pb", "pc"]
+    assert deploy.wait_closed("s1", 0.0)       # 包好的 b 与刚开、还没包成后端的 c 的端口都关了
+
+
+def test_a_failing_port_open_closes_the_ports_already_opened(store, tmp_path, monkeypatch):
+    from actio.memory import FileTupleStore
+    from actio.memory_port import MemoryFailureError
+    deploy = FileTupleStore(tmp_path / "deploy")
+    real = deploy.open
+
+    def open_once(world, holder):
+        if holder == "pc":
+            raise MemoryFailureError("library unreadable", transient=False)
+        return real(world, holder)
+
+    monkeypatch.setattr(deploy, "open", open_once)
+    runtime = AgentRuntime(store, ("嗯",), deployment_store=deploy)
+    runtime.register_deployment_episode("deploy-m-s1-1", "agent-round-m")
+    with pytest.raises(MemoryFailureError):
+        runtime._backends(_slot_info(_scenario_with(), _three_slots(), episode_id="deploy-m-s1-1"))
+    assert deploy.wait_closed("s1", 0.0)
+
+
+def test_the_deployment_table_is_kept_without_the_runtime_lock(store, tmp_path):
+    """登记与注销只取 _routes_lock:驱动器在 finally 里注销时,close() 可能正持着 _lock 等处理器退出。"""
+    from actio.memory import FileTupleStore
+    runtime = AgentRuntime(store, ("嗯",), deployment_store=FileTupleStore(tmp_path / "deploy"))
+    done = threading.Event()
+
+    def churn():
+        runtime.register_deployment_episode("deploy-m-s1-1", "agent-round-m")
+        runtime.unregister_deployment_episode("deploy-m-s1-1")
+        done.set()
+
+    with runtime._lock:
+        worker = threading.Thread(target=churn, daemon=True)
+        worker.start()
+        assert done.wait(5.0), "the deployment table blocked on the runtime lock"
+    worker.join(timeout=5.0)
+
+
 # ---------------- AgentRuntime 的会话登记与 episode 落盘(--interact 与部署共用一个运行时) ----------------
 
 def _play_session(runtime, scenario_id):
@@ -972,7 +1127,7 @@ def test_a_non_empty_memory_library_exits_2_at_assembly(store, capsys, switch):
     assert not (git_dir(store.repo_root) / "rismforge-memory").exists()   # 终审 M-1:预检失败不在 .git 里留目录
 
 
-def test_round_and_admit_handlers_share_one_stand_in_deployment_memory(store, monkeypatch):
+def test_round_and_admit_handlers_and_the_runtime_share_one_management_plane(store, monkeypatch):
     import factory.handlers as fh
     from actio.memory import FileTupleStore
     from controlplane.lock import git_dir
@@ -989,16 +1144,71 @@ def test_round_and_admit_handlers_share_one_stand_in_deployment_memory(store, mo
         assert r["memory_runtime"] == STAND_IN_MEMORY_RUNTIME and r["scratch_store_factory"] is FileTupleStore
         assert r.get("stream_deadline_s") is None                       # 替身保持现值
         assert not (store.repo_root / "control-plane" / "rismforge-memory").exists()
+        # 运行时开对手端口用的是同一个管理面:端口数是实例内状态,不共用的话驱动器的 wait_closed 看不见对手端口
+        runtime = r["client_factory"].__self__
+        assert runtime._deployment_store is r["memory_store"]
+        assert r["register_episode"] == runtime.register_deployment_episode
+        assert r["unregister_episode"] == runtime.unregister_deployment_episode
     finally:
         asm.close()
+
+
+def test_a_hand_built_context_gives_its_own_runtime_the_same_management_plane(store, monkeypatch):
+    """BuildContext 没带共用运行时时 _agent 自己造一个:它也拿 mem.store,登记回调也指向它。"""
+    import factory.handlers as fh
+    from factory.memory_runtime import stand_in_deployment_memory
+    from factory.wire import BuildContext, _close_all
+    seen = {}
+    monkeypatch.setattr(fh, "make_start_round_handler", lambda **kw: seen.setdefault("round", kw) and None or (lambda s, a: None))
+    mem = stand_in_deployment_memory(store.repo_root)
+    ctx = BuildContext(store=store, accept_mock_evidence=False, confirm_directives=None, planner_backend="heuristic",
+                       env={}, log_dir=None, deployment_memory=mem)
+    fh._agent(ctx)
+    try:
+        r = seen["round"]
+        runtime = r["client_factory"].__self__
+        assert runtime._deployment_store is mem.store is r["memory_store"]
+        assert r["register_episode"] == runtime.register_deployment_episode
+        assert r["unregister_episode"] == runtime.unregister_deployment_episode
+    finally:
+        _close_all(ctx.closers)
+
+
+def test_a_deployment_round_through_the_real_server_writes_the_opponent_into_the_scenario_world(store):
+    """一轮真的部署:轮次处理器 → 部署驱动器 → 进程内 loopback 服务端。对手位按驱动器登记的轮次 id 在情境世界里
+    开端口,它记下的智能体发言落在 agent-round-<模型>/deploy-...#N@<对手人格> 下,与智能体位的行在同一个世界文件里。"""
+    from controlplane.envelope import Envelope, OwnerRef
+    from controlplane.lock import git_dir
+    from controlplane.paths import agent_round_file, model_file
+    from controlplane.reconcile import Action
+    store.write_product(model_file(1), Envelope(
+        id="zengen-v1", type="zengen_model", version=1, created_at="2026-11-04T00:00:00Z", created_by=OwnerRef(),
+        status="effective", schema_version=1, links=["cand-run-001", "run-001"],
+        payload={"promoted_from": "cand-run-001"}), "test: model")
+    asm = assemble(store, FactoryOptions(switches=("agent",)), env={})
+    try:
+        asm.handlers["start_agent_round"](store, Action("start_agent_round", "zengen-v1", {}))
+    finally:
+        asm.close()
+    assert store.read_product(agent_round_file("zengen-v1")).status == "executed"
+    deploy = git_dir(store.repo_root) / "rismforge-memory" / "deploy"
+    agent, user = "factory-agent-persona", "factory-user-persona"      # 默认 agent.yaml:user 位先说
+    for world in ("factory-deploy-s1", "factory-deploy-s2", "factory-deploy-s3"):
+        prefix = f"agent-round-zengen-v1/deploy-zengen-v1-{world}-1"
+        assert _world_rows(deploy, world) == [
+            (f"{prefix}#0@{agent}", agent, "committed"),
+            (f"{prefix}#1@{user}", user, "committed"),
+            (f"{prefix}#2@{agent}", agent, "committed"),
+        ]
+    assert not (deploy / f"{user}.json").exists() and not (deploy / f"{agent}.json").exists()
 
 
 def test_the_stand_in_memory_root_survives_a_second_assembly(store):
     from factory.memory_runtime import stand_in_deployment_memory
     first = stand_in_deployment_memory(store.repo_root)
-    first.store.remember_event("pa", "k#0", "pb：你好", interlocutor="pb")
+    first.store.remember_event("s1", "pa", "k#0@pa", "pb：你好", interlocutor="pb")
     second = stand_in_deployment_memory(store.repo_root)
-    assert second.store.digest("pa") == first.store.digest("pa")
+    assert second.store.digest("s1") == first.store.digest("s1")
 
 
 def test_switches_without_round_or_admit_build_no_deployment_memory(store, monkeypatch):

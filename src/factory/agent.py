@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 import grpc
 
 from actio.memory import TupleMemory
-from actio.memory_port import PERSONA_ID_PATTERN
+from actio.memory_port import PERSONA_ID_PATTERN, DeploymentMemoryStore
 from controlplane.gitstore import GitStore
 from controlplane.paths import CONTROL_PLANE_ROOT
 from factory.configio import describe, key_names, read_tree_config
@@ -135,9 +135,10 @@ class DeadlineStub:
 
 class AgentRuntime:
     """进程内的 loopback 实时服务端,第一次 client_factory() 时才启动;close() 关通道、停服务端并等它停完。
-    对手位的底座后端按各自绑定的驱动分派(见 _backends),再一律包成带记忆的 Actio 实例(每个位一份各自的记忆,
-    外套记忆异常的转换后端):替身是空 TupleMemory;传了 training_copies 且会话登记给了训练 run 时,是从种子复制的
-    Starling 私有副本(终态即删,见 _backends);情境从树里读(scenario_resolver)。
+    对手位的底座后端按各自绑定的驱动分派(见 _backends),再一律包成带记忆的 Actio 实例(每个位一份各自的记忆端口,
+    外套记忆异常的转换后端):传了 training_copies 且会话登记给了训练 run 时,是从种子复制的 Starling 私有副本
+    (终态即删);传了 deployment_store 且会话的 episode id 由部署驱动器登记过轮次时,是部署世界(世界 = 情境 id)里
+    该位人格的端口,随会话资源关闭;其余是空 TupleMemory(见 _backends)。情境从树里读(scenario_resolver)。
     每条 Interact 流带 deadline(DeadlineStub);流 deadline 可由调用方逐个给(client_factory(deadline_s=...)),
     interact_deadline_s 只是没给时的缺省。message_timeout_s 是客户端相邻两条服务端消息的最长间隔,运行时级,
     给每个客户端(None 即不设,与过去相同)。stub_factory 只为测试注入。
@@ -150,11 +151,22 @@ class AgentRuntime:
     记该情境属于哪个 run,只用来判定新开的会话归谁:工厂造资源时情境 id 已登记,就按 session_id 记一条路由(_session_runs),
     并把"删这条路由"放进资源的 closers。落盘钩子只查 session_id 的路由:登记过的会话把 episode 写进开会话时的那个 run,
     注销情境不影响已经在跑的会话;没登记的(部署会话)没有路由,钩子不碰,仍由 MindAgent 驱动器自己落盘,
-    两边的 episode 不混写、不重复写。两把锁:_lock 守护登记表、通道与服务端的启停(close() 持它停服务端并等在途处理器退出);
-    _routes_lock 只守护 _session_runs,_failures_lock 只守护 episode_write_failures 的追加。处理器收尾时跑的"删路由"、
-    钩子里的路由查询与失败追加只取各自的小锁、绝不取 _lock,
+    两边的 episode 不混写、不重复写。
+
+    部署登记(register_deployment_episode / unregister_deployment_episode,设计三 3.3 节):CreateSession.episode_id
+    装不下 "<round_id>/",所以部署驱动器每次尝试开会话之前按部署 id 登记 round_id、尝试结束在 finally 里注销。
+    工厂对没登记给训练 run 的会话按 info.episode_id 查这张表,拼出对手位实例的 episode_id "<round_id>/<部署 id>",
+    事件 key 因而与智能体位同一个前缀,驱动器提交时按前缀放弃 pending 行就连对手位的一起放弃。
+    deployment_store 只在启用部署轮次时由组合根传入,必须是轮次处理器与门② 用的同一个管理面:它的端口数是实例内
+    状态,驱动器的 wait_closed 要看得见对手位的端口。
+
+    锁:_lock 守护训练登记表、通道与服务端的启停(close() 持它停服务端并等在途处理器退出);
+    _routes_lock 守护 _session_runs 与部署登记表 _deployment_rounds,_failures_lock 只守护 episode_write_failures 的追加。
+    处理器收尾时跑的"删路由"、钩子里的路由查询、部署登记的增删查与失败追加只取各自的小锁、绝不取 _lock,
     否则 close() 持 _lock 等处理器、处理器等 _lock,关停就挂住;close() 不取 _routes_lock。取锁顺序只有一个方向:
-    先 _lock 后 _routes_lock(工厂读登记表与记路由在同一次持 _lock 里完成)。落盘失败先把描述记进 episode_write_failures(只含类名与 id,有上限的 deque,只留最近 100 条),
+    先 _lock 后 _routes_lock(工厂读登记表与记路由在同一次持 _lock 里完成;查部署登记表只取 _routes_lock)。
+    关对手位的部署端口不取任何世界文件锁:端口在处理器线程上随资源关闭,那时轮次正持着世界锁等 wait_closed。
+    落盘失败先把描述记进 episode_write_failures(只含类名与 id,有上限的 deque,只留最近 100 条),
     再把原异常抛回 servicer:servicer 据此给客户端报 persistence_failed、不给 episode_id,轨迹源把它当瞬时失败重跑。"""
 
     def __init__(self, store: GitStore, opponent_lines: tuple[str, ...], *, turn_timeout_s: float = 5.0,
@@ -163,7 +175,8 @@ class AgentRuntime:
                  backend_timeout_s: float | None = None,
                  stub_factory=pb2_grpc.EnvironmentServiceStub,
                  opponent_backend_factory: Callable[[RoleBinding, Scenario], ModelBackend] | None = None,
-                 training_copies: TrainingCopies | None = None) -> None:
+                 training_copies: TrainingCopies | None = None,
+                 deployment_store: DeploymentMemoryStore | None = None) -> None:
         # 与 EnvironmentServiceClient 同一判法,在这里先判:否则要到第一次 client_factory() 才抛,那时 channel 已造好、
         # 还没进 _channels,每次失败漏一个
         if message_timeout_s is not None and not (
@@ -182,6 +195,7 @@ class AgentRuntime:
         self._stub_factory = stub_factory
         self._opponent_backend_factory = opponent_backend_factory
         self._training_copies = training_copies
+        self._deployment_store = deployment_store
         self._server = None
         # (客户端, 通道) 成对记下:会话结束的客户端,通道在下一次发客户端时关掉(见 client_factory)
         self._channels: list = []
@@ -191,6 +205,9 @@ class AgentRuntime:
         # 可能与持 _lock 停服务端的 close() 同时发生,所以不能取 _lock。取锁顺序:先 _lock 后 _routes_lock。
         self._routes_lock = threading.Lock()
         self._session_runs: dict[str, str] = {}
+        # 部署 id -> round_id,部署驱动器每次尝试前登记、finally 里注销;同样只由 _routes_lock 守护:
+        # 注销跑在驱动器的 finally 里,可能与持 _lock 的 close() 同时发生
+        self._deployment_rounds: dict[str, str] = {}
         # 每条一句描述,只含类名与 id,不含异常文字;只留最近 MAX_WRITE_FAILURES_KEPT 条(最早的先丢)。
         # 追加在钩子(gRPC 处理器线程)里,有自己的小锁:不能取 _lock(见 _on_session_closed)
         self._failures_lock = threading.Lock()
@@ -226,6 +243,17 @@ class AgentRuntime:
         """注销;没登记过也不报错。此后新开的该情境 id 的会话不再被钩子写;已经在跑的会话不受影响。"""
         with self._lock:
             self._sessions.pop(scenario_id, None)
+
+    def register_deployment_episode(self, episode_id: str, round_id: str) -> None:
+        """部署登记:此后新开的、episode id 为 episode_id 的部署会话,对手位在部署世界里开端口,实例的 episode_id
+        取 "<round_id>/<episode_id>"。同 id 再登记则覆盖。只取 _routes_lock。"""
+        with self._routes_lock:
+            self._deployment_rounds[episode_id] = round_id
+
+    def unregister_deployment_episode(self, episode_id: str) -> None:
+        """注销;没登记过也不报错。已开的会话不受影响:它的端口随会话资源关闭。只取 _routes_lock。"""
+        with self._routes_lock:
+            self._deployment_rounds.pop(episode_id, None)
 
     def _on_session_closed(self, session_id: str, episode: Episode) -> None:
         """服务端的落盘钩子,跑在 gRPC 线程池的线程里。查路由只取 _routes_lock,写失败时往清单追加只取 _failures_lock,
@@ -267,15 +295,21 @@ class AgentRuntime:
         其余会话(没传工厂,或没登记):显式 scripted 同上,别的一律是原来的 ScriptedBackend(不循环,全局台词),
         不碰工厂、不调 driver_for。
 
-        上面得到的只是底座。每个对手位的底座都再包成带记忆的 Actio 实例(memory_role_backend):每个位一份各自的
-        记忆,情境对话方取自绑定表(槽位 -> 角色卡 id)。对话台词不变,每轮多一份 v2 轨迹。记忆有两种:
-        - 默认(没传 training_copies,或会话没登记给训练 run,即部署会话):一份空 TupleMemory,与部署会话同一写法。
-          closers 依次是每个已造后端的 close、最后(登记过时)是删路由;
+        上面得到的只是底座。每个对手位的底座都再包成带记忆的 Actio 实例(memory_role_backend):每个位一个各自的
+        记忆端口,holder 是该位绑定的人格 id,情境对话方取自绑定表(槽位 -> 角色卡 id)。对话台词不变,每轮多一份
+        v2 轨迹。记忆有三种:
         - 会话登记给了训练 run 且传了 training_copies:该位绑定人格的 Starling 私有副本(从 run 的种子复制,
           按会话一个目录)。closers 是 (release_all, 删路由):release_all 关掉所有端口,全部关上才删会话的副本目录
           (有端口关不上,说明 Starling 还有在途调用,目录留给下次启动的清扫);它抛的异常由 SessionResources.close
-          记 warning 吞掉。run 还没 bind 种子(seed_of 抛 KeyError)按造后端失败处理。
-        造到一半抛异常时,先关已造好的后端并(训练路)删副本目录,关失败只记类名;再删路由、原样重抛。
+          记 warning 吞掉。run 还没 bind 种子(seed_of 抛 KeyError)按造后端失败处理;
+        - 部署会话(没登记给训练 run)且传了 deployment_store:按 info.episode_id 查部署登记表(只取 _routes_lock)。
+          查到 round_id 时每个对手位 deployment_store.open(情境 id, 该位人格),实例 episode_id 为
+          "<round_id>/<部署 id>";查不到时一份空 TupleMemory,并记 warning(只有绕过部署驱动器直接开会话的调用方
+          会落到这里)。closers 依次是每个已造后端的 close:关端口不取任何世界文件锁,轮次此时正持着世界锁等端口全关;
+        - 其余(训练路没传 training_copies;部署会话没传 deployment_store):一份空 TupleMemory。
+          closers 依次是每个已造后端的 close、最后(登记过时)是删路由。
+        造到一半抛异常时,先关已造好的后端与已开、还没包成后端的端口,(训练路)删副本目录,关失败只记类名;
+        再删路由、原样重抛。
 
         落盘路由:情境 id 已登记时,在读登记表的同一次持 _lock 里(再取 _routes_lock)记 session_id -> run id,
         "删这条"放进资源的 closers,随会话资源一起关;造后端抛异常时先删再把原异常抛出去(工厂不留半开状态)。
@@ -293,9 +327,20 @@ class AgentRuntime:
 
         judged = run_id is not None and self._opponent_backend_factory is not None
         copies = self._training_copies if run_id is not None else None
+        deploy = self._deployment_store if run_id is None else None
+        episode_id = info.episode_id
+        if deploy is not None:
+            with self._routes_lock:
+                round_id = self._deployment_rounds.get(info.episode_id)
+            if round_id is None:
+                logger.warning("deployment session %s has no registered round; opponents get an empty memory",
+                               info.episode_id)
+                deploy = None
+            else:
+                episode_id = f"{round_id}/{info.episode_id}"
         interlocutors = {b.slot_id: b.persona_id for b in assignment.bindings}
         backends: dict[str, MemoryTranslatingBackend] = {}
-        orphans: list[object] = []     # 副本已开、还没包成后端就失败的端口:收尾时同样要关
+        orphans: list[object] = []     # 端口已开、还没包成后端就失败的:收尾时同样要关
         session_dir = None
         try:
             if copies is not None:
@@ -311,24 +356,25 @@ class AgentRuntime:
                     base = self._opponent_backend_factory(binding, scenario)
                 else:
                     base = ScriptedBackend({slot: list(self._lines)})
-                if copies is None:
-                    memory = TupleMemory()
-                else:
+                if copies is not None:
                     memory = copies.open_session_copy(run_id, info.session_id, slot, binding.persona_id)
+                elif deploy is not None:
+                    memory = deploy.open(scenario.id, binding.persona_id)
+                else:
+                    memory = TupleMemory()
                 try:
                     backends[slot] = memory_role_backend(
-                        base, memory=memory, episode_id=info.episode_id, interlocutors=interlocutors,
+                        base, memory=memory, episode_id=episode_id, interlocutors=interlocutors,
                         holder=binding.persona_id,
                     )
                 except BaseException:
-                    if copies is not None:
-                        orphans.append(memory)
+                    orphans.append(memory)
                     raise
         except Exception:
             if copies is None:
-                for built in backends.values():
+                for closable in [*backends.values(), *orphans]:
                     try:
-                        built.close()
+                        closable.close()
                     except Exception as exc:
                         logger.warning("opponent backend close failed: %s", type(exc).__name__)
             elif session_dir is not None:

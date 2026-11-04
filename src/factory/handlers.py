@@ -8,7 +8,8 @@
   同一个值(--allow-mock-evidence);repo_commit 来自 BuildContext。
 - start_agent_round:计划 7 的 make_start_round_handler;AgentConfig 与对手台词来自 agent.yaml,
   实时服务端是进程内 loopback(factory.agent.AgentRuntime),模型后端是罐头后端。
-  它与 admit_proposal 共用 BuildContext.deployment_memory(assemble 造的那一份)。
+  它与 admit_proposal 共用 BuildContext.deployment_memory(assemble 造的那一份),运行时开对手位端口也用其中的 store;
+  部署驱动器经运行时的部署登记表把轮次 id 交给服务端。
 """
 from __future__ import annotations
 
@@ -97,9 +98,11 @@ def _agent(ctx) -> Handler:
         # assemble 总会造共用运行时;走到这里的是手工拼的 BuildContext。等提交的上限与 wire.deploy_turn_timeout_s
         # 在 interact=False 时同一个判法(这里不导入 factory.wire:wire 在函数内导入本模块,反过来就成环)
         timeout_s = DEPLOY_MEMORY_TURN_TIMEOUT_S if starling else None
-        runtime = AgentRuntime(ctx.store, lines, **({} if timeout_s is None else {"turn_timeout_s": timeout_s}))
+        runtime = AgentRuntime(ctx.store, lines, deployment_store=mem.store,
+                               **({} if timeout_s is None else {"turn_timeout_s": timeout_s}))
         ctx.register_closer(runtime.close)
-    # ctx.runtime 非空时是 assemble 造的共用运行时(--interact 与 agent 开关同开),它的收尾已登记过
+    # ctx.runtime 非空时是 assemble 造的共用运行时(--interact 与 agent 开关同开),它的收尾已登记过,
+    # 部署管理面也已是这里的 mem.store。轮次处理器、门② 与运行时共用这一个管理面:端口数是它的实例内状态
     bridge = ctx.bridge("agent") if _has_bridge_role(ctx.store, "agent") else None
     # Starling:整条流的 deadline 按 max_turns × 40 秒折算(FC-31),训练路的 max_turns × 90 由轨迹源自己传;
     # 替身不传,保持 AgentRuntime 的缺省
@@ -114,6 +117,8 @@ def _agent(ctx) -> Handler:
         memory_layout=mem.layout,
         memory_runtime=mem.runtime,
         scratch_store_factory=mem.scratch_store_factory,
+        register_episode=runtime.register_deployment_episode,
+        unregister_episode=runtime.unregister_deployment_episode,
         **extra,
     )
 
