@@ -375,6 +375,7 @@ def make_policy_factory(
                     try:
                         backend = memory_role_backend(
                             policy, memory=memory, episode_id=episode_id, interlocutors=interlocutors,
+                            holder=interlocutors[cfg.trained_slot],
                         )
                     except BaseException:
                         if training_copies is not None:

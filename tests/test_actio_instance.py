@@ -224,6 +224,7 @@ class LoggingBackend:
 
 def _ported(port, backend=None, **kw):
     kw.setdefault("episode_id", "ep")
+    kw.setdefault("holder", "pa")
     return instantiate(backend or EchoGuidance(), skills=[], memory=port, library_version=LV, profile=None, **kw)
 
 
@@ -378,17 +379,24 @@ def test_instantiate_memory_arguments():
         instantiate(EchoGuidance(), **base, memory=TupleMemory())
     with pytest.raises(ActioDataError, match="episode_id"):
         instantiate(EchoGuidance(), **base, memories=[], replay_read_only=False)
+    with pytest.raises(ActioDataError, match="holder"):
+        instantiate(EchoGuidance(), **base, memory=TupleMemory(), episode_id="ep")
+    with pytest.raises(ActioDataError, match="holder"):
+        instantiate(EchoGuidance(), **base, memories=[], episode_id="ep", replay_read_only=False)
     with pytest.raises(ActioDataError, match="memory"):
         instantiate(EchoGuidance(), **base, memory=object(), episode_id="ep")
     for bad in ({"episode_id": ""}, {"episode_id": 3}, {"interlocutors": {"b": ""}},
-                {"interlocutors": [("b", "pb")]}, {"replay_read_only": "yes"}):
+                {"interlocutors": [("b", "pb")]}, {"replay_read_only": "yes"}, {"holder": ""}, {"holder": 3}):
         with pytest.raises(ActioDataError):
-            instantiate(EchoGuidance(), **base, memory=TupleMemory(), **{"episode_id": "ep", **bad})
+            instantiate(EchoGuidance(), **base, memory=TupleMemory(), **{"episode_id": "ep", "holder": "pa", **bad})
     short = instantiate(EchoGuidance(), **base, memories=[])
     assert short.replay_read_only is True and short.episode_id is None and short.interlocutors == {}
-    ported = instantiate(EchoGuidance(), **base, memory=TupleMemory(), episode_id="ep", interlocutors={"b": "pb"})
-    assert ported.replay_read_only is False and ported.interlocutors == {"b": "pb"}
-    assert instantiate(EchoGuidance(), **base, memory=TupleMemory(), replay_read_only=True).episode_id is None
+    ported = instantiate(EchoGuidance(), **base, memory=TupleMemory(), episode_id="ep", holder="pa",
+                         interlocutors={"b": "pb"})
+    assert ported.replay_read_only is False and ported.interlocutors == {"b": "pb"} and ported.holder == "pa"
+    read_only = instantiate(EchoGuidance(), **base, memory=TupleMemory(), replay_read_only=True)
+    assert read_only.episode_id is None and read_only.holder is None  # 只读实例不要求 holder
+    assert short.holder is None
 
 
 def test_close_forwards_to_the_port():
@@ -496,10 +504,10 @@ def test_after_the_reply_each_new_opponent_turn_is_remembered_then_embedded_once
                    interlocutors={"b": "pb"})
     _, _, first = inst.respond(_persona(), _scenario(), [B0], "a")
     assert [e[0] for e in log] == ["digest", "recall", "backend", "remember", "embed_pending"]
-    assert _events(log) == [MemoryEvent("run-1-sft-sc-r0#0", "pb：钱不够", "pb")]
+    assert _events(log) == [MemoryEvent("run-1-sft-sc-r0#0@pa", "pb：钱不够", "pb")]
     log.clear()
     _, _, second = inst.respond(_persona(), _scenario(), [B0, A1, B2], "a")
-    assert _events(log) == [MemoryEvent("run-1-sft-sc-r0#2", "pb：预算呢", "pb")]  # 自己的话与旧发言都不写
+    assert _events(log) == [MemoryEvent("run-1-sft-sc-r0#2@pa", "pb：预算呢", "pb")]  # 自己的话与旧发言都不写
     assert [e[0] for e in log][-1] == "embed_pending" and [e[0] for e in log].count("embed_pending") == 1
     assert (first["memory"]["remembered"], second["memory"]["remembered"]) == ("1", "2")
     assert second["memory"]["digest_before"] == f"{1:064x}"   # 本轮 recall 之前,含上一轮的写入
@@ -508,34 +516,34 @@ def test_after_the_reply_each_new_opponent_turn_is_remembered_then_embedded_once
 def test_an_unmapped_slot_speaks_as_itself():
     port = RecordingPort()
     _ported(port, episode_id="ep").respond(_persona(), _scenario(), [B0], "a")
-    assert _events(port.log) == [MemoryEvent("ep#0", "b：钱不够", "b")]
+    assert _events(port.log) == [MemoryEvent("ep#0@pa", "b：钱不够", "b")]
 
 
 def test_the_turn_index_comes_from_history_not_from_a_counter():
     port = RecordingPort()
     _ported(port, episode_id="ep").respond(_persona(), _scenario(), [TurnRecord(7, "b", "钱不够")], "a")
-    assert _events(port.log)[0].key == "ep#7"
+    assert _events(port.log)[0].key == "ep#7@pa"
 
 
 def test_a_failed_extraction_is_counted_not_raised_and_retried_once_in_the_next_respond():
-    port = RecordingPort(fail_keys={"ep#0": 1})
+    port = RecordingPort(fail_keys={"ep#0@pa": 1})
     inst = _ported(port, episode_id="ep")
     _, _, t1 = inst.respond(_persona(), _scenario(), [B0], "a")
     assert (t1["memory"]["remembered"], t1["memory"]["extraction_failed"]) == ("0", "1")
     port.log.clear()
     _, _, t2 = inst.respond(_persona(), _scenario(), [B0, A1, B2], "a")
-    assert [e.key for e in _events(port.log)] == ["ep#0", "ep#2"]       # 上次失败的在前,同 key 同文本
+    assert [e.key for e in _events(port.log)] == ["ep#0@pa", "ep#2@pa"]       # 上次失败的在前,同 key 同文本
     assert (t2["memory"]["remembered"], t2["memory"]["extraction_failed"]) == ("2", "1")
 
 
 def test_a_second_failure_is_counted_and_not_retried_again():
-    port = RecordingPort(fail_keys={"ep#0": 5})
+    port = RecordingPort(fail_keys={"ep#0@pa": 5})
     inst = _ported(port, episode_id="ep")
     inst.respond(_persona(), _scenario(), [B0], "a")
     inst.respond(_persona(), _scenario(), [B0, A1, B2], "a")
     port.log.clear()
     _, _, t3 = inst.respond(_persona(), _scenario(), [B0, A1, B2, A3, B4], "a")
-    assert [e.key for e in _events(port.log)] == ["ep#4"]
+    assert [e.key for e in _events(port.log)] == ["ep#4@pa"]
     assert (t3["memory"]["remembered"], t3["memory"]["extraction_failed"]) == ("2", "2")
 
 
@@ -570,7 +578,7 @@ def test_a_write_that_raises_leaves_the_state_alone_so_the_same_history_is_resen
     port.raise_on.clear()
     port.log.clear()
     _, _, t = inst.respond(_persona(), _scenario(), [B0], "a")
-    assert [e.key for e in _events(port.log)] == ["ep#0"]  # 上次中途抛出,seen_turn 没前进,事件不丢
+    assert [e.key for e in _events(port.log)] == ["ep#0@pa"]  # 上次中途抛出,seen_turn 没前进,事件不丢
     assert (t["memory"]["remembered"], t["memory"]["extraction_failed"]) == ("1", "0")  # 抛出那次不计数
 
 
@@ -582,19 +590,51 @@ def test_a_shorter_history_does_not_move_the_written_turn_back_so_old_turns_are_
     inst.respond(_persona(), _scenario(), [B0], "a")
     port.log.clear()
     inst.respond(_persona(), _scenario(), [B0, A1, B2, A3, B4], "a")
-    assert [e.key for e in _events(port.log)] == ["ep#4"]
+    assert [e.key for e in _events(port.log)] == ["ep#4@pa"]
 
 
 def test_with_the_file_store_the_round_prefixed_key_lands_and_close_abandons_nothing(tmp_path):
     store = FileTupleStore(tmp_path, extraction_failure=lambda event: "timeout")
     inst = instantiate(EchoGuidance(), skills=[], memory=store.open("s1", "pa"), episode_id="round-7/deploy-m-sc-0",
-                       interlocutors={"b": "pb"}, library_version=LV, profile=None)
+                       holder="pa", interlocutors={"b": "pb"}, library_version=LV, profile=None)
     _, _, t = inst.respond(_persona(), _scenario(), [B0], "a")
     assert t["memory"]["extraction_failed"] == "1"
     inst.close()
-    assert store.pending_events("s1") == ["round-7/deploy-m-sc-0#0"]  # close 只关库,不放弃
+    assert store.pending_events("s1") == ["round-7/deploy-m-sc-0#0@pa"]  # close 只关库,不放弃
     with pytest.raises(MemoryFailureError):
         inst.respond(_persona(), _scenario(), [B0], "a")              # 端口已关:MemoryClosedError
+
+
+SLOTS3 = {"a": "pa", "b": "pb", "c": "pc"}
+
+
+def _world_instance(world, holder, **kw):
+    return instantiate(EchoGuidance(), skills=[], memory=world.world(holder), episode_id="ep", holder=holder,
+                       library_version=LV, profile=None, **kw)
+
+
+def test_event_keys_carry_the_writing_holder():
+    world = TupleMemory()
+    inst = _world_instance(world, "pb", interlocutors={"a": "pa", "b": "pb"})
+    inst.respond(_persona(), _scenario(), [TurnRecord(0, "a", "你好")], "b")
+    assert world._live().events.keys() == {"ep#0@pb"}
+
+
+def test_three_slots_write_the_same_turn_once_per_listener():
+    world = TupleMemory()
+    b = _world_instance(world, "pb", interlocutors=SLOTS3)
+    c = _world_instance(world, "pc", interlocutors=SLOTS3)
+    history = [TurnRecord(0, "a", "预算砍一半")]
+    b.respond(_persona(), _scenario(), history, "b")
+    c.respond(_persona(), _scenario(), history, "c")
+    assert set(world._live().events) == {"ep#0@pb", "ep#0@pc"}
+    assert world.world("pb").recall("预算", limit=3) and world.world("pc").recall("预算", limit=3)
+
+
+def test_a_writable_port_without_a_holder_is_refused():
+    with pytest.raises(ActioDataError, match="holder"):
+        instantiate(EchoGuidance(), skills=[], memory=TupleMemory(), episode_id="ep", interlocutors={"a": "pa"},
+                    library_version=LV, profile=None)
 
 
 # ---------------- 依赖边界 ----------------

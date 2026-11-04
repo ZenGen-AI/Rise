@@ -415,10 +415,10 @@ def make_start_round_handler(
         interlocutors = {b.slot_id: b.persona_id for b in config.bindings}
         profile = {"model_id": model_id, "round_id": env.id}
 
-        def make_instance(episode_id: str, memory):
+        def make_instance(episode_id: str, memory, holder: str):
             return instantiate(
                 backend_factory(model_id, ckpt), skills=lib.skills, memory=memory, episode_id=episode_id,
-                interlocutors=interlocutors, library_version=lib.version, profile=profile,
+                holder=holder, interlocutors=interlocutors, library_version=lib.version, profile=profile,
             )
 
         def on_episode_start(eid: str, by_persona: dict[str, str]) -> None:

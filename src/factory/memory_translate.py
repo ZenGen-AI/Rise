@@ -59,9 +59,10 @@ class MemoryTranslatingBackend:
 
 
 def memory_role_backend(
-    inner: object, *, memory: MemoryBackend, episode_id: str, interlocutors: Mapping[str, str],
+    inner: object, *, memory: MemoryBackend, episode_id: str, interlocutors: Mapping[str, str], holder: str,
 ) -> MemoryTranslatingBackend:
-    """在给定记忆端口上造一个角色位的 Actio 实例,外套转换后端。对手位与训练位都只经它造实例。"""
+    """在给定记忆端口上造一个角色位的 Actio 实例,外套转换后端。对手位与训练位都只经它造实例。
+    holder 是这个位的人格 id:事件 key 的 @ 后缀,要与 memory 端口绑定的主体一致。"""
     instance = instantiate(
         inner,
         skills=(),
@@ -69,6 +70,7 @@ def memory_role_backend(
         profile=None,
         memory=memory,
         episode_id=episode_id,
+        holder=holder,
         interlocutors=dict(interlocutors),
     )
     return MemoryTranslatingBackend(instance)

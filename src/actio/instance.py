@@ -138,7 +138,8 @@ class _MemoryState:
 @dataclass(frozen=True)
 class ActioInstance:
     """配置不可变,每 episode 的计数在 _state 里。一个带写入的实例(replay_read_only 为假)只服务
-    一条 episode(episode_id 在构造时定),并且只许一条线程用;只读实例没有这两条限制。"""
+    一条 episode(episode_id 在构造时定),写在哪个主体名下(holder 在构造时定),并且只许一条线程用;
+    只读实例没有这三条限制。holder 只决定事件 key 的 @<holder> 后缀,记忆归谁由端口自己绑定的主体定。"""
 
     backend: GuidedBackend
     skills: tuple[Skill, ...]
@@ -150,6 +151,7 @@ class ActioInstance:
     memory_limit: int
     replay_read_only: bool
     episode_id: str | None
+    holder: str | None
     interlocutors: dict[str, str]
     _state: _MemoryState = field(default_factory=_MemoryState, repr=False, compare=False)
 
@@ -192,8 +194,10 @@ class ActioInstance:
 
     def _remember_new(self, history: list[TurnRecord], speaker_slot: str) -> None:
         """写路径:先重试上一轮抽取失败的事件,再写 history 里对方的新发言,最后 embed_pending 一次。
-        事件 key 用 history 里的 turn_index 而不是实例计数:重放与断线重连后重建的 history 给出同一批 key,
-        端口的去重才拦得住。抽取失败只计数:来自旧重试表的丢掉(episode 内只重试一次,行留 pending,
+        事件 key 是 {episode_id}#{turn_index}@{holder},turn_index 取 history 里的而不是实例计数:重放与
+        断线重连后重建的 history 给出同一批 key,端口的去重才拦得住。key 带 holder,是因为同一世界里
+        几个主体听到同一句话各写一份:同一回合的 key 只靠 turn_index 区分不开他们。
+        抽取失败只计数:来自旧重试表的丢掉(episode 内只重试一次,行留 pending,
         由 MindAgent 在 episode 最终结束时处理),来自新发言的进下一轮的重试表。不调 tick。
         状态在 remember 全部返回之后一次提交:中途抛出时 seen_turn、重试表与计数都不动,调用方重试
         同一份 history 会重发同样的事件(同 key 同文本,端口幂等),不丢事件也不重复计数。"""
@@ -202,7 +206,8 @@ class ActioInstance:
         for t in history:
             if t.turn_index > state.seen_turn and t.speaker_slot != speaker_slot:
                 pid = self.interlocutors.get(t.speaker_slot, t.speaker_slot)
-                fresh.append(MemoryEvent(f"{self.episode_id}#{t.turn_index}", f"{pid}：{t.utterance}", pid))
+                key = f"{self.episode_id}#{t.turn_index}@{self.holder}"
+                fresh.append(MemoryEvent(key, f"{pid}：{t.utterance}", pid))
 
         def store(event: MemoryEvent) -> bool:
             return _guard(lambda: self.memory.remember(event)).failed
@@ -242,6 +247,7 @@ def instantiate(
     memories: list[MemoryEntry] | tuple[MemoryEntry, ...] | None = None,
     memory: MemoryBackend | None = None,
     episode_id: str | None = None,
+    holder: str | None = None,
     interlocutors: dict[str, str] | None = None,
     replay_read_only: bool | None = None,
     experiences: list[ReasoningExperience] | tuple[ReasoningExperience, ...] = (),
@@ -254,7 +260,9 @@ def instantiate(
 
     记忆二选一:memories= 是简写,包成内存替身 TupleMemory,默认只读;memory= 直接给一个
     MemoryBackend 端口,默认会写库。replay_read_only 显式给出时以它为准。会写库的实例必须有
-    episode_id(事件 key 的前缀),不论记忆是怎么给的。interlocutors 是 slot -> 对话者人格 id。"""
+    episode_id(事件 key 的前缀)与 holder(事件 key 的 @ 后缀,写入方主体),不论记忆是怎么给的。
+    holder 只决定 key,记忆记在哪个主体名下由 memory 端口自己绑定的主体定,调用方要让两者一致。
+    interlocutors 是 slot -> 对话者人格 id。"""
     reg = registry if registry is not None else default_registry()
     skills = tuple(skills)
     check_library(skills, reg)
@@ -274,6 +282,10 @@ def instantiate(
         _check.text(episode_id, "episode_id")
     elif not replay_read_only:
         raise ActioDataError("episode_id: required when the instance writes memory")
+    if holder is not None:
+        _check.text(holder, "holder")
+    elif not replay_read_only:
+        raise ActioDataError("holder: required when the instance writes memory")
     if interlocutors is None:
         interlocutors = {}
     elif not isinstance(interlocutors, dict):
@@ -311,5 +323,6 @@ def instantiate(
         memory_limit=memory_limit,
         replay_read_only=replay_read_only,
         episode_id=episode_id,
+        holder=holder,
         interlocutors=interlocutors,
     )

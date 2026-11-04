@@ -310,6 +310,7 @@ class AgentRuntime:
                 try:
                     backends[slot] = memory_role_backend(
                         base, memory=memory, episode_id=info.episode_id, interlocutors=interlocutors,
+                        holder=binding.persona_id,
                     )
                 except BaseException:
                     if copies is not None:

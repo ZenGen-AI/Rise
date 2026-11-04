@@ -9,6 +9,7 @@ from factory.memory_translate import (
 )
 from factory.opponents import OpponentApiError
 from simulator.backends import ScriptedBackend
+from simulator.datamodel import TurnRecord
 from simulator.realtime.backend_timeout import RoleMemoryFailureError, RoleMemoryUnavailableError
 
 
@@ -71,7 +72,9 @@ def test_a_memory_failure_while_closing_is_translated_too():
 
 def test_memory_role_backend_builds_an_actio_instance_that_writes_v2_traces():
     scripted = ScriptedBackend({"b": ["hi"]})
-    backend = memory_role_backend(scripted, memory=TupleMemory(), episode_id="ep-x", interlocutors={"a": "pa"})
+    backend = memory_role_backend(
+        scripted, memory=TupleMemory(), episode_id="ep-x", interlocutors={"a": "pa"}, holder="pb",
+    )
     utterance, _, trace = backend.respond(None, None, [], "b")
     assert utterance == "hi" and trace["schema"] == "actio.trace.v2"
     assert backend.instance.backend.inner is scripted       # 只有 respond 的底座被套了 IgnoreGuidance
@@ -79,7 +82,7 @@ def test_memory_role_backend_builds_an_actio_instance_that_writes_v2_traces():
 
 def test_closing_twice_is_harmless_on_a_real_instance():
     backend = memory_role_backend(
-        ScriptedBackend({"b": ["hi"]}), memory=TupleMemory(), episode_id="ep-x", interlocutors={},
+        ScriptedBackend({"b": ["hi"]}), memory=TupleMemory(), episode_id="ep-x", interlocutors={}, holder="pb",
     )
     backend.close()
     backend.close()
@@ -87,9 +90,26 @@ def test_closing_twice_is_harmless_on_a_real_instance():
 
 def test_a_closed_port_surfaces_as_the_failure_error_without_the_original_text():
     backend = memory_role_backend(
-        ScriptedBackend({"b": ["hi"]}), memory=TupleMemory(), episode_id="ep-x", interlocutors={},
+        ScriptedBackend({"b": ["hi"]}), memory=TupleMemory(), episode_id="ep-x", interlocutors={}, holder="pb",
     )
     backend.close()
     with pytest.raises(FactoryMemoryFailureError) as caught:
         backend.respond(None, None, [], "b")
     assert "MemoryClosedError" in str(caught.value) and "'b'" in str(caught.value)
+
+
+def test_memory_role_backend_writes_event_keys_under_the_given_holder():
+    world = TupleMemory()
+    backend = memory_role_backend(
+        ScriptedBackend({"b": ["hi"]}), memory=world.world("pb"), episode_id="ep-x",
+        interlocutors={"a": "pa"}, holder="pb",
+    )
+    backend.respond(None, None, [TurnRecord(0, "a", "你好")], "b")
+    assert world._live().events.keys() == {"ep-x#0@pb"}
+
+
+def test_memory_role_backend_requires_the_holder():
+    with pytest.raises(TypeError):
+        memory_role_backend(
+            ScriptedBackend({"b": ["hi"]}), memory=TupleMemory(), episode_id="ep-x", interlocutors={},
+        )

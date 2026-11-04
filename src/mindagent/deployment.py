@@ -50,8 +50,9 @@ ADMISSION_FIRST_BACKOFF_S = 0.5
 ADMISSION_MAX_BACKOFF_S = 8.0
 
 
-# make_instance(带轮次前缀的 episode id, 该人格新开的端口) -> ActioInstance;每次尝试调一次。
-MakeInstance = Callable[[str, MemoryBackend], object]
+# make_instance(带轮次前缀的 episode id, 该人格新开的端口, 智能体位人格 id 即写入方主体) -> ActioInstance;
+# 每次尝试调一次。
+MakeInstance = Callable[[str, MemoryBackend, str], object]
 
 
 class DeploymentFailedError(Exception):
@@ -288,7 +289,7 @@ def run_deployment_episodes(
     - 起点副本:每条 episode 开始前把智能体位人格的部署库 backup_to memory_layout.snapshot(...),
       先经 on_episode_start(部署 id, {persona_id: 起点摘要}) 交给调用方记进轮次产物,再开第一次尝试。
       对手位的记忆在服务端、每会话一份,不进部署库。
-    - 每次尝试:memory_store.open 新端口,make_instance(f"{round_id}/{部署 id}", 端口) 新造实例,
+    - 每次尝试:memory_store.open 新端口,make_instance(f"{round_id}/{部署 id}", 端口, 智能体位人格) 新造实例,
       跑会话,关实例(端口随之关闭)。尝试失败先关、再用起点副本覆盖部署库,下一次尝试面对起点状态。
     - 提交:某次尝试成功后落盘 episode,放弃这条 episode 留下的 pending 行(只放弃本轮本条前缀的,
       门② 的行归提案),最后删起点副本。删副本就是提交点;崩在它之前,副本还在,这条就算在途。
@@ -369,7 +370,7 @@ def run_deployment_episodes(
                 # 先关实例与端口:restore_from 要求该人格没有打开的端口。close 失败(终审 M-1)没有原异常在途时
                 # 按 _memory_op 改抛,有原异常在途时不盖它、只记 warning
                 try:
-                    instance = make_instance(f"{round_id}/{eid}", port)
+                    instance = make_instance(f"{round_id}/{eid}", port, persona_id)
                     try:
                         raw = _attempt(instance, client_factory, scenario, assignment, personas, agent_slot,
                                        episode_id=eid, deadline_s=stream_deadline_s,
