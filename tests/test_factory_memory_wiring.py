@@ -341,17 +341,21 @@ def _stand_in_root(store):
 
 _LOST_TAG_HINT = ("a deploy-deploy-* snapshot listed here may instead be a new snapshot that lost its .world tag: "
                   "write the scenario id into <snapshot>.world or delete the snapshot")
+# 只按文件名判,分不出"已从 agent.yaml 移除的情境的世界"和"旧的按人格库":文字指向移回或移走,不指向清空
+_MOVE_HINT = ("if any of these are worlds of scenarios removed from agent.yaml, add the scenarios back to agent.yaml "
+              "or move the files out of the memory root; delete them only once they are confirmed to be old "
+              "per-persona libraries")
 
 
-def test_an_old_per_persona_memory_root_exits_2_naming_the_directories_to_clear(tmp_path, store, monkeypatch):
+def test_an_old_per_persona_memory_root_exits_2_listing_the_suspect_entries(tmp_path, store, monkeypatch):
     env = _starling_env(tmp_path, monkeypatch)
     root = tmp_path / "mem"
     _touch(root, "deploy/pa.db")
     with pytest.raises(FactoryConfigError, match=r"old per-persona layout \(deploy/pa.db") as caught:
         memory_wiring(store.repo_root, env, deployment=True)
     assert str(caught.value) == (
-        "memory root has the old per-persona layout (deploy/pa.db); "
-        f"clear deploy/ and snapshots/ under the memory root; {_LOST_TAG_HINT}")
+        f"memory root has the old per-persona layout (deploy/pa.db); {_MOVE_HINT}; {_LOST_TAG_HINT}")
+    assert "clear deploy/" not in str(caught.value)
     assert str(root) not in str(caught.value)
     assert (root / "deploy" / "pa.db").exists() and not (root / "runs").exists()      # 只读检查:什么都没动
 
@@ -366,12 +370,24 @@ def test_the_old_layout_refusal_is_exit_code_2_at_every_entry_that_needs_memory(
         assert str(tmp_path / "mem") not in err
 
 
-def test_the_old_layout_message_counts_the_other_entries_and_lists_the_first_in_sorted_order(tmp_path, store, monkeypatch):
+def test_the_old_layout_message_lists_up_to_five_entries_in_sorted_order(tmp_path, store, monkeypatch):
     env = _starling_env(tmp_path, monkeypatch)
     _touch(tmp_path / "mem", "deploy/pb.db", "deploy/pa.db", "snapshots/r1/deploy-m-s1-1-pa.db")
     with pytest.raises(FactoryConfigError) as caught:
         memory_wiring(store.repo_root, env, deployment=True)
-    assert "(deploy/pa.db and 2 more); clear deploy/ and snapshots/" in str(caught.value)
+    text = str(caught.value)
+    assert f"(deploy/pa.db, deploy/pb.db, snapshots/r1/deploy-m-s1-1-pa.db); {_MOVE_HINT}" in text
+    assert "more" not in text and "agent.yaml" in text and "clear deploy/" not in text
+
+
+def test_the_old_layout_message_counts_the_entries_past_the_first_five(tmp_path, store, monkeypatch):
+    env = _starling_env(tmp_path, monkeypatch)
+    _touch(tmp_path / "mem", *(f"deploy/p{i}.db" for i in range(6)))
+    with pytest.raises(FactoryConfigError) as caught:
+        memory_wiring(store.repo_root, env, deployment=True)
+    text = str(caught.value)
+    assert "(deploy/p0.db, deploy/p1.db, deploy/p2.db, deploy/p3.db, deploy/p4.db and 1 more); " in text
+    assert "deploy/p5.db" not in text and str(tmp_path) not in text
 
 
 def test_a_tagged_snapshot_and_the_known_scenarios_libraries_are_the_new_layout(tmp_path, store, monkeypatch):
@@ -455,7 +471,7 @@ def test_a_corrupt_tag_on_a_snapshot_of_the_stand_in_root_is_refused_too(store):
 def test_an_old_per_persona_stand_in_root_is_refused_with_the_json_suffix(store, capsys):
     root = _stand_in_root(store)
     _touch(root, "deploy/pa.json", "deploy/factory-deploy-s1.json", "deploy/pa.lock")
-    with pytest.raises(FactoryConfigError, match=r"old per-persona layout \(deploy/pa.json\); clear deploy/ and snapshots/"):
+    with pytest.raises(FactoryConfigError, match=r"old per-persona layout \(deploy/pa.json\); if any of these"):
         memory_wiring(store.repo_root, {}, deployment=True)
     assert main(["reconcile", str(store.repo_root), "--once", "--enable", "agent"], env={}) == 2
     assert "old per-persona layout (deploy/pa.json)" in capsys.readouterr().err

@@ -115,14 +115,18 @@ def stand_in_memory_root(repo_root: Path) -> Path:
     return git_dir(Path(repo_root)) / "rismforge-memory"
 
 
+_SHOWN_ENTRIES = 5     # 旧布局拒绝启动时文字里列出的条目数,多出来的只报个数
+
+
 def check_memory_layout(layout: MemoryLayout, repo_root: Path) -> None:
     """记忆根是旧布局(设计三 4.8 节)或有坏的 `.world` 旁注时拒绝启动,抛 `FactoryConfigError`(命令行退出码 2)。
     只读磁盘,先于任何对记忆根的写。不迁移、不静默忽略:旧库里的记忆不会被任何世界读到,留着会让人以为还在用。
 
     - 已知情境取自 `agent.yaml` 的 `scenario_ids`;文件不在时是空集,`deploy/` 下任何库都算旧布局。
       `agent.yaml` 读不了的 `FactoryConfigError` 原样上抛。
-    - 旧布局条目由 `MemoryLayout.legacy_entries` 给。没有旁注的 `deploy-` 快照也算在里面,但新格式快照的旁注
-      丢了会被同样报出,所以文字里点明这一种恢复办法。
+    - 旧布局条目由 `MemoryLayout.legacy_entries` 给,文字列出至多 5 条。它只按文件名判:从 `agent.yaml` 删掉的
+      情境的世界也会被报出,所以文字指向把情境加回配置或把文件移出记忆根,不指向清空目录。没有旁注的 `deploy-`
+      快照也算在里面,但新格式快照的旁注丢了会被同样报出,所以文字里点明这一种恢复办法。
     - 有旁注的快照逐个 `world_of`:旁注坏了在装配期报,而不是留到门② 才抛。文字里的路径相对记忆根。"""
     from factory.agent import AGENT_CONFIG, read_agent_settings        # 惰性:拖进 grpc 与 mindagent
 
@@ -130,9 +134,15 @@ def check_memory_layout(layout: MemoryLayout, repo_root: Path) -> None:
     known = read_agent_settings(store)[0].scenario_ids if store.exists(AGENT_CONFIG) else ()
     entries = layout.legacy_entries(known)
     if entries:
-        shown = entries[0] if len(entries) == 1 else f"{entries[0]} and {len(entries) - 1} more"
+        shown = ", ".join(entries[:_SHOWN_ENTRIES])
+        if len(entries) > _SHOWN_ENTRIES:
+            shown += f" and {len(entries) - _SHOWN_ENTRIES} more"
+        # 只按文件名判,分不出"已从 agent.yaml 移除的情境的世界"和"旧的按人格库":指向移回或移走,不指向清空
         raise FactoryConfigError(
-            f"memory root has the old per-persona layout ({shown}); clear deploy/ and snapshots/ under the memory root; "
+            f"memory root has the old per-persona layout ({shown}); "
+            "if any of these are worlds of scenarios removed from agent.yaml, add the scenarios back to agent.yaml "
+            "or move the files out of the memory root; delete them only once they are confirmed to be old "
+            "per-persona libraries; "
             "a deploy-deploy-* snapshot listed here may instead be a new snapshot that lost its .world tag: "
             "write the scenario id into <snapshot>.world or delete the snapshot"
         )
