@@ -159,7 +159,8 @@ def test_the_full_agent_rsi_loop_over_a_real_server(world):
     # 门②:人工批准,收录
     proposal.status = "approved"
     store.write_product(proposal_file(pid), proposal, "human: approve")
-    make_admit_proposal_handler(memory_store=memory_store, memory_layout=memory_layout)(
+    make_admit_proposal_handler(memory_store=memory_store, memory_layout=memory_layout,
+                                bound_pairs=lambda: frozenset())(       # 只含技能的提案不读绑定
         store, Action(kind="admit_proposal", target_id=pid, detail={}))
     assert store.read_product(proposal_file(pid)).status == "effective"
     lib = load_library(store)

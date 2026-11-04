@@ -2,11 +2,15 @@
 
 顺序(make_admit_proposal_handler 返回的处理器):
 1. 读提案,不是 approved 就返回;增量与库版本先校验,不合法记一次 T2、提案留在 approved。
-2. 记忆增量所涉人格逐个拿部署库锁,并查该人格有没有未提交的部署起点副本:锁被占或有在途 episode
-   就抛 DeferredError(守护进程不写树、按退避重试),否则轮次重入覆盖部署库时会抹掉刚收录的记忆。
-   任何人格有未提交的起点副本时,只含技能的提案也延后:在途轮次重入会重读库,技能版本一变,已提交的
-   episode 就换新 id 重跑、记下新记忆,随后在途那条的起点副本覆盖回去,把这些记忆悄悄抹掉。
-3. 记忆增量按位置逐个 remember_event 写进该人格的部署库,事件 key 是 <proposal_id>#<k>。记忆先于技能写:
+   记忆增量的 (scenario_id, persona_id) 必须是部署配置里绑定的一对(bound_pairs 每次调用时现读,
+   只在提案有记忆增量时才调):不是、或读不了绑定,都在拿锁与写任何东西之前记一次 T2,提案留在 approved。
+2. 记忆增量所涉情境世界(scenario_id,去重后排序)逐个拿世界锁,并查该世界有没有未提交的部署起点副本:
+   锁被占或有在途 episode 就抛 DeferredError(守护进程不写树、按退避重试),否则轮次重入覆盖部署库时
+   会抹掉刚收录的记忆。任何世界有未提交的起点副本时,只含技能的提案也延后:在途轮次重入会重读库,
+   技能版本一变,已提交的 episode 就换新 id 重跑、记下新记忆,随后在途那条的起点副本覆盖回去,
+   把这些记忆悄悄抹掉。
+3. 记忆增量按位置逐个 remember_event 写进 scenario_id 那个世界、记在 persona_id 名下,事件 key 是
+   <proposal_id>#<k>(不带持有者:持有者在 remember_event 的参数里)。记忆先于技能写:
    抽取失败要整份提案转 rejected,技能条目已写成 effective 就收不回了。
    - remember_event 抛错(库打不开、③ 写失败):记一次失败记录,提案留在 approved,不放弃事件;下一 tick
      重入时同 key 同文本返回幂等的同一批语句 id,不二次抽取。
@@ -48,7 +52,7 @@ from mindagent.failures import fail_once, recorded_category
 from mindagent.library import LIBRARY_STATE_ID, read_library_versions, skill_id_for
 from mindagent.memory_layout import MemoryLayout
 
-MEMORY_DEFINITION_KEYS = frozenset({"persona_id", "text", "interlocutor"})
+MEMORY_DEFINITION_KEYS = frozenset({"scenario_id", "persona_id", "text", "interlocutor"})
 # Starling 的抽取失败类别里上游网络的瞬态(设计源 M21);其余已知类别与未知类别都是确定性的
 TRANSIENT_EXTRACTION_CATEGORIES = frozenset({"timeout", "transport_failure"})
 
@@ -60,10 +64,14 @@ def _now() -> str:
 
 
 def _memory_definition(k: int, definition: dict) -> dict:
-    """记忆增量的 definition:恰好三个键;persona_id 拼进库文件名,要过 PERSONA_ID_PATTERN;
-    text 非空;interlocutor 是字符串,空串表示一般事实。"""
+    """记忆增量的 definition:恰好四个键;scenario_id(世界)与 persona_id(持有者)分别拼进部署库与锁的
+    文件名、事件表,都要过 PERSONA_ID_PATTERN;text 非空;interlocutor 是字符串,空串表示一般事实。
+    这里只判形状;(scenario_id, persona_id) 是不是部署配置里绑定的一对由处理器入口判。"""
     if set(definition) != MEMORY_DEFINITION_KEYS:
         raise ValueError(f"increment {k}: memory definition must have exactly {sorted(MEMORY_DEFINITION_KEYS)}")
+    sid = definition["scenario_id"]
+    if not isinstance(sid, str) or not PERSONA_ID_PATTERN.fullmatch(sid):
+        raise ValueError(f"increment {k}: memory scenario_id is not a valid scenario id: {sid!r}")
     pid = definition["persona_id"]
     if not isinstance(pid, str) or not PERSONA_ID_PATTERN.fullmatch(pid):
         raise ValueError(f"increment {k}: memory persona_id is not a valid persona id: {pid!r}")
@@ -105,8 +113,16 @@ def _entry_envelope(kind: str, entry_id: str, payload: dict, proposal_id: str) -
     )
 
 
-def make_admit_proposal_handler(*, memory_store: DeploymentMemoryStore, memory_layout: MemoryLayout) -> Handler:
-    """memory_store 与 memory_layout 是部署记忆,与轮次处理器共用同一份(锁与"打开着的端口"都按它算)。"""
+def make_admit_proposal_handler(
+    *,
+    memory_store: DeploymentMemoryStore,
+    memory_layout: MemoryLayout,
+    bound_pairs: Callable[[], frozenset[tuple[str, str]]],
+) -> Handler:
+    """memory_store 与 memory_layout 是部署记忆,与轮次处理器共用同一份(锁与"打开着的端口"都按它算)。
+    bound_pairs 返回部署配置里绑定的 (scenario_id, persona_id) 集合,处理器每次要判记忆增量时现调
+    (人改了 agent.yaml 下一次就生效)。读不了绑定时它抛 MindAgentDataError,按 T2 处理;`mindagent`
+    不导入 `factory`,所以把 FactoryConfigError 转成 MindAgentDataError 是组合根的事。"""
 
     def handle(store: GitStore, action: Action) -> None:
         proposal_id = action.target_id
@@ -121,6 +137,15 @@ def make_admit_proposal_handler(*, memory_store: DeploymentMemoryStore, memory_l
             return  # 部分收录已确定性失败、等人处理:不拿锁、不再抽取(见模块 docstring 第 3 步)
         try:
             entries = _entries(proposal_id, proposal.payload.get("increments"))
+            memories = [(key, d) for kind, key, d in entries if kind == "memory"]
+            if memories:
+                # 只在有记忆增量时读绑定;不是绑定对的第一条决定整份提案的结局,之前的增量也不写
+                bound = bound_pairs()
+                for key, d in memories:
+                    if (d["scenario_id"], d["persona_id"]) not in bound:
+                        raise ValueError(
+                            f"memory increment {key}: ({d['scenario_id']!r}, {d['persona_id']!r}) "
+                            "is not a bound pair of the deployment config")
             # 库版本在写任何条目之前就校验:不是十进制数字串时无法递增,按确定性失败处理
             state = read_library_versions(store)
         except (ValueError, MindAgentDataError) as exc:
@@ -131,19 +156,18 @@ def make_admit_proposal_handler(*, memory_store: DeploymentMemoryStore, memory_l
                       point="mindagent.admit", retries=0, reason=str(exc))
             return
 
-        memories = [(key, d) for kind, key, d in entries if kind == "memory"]
         with ExitStack() as locks:
-            persona_ids = sorted({d["persona_id"] for _, d in memories})
-            for pid in persona_ids:
+            world_ids = sorted({d["scenario_id"] for _, d in memories})
+            for sid in world_ids:
                 try:
-                    locks.enter_context(memory_layout.persona_lock(pid))
+                    locks.enter_context(memory_layout.hold_world(sid))
                 except FileLockBusyError as exc:
-                    raise DeferredError(f"persona library locked: {exc}") from exc
-            for pid in persona_ids:
-                in_flight = memory_layout.uncommitted_snapshots(pid)
+                    raise DeferredError(f"world library locked: {exc}") from exc
+            for sid in world_ids:
+                in_flight = memory_layout.uncommitted_snapshots(sid)
                 if in_flight:
                     names = ", ".join(p.name for p in in_flight)
-                    raise DeferredError(f"persona {pid} has an uncommitted deployment episode: {names}")
+                    raise DeferredError(f"world {sid} has an uncommitted deployment episode: {names}")
             in_flight = memory_layout.any_uncommitted_snapshots()
             if in_flight:
                 # 只含技能的提案也延后:库版本在轮次在途时不许变(见模块 docstring 第 2 步)
@@ -160,20 +184,20 @@ def make_admit_proposal_handler(*, memory_store: DeploymentMemoryStore, memory_l
 
             statements: dict[str, list[str]] = {}
             for key, d in memories:
-                pid = d["persona_id"]
+                sid, pid = d["scenario_id"], d["persona_id"]
                 try:
                     try:
-                        outcome = memory_store.remember_event(pid, key, d["text"], interlocutor=d["interlocutor"])
+                        outcome = memory_store.remember_event(sid, pid, key, d["text"], interlocutor=d["interlocutor"])
                     except MemoryEventConflict:
                         if statements:
                             raise
                         # 上一次放弃了这条、没写成 rejected 就崩了:再放弃一次(已放弃是空操作,已提交会抛)
-                        memory_store.abandon_event(pid, key)
+                        memory_store.abandon_event(sid, key)
                         reject(f"extraction failed for {key}: event was abandoned earlier")
                         return
                     transient = outcome.failed and outcome.category in TRANSIENT_EXTRACTION_CATEGORIES
                     if outcome.failed and not statements and not transient:
-                        memory_store.abandon_event(pid, key)
+                        memory_store.abandon_event(sid, key)
                 except (MemoryFailureError, OSError, ActioDataError) as exc:
                     # 不改提案、不放弃事件:留在 approved,下一 tick 重入同 key 补收据(只报类名)。
                     # ActioDataError:库拒收这条事件(替身要求 interlocutor 非空),登记之前就拒,库没动;

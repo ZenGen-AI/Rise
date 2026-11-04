@@ -15,6 +15,7 @@ from factory.errors import FactoryConfigError
 from factory.wire import CODE_ROOT, FactoryOptions, assemble, resolve_repo_commit
 from factory_fixtures import closed_loop_repo
 from mindagent.config import AgentConfig
+from mindagent.errors import MindAgentDataError
 from recipestore.admit import handle_admit_recipe
 from recipestore.record import handle_record_track
 from simulator.backends import ScriptedBackend
@@ -1149,6 +1150,44 @@ def test_round_and_admit_handlers_and_the_runtime_share_one_management_plane(sto
         assert runtime._deployment_store is r["memory_store"]
         assert r["register_episode"] == runtime.register_deployment_episode
         assert r["unregister_episode"] == runtime.unregister_deployment_episode
+    finally:
+        asm.close()
+
+
+def _admit_bound_pairs(store, monkeypatch):
+    """装配 admit 开关,截下 _admit_proposal 交给处理器工厂的 bound_pairs 闭包。"""
+    import factory.handlers as fh
+    seen = {}
+    monkeypatch.setattr(fh, "make_admit_proposal_handler", lambda **kw: seen.setdefault("admit", kw) and None or (lambda s, a: None))
+    asm = assemble(store, FactoryOptions(switches=("admit",)), env={})
+    return asm, seen["admit"]["bound_pairs"]
+
+
+def test_the_admit_bound_pairs_are_the_scenarios_times_the_bound_personas_read_on_every_call(store, monkeypatch):
+    """门② 的绑定对由组合根给:没有 agent.yaml 就一对也没有;有就是 scenario_ids × bindings 的 persona_id,
+    每次调用现读(装配之后人改了配置,下一次就生效)。"""
+    asm, bound_pairs = _admit_bound_pairs(store, monkeypatch)
+    try:
+        personas = [b["persona_id"] for b in DEFAULT_AGENT_CONFIG["bindings"]]
+        assert len(DEFAULT_AGENT_CONFIG["scenario_ids"]) >= 1 and len(set(personas)) == 2
+        assert bound_pairs() == frozenset((sid, pid) for sid in DEFAULT_AGENT_CONFIG["scenario_ids"] for pid in personas)
+        changed = dict(DEFAULT_AGENT_CONFIG, scenario_ids=["only-world"])
+        write_config(store, AGENT_CONFIG, "agent", changed, "human: one world")
+        assert bound_pairs() == frozenset(("only-world", pid) for pid in personas)
+        (store.repo_root / AGENT_CONFIG).unlink()
+        assert bound_pairs() == frozenset()
+    finally:
+        asm.close()
+
+
+def test_unreadable_agent_yaml_reaches_the_admit_handler_as_a_mind_agent_data_error(store, monkeypatch):
+    """FactoryConfigError 在组合根转成 MindAgentDataError(mindagent 不导入 factory),门② 把它记成 T2。"""
+    asm, bound_pairs = _admit_bound_pairs(store, monkeypatch)
+    try:
+        write_config(store, AGENT_CONFIG, "agent", dict(DEFAULT_AGENT_CONFIG, scenario_ids=[]), "human: break agent.yaml")
+        with pytest.raises(MindAgentDataError, match=r"^cannot read the deployment bindings: .*scenario_ids") as caught:
+            bound_pairs()
+        assert isinstance(caught.value.__cause__, FactoryConfigError)
     finally:
         asm.close()
 

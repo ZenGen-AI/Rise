@@ -8,20 +8,22 @@ from actio.skills import Skill
 from controlplane.deferred import DeferredError
 from controlplane.envelope import Envelope, OwnerRef
 from controlplane.gitstore import GitStore
-from controlplane.lock import hold_file_lock
 from controlplane.paths import (
     CONTROL_PLANE_ROOT, failure_record_file, library_state_file, proposal_file, run_dir, skill_file,
 )
 from controlplane.reconcile import Action
 from mindagent.admit import MEMORY_DEFINITION_KEYS, make_admit_proposal_handler
+from mindagent.errors import MindAgentDataError
 from mindagent.library import load_library
 from mindagent.memory_layout import MemoryLayout
 
 PID = "proposal-agent-round-zengen-v3-1"
 SKILL = {"id": "skill-candidate-emotion_high", "version": 1, "level": "micro", "priority": 100,
          "trigger": {"signal": "emotion_high"}, "policy": {"instructions": ["先回应情绪"]}, "description": "d"}
-MEMORY = {"persona_id": "pa", "text": "对方住在北京", "interlocutor": "pb"}
+MEMORY = {"scenario_id": "s1", "persona_id": "pa", "text": "对方住在北京", "interlocutor": "pb"}
 KEY = f"{PID}#1"
+# 部署配置里绑定的 (情境, 人格) 对:MEMORY 与 SECOND 用的 (s1, pa),加一对别的情境的(s2, pa)
+BOUND = frozenset({("s1", "pa"), ("s2", "pa")})
 
 
 class Crash(Exception):
@@ -62,8 +64,8 @@ def _put(store, pid=PID, status="approved", increments=None, run_id="run-003"):
     store.write_product(proposal_file(pid), env, "test: proposal")
 
 
-def _admit(store, mem, pid=PID):
-    make_admit_proposal_handler(memory_store=mem.store, memory_layout=mem.layout)(
+def _admit(store, mem, pid=PID, bound_pairs=lambda: BOUND):
+    make_admit_proposal_handler(memory_store=mem.store, memory_layout=mem.layout, bound_pairs=bound_pairs)(
         store, Action(kind="admit_proposal", target_id=pid, detail={}))
 
 
@@ -104,7 +106,7 @@ def test_a_memory_increment_is_remembered_in_the_personas_deploy_library(store, 
     _admit(store, mem)
     proposal = store.read_product(proposal_file(PID))
     assert proposal.status == "effective"
-    again = mem.store.remember_event("pa", KEY, "对方住在北京", interlocutor="pb")
+    again = mem.store.remember_event("s1", "pa", KEY, "对方住在北京", interlocutor="pb")
     assert list(again.stored) == proposal.payload["admitted_statements"][KEY]   # 收据是事件行
     assert _state(store)["memory_version"] == "1" and _state(store)["admitted"][0]["entries"] == [KEY]
     assert store.list_products(f"{CONTROL_PLANE_ROOT}/memory_library") == []   # 不再写树里的记忆库
@@ -168,11 +170,11 @@ def test_a_crash_between_two_entries_converges(store, mem, monkeypatch):
         _admit(store, mem)
     assert not store.exists(skill_file("skill-agent-round-zengen-v3-1-1"))
     assert not store.exists(library_state_file())
-    before = mem.store.digest("pa")
+    before = mem.store.digest("s1")
     restore()
     _admit(store, mem)
     assert (_state(store)["skill_version"], _state(store)["memory_version"]) == ("1", "1")
-    assert mem.store.digest("pa") == before                           # 记忆已在库里,重入幂等
+    assert mem.store.digest("s1") == before                           # 记忆已在库里,重入幂等
 
 
 def test_a_non_decimal_library_version_fails_admission_without_crashing(store, mem):
@@ -232,15 +234,15 @@ def test_a_failed_extraction_abandons_the_event_and_rejects_the_proposal(store, 
     assert proposal.status == "rejected" and "schema_failure" in proposal.payload["reject_reason"]
     fr = store.read_product(failure_record_file("run-003", f"admit-{PID}"))
     assert fr.payload["category"] == "T2"
-    assert mem.store.pending_events("pa") == []
+    assert mem.store.pending_events("s1") == []
     mem.failing.clear()
     with pytest.raises(MemoryEventConflict):                          # abandoned 是终态,任何路径都写不进
-        mem.store.remember_event("pa", f"{PID}#2", "对方住在北京", interlocutor="pb")
+        mem.store.remember_event("s1", "pa", f"{PID}#2", "对方住在北京", interlocutor="pb")
     assert not store.exists(skill_file("skill-agent-round-zengen-v3-1-1"))     # 记忆先写,技能未落
     assert not store.exists(library_state_file())
 
 
-SECOND = {"persona_id": "pa", "text": "对方养了一只猫", "interlocutor": "pb"}
+SECOND = {"scenario_id": "s1", "persona_id": "pa", "text": "对方养了一只猫", "interlocutor": "pb"}
 TWO_MEMORIES = [{"kind": "memory", "definition": MEMORY}, {"kind": "memory", "definition": SECOND}]
 
 
@@ -256,14 +258,14 @@ def test_a_later_extraction_failure_after_an_earlier_commit_defers_and_then_conv
     assert (fr.payload["category"], fr.payload["point"]) == ("T1", "mindagent.admit.memory")
     assert f"{PID}#2" in fr.payload["reason"] and "transport_failure" in fr.payload["reason"]
     assert not store.exists(failure_record_file("run-003", f"admit-{PID}-partial"))
-    assert mem.store.pending_events("pa") == [f"{PID}#2"]              # 留 pending,不放弃
+    assert mem.store.pending_events("s1") == [f"{PID}#2"]              # 留 pending,不放弃
     assert not store.exists(library_state_file())
     mem.failing.clear()                                                # 抽取恢复后重入
     _admit(store, mem)
     proposal = store.read_product(proposal_file(PID))
     assert proposal.status == "effective"
     assert set(proposal.payload["admitted_statements"]) == {KEY, f"{PID}#2"}
-    assert mem.store.pending_events("pa") == []
+    assert mem.store.pending_events("s1") == []
 
 
 def test_a_store_error_leaves_the_proposal_approved_and_reentry_completes_the_receipt(store, mem, monkeypatch):
@@ -279,10 +281,10 @@ def test_a_store_error_leaves_the_proposal_approved_and_reentry_completes_the_re
     assert store.read_product(proposal_file(PID)).status == "approved"
     assert store.exists(failure_record_file("run-003", f"admit-{PID}"))
     monkeypatch.setattr(mem.store, "remember_event", real)
-    before = mem.store.digest("pa")
+    before = mem.store.digest("s1")
     _admit(store, mem)
     assert store.read_product(proposal_file(PID)).status == "effective"
-    assert mem.store.digest("pa") == before                           # 重入是幂等的,不二次抽取
+    assert mem.store.digest("s1") == before                           # 重入是幂等的,不二次抽取
 
 
 @pytest.mark.parametrize("transient,category", [(True, "T1"), (False, "T2")])
@@ -300,56 +302,180 @@ def test_a_memory_failure_error_is_recorded_by_class_name_only(store, mem, monke
     assert fr.payload["reason"] == f"remember {KEY}: MemoryFailureError"
 
 
-def test_an_in_flight_round_defers_admission_until_its_copy_is_gone(store, mem):
-    # 门② 与在途轮次同一 tick:该人格有未提交起点副本时延后,库不变;副本删掉后下一 tick 收录成功
+def _in_flight_copy(mem, world, episode="deploy-zengen-v3-s1-1"):
+    """该世界的一份未提交起点快照,带 .world 旁注(与部署驱动器落的一致)。"""
+    snap = mem.layout.snapshot("agent-round-zengen-v3", episode)
+    mem.layout.write_world_tag(snap, world)
+    mem.store.backup_to(world, snap)
+    return snap
+
+
+def test_an_in_flight_round_of_the_same_world_defers_admission_until_its_copy_is_gone(store, mem):
+    # 门② 与在途轮次同一 tick:该世界有未提交起点副本时延后,库不变;副本删掉后下一 tick 收录成功
     _put(store, increments=[{"kind": "memory", "definition": MEMORY}])
-    snap = mem.layout.snapshot("agent-round-zengen-v3", "deploy-zengen-v3-s1-1", "pa")
-    snap.parent.mkdir(parents=True)
-    mem.store.backup_to("pa", snap)
-    before, head = mem.store.digest("pa"), store._git("rev-parse", "HEAD")
-    with pytest.raises(DeferredError, match="uncommitted"):
+    snap = _in_flight_copy(mem, "s1")
+    before, head = mem.store.digest("s1"), store._git("rev-parse", "HEAD")
+    with pytest.raises(DeferredError, match="world s1 has an uncommitted deployment episode: deploy-deploy-zengen-v3-s1-1.json"):
         _admit(store, mem)
-    assert mem.store.digest("pa") == before and store._git("rev-parse", "HEAD") == head
+    assert mem.store.digest("s1") == before and store._git("rev-parse", "HEAD") == head
+    assert store.read_product(proposal_file(PID)).status == "approved"
     snap.unlink()
+    snap.with_suffix(".world").unlink()
     _admit(store, mem)
     assert store.read_product(proposal_file(PID)).status == "effective"
 
 
-def test_a_locked_persona_library_defers_admission(store, mem):
+def test_a_locked_world_defers_admission(store, mem):
     _put(store, increments=[{"kind": "memory", "definition": MEMORY}])
-    with hold_file_lock(mem.layout.deploy_lock("pa")):
-        with pytest.raises(DeferredError, match="pa.lock"):
+    with mem.layout.hold_world("s1"):
+        with pytest.raises(DeferredError, match=r"world library locked: .*s1\.lock"):
             _admit(store, mem)
     assert store.read_product(proposal_file(PID)).status == "approved"
+    assert mem.store.pending_events("s1") == []
+    _admit(store, mem)
+    assert store.read_product(proposal_file(PID)).status == "effective"
 
 
-def test_a_skill_only_proposal_takes_no_persona_lock(store, mem):
+def test_only_the_worlds_a_proposal_names_are_locked(store, mem):
+    # 别的世界被占着不挡:提案只涉及 s1
+    _put(store, increments=[{"kind": "memory", "definition": MEMORY}])
+    with mem.layout.hold_world("s2"):
+        _admit(store, mem)
+    assert store.read_product(proposal_file(PID)).status == "effective"
+
+
+def test_a_skill_only_proposal_takes_no_world_lock(store, mem):
     _put(store)
-    with hold_file_lock(mem.layout.deploy_lock("pa")):
+    with mem.layout.hold_world("s1"):
         _admit(store, mem)
     assert store.read_product(proposal_file(PID)).status == "effective"
 
 
 @pytest.mark.parametrize("definition", [
-    {"persona_id": "pa", "text": "x"},                                             # 少键
-    {"persona_id": "pa", "text": "x", "interlocutor": "pb", "subject": "pb"},      # 多键
-    {"persona_id": "a/b", "text": "x", "interlocutor": "pb"},                      # 人格 id 不合法
-    {"persona_id": "pa", "text": "", "interlocutor": "pb"},                        # 空文本
-    {"persona_id": "pa", "text": "x", "interlocutor": 3},
+    {"scenario_id": "s1", "persona_id": "pa", "text": "x"},                                        # 少键
+    {"persona_id": "pa", "text": "x", "interlocutor": "pb"},                                       # 缺 scenario_id(旧形状)
+    {"scenario_id": "s1", "persona_id": "pa", "text": "x", "interlocutor": "pb", "subject": "pb"}, # 多键
+    {"scenario_id": "s1", "persona_id": "a/b", "text": "x", "interlocutor": "pb"},                 # 人格 id 不合法
+    {"scenario_id": "a/b", "persona_id": "pa", "text": "x", "interlocutor": "pb"},                 # 情境 id 不合法
+    {"scenario_id": "../s1", "persona_id": "pa", "text": "x", "interlocutor": "pb"},
+    {"scenario_id": "", "persona_id": "pa", "text": "x", "interlocutor": "pb"},
+    {"scenario_id": 7, "persona_id": "pa", "text": "x", "interlocutor": "pb"},
+    {"scenario_id": "s1", "persona_id": "pa", "text": "", "interlocutor": "pb"},                   # 空文本
+    {"scenario_id": "s1", "persona_id": "pa", "text": "x", "interlocutor": 3},
 ])
 def test_a_malformed_memory_definition_is_t2_and_touches_nothing(store, mem, definition):
     _put(store, increments=[{"kind": "memory", "definition": definition}])
     _admit(store, mem)
     assert store.read_product(proposal_file(PID)).status == "approved"
     assert store.read_product(failure_record_file("run-003", f"admit-{PID}")).payload["category"] == "T2"
-    assert mem.store.digest("pa") == FileTupleStore(mem.layout.root / "empty").digest("pa")
+    assert mem.store.digest("s1") == FileTupleStore(mem.layout.root / "empty").digest("s1")
+
+
+def test_a_bad_scenario_id_names_the_scenario_id_in_the_reason(store, mem):
+    _put(store, increments=[{"kind": "memory", "definition": dict(MEMORY, scenario_id="a/b")}])
+    _admit(store, mem)
+    reason = store.read_product(failure_record_file("run-003", f"admit-{PID}")).payload["reason"]
+    assert reason == "increment 1: memory scenario_id is not a valid scenario id: 'a/b'"
+
+
+def test_a_memory_increment_outside_the_bound_pairs_is_t2_and_touches_nothing(store, mem):
+    # (s1, pz) 不在部署配置的绑定对里:T2、提案留 approved、部署库与树都不动,也不取世界锁
+    _put(store, increments=[{"kind": "memory", "definition": dict(MEMORY, persona_id="pz")}])
+    head = store._git("rev-parse", "HEAD")
+    with mem.layout.hold_world("s1"):                      # 世界锁被占着也不影响:校验在取锁之前
+        _admit(store, mem)
+    assert store.read_product(proposal_file(PID)).status == "approved"
+    fr = store.read_product(failure_record_file("run-003", f"admit-{PID}"))
+    assert (fr.payload["category"], fr.payload["point"]) == ("T2", "mindagent.admit")
+    assert fr.payload["reason"] == (
+        f"memory increment {KEY}: ('s1', 'pz') is not a bound pair of the deployment config")
+    assert not store.exists(library_state_file())
+    assert mem.store.digest("s1") == FileTupleStore(mem.layout.root / "empty").digest("s1")
+    assert mem.store.pending_events("s1") == [] and mem.extractions == []
+    head = store._git("rev-parse", "HEAD")
+    _admit(store, mem)                                     # 下一 tick 只读,什么都不写
+    assert store._git("rev-parse", "HEAD") == head
+
+
+def test_a_pair_bound_in_another_scenario_is_not_a_bound_pair(store, mem):
+    # 人格 pa 绑在 s1、s2,不绑在 s3:按对判,不是各自在集合里就行
+    _put(store, increments=[{"kind": "memory", "definition": dict(MEMORY, scenario_id="s3")}])
+    _admit(store, mem)
+    fr = store.read_product(failure_record_file("run-003", f"admit-{PID}"))
+    assert fr.payload["category"] == "T2" and "('s3', 'pa') is not a bound pair" in fr.payload["reason"]
+    assert store.read_product(proposal_file(PID)).status == "approved"
+
+
+def test_the_first_unbound_pair_stops_the_whole_proposal(store, mem):
+    # 第 1 条合法、第 2 条不在绑定对里:整份提案 T2,第 1 条也不写
+    _put(store, increments=[{"kind": "memory", "definition": MEMORY},
+                            {"kind": "memory", "definition": dict(SECOND, persona_id="pz")}])
+    _admit(store, mem)
+    fr = store.read_product(failure_record_file("run-003", f"admit-{PID}"))
+    assert fr.payload["reason"].startswith(f"memory increment {PID}#2: ('s1', 'pz')")
+    assert mem.store.digest("s1") == FileTupleStore(mem.layout.root / "empty").digest("s1")
+    assert mem.extractions == []
+
+
+def test_a_skill_only_proposal_never_asks_for_the_bound_pairs(store, mem):
+    # 没有记忆增量就不读 agent.yaml:读不了绑定也不挡只含技能的提案
+    def unreadable():
+        raise AssertionError("bound_pairs must not be called")
+
+    _put(store)
+    _admit(store, mem, bound_pairs=unreadable)
+    assert store.read_product(proposal_file(PID)).status == "effective"
+
+
+def test_unreadable_deployment_bindings_are_t2_and_touch_nothing(store, mem):
+    # bound_pairs 抛 MindAgentDataError(组合根把 FactoryConfigError 转成它):同一个 T2 分支
+    def unreadable():
+        raise MindAgentDataError("cannot read the deployment bindings: agent.yaml is missing")
+
+    _put(store, increments=[{"kind": "memory", "definition": MEMORY}])
+    head = store._git("rev-parse", "HEAD")
+    _admit(store, mem, bound_pairs=unreadable)
+    assert store.read_product(proposal_file(PID)).status == "approved"
+    fr = store.read_product(failure_record_file("run-003", f"admit-{PID}"))
+    assert (fr.payload["category"], fr.payload["point"]) == ("T2", "mindagent.admit")
+    assert fr.payload["reason"] == "cannot read the deployment bindings: agent.yaml is missing"
+    assert not store.exists(library_state_file())
+    assert mem.store.digest("s1") == FileTupleStore(mem.layout.root / "empty").digest("s1")
+    assert mem.store.pending_events("s1") == [] and mem.extractions == []
+    assert store._git("rev-parse", "HEAD") != head          # 只多了那一条失败记录的提交
+    head = store._git("rev-parse", "HEAD")
+    _admit(store, mem, bound_pairs=unreadable)
+    assert store._git("rev-parse", "HEAD") == head
+
+
+def test_one_proposal_can_write_into_two_worlds_and_takes_both_locks(store, mem):
+    other = dict(SECOND, scenario_id="s2")
+    _put(store, increments=[{"kind": "memory", "definition": MEMORY}, {"kind": "memory", "definition": other}])
+    with mem.layout.hold_world("s2"):
+        with pytest.raises(DeferredError, match="world library locked"):
+            _admit(store, mem)
+        assert mem.store.digest("s1") == FileTupleStore(mem.layout.root / "empty").digest("s1")   # 锁先取全、再写
+    _admit(store, mem)
+    proposal = store.read_product(proposal_file(PID))
+    assert proposal.status == "effective" and set(proposal.payload["admitted_statements"]) == {KEY, f"{PID}#2"}
+    assert mem.store.pending_events("s1") == [] and mem.store.pending_events("s2") == []
+    assert mem.store.digest("s1") != mem.store.digest("s2")
+
+
+def test_an_in_flight_round_of_another_world_still_defers_a_memory_increment_through_the_global_wait(store, mem):
+    # 世界级的在途检查只看本提案涉及的世界;全局那条(任何未提交快照都延后)仍然在,所以这里仍延后,
+    # 但原因是全局等待而不是"world s1 ..."
+    _put(store, increments=[{"kind": "memory", "definition": MEMORY}])
+    _in_flight_copy(mem, "s2", "deploy-zengen-v3-s2-1")
+    with pytest.raises(DeferredError, match="admission waits for uncommitted deployment episodes"):
+        _admit(store, mem)
 
 
 def test_an_empty_interlocutor_passes_validation_but_the_stand_in_refusal_is_t2_and_does_not_escape(store, mem):
     # 设计源:interlocutor 空串表示一般事实,校验放行;替身库要求它非空、在登记之前就以 ActioDataError 拒收。
     # 处理器把它当 T2 记下(只报类名),提案留在 approved,库不动,守护进程不崩
     _put(store, increments=[{"kind": "memory", "definition": dict(MEMORY, interlocutor="")}])
-    before = mem.store.digest("pa")
+    before = mem.store.digest("s1")
     _admit(store, mem)
     assert store.read_product(proposal_file(PID)).status == "approved"
     fr = store.read_product(failure_record_file("run-003", f"admit-{PID}"))
@@ -358,11 +484,11 @@ def test_an_empty_interlocutor_passes_validation_but_the_stand_in_refusal_is_t2_
     # 终审 M-6:点明替身收不了一般事实,否则人看不出提案为什么一直停在 approved;不带任何正文
     assert "general fact" in reason and "interlocutor" in reason
     assert MEMORY["text"] not in reason
-    assert mem.store.digest("pa") == before and mem.store.pending_events("pa") == []
+    assert mem.store.digest("s1") == before and mem.store.pending_events("s1") == []
 
 
-def test_memory_definition_keys_are_the_three_required_keys():
-    assert MEMORY_DEFINITION_KEYS == frozenset({"persona_id", "text", "interlocutor"})
+def test_memory_definition_keys_are_the_four_required_keys():
+    assert MEMORY_DEFINITION_KEYS == {"scenario_id", "persona_id", "text", "interlocutor"}
 
 
 # ---------------- 修补第 1 轮 ----------------
@@ -371,14 +497,13 @@ def test_a_skill_only_proposal_is_deferred_while_any_round_has_an_uncommitted_co
     # 在途轮次重入时会重读库:只收技能也会改技能版本,让已提交的 episode 换新 id 重跑、记下新记忆,
     # 之后在途那条的起点副本覆盖回去就把它们抹掉。所以有任何未提交副本时门② 一律延后
     _put(store)
-    snap = mem.layout.snapshot("agent-round-zengen-v3", "deploy-zengen-v3-s1-1", "pb")   # 别的人格的副本也算
-    snap.parent.mkdir(parents=True)
-    mem.store.backup_to("pb", snap)
+    snap = _in_flight_copy(mem, "s2")                                          # 别的世界的副本也算
     head = store._git("rev-parse", "HEAD")
-    with pytest.raises(DeferredError, match="deploy-zengen-v3-s1-1-pb.json"):
+    with pytest.raises(DeferredError, match="deploy-deploy-zengen-v3-s1-1.json"):
         _admit(store, mem)
     assert store._git("rev-parse", "HEAD") == head and store.read_product(proposal_file(PID)).status == "approved"
     snap.unlink()
+    snap.with_suffix(".world").unlink()
     _admit(store, mem)
     assert store.read_product(proposal_file(PID)).status == "effective"
 
@@ -401,7 +526,7 @@ def test_a_crash_after_abandoning_the_failed_event_converges_to_rejected(store, 
 
 def test_a_conflict_on_a_committed_key_is_t2_and_leaves_the_proposal_approved(store, mem):
     # 同 key 已以别的文本 committed:abandon_event 抛,提案不动,只记 T2
-    mem.store.remember_event("pa", KEY, "别的文本", interlocutor="pb")
+    mem.store.remember_event("s1", "pa", KEY, "别的文本", interlocutor="pb")
     _put(store, increments=[{"kind": "memory", "definition": MEMORY}])
     _admit(store, mem)
     assert store.read_product(proposal_file(PID)).status == "approved"
@@ -422,7 +547,7 @@ def test_a_transient_extraction_failure_defers_without_abandoning_and_reentry_ad
     with pytest.raises(DeferredError, match=category):
         _admit(store, mem)
     assert store.read_product(proposal_file(PID)).status == "approved"
-    assert mem.store.pending_events("pa") == [KEY]                    # 没被放弃
+    assert mem.store.pending_events("s1") == [KEY]                    # 没被放弃
     fr = store.read_product(failure_record_file("run-003", f"admit-{PID}"))
     assert (fr.payload["category"], fr.payload["point"]) == ("T1", "mindagent.admit.memory")
     assert KEY in fr.payload["reason"] and category in fr.payload["reason"]
@@ -432,7 +557,7 @@ def test_a_transient_extraction_failure_defers_without_abandoning_and_reentry_ad
     proposal = store.read_product(proposal_file(PID))
     assert proposal.status == "effective" and set(proposal.payload["admitted_statements"]) == {KEY}
     assert mem.extractions == [KEY, KEY]                               # 重入确实再抽了一次
-    assert mem.store.pending_events("pa") == []
+    assert mem.store.pending_events("s1") == []
 
 
 @pytest.mark.parametrize("category", ["schema_failure", "semantic_rejection", "a_category_nobody_knows"])
@@ -443,10 +568,10 @@ def test_a_deterministic_extraction_failure_of_a_single_increment_rejects(store,
     proposal = store.read_product(proposal_file(PID))
     assert proposal.status == "rejected" and category in proposal.payload["reject_reason"]
     assert store.read_product(failure_record_file("run-003", f"admit-{PID}")).payload["category"] == "T2"
-    assert mem.store.pending_events("pa") == []
+    assert mem.store.pending_events("s1") == []
     del mem.failing[KEY]
     with pytest.raises(MemoryEventConflict):                          # 事件已 abandoned
-        mem.store.remember_event("pa", KEY, MEMORY["text"], interlocutor="pb")
+        mem.store.remember_event("s1", "pa", KEY, MEMORY["text"], interlocutor="pb")
 
 
 def test_a_deterministic_failure_after_a_commit_is_t3_and_reentry_does_not_extract_again(store, mem):
@@ -459,7 +584,7 @@ def test_a_deterministic_failure_after_a_commit_is_t3_and_reentry_does_not_extra
     fr = store.read_product(failure_record_file("run-003", PARTIAL))
     assert (fr.payload["category"], fr.payload["point"]) == ("T3", "mindagent.admit.memory")
     assert fr.payload["reason"] == f"partial admission: {PID}#2 semantic_rejection after 1 committed"
-    assert mem.store.pending_events("pa") == [f"{PID}#2"]              # 不放弃,等人处理
+    assert mem.store.pending_events("s1") == [f"{PID}#2"]              # 不放弃,等人处理
     assert not store.exists(library_state_file())
     extractions, head = len(mem.extractions), store._git("rev-parse", "HEAD")
     _admit(store, mem)                                                 # 下一个 tick

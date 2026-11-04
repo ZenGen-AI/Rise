@@ -20,14 +20,17 @@ from controlplane.daemon import Handler
 from controlplane.gitstore import GitStore
 from controlplane.paths import backends_config_file
 from factory.agent import (
+    AGENT_CONFIG,
     AgentRuntime,
     canned_backend_factory,
     personas_from_tree,
     read_agent_settings,
 )
 from factory.configio import preflight, read_tree_config
+from factory.errors import FactoryConfigError
 from factory.memory_runtime import DEPLOY_MEMORY_PER_TURN_S, DEPLOY_MEMORY_TURN_TIMEOUT_S
 from mindagent.admit import make_admit_proposal_handler
+from mindagent.errors import MindAgentDataError
 from mindagent.library import check_memory_library_empty
 from mindagent.rounds import make_start_round_handler
 from recipestore.admit import handle_admit_recipe
@@ -127,7 +130,21 @@ def _admit_proposal(ctx) -> Handler:
     # 门② 的记忆提案改走部署库,留在树里的旧条目会被误当成已收录,所以收录处理器装配时也查
     _checked_memory_library(ctx)
     mem = ctx.deployment_memory
-    return make_admit_proposal_handler(memory_store=mem.store, memory_layout=mem.layout)
+    store = ctx.store
+
+    def bound_pairs() -> frozenset[tuple[str, str]]:
+        """部署配置里绑定的 (情境, 人格) 对:agent.yaml 的 scenario_ids × bindings。每次调用现读(人改了配置
+        下一次就生效)。没有 agent.yaml(没开 agent 开关)就没有任何绑定对;读不了转成 MindAgentDataError,
+        门② 按 T2 处理(`mindagent` 不导入 `factory`,转换在这里做)。"""
+        if not store.exists(AGENT_CONFIG):
+            return frozenset()
+        try:
+            config, _ = read_agent_settings(store)
+        except FactoryConfigError as exc:
+            raise MindAgentDataError(f"cannot read the deployment bindings: {exc}") from exc
+        return frozenset((sid, b.persona_id) for sid in config.scenario_ids for b in config.bindings)
+
+    return make_admit_proposal_handler(memory_store=mem.store, memory_layout=mem.layout, bound_pairs=bound_pairs)
 
 
 DEFAULT_BUILDERS: Mapping[str, Callable] = {

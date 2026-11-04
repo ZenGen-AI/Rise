@@ -27,8 +27,8 @@ from test_ma_deployment import store  # noqa: E402,F401  (部署用例的夹具:
 EID2 = "deploy-zengen-v1-s1-2"
 # 假抽取器按「说话方：原话」切段(见 starling_fakes._SEGMENT);门② 的记忆增量正文是自由文本,
 # 在这里补上说话方,否则假端点抽不出东西,fail_keys 也不会生效。
-FIRST = {"persona_id": "pa", "text": "pb：对方住在北京", "interlocutor": "pb"}
-SECOND = {"persona_id": "pa", "text": "pb：对方养了一只猫", "interlocutor": "pb"}
+FIRST = {"scenario_id": "s1", "persona_id": "pa", "text": "pb：对方住在北京", "interlocutor": "pb"}
+SECOND = {"scenario_id": "s1", "persona_id": "pa", "text": "pb：对方养了一只猫", "interlocutor": "pb"}
 SKILL_AND_MEMORY = [{"kind": "skill", "definition": SKILL}, {"kind": "memory", "definition": FIRST}]
 
 
@@ -236,14 +236,14 @@ def test_a_transient_admission_extraction_failure_defers_and_keeps_the_event_pen
     assert admit_store.read_product(proposal_file(PID)).status == "approved"
     fr = admit_store.read_product(failure_record_file("run-003", f"admit-{PID}"))
     assert (fr.payload["category"], fr.payload["point"]) == ("T1", "mindagent.admit.memory")
-    assert mem.store.pending_events("pa") == [f"{PID}#2"]              # 没被放弃
+    assert mem.store.pending_events("s1") == [f"{PID}#2"]              # 没被放弃
     assert not admit_store.exists(skill_file("skill-agent-round-zengen-v3-1-1"))   # 记忆先写,技能未落
     mem.failing.clear()                                                # 抽取恢复后重入
     _admit(admit_store, mem)
     proposal = admit_store.read_product(proposal_file(PID))
     assert proposal.status == "effective" and set(proposal.payload["admitted_statements"]) == {f"{PID}#2"}
     assert admit_store.exists(skill_file("skill-agent-round-zengen-v3-1-1"))
-    assert mem.store.pending_events("pa") == []
+    assert mem.store.pending_events("s1") == []
 
 
 def test_a_later_admission_extraction_failure_defers_and_converges(admit_store, mem):
@@ -257,14 +257,14 @@ def test_a_later_admission_extraction_failure_defers_and_converges(admit_store, 
     assert admit_store.read_product(proposal_file(PID)).status == "approved"
     fr = admit_store.read_product(failure_record_file("run-003", f"admit-{PID}"))
     assert fr.payload["category"] == "T1" and f"{PID}#2" in fr.payload["reason"]
-    assert mem.store.pending_events("pa") == [f"{PID}#2"]              # 留 pending,不放弃
+    assert mem.store.pending_events("s1") == [f"{PID}#2"]              # 留 pending,不放弃
     assert not admit_store.exists(library_state_file())
     mem.failing.clear()                                                # 抽取恢复后重入
     _admit(admit_store, mem)
     proposal = admit_store.read_product(proposal_file(PID))
     assert proposal.status == "effective"
     assert set(proposal.payload["admitted_statements"]) == {KEY, f"{PID}#2"}
-    assert mem.store.pending_events("pa") == []
+    assert mem.store.pending_events("s1") == []
 
 
 def test_a_deterministic_admission_extraction_failure_rejects_and_abandons_the_event(admit_store, mem):
@@ -278,10 +278,10 @@ def test_a_deterministic_admission_extraction_failure_rejects_and_abandons_the_e
     assert proposal.status == "rejected" and "unknown" in proposal.payload["reject_reason"]
     fr = admit_store.read_product(failure_record_file("run-003", f"admit-{PID}"))
     assert (fr.payload["category"], fr.payload["point"]) == ("T2", "mindagent.admit.memory")
-    assert mem.store.pending_events("pa") == []                        # 不是 pending:已放弃
+    assert mem.store.pending_events("s1") == []                        # 不是 pending:已放弃
     mem.fake.malformed_keys.clear()
     with pytest.raises(MemoryEventConflict):                           # abandoned 是终态
-        mem.store.remember_event("pa", KEY, FIRST["text"], interlocutor="pb")
+        mem.store.remember_event("s1", "pa", KEY, FIRST["text"], interlocutor="pb")
     assert not admit_store.exists(library_state_file())
 
 
@@ -297,7 +297,7 @@ def test_a_deterministic_failure_after_a_commit_is_t3_and_reentry_does_not_extra
     fr = admit_store.read_product(failure_record_file("run-003", f"admit-{PID}-partial"))
     assert (fr.payload["category"], fr.payload["point"]) == ("T3", "mindagent.admit.memory")
     assert fr.payload["reason"] == f"partial admission: {second} unknown after 1 committed"
-    assert mem.store.pending_events("pa") == [second]                  # 不放弃,等人处理
+    assert mem.store.pending_events("s1") == [second]                  # 不放弃,等人处理
     assert not admit_store.exists(library_state_file())
     calls, head = mem.fake.chat_calls, admit_store._git("rev-parse", "HEAD")
     _admit(admit_store, mem)                                           # 下一个 tick
