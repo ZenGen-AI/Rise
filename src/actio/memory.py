@@ -202,7 +202,10 @@ class _Ledger:
     FileTupleStore 把它存成 JSON,所以同样内容在两者上的命中与摘要逐值相等。
 
     条目的 schema 不带 holder,账本另存 holders(条目 id → holder);不在表里的条目(构造时传入的、
-    读旧账本得到的)属于 holder ""。事件行带 holder,commit 落条目时把它记进 holders。"""
+    读旧账本得到的)属于 holder ""。事件行带 holder,commit 落条目时把它记进 holders。
+
+    账本自己不加锁:begin 读 next_seq 再加一、digest 遍历事件表,两条线程交错就会出错。多线程共用一份账本时,
+    由持有者在每次操作外面加锁(TupleMemory 的各视图共用一把锁,FileTupleStore 用 store 的锁)。"""
 
     def __init__(
         self,
@@ -369,18 +372,23 @@ class TupleMemory:
     不用条目自带的 id,所以同一内容换个 id 进来,prompt 与轨迹不变。替身的抽取从不失败,也没有待嵌入的东西。
 
     不带 holder 构造时 holder 是 "",构造时传入的 entries 都在它名下。world(holder) 在同一份账本上
-    取另一个主体的端口,训练替身的 rollout 世界用:一个世界一份账本,各角色位各开一个视图。"""
+    取另一个主体的端口,训练替身的 rollout 世界用:一个世界一份账本,各角色位各开一个视图。
+
+    各视图会在不同线程上用(客户端线程与服务端线程),所以同一份账本配一把锁,所有视图共用它,
+    每次账本操作都在锁里做。"""
 
     def __init__(self, entries: tuple[MemoryEntry, ...] | list[MemoryEntry] = ()) -> None:
         self._ledger = _Ledger(entries)
+        self._lock = threading.Lock()  # 守 _ledger;world() 出来的视图共用这一把
         self._holder = ""
         self._closed = False
 
     def world(self, holder: str) -> "TupleMemory":
-        """共享本端口账本、绑定 holder 的新端口。各视图的关闭状态互相独立。"""
+        """共享本端口账本与账本锁、绑定 holder 的新端口。各视图的关闭状态互相独立。"""
         _check.text(holder, "holder", allow_empty=True)
         view = TupleMemory()
         view._ledger = self._ledger
+        view._lock = self._lock
         view._holder = holder
         return view
 
@@ -390,13 +398,16 @@ class TupleMemory:
         return self._ledger
 
     def recall(self, query: str, *, limit: int) -> list[MemoryHit]:
-        return self._live().recall(query, limit=limit, holder=self._holder)
+        ledger = self._live()
+        with self._lock:
+            return ledger.recall(query, limit=limit, holder=self._holder)
 
     def remember(self, event: MemoryEvent) -> RememberOutcome:
         ledger = self._live()
-        ids = ledger.begin(event, holder=self._holder)
-        if ids is None:
-            ids = ledger.commit(event.key)
+        with self._lock:  # begin 与 commit 一起做:中间不让别的视图插进来占序号
+            ids = ledger.begin(event, holder=self._holder)
+            if ids is None:
+                ids = ledger.commit(event.key)
         return RememberOutcome(ids, False, None)
 
     def embed_pending(self) -> int:
@@ -404,7 +415,9 @@ class TupleMemory:
         return 0
 
     def digest(self) -> str:
-        return self._live().digest()
+        ledger = self._live()
+        with self._lock:
+            return ledger.digest()
 
     def close(self) -> None:
         self._closed = True
@@ -449,10 +462,13 @@ class FileTupleStore:
     """DeploymentMemoryStore 的落盘替身:<root>/<world_id>.json 存一份 _Ledger.to_json(),世界还没有文件时
     等同空库。一个世界一个文件,各 holder(主体)的条目与事件行都在里面。每个操作都是"读整份、改、写整份"。
 
-    账本的读改写不加锁:同一世界的写入由调用方串行(每个部署 episode 一条线程)。只有打开着的端口数加锁:
-    端口会在服务端线程关,而部署驱动器在另一条线程上 wait_closed 或 restore_from。
+    一个世界的所有主体共用这一个文件,端口又会在两条线程上用(部署驱动器线程写智能体位,服务端线程写对手位),
+    所以每个碰世界文件的操作(端口与管理面一样)都在 store 的锁里完成"读整份、改、写整份":两次读改写
+    不会互相覆盖,也不会同时写同一个 .tmp。同一把锁还守打开着的端口数:端口会在服务端线程关,
+    而驱动器在另一条线程上 wait_closed 或 restore_from。锁只在一个 store 实例内有效,
+    所以组合根只造一个 store(与 StarlingDeploymentStore 的假设一致)。
     extraction_failure 是故障注入口:对一条事件返回非 None 的字符串,就当这次抽取以该
-    failure_category 失败;缺省从不失败。"""
+    failure_category 失败;缺省从不失败。它在锁外调用,所以可以慢,也可以回头调这个 store。"""
 
     def __init__(
         self,
@@ -464,7 +480,7 @@ class FileTupleStore:
         # 根目录由第一次写(_write_ledger)建
         self._root = Path(root)
         self._extraction_failure = extraction_failure
-        self._lock = threading.Lock()
+        self._lock = threading.Lock()  # 守世界文件的读改写与 _open;公开操作各自持有,内部的 _load/_save 不拿
         self._all_closed = threading.Condition(self._lock)  # 某个世界的端口数归零时 notify_all
         self._open: dict[str, int] = {}  # 每个世界打开着的端口数(不分主体),读写都要持 _lock
 
@@ -518,38 +534,52 @@ class FileTupleStore:
         替身的语句在 ③ 之前不进库,没有"补收据"的分支。事件与条目记在 holder 名下。"""
         _check_name(holder, "holder")
         event = MemoryEvent(key, text, interlocutor)
-        ledger = self._load(world_id)
-        ids = ledger.begin(event, holder=holder)
-        if ids is not None:
-            return RememberOutcome(ids, False, None)
-        self._save(world_id, ledger)
-        category = None if self._extraction_failure is None else self._extraction_failure(event)
-        ledger = self._load(world_id)
-        if category is None:
-            ids = ledger.commit(key)
+        with self._lock:  # ① 登记
+            ledger = self._load(world_id)
+            ids = ledger.begin(event, holder=holder)
+            if ids is not None:
+                return RememberOutcome(ids, False, None)
             self._save(world_id, ledger)
-            return RememberOutcome(ids, False, None)
-        ledger.fail(key, category)
-        self._save(world_id, ledger)
+        category = None if self._extraction_failure is None else self._extraction_failure(event)  # ② 不持锁
+        with self._lock:  # ③ 重新读库再改:②期间别的线程可能已经写过这个世界
+            ledger = self._load(world_id)
+            if category is None:
+                ids = ledger.commit(key)
+                self._save(world_id, ledger)
+                return RememberOutcome(ids, False, None)
+            ledger.fail(key, category)
+            self._save(world_id, ledger)
         return RememberOutcome((), True, category)
 
     def abandon_event(self, world_id: str, key: str) -> None:
-        ledger = self._load(world_id)
-        ledger.abandon(key)
-        self._save(world_id, ledger)
+        with self._lock:
+            ledger = self._load(world_id)
+            ledger.abandon(key)
+            self._save(world_id, ledger)
 
     def pending_events(self, world_id: str) -> list[str]:
-        rows = [r for r in self._load(world_id).events.values() if r["state"] == "pending"]
+        with self._lock:
+            ledger = self._load(world_id)
+        rows = [r for r in ledger.events.values() if r["state"] == "pending"]  # 读回的是私有副本,锁外算
         return [r["key"] for r in sorted(rows, key=lambda r: r["seq"])]
 
     def digest(self, world_id: str) -> str:
-        return self._load(world_id).digest()
+        with self._lock:
+            ledger = self._load(world_id)
+        return ledger.digest()
+
+    def _recall(self, world_id: str, holder: str, query: str, limit: int) -> list[MemoryHit]:
+        with self._lock:
+            ledger = self._load(world_id)
+        return ledger.recall(query, limit=limit, holder=holder)
 
     def backup_to(self, world_id: str, path: Path) -> str:
         """把账本规范化写到 path(世界还没有文件时写空账本,所以起点副本总是存在),
         返回读回的副本的逻辑摘要。"""
         path = Path(path)
-        _write_ledger(path, self._load(world_id))
+        with self._lock:  # 只有读世界文件需要锁;副本写到别处
+            ledger = self._load(world_id)
+        _write_ledger(path, ledger)
         return _read_ledger(path).digest()
 
     def restore_from(self, world_id: str, path: Path) -> str:
@@ -590,7 +620,7 @@ class _FilePort:
         return self._store
 
     def recall(self, query: str, *, limit: int) -> list[MemoryHit]:
-        return self._live()._load(self._world_id).recall(query, limit=limit, holder=self._holder)
+        return self._live()._recall(self._world_id, self._holder, query, limit)
 
     def remember(self, event: MemoryEvent) -> RememberOutcome:
         return self._live().remember_event(

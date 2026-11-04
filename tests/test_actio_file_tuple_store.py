@@ -304,8 +304,39 @@ def test_the_open_port_count_survives_closes_from_many_threads(tmp_path):
         t.start()
     for t in threads:
         t.join()
-    assert store.wait_closed("s1", 0) is True     # 计数没有少减(会一直不归零)也没有多减(会 KeyError 或变负)
+    assert store.wait_closed("s1", 0) is True     # 多条线程关完以后,计数回到 0
     store.restore_from("s1", snap)
+
+
+def test_concurrent_writes_from_two_holders_of_one_world_are_all_kept(tmp_path):
+    # 一个世界的所有主体共用一个文件,端口会在两条线程上用(驱动器线程写智能体位,服务端线程写对手位):
+    # 没有锁时,两条线程的"读整份、改、写整份"互相覆盖,丢行,或撞同一个 .tmp 文件
+    store = FileTupleStore(tmp_path)
+    ports = {who: store.open("s1", who) for who in ("pa", "pb")}
+    start, errors = threading.Barrier(len(ports)), []
+
+    def work(who):
+        try:
+            start.wait()  # 两条线程同时开写,没有错开的起跑
+            for i in range(50):
+                ports[who].remember(MemoryEvent(f"t#{i}@{who}", f"pc：第{i}句", "pc"))
+        except BaseException as exc:  # 线程里的异常不会让测试失败,收起来在主线程断言
+            errors.append(exc)
+
+    threads = [threading.Thread(target=work, args=(who,)) for who in ports]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+    doc = json.loads((tmp_path / "s1.json").read_text(encoding="utf-8"))
+    keys = {f"t#{i}@{who}" for i in range(50) for who in ports}
+    committed = {r["key"] for r in doc["events"] if r["state"] == "committed"}
+    assert committed | set(store.pending_events("s1")) == keys and len(doc["events"]) == 100
+    assert sorted(r["seq"] for r in doc["events"]) == list(range(100)) and doc["next_seq"] == 100
+    assert sorted(doc["holders"].values()) == ["pa"] * 50 + ["pb"] * 50
+    for port in ports.values():
+        port.close()
 
 
 def test_world_ids_and_holders_are_checked_before_any_path_is_built(tmp_path):

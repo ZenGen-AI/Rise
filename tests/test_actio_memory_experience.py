@@ -1,5 +1,7 @@
 import hashlib
 import json
+import sys
+import threading
 
 import pytest
 import yaml
@@ -300,6 +302,41 @@ def test_tuple_memory_remember_appends_an_entry_and_keeps_an_event_table():
         [row("ep#1", "pb：预算不够", "pb", 0), row("ep#3", "pc：好吧", "pc", 1)],
     )
     assert m.embed_pending() == 0
+
+
+def test_world_views_on_two_threads_keep_every_write_and_survive_concurrent_reads():
+    # 训练替身的 rollout 世界:客户端线程与服务端线程各用一个视图读写同一份账本。每次写之后紧跟 digest 与
+    # recall:digest 遍历事件表,另一条线程这时插入新行就是 "dictionary changed size during iteration"
+    world = TupleMemory()
+    views = {who: world.world(who) for who in ("pa", "pb")}
+    start, errors = threading.Barrier(len(views)), []
+
+    def work(who):
+        try:
+            start.wait()
+            for i in range(100):
+                views[who].remember(MemoryEvent(f"t#{i}@{who}", f"pc：第{i}句", "pc"))
+                views[who].digest()
+                views[who].recall("第", limit=3)
+        except BaseException as exc:  # 线程里的异常不会让测试失败,收起来在主线程断言
+            errors.append(exc)
+
+    old = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)  # 线程切换拉到最密,让没有锁时的竞争能在这些调用里露出来
+    try:
+        threads = [threading.Thread(target=work, args=(who,)) for who in views]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    finally:
+        sys.setswitchinterval(old)
+    assert errors == []
+    ledger = world._live()
+    assert len(ledger.events) == 200 and len(ledger.entries) == 200 and ledger.next_seq == 200
+    assert sorted(r["seq"] for r in ledger.events.values()) == list(range(200))
+    assert sorted(ledger.holders.values()) == ["pa"] * 100 + ["pb"] * 100
+    _Ledger.from_json(json.loads(json.dumps(ledger.to_json())))  # 序号重复的账本读不回来
 
 
 # ---------------- _Ledger(Task 4 的 FileTupleStore 复用) ----------------
