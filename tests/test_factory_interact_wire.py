@@ -888,7 +888,7 @@ def test_a_retry_while_the_server_still_holds_the_world_is_a_transient_memory_fa
     FactoryMemoryUnavailableError,轨迹源据此重跑;端口关上后重试从起点重建。"""
     from factory.memory_translate import FactoryMemoryUnavailableError
 
-    worlds = StandInTrainingWorlds()
+    worlds = StandInTrainingWorlds(held_wait_s=0.05)      # 同名重试等保留世界的期限也压短
     _, _, factory, _ = _unit(world, tmp_path, stub, training_worlds=worlds)
     episode = f"{RUN}-grpo0-t1-r0"
     with factory(RUN, _cfg()) as policy_for_rollout:

@@ -474,7 +474,7 @@ SESSION_CLOSE_WAIT_S = 70.0   # mindagent.deployment;服务端 join 上限 60 �
 
 | 名字 | 谁调 | 语义 |
 |---|---|---|
-| `open_rollout` | 客户端 `policy_for_rollout` 进入时 | 先删后建:从 `seeds/<seed>/<scenario>.db` 复制出世界(没有就空世界),登记进表,开训练位端口;同名世界还被端口占着时抛瞬态 `MemoryFailureError` |
+| `open_rollout` | 客户端 `policy_for_rollout` 进入时 | 先删后建:从 `seeds/<seed>/<scenario>.db` 复制出世界(没有就空世界),登记进表,开训练位端口;同名世界在保留表里还被端口占着时先有界等待(默认 70 秒)端口关上,仍没关上才抛瞬态 `MemoryFailureError` |
 | `join_rollout` | 服务端后端工厂 | 按 `info.episode_id` 查表,开对手位端口;查不到抛非瞬态 `MemoryFailureError`,造后端失败,会话被拒 |
 | `close_rollout` | 客户端退出 `policy_for_rollout` 时 | 关训练位端口,等服务端端口关完(上限 `SESSION_CLOSE_WAIT_S`),摘表、删世界,返回真;等不到时世界进保留表、记 warning、返回假 |
 | `release_session` | 服务端会话资源的 closer | 会话终态关本会话开的对手位端口,每关一个计数减一 |
@@ -598,7 +598,7 @@ TypeScript 命令行:`rismforge <review|approve|reject|confirm|status> [id] [rea
 
 - 训练位的实例在客户端(轨迹源一侧),对手位的实例在服务端,由后端工厂每个会话新造一个。替身的 rollout 世界在内存里,从空世界起。
 - 训练位端口 `close` 超时则这条 rollout 判确定性记忆失败,不重试。
-- 等不到服务端端口关完时,世界进保留表:端口还开着时同名重试判瞬态,端口全关后同名重试先删后建;没有同名重试的,文件留给启动清扫;这条 rollout 照常结束,轨迹已经拿到。
+- 等不到服务端端口关完时,世界进保留表:端口还开着时同名重试先有界等待(默认 70 秒)端口关上,仍没关上才判瞬态,端口全关后同名重试先删后建;没有同名重试的,文件留给启动清扫;这条 rollout 照常结束,轨迹已经拿到。
 - 重试同一个 episode id 时先删后建。表里还登记着同名世界,说明服务端端口没关上。
 - 这时抛瞬态的 `FactoryMemoryUnavailableError`,记为 `role_memory_unavailable` 重跑(FC-38)。
 - 重试用尽抛 `RolloutFailedError`,由 `factory.interact_policy` 译成 `RolloutDeferredError`,指令留 `pending`。

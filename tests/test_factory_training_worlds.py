@@ -30,9 +30,9 @@ class Case:
 @pytest.fixture(params=["stand-in", "starling"])
 def case(request, tmp_path):
     """run-1 已绑定。替身从空世界起;Starling 绑种子 s1,情境 s1 的种子世界里有 pa 的一条记忆,
-    所以"复制了种子"和"建了空库"分得开。"""
+    所以"复制了种子"和"建了空库"分得开。同名重试等保留世界的期限压到 0.1 秒,省得撞保留表的用例真等 70 秒。"""
     if request.param == "stand-in":
-        worlds = StandInTrainingWorlds()
+        worlds = StandInTrainingWorlds(held_wait_s=0.1)
         worlds.bind("run-1", None)
         yield Case(worlds, TupleMemory().digest(), None, None)
         return
@@ -47,7 +47,7 @@ def case(request, tmp_path):
         seeds.remember_event("s1", "pa", "seed#0@pa", "pb：人手也不够", interlocutor="pb")
         seeded = seeds.digest("s1")
         assert seeded != empty_digest()
-        worlds = StarlingTrainingWorlds(layout, fake.endpoints(), close_timeout_s=0.2)
+        worlds = StarlingTrainingWorlds(layout, fake.endpoints(), close_timeout_s=0.2, held_wait_s=0.1)
         worlds.bind("run-1", "s1")
         yield Case(worlds, seeded, layout, fake)
 
@@ -121,6 +121,38 @@ def test_a_retry_while_the_world_is_still_held_is_transient(case):
     again = worlds.open_rollout("run-1", "s1", "run-1-grpo0-s1-r0", "pa")
     assert again.digest() == case.start                           # 先删后建:从起点重来
     assert worlds.close_rollout("run-1-grpo0-s1-r0", [again], wait_s=1.0) is True
+
+
+def test_a_retry_waits_for_a_held_world_whose_server_port_closes_late(case):
+    # 服务端 join 超时时回收线程最早约 120 秒才关端口,客户端只等了 70 秒就把世界放进保留表。轨迹源的重试没有间隔,
+    # 所以同名 open_rollout 先有界等端口关上,关上了就先删后建,不把重试预算一下子耗光
+    worlds = case.worlds
+    worlds.held_wait_s = 3.0
+    a = worlds.open_rollout("run-1", "s1", EP, "pa")
+    b = worlds.join_rollout(EP, "pb")
+    assert worlds.close_rollout(EP, [a], wait_s=0.05) is False      # 世界进保留表
+    b.remember(EV)                                                # 服务端写的东西不该带进重建的世界
+    timer = threading.Timer(0.3, lambda: worlds.release_session(EP, [b]))
+    timer.start()
+    started = time.monotonic()
+    again = worlds.open_rollout("run-1", "s1", EP, "pa")
+    assert time.monotonic() - started >= 0.25                     # 真的等了服务端的端口
+    assert again.digest() == case.start
+    timer.join()
+    assert worlds.close_rollout(EP, [again], wait_s=1.0) is True
+
+
+def test_a_reopen_while_the_previous_attempt_is_still_open_does_not_wait(case):
+    # 只等保留表里的世界:世界表里的同名项还开着,说明上一次尝试的 close_rollout 还没跑完;等它的话会和
+    # close_rollout 抢着醒来,新建的世界随后被 close_rollout 摘掉、删掉。所以照旧立即判瞬态
+    worlds = case.worlds
+    worlds.held_wait_s = 3.0
+    a = worlds.open_rollout("run-1", "s1", EP, "pa")
+    started = time.monotonic()
+    with pytest.raises(MemoryFailureError) as exc:
+        worlds.open_rollout("run-1", "s1", EP, "pa")
+    assert exc.value.transient is True and time.monotonic() - started < 1.0
+    assert worlds.close_rollout(EP, [a], wait_s=1.0) is True
 
 
 def test_a_world_kept_after_the_wait_is_logged_by_its_episode_id_only(case, caplog):

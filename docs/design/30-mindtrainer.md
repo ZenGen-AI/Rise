@@ -516,7 +516,7 @@ class TrainingWorlds(Protocol):
 | 都没注入 [已落地] | interact 指令判 `failed`(T2),原因是 `interact mode needs a client_factory and a policy or policy_factory; start factory run or factory reconcile with --interact to run interact directives`:原文之后追加一句点名 `--interact`,告诉操作者该用哪个开关重启。冻结入口(`mindtrainer.wire`)与 factory 不带 `--interact` 的路径用的是同一个无参派发器,两边写出的文字相同,逐字节相同的保证(G1)不受影响 |
 | 交出什么与轨迹源 [已落地] | run 级上下文照旧:起 vLLM、登记会话、退出时收尾。进入后交出 `policy_for_rollout`(上方代码块里的别名)。每条 rollout 进入一次,以逻辑 episode id 与情境 id 调用,建这条 rollout 的世界并造一个训练位 Actio 实例。退出时关实例并删世界,关实例最多等 60 秒。`InteractTrajectorySource` 的参数名是 `policy_for_rollout`,不保留旧名 `policy`。`_attempt` 在 `create_session` 之前进入它,随 `with` 块退出,异常也一样。世界因此按逻辑 episode id 命名,此时还没有 session id。策略返回三元组时,第三项作为 `activation_trace` 随 `submit_turn` 上行,二元组照旧。续训不变:`make_sources(start)` 每次构造轨迹源,`policy_for_rollout` 在每条 rollout 内进出,与 `start` 无关。测试里的固定后端用 `nullcontext` 包一层传入。训练位实例不读技能库,库版本取 `{"skill": "0", "memory": "0"}` |
 | 起点记忆解析 [已落地] | `mindtrainer` 不导入 `actio` 与 `starling`,开库与算摘要由组合根注入的 `memory_resolver` 做。派发器在生成路回写并复校之后调它,入参是 `memory.seed` 与按配置顺序去重的 `scenario_ids`。种子文件是 `seeds/<seed_id>/<scenario_id>.db`,没有这个文件的情境从空世界起;以人格命名的旧种子库不会被读到。配了种子却一个情境都对不上、种子目录里又有库文件时抛 `DirectiveFailedError`(T2),原因写种子 id 与至多 5 个文件主名;种子只覆盖部分情境仍合法。生成路的情境 id 在回写之后才齐,所以调用在回写之后。返回的摘要与身份只进本次派发的 `cfg`(`memory.digests`、`memory.runtime`),不回写指令;训练记录的 `policy_backend.memory` 记下它们。interact 指令没注入它时判 T2,原因点名 `--interact`;它抛 `DirectiveFailedError` 时保留它自己的原因(替身拒绝种子要说清原因),其余异常只报类名,一律 T2 |
-| rollout 世界 [已落地] | 进入 `policy_for_rollout` 时,组合根的 `open_rollout` 从情境的种子世界复制出世界,登记进进程内的 `episode_id → 世界` 表,开训练位端口。服务端造会话资源时按 `episode_id` 用 `join_rollout` 开对手位端口,查不到就造后端失败、会话被拒。退出时 `close_rollout` 先关训练位端口,再等服务端端口全关(上限 `SESSION_CLOSE_WAIT_S`,70 秒),然后摘表、删世界文件。等不到时世界进保留表:端口还开着时同名重试判瞬态,端口全关后同名重试先删后建;没有同名重试的,文件留给启动清扫,这条 rollout 照常结束。替身也走这条路:每条 rollout 一个内存世界,不落盘,起点是空世界 |
+| rollout 世界 [已落地] | 进入 `policy_for_rollout` 时,组合根的 `open_rollout` 从情境的种子世界复制出世界,登记进进程内的 `episode_id → 世界` 表,开训练位端口。服务端造会话资源时按 `episode_id` 用 `join_rollout` 开对手位端口,查不到就造后端失败、会话被拒。退出时 `close_rollout` 先关训练位端口,再等服务端端口全关(上限 `SESSION_CLOSE_WAIT_S`,70 秒),然后摘表、删世界文件。等不到时世界进保留表:端口还开着时同名重试先有界等待(默认 70 秒)端口关上,仍没关上才判瞬态,端口全关后同名重试先删后建;没有同名重试的,文件留给启动清扫,这条 rollout 照常结束。替身也走这条路:每条 rollout 一个内存世界,不落盘,起点是空世界 |
 | 事件 key [已落地] | `<逻辑 episode id>#<turn_index>@<主体>`:三个及以上角色位时,同一轮会被两个主体各写一次,不带主体就撞键 |
 | 逻辑 episode id [已落地] | 训练位是 `{run_id}-grpo{step}-{scenario_id}-r{k}`,同一条 rollout 的重试不变;同一情境在不同 GRPO step 反复出现,只写阶段名会撞。续训从同一 step 重跑时 id 与上次相同,同名 episode 文件被覆盖,批只认本次产出的 id。Starling 下训练位与对手位共用一个世界文件,即记忆根目录下的 `runs/<run_id>/<逻辑 episode id>.db`,在产物树之外,rollout 结束即删。逻辑 episode id 只用 `[A-Za-z0-9._-]`,是单段名,直接拼进路径。轨迹源经 `create_session` 的可选字段 `episode_id` 交给服务端,服务端落盘的 episode 也用它当 id;服务端原先用的 `ep-<session_id>` 每次重试都变 |
 
@@ -575,7 +575,7 @@ vLLM 服务按指令起停,不常驻。一条 interact 指令派发时起服务,
 | 一轮的最坏耗时 | 不适用 | 对手位约 80 秒(HTTP 60 秒加记忆最坏 20 秒),低于服务端后端调用的 90 秒;训练位约 140 秒(HTTP 120 秒加记忆最坏 20 秒),低于服务端等提交的 150 秒 |
 | 服务端收尾等在途线程的 `join` | 60 秒(`resource_join_timeout_s`) | 不变:准入退避预算 `ADMISSION_WAIT_S` 65 秒以它加 5 秒为前提;被放弃的对手调用跑得比它久时,线程进滞留表,由回收线程收走 |
 | 训练位端口 close 的等待 | 不适用 | 60 秒,与服务端 join 同值;超时抛 FactoryMemoryFailureError(RoleMemoryFailureError 的子类),编排器判 T2,这条 rollout 不重试。close 抛其他异常同样译成它、不重试,即使 rollout 本身已结束:close 失败说明世界状态不可信 |
-| 删 rollout 世界前等服务端端口全关 [已落地] | 不适用 | `SESSION_CLOSE_WAIT_S` 70 秒,即服务端 join 的 60 秒加 10 秒余量;等不到时世界进保留表:端口还开着时同名重试判瞬态,端口全关后同名重试先删后建;没有同名重试的,文件留给启动清扫,rollout 照常结束 |
+| 删 rollout 世界前等服务端端口全关 [已落地] | 不适用 | `SESSION_CLOSE_WAIT_S` 70 秒,即服务端 join 的 60 秒加 10 秒余量;等不到时世界进保留表:端口还开着时同名重试先有界等待(默认 70 秒)端口关上,仍没关上才判瞬态,端口全关后同名重试先删后建;没有同名重试的,文件留给启动清扫,rollout 照常结束 |
 
 等提交的 150 秒与等相邻消息的 120 秒方向相反,互不嵌套。服务端等的是客户端的一次提交。客户端等的是相邻两条服务端消息的间隔。每条对手发言都是一条消息,所以一轮里有几个对手都不叠加。外层上限高于内层最坏耗时,内层先超时,外层才看得到分类过的失败。
 
@@ -802,7 +802,7 @@ interact 的生成路多一条「生成、写树、回写、复校」的链路 [
 | 种子世界读不出:`seeds/<seed_id>/<scenario_id>.db` 在但打不开或摘要算不出 [已落地] | T2 | 派发器在进入策略上下文之前判 `failed`,不起服务。文件不存在才从空世界起 | 指令 `payload["failure"]` |
 | 重试时同名 rollout 世界还被服务端端口占着 [已落地] | T1 | 不重建,抛 `FactoryMemoryUnavailableError`,轨迹源记为 `role_memory_unavailable` 原地重跑;耗尽后的 `RolloutFailedError` 由策略上下文译成延后,指令保持 `pending` | `curve_summary["failed_rollout_attempts"]` |
 | 服务端按 `episode_id` 找不到 rollout 世界 [已落地] | 延后,续训上限用完升 T3 | 会话以 `role_backend_failure` 被拒,轨迹源不重跑;组合根把它译成延后,指令留 `pending`。只有绕过 `policy_for_rollout` 直接开会话的调用方会落到这里 | 同上 |
-| 删 rollout 世界前服务端端口 70 秒内没关 [已落地] | 不算失败 | 世界进保留表:端口还开着时同名重试判瞬态,端口全关后同名重试先删后建;没有同名重试的,文件留给启动清扫;这条 rollout 的轨迹已拿到,照常结束 | warning 日志 |
+| 删 rollout 世界前服务端端口 70 秒内没关 [已落地] | 不算失败 | 世界进保留表:端口还开着时同名重试先有界等待(默认 70 秒)端口关上,仍没关上才判瞬态,端口全关后同名重试先删后建;没有同名重试的,文件留给启动清扫;这条 rollout 的轨迹已拿到,照常结束 | warning 日志 |
 | `bindings` 里人格重复 [已落地] | T2 | `validate_training_config` 给出原因,指令判 `failed`,不写训练记录 | 指令 `payload["failure"]` |
 | 创建会话被拒,终止原因在瞬态集合里(准入满额,或逻辑 episode id 撞上活动会话,都是 `role_backend_unavailable`) [已落地] | T1 | 准入满额先在同一次尝试里退避重建(总等待 `ADMISSION_WAIT_S` 65 秒,不计入重试次数),仍被拒再按终止原因查瞬态集合、按条重跑;`invalid_session` 仍不重跑 | `curve_summary["failed_rollout_attempts"]` |
 | interact 的 `role_backend_failure` 等其余原因(含对手 API 的回复形状不对) | T1 或 T2,协议上不区分(与 20 篇一致) | 不按条重跑(它不在轨迹源的瞬态集合里),上抛,记录保持 `pending`,由续训上限兜底(经 `--interact` 入口时的去向见下一行) | 同上 |

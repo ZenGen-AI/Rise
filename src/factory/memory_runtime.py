@@ -300,7 +300,7 @@ class TrainingWorlds(Protocol):
     - `bind(run_id, seed)`、`unbind(run_id)`、`seed_of(run_id)`:训练 run 进入策略上下文时绑定种子 id,退出时解绑。
     - `open_rollout(run_id, scenario_id, episode_id, holder)`:客户端建世界(先删后建,从这个 run 的种子里该情境的
       种子世界复制起点,没有就是空世界),登记进 `episode_id → 世界` 表,开训练位主体的端口。同名世界在保留表里
-      (服务端端口没关上)抛瞬态 `MemoryFailureError`。
+      (服务端端口没关上)时先有界等它的端口关上(默认 70 秒),仍没关上才抛瞬态 `MemoryFailureError`。
     - `join_rollout(episode_id, holder)`:服务端在已登记的世界里开对手位主体的端口;表里没有抛非瞬态 `MemoryFailureError`。
     - `release_session(episode_id, ports)`:服务端在会话终态关自己的端口。
     - `close_rollout(episode_id, ports, *, wait_s)`:客户端关训练位端口,等服务端端口关完,删世界、摘表项,返回真;
@@ -356,16 +356,19 @@ class _RolloutWorlds:
     `AgentRuntime._lock`:它跑在服务端处理器线程的收尾里。开端口失败时把这一次计数退掉。
 
     保留表:`close_rollout` 等不到计数归零(服务端的端口没在期限内关上),或客户端自己的端口关不上时,世界移进保留表。
-    同名的 `open_rollout` 在它还有端口开着时拒绝(瞬态),端口全关之后先删后建;服务端不能再加入保留的世界。
+    同名的 `open_rollout` 在保留世界还有端口开着时先有界等待(`held_wait_s`,默认 70 秒):服务端 join 超时时回收线程
+    晚于客户端的等待期限才关端口,轨迹源的重试又没有间隔,不等的话重试预算一下子就用完。等到端口全关就先删后建,
+    等不到才拒绝(瞬态);服务端不能再加入保留的世界。
 
     子类实现 `_create`(先删后建一个世界)、`_port`(在世界里开一个主体的端口)、`_discard`(删世界)与 `sweep`。
     异常与日志文字不含路径、端点与密钥:只有 episode id 与异常类名。"""
 
-    def __init__(self) -> None:
+    def __init__(self, *, held_wait_s: float = SESSION_CLOSE_WAIT_S) -> None:
         self._lock = threading.Lock()
         self._seeds: dict[str, str | None] = {}
         self._worlds: dict[str, _World] = {}
         self._held: dict[str, _World] = {}
+        self.held_wait_s = held_wait_s          # open_rollout 等保留世界端口关上的期限;测试传小值
 
     # ---- 绑定表 ----
 
@@ -414,20 +417,31 @@ class _RolloutWorlds:
 
         return release
 
+    def _busy(self, episode_id: str) -> _World | None:
+        """两张表里同名、还有端口开着的第一项(先保留表、后世界表),没有返回 None。调用方持表锁。"""
+        for table in (self._held, self._worlds):
+            rec = table.get(episode_id)
+            if rec is not None and rec.open > 0:
+                return rec
+        return None
+
     # ---- 客户端 ----
 
     def open_rollout(self, run_id: str, scenario_id: str, episode_id: str, holder: str) -> MemoryBackend:
         """建世界、登记、开 holder 的端口。重试在同一线程里顺序发生,上一次尝试的上下文已经退出,所以同名世界
-        先删后建,从起点出发;但它还有端口开着(在保留表里等服务端收尾,或还在表里没收尾)时不删,抛瞬态
-        `MemoryFailureError`:轨迹源把它记成一次 role_memory_unavailable 再重跑。建不成时摘掉表项、删掉半建的世界。
-        run 没绑定抛 `KeyError`。"""
+        先删后建,从起点出发。它在保留表里还有端口开着(等服务端收尾)时,持表锁有界等待 `held_wait_s`(等待时放锁),
+        醒来后复核两张表。仍有端口开着就不删,抛瞬态 `MemoryFailureError`:轨迹源把它记成一次
+        role_memory_unavailable 再重跑。世界表里的同名项还有端口开着(上一次尝试的 `close_rollout` 还没跑完)时
+        不等、直接抛:等它就是和 `close_rollout` 等同一项的 Condition,本方先醒的话,新建的世界会被随后醒来的
+        `close_rollout` 摘掉并删掉。建不成时摘掉表项、删掉半建的世界。run 没绑定抛 `KeyError`。"""
         seed = self.seed_of(run_id)
         with self._lock:
-            for table in (self._held, self._worlds):
-                stale = table.get(episode_id)
-                if stale is not None and stale.open > 0:
-                    raise MemoryFailureError(
-                        f"rollout world {episode_id} is still held by a port that did not close", transient=True)
+            held, live = self._held.get(episode_id), self._worlds.get(episode_id)
+            if held is not None and held.open > 0 and (live is None or live.open == 0):
+                held.closed.wait_for(lambda: held.open == 0, self.held_wait_s)
+            if self._busy(episode_id) is not None:          # 醒来后重新从两张表取表项复核
+                raise MemoryFailureError(
+                    f"rollout world {episode_id} is still held by a port that did not close", transient=True)
             self._held.pop(episode_id, None)
             self._worlds.pop(episode_id, None)
             rec = _World(self._lock)
@@ -595,8 +609,8 @@ class StarlingTrainingWorlds(_RolloutWorlds):
     一侧当成记忆失败。"""
 
     def __init__(self, layout: StarlingLayout, endpoints: StarlingEndpoints, *,
-                 close_timeout_s: float = 60.0) -> None:
-        super().__init__()
+                 close_timeout_s: float = 60.0, held_wait_s: float = SESSION_CLOSE_WAIT_S) -> None:
+        super().__init__(held_wait_s=held_wait_s)
         self._layout = layout
         self._endpoints = endpoints
         self._close_timeout_s = close_timeout_s
