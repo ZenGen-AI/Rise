@@ -523,17 +523,18 @@ def test_a_bad_or_missing_run_id_fails_the_round_without_a_failure_record_or_run
     assert runs == ["run-001"]
 
 
-# ---------------- 部署记忆:人格库锁、起点摘要、T3 回滚、验证快照(设计二第 9 节) ----------------
+# ---------------- 部署记忆:世界锁、起点摘要、T3 回滚、验证快照(设计二第 9 节,设计三 4.2–4.7 节) ----------------
 
 def test_the_round_records_the_memory_runtime_and_each_episodes_start_digest(store, mem):
     env = _start(store, _handler(mem=mem))
     assert env.payload["memory_runtime"] == STAND_IN_MEMORY_RUNTIME
     digests = env.payload["episode_digests"]
     assert sorted(digests) == sorted(env.payload["episode_ids"])
-    assert all(set(d) == {"pa"} for d in digests.values())            # 只备份智能体位的人格
+    assert all(isinstance(d, str) for d in digests.values())          # 一条 episode 一个世界摘要
     assert mem.layout.round_snapshots(ROUND) == []                    # 全部已提交
-    assert not mem.layout.verify_snapshot(ROUND, "pa").exists()       # 验证快照轮次结束即删
+    assert not any(mem.layout.verify_snapshot(ROUND, sid).exists() for sid in ("s1", "s2", "s3"))   # 轮次结束即删
     assert not mem.layout.verify_scratch(ROUND).exists()
+    assert sorted(p.name for p in (mem.layout.root / "deploy").glob("*.json")) == ["s1.json", "s2.json", "s3.json"]
 
 
 def test_the_round_payload_gets_a_copy_of_the_memory_runtime(store, mem):
@@ -545,11 +546,11 @@ def test_the_round_payload_gets_a_copy_of_the_memory_runtime(store, mem):
     assert _start(store, h).payload["memory_runtime"]["backend"] == "stand-in"
 
 
-def test_a_round_that_cannot_lock_a_persona_library_is_deferred(store, mem):
+def test_a_round_that_cannot_lock_a_world_library_is_deferred(store, mem):
     # 修补第 1 轮:锁被占不判 T3,抛 DeferredError 让守护进程退避;拿锁在写任何东西之前
     from controlplane.deferred import DeferredError
-    with hold_file_lock(mem.layout.deploy_lock("pb")):                # 对手人格也要锁(第 9 节"每个绑定人格")
-        with pytest.raises(DeferredError, match="pb.lock"):
+    with hold_file_lock(mem.layout.world_lock("s1")):                 # 本轮每个情境世界都要锁(设计三 4.2 节)
+        with pytest.raises(DeferredError, match="world library locked: .*s1.lock"):
             _start(store, _handler(mem=mem))
     assert not store.exists(agent_round_file("zengen-v1"))
     assert not store.exists(failure_record_file("run-001", "agent-zengen-v1"))
@@ -561,8 +562,9 @@ def test_a_t3_round_rolls_back_the_in_flight_episode_and_drops_its_copy(store, m
     env = _start(store, _handler(factory=factory, mem=mem))
     assert env.status == "failed" and env.payload["failure"]["category"] == "T3"
     second = "deploy-zengen-v1-s2-1"
-    assert mem.store.digest("pa") == env.payload["episode_digests"][second]["pa"]
+    assert mem.store.digest("s2") == env.payload["episode_digests"][second]
     assert mem.layout.round_snapshots(ROUND) == []
+    assert not list((mem.layout.root / "snapshots" / ROUND).glob("*.world"))   # 旁注随快照删
 
 
 def test_a_data_error_mid_episode_is_rolled_back_by_the_round(store, mem):
@@ -584,8 +586,8 @@ def test_a_data_error_mid_episode_is_rolled_back_by_the_round(store, mem):
                                  memory_runtime=STAND_IN_MEMORY_RUNTIME, scratch_store_factory=FileTupleStore)
     env = _start(store, h)
     _assert_failed(store, "mindagent.rounds", "ActioDataError")
-    assert mem.store.digest("pa") == env.payload["episode_digests"]["deploy-zengen-v1-s2-1"]["pa"]
-    assert mem.store.pending_events("pa") == []
+    assert mem.store.digest("s2") == env.payload["episode_digests"]["deploy-zengen-v1-s2-1"]
+    assert mem.store.pending_events("s2") == []
     assert mem.layout.round_snapshots(ROUND) == []
 
 
@@ -611,7 +613,7 @@ def test_a_failed_restore_fails_the_round_and_keeps_library_and_copy(store, mem)
     with pytest.raises(Crash):
         _start(store, _handler(factory=_Factory(plans=[{"crash_on_submit": Crash}]), mem=mem))
     env = store.read_product(agent_round_file("zengen-v1"))
-    env.payload["episode_digests"]["deploy-zengen-v1-s1-1"]["pa"] = "tampered"
+    env.payload["episode_digests"]["deploy-zengen-v1-s1-1"] = "tampered"
     store.write_product(agent_round_file("zengen-v1"), env, "test: tamper")
     _start(store, _handler(mem=mem))
     _assert_failed(store, "mindagent.deployment.restore", "digest mismatch")
@@ -623,28 +625,42 @@ def test_verification_replays_on_read_only_snapshot_copies(store, mem, monkeypat
     calls = []
     real = rounds.instantiate
     monkeypatch.setattr(rounds, "instantiate", lambda *a, **kw: calls.append(kw) or real(*a, **kw))
+    seen_verify = {}
+    real_backup = mem.store.backup_to
+
+    def backup_to(world, path):
+        digest = real_backup(world, path)
+        if path.name.startswith("verify-"):
+            seen_verify[world] = path == mem.layout.verify_snapshot(ROUND, world) and path.exists()
+        return digest
+
+    monkeypatch.setattr(mem.store, "backup_to", backup_to)
     _skill(store, GOAL)
     env = _start(store, _handler(mem=mem))
     assert env.payload["proposals"]                                    # 有草案才会验证
     replays = [kw for kw in calls if kw.get("replay_read_only")]
-    assert replays and len(replays) % 2 == 0                           # 每份草案基线与候选各一
+    # 动机 episode 跨三个情境:每份草案每个情境基线与候选各一
+    assert len(replays) == 6 * len(env.payload["proposals"])
     assert all(kw["memory"] is not None for kw in replays)
-    assert mem.store.pending_events("pa") == []
+    assert all(mem.store.pending_events(sid) == [] for sid in ("s1", "s2", "s3"))
+    assert all(seen_verify[sid] for sid in ("s1", "s2", "s3"))         # 每个情境的验证快照都拍过
+    assert not mem.layout.verify_snapshot(ROUND, "s1").exists()        # 轮次结束即删
 
 
 # ---------------- 修补第 1 轮:轮次写成终态之前先回滚 ----------------
 
 def _kept_copy(store, mem):
-    """造一个 pending 轮次,s1 在途时崩:起点副本留着,部署库里有半截记忆。返回 (起点摘要, 副本路径)。"""
+    """造一个 pending 轮次,s1 在途时崩:起点快照留着,s1 世界里有半截记忆。返回 (起点摘要, 快照路径)。"""
     class Crash(Exception):
         pass
 
     with pytest.raises(Crash):
         _start(store, _handler(factory=_Factory(plans=[{"crash_on_submit": Crash}]), mem=mem))
     (snap,) = mem.layout.round_snapshots(ROUND)
-    start = store.read_product(agent_round_file("zengen-v1")).payload["episode_digests"]["deploy-zengen-v1-s1-1"]["pa"]
-    mem.store.remember_event("pa", f"{ROUND}/deploy-zengen-v1-s1-1#0", "pb：我真的很生气!!", interlocutor="pb")
-    assert mem.store.digest("pa") != start
+    start = store.read_product(agent_round_file("zengen-v1")).payload["episode_digests"]["deploy-zengen-v1-s1-1"]
+    mem.store.remember_event("s1", "pa", f"{ROUND}/deploy-zengen-v1-s1-1#0@pa", "pb：我真的很生气!!", interlocutor="pb")
+    assert mem.store.digest("s1") != start
+    assert mem.layout.world_of(snap) == "s1"
     return start, snap
 
 
@@ -655,20 +671,65 @@ def test_a_superseded_round_with_a_kept_copy_is_rolled_back_first(store, mem):
     env2 = _start(store, _handler(mem=mem), model="zengen-v2")
     old = store.read_product(agent_round_file("zengen-v1"))
     assert old.status == "failed" and old.payload["failure"]["category"] == "superseded"
-    assert not snap.exists()
+    assert not snap.exists() and not snap.with_suffix(".world").exists()
     # v1 的半截记忆在 v2 开跑之前就被覆盖回起点:v2 第一条 episode 的起点摘要就是 v1 那条的起点
-    assert env2.payload["episode_digests"]["deploy-zengen-v2-s1-1"]["pa"] == start
+    assert env2.payload["episode_digests"]["deploy-zengen-v2-s1-1"] == start
 
 
-def test_a_superseded_round_whose_persona_library_is_locked_is_deferred(store, mem):
+def test_a_superseded_round_whose_world_library_is_locked_is_deferred(store, mem):
     from controlplane.deferred import DeferredError
     start, snap = _kept_copy(store, mem)
     _model(store, 2, "run-002")
-    with hold_file_lock(mem.layout.deploy_lock("pa")):
-        with pytest.raises(DeferredError, match="pa.lock"):
+    with hold_file_lock(mem.layout.world_lock("s1")):
+        with pytest.raises(DeferredError, match="s1.lock"):
             _start(store, _handler(mem=mem), model="zengen-v2")
     assert store.read_product(agent_round_file("zengen-v1")).status == "pending"
-    assert snap.exists() and mem.store.digest("pa") != start
+    assert snap.exists() and mem.store.digest("s1") != start
+
+
+def test_a_rollback_locks_the_worlds_of_the_stale_round_not_only_the_current_config(store, mem):
+    # 被取代的轮次绑定的情境集合(轮次产物的 scenario_ids)与新轮次的不同:回滚要锁的是旧轮次的世界
+    from controlplane.deferred import DeferredError
+    start, snap = _kept_copy(store, mem)
+    _model(store, 2, "run-002")
+    (store.repo_root / run_dir("run-002")).mkdir(parents=True)
+    with hold_file_lock(mem.layout.world_lock("s1")):
+        with pytest.raises(DeferredError, match="s1.lock"):
+            _start(store, _handler(mem=mem, scenario_ids=("s2",)), model="zengen-v2")
+    assert store.read_product(agent_round_file("zengen-v1")).status == "pending"
+    env2 = _start(store, _handler(mem=mem, scenario_ids=("s2",)), model="zengen-v2")
+    assert env2.status == "executed"
+    assert mem.store.digest("s1") == start and not snap.exists()
+
+
+def test_a_stale_round_product_without_scenario_ids_is_rolled_back_by_its_world_tags(store, mem):
+    # 产物早于本改动、没有 scenario_ids:按快照旁注找世界、锁上再恢复
+    start, snap = _kept_copy(store, mem)
+    env = store.read_product(agent_round_file("zengen-v1"))
+    del env.payload["scenario_ids"]
+    store.write_product(agent_round_file("zengen-v1"), env, "test: an older round product")
+    _model(store, 2, "run-002")
+    (store.repo_root / run_dir("run-002")).mkdir(parents=True)
+    env2 = _start(store, _handler(mem=mem, scenario_ids=("s2",)), model="zengen-v2")
+    assert env2.status == "executed"
+    assert store.read_product(agent_round_file("zengen-v1")).payload["failure"]["category"] == "superseded"
+    assert mem.store.digest("s1") == start and not snap.exists()
+
+
+def test_a_stale_snapshot_without_a_world_tag_fails_the_rollback_naming_it(store, mem):
+    # 本轮自己重入时驱动器按路径认得自己的快照,不靠旁注;回滚(这里由取代它的新轮次触发)要靠旁注找世界
+    start, snap = _kept_copy(store, mem)
+    snap.with_suffix(".world").unlink()
+    _model(store, 2, "run-002")
+    (store.repo_root / run_dir("run-002")).mkdir(parents=True)
+    env2 = _start(store, _handler(mem=mem, scenario_ids=("s2",)), model="zengen-v2")
+    assert env2.status == "executed"
+    env = store.read_product(agent_round_file("zengen-v1"))
+    assert env.status == "failed" and env.payload["failure"]["point"] == "mindagent.deployment.restore"
+    assert snap.name in env.payload["failure"]["reason"]
+    fr = store.read_product(failure_record_file("run-001", "agent-zengen-v1"))
+    assert fr.payload["category"] == "T3" and snap.name in fr.payload["reason"]
+    assert snap.exists() and mem.store.digest("s1") != start           # 一个世界都不碰
 
 
 def test_a_stale_action_for_a_round_with_a_kept_copy_rolls_it_back(store, mem):
@@ -677,7 +738,7 @@ def test_a_stale_action_for_a_round_with_a_kept_copy_rolls_it_back(store, mem):
     _model(store, 2, "run-002")
     _start(store, _handler(mem=mem))
     assert store.read_product(agent_round_file("zengen-v1")).payload["failure"]["category"] == "superseded"
-    assert mem.store.digest("pa") == start and not snap.exists()
+    assert mem.store.digest("s1") == start and not snap.exists()
 
 
 def test_a_round_whose_model_disappeared_rolls_back_its_kept_copy(store, mem):
@@ -688,7 +749,7 @@ def test_a_round_whose_model_disappeared_rolls_back_its_kept_copy(store, mem):
     store.write_product(model_file(1), env, "human: deprecate")
     _start(store, _handler(mem=mem))
     assert store.read_product(agent_round_file("zengen-v1")).status == "failed"
-    assert mem.store.digest("pa") == start and not snap.exists()
+    assert mem.store.digest("s1") == start and not snap.exists()
 
 
 def test_a_round_that_fails_its_inputs_on_reentry_rolls_back_its_kept_copy(store, mem):
@@ -697,14 +758,14 @@ def test_a_round_that_fails_its_inputs_on_reentry_rolls_back_its_kept_copy(store
     (store.repo_root / scenario_file("s3")).unlink()
     _start(store, _handler(mem=mem))
     _assert_failed(store, "mindagent.rounds.inputs", "scenario 's3'")
-    assert mem.store.digest("pa") == start and not snap.exists()
+    assert mem.store.digest("s1") == start and not snap.exists()
 
 
 def test_a_failed_rollback_still_fails_the_round_and_keeps_library_and_copy(store, mem, monkeypatch):
     start, snap = _kept_copy(store, mem)
-    before = mem.store.digest("pa")
+    before = mem.store.digest("s1")
 
-    def broken(pid, path):
+    def broken(world, path):
         raise OSError("disk")
 
     monkeypatch.setattr(mem.store, "restore_from", broken)
@@ -713,7 +774,8 @@ def test_a_failed_rollback_still_fails_the_round_and_keeps_library_and_copy(stor
     env = store.read_product(agent_round_file("zengen-v1"))
     assert env.status == "failed" and env.payload["failure"]["point"] == "mindagent.deployment.restore"
     assert "OSError" in env.payload["failure"]["reason"] and "disk" not in env.payload["failure"]["reason"]
-    assert snap.exists() and mem.store.digest("pa") == before
+    assert snap.exists() and mem.store.digest("s1") == before
+    assert mem.layout.world_of(snap) == "s1"                           # 旁注也留着
 
 
 def test_a_copy_that_cannot_be_deleted_after_rollback_fails_the_round_instead_of_escaping(store, mem, monkeypatch):
@@ -744,11 +806,12 @@ def _tick(store, handler):
 
 
 def test_a_corrupt_deployment_library_fails_the_round_t3_and_the_tick_does_not_raise(store, mem):
-    path = mem.layout.root / "deploy" / "pa.json"
+    path = mem.layout.root / "deploy" / "s1.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("{not json", encoding="utf-8")
     _tick(store, _handler(mem=mem))
-    fr = _assert_failed(store, "mindagent.deployment.memory", "backup deploy-zengen-v1-s1-1 for pa: MemoryFailureError")
+    fr = _assert_failed(store, "mindagent.deployment.memory",
+                        "backup deploy-zengen-v1-s1-1 of world s1: MemoryFailureError")
     assert "not json" not in fr.payload["reason"]
     _tick(store, _handler(mem=mem))                                      # 终态:下一 tick 不再触发
     assert store.read_product(agent_round_file("zengen-v1")).status == "failed"
@@ -765,10 +828,10 @@ def test_a_snapshot_directory_that_cannot_be_created_fails_the_round_t3(store, m
 def test_a_failing_verify_snapshot_fails_the_round_t3(store, mem, monkeypatch):
     real = mem.store.backup_to
 
-    def backup_to(pid, path):
+    def backup_to(world, path):
         if path.name.startswith("verify-"):
             raise OSError("disk full at /secret/path")
-        return real(pid, path)
+        return real(world, path)
 
     monkeypatch.setattr(mem.store, "backup_to", backup_to)
     _tick(store, _handler(mem=mem))
@@ -777,16 +840,55 @@ def test_a_failing_verify_snapshot_fails_the_round_t3(store, mem, monkeypatch):
     assert mem.layout.round_snapshots(ROUND) == []
 
 
-def test_a_persona_id_the_lock_refuses_fails_the_round_t3_without_rollback(store, mem):
-    # 装配期已拦(read_agent_settings);这里绕过装配直接造处理器,locks.hold 的 ActioDataError 不能逃出
-    bad = RoleBinding("a", "张三", "self_play")
-    _tick(store, _handler(mem=mem, bindings=(OPP, bad)))
+def test_a_scenario_id_the_lock_refuses_fails_the_round_t3_without_rollback(store, mem):
+    # 情境 id 过不了世界 id 白名单(装配期另有校验);这里绕过装配直接造处理器,locks.hold 的 ValueError 不能逃出
+    factory = _Factory()
+    _tick(store, _handler(mem=mem, factory=factory, scenario_ids=("s1", "情境")))
     env = store.read_product(agent_round_file("zengen-v1"))
     assert env.status == "failed" and env.payload["failure"]["category"] == "T3"
-    assert env.payload["failure"]["point"] == "mindagent.rounds.persona"
-    assert "ActioDataError" in env.payload["failure"]["reason"]
+    assert env.payload["failure"]["point"] == "mindagent.rounds.world"
+    assert "ValueError" in env.payload["failure"]["reason"]
     fr = store.read_product(failure_record_file("run-001", "agent-zengen-v1"))
-    assert (fr.payload["category"], fr.payload["point"]) == ("T3", "mindagent.rounds.persona")
+    assert (fr.payload["category"], fr.payload["point"]) == ("T3", "mindagent.rounds.world")
+    assert factory.count == 0 and not (mem.layout.root / "snapshots").exists()
+
+
+def test_a_corrupt_world_tag_left_by_another_round_fails_the_round_t3(store, mem):
+    # uncommitted_snapshots 遇到坏旁注抛 MindAgentDataError:确定性,轮次 T3;一个会话都不开
+    p = mem.layout.snapshot("agent-round-zengen-v0", "deploy-zengen-v0-s1-1")
+    p.parent.mkdir(parents=True)
+    p.write_text("{}")
+    p.with_suffix(".world").write_text("s1 ")
+    factory = _Factory()
+    _tick(store, _handler(mem=mem, factory=factory))
+    _assert_failed(store, "mindagent.rounds", "MindAgentDataError")
+    assert factory.count == 0
+
+
+def test_another_rounds_uncommitted_snapshot_defers_the_round_and_writes_no_snapshot(store, mem):
+    from controlplane.deferred import DeferredError
+    p = mem.layout.snapshot("agent-round-zengen-v0", "deploy-zengen-v0-s1-1")
+    p.parent.mkdir(parents=True)
+    p.write_text("{}")
+    mem.layout.write_world_tag(p, "s1")
+    factory = _Factory()
+    with pytest.raises(DeferredError, match="round agent-round-zengen-v0"):
+        _start(store, _handler(mem=mem, factory=factory))
+    assert factory.count == 0 and mem.layout.round_snapshots(ROUND) == []
+    assert store.read_product(agent_round_file("zengen-v1")).status == "pending"
+    assert not store.exists(failure_record_file("run-001", "agent-zengen-v1"))
+
+
+def test_the_round_handler_forwards_the_episode_registration_hooks(store, mem):
+    seen = []
+    h = make_start_round_handler(
+        config=_cfg(scenario_ids=("s1",)), client_factory=_Factory(), backend_factory=lambda m, c: Echo(),
+        personas_loader=_loader, memory_store=mem.store, memory_layout=mem.layout,
+        memory_runtime=STAND_IN_MEMORY_RUNTIME, scratch_store_factory=FileTupleStore,
+        register_episode=lambda eid, rid: seen.append(("register", eid, rid)),
+        unregister_episode=lambda eid: seen.append(("unregister", eid)))
+    assert _start(store, h).status == "executed"
+    assert seen == [("register", "deploy-zengen-v1-s1-1", ROUND), ("unregister", "deploy-zengen-v1-s1-1")]
 
 
 def test_a_verify_copy_that_cannot_be_restored_fails_the_round_t3(store, mem):
@@ -794,7 +896,7 @@ def test_a_verify_copy_that_cannot_be_restored_fails_the_round_t3(store, mem):
     from actio.memory_port import MemoryFailureError
 
     class BrokenScratch(FileTupleStore):
-        def restore_from(self, persona_id, path):
+        def restore_from(self, world_id, path):
             raise MemoryFailureError("JSONDecodeError at /secret", transient=False)
 
     _skill(store, GOAL)                                                  # 有草案才会验证
@@ -826,8 +928,8 @@ class _RecallFailingScratch(FileTupleStore):
         self._exc = exc
         self._closes = closes
 
-    def open(self, persona_id):
-        port = super().open(persona_id)
+    def open(self, world_id, holder):
+        port = super().open(world_id, holder)
         exc, closes = self._exc, self._closes
 
         class Port:
@@ -871,7 +973,7 @@ def test_a_transient_memory_failure_in_verification_replay_defers_the_round(stor
     assert env.status == "pending"
     assert not store.exists(failure_record_file("run-001", "agent-zengen-v1"))
     assert closes                                                        # 验证实例照样关了
-    assert not mem.layout.verify_snapshot(ROUND, "pa").exists()          # 验证快照已删
+    assert not mem.layout.verify_snapshot(ROUND, "s1").exists()          # 验证快照已删
     assert not mem.layout.verify_scratch(ROUND).exists()                 # 临时目录已删
     _tick(store, h)                                                      # 守护进程的 tick 接住延后,不以异常退出
     env = _start(store, _handler(mem=mem))                               # 嵌入恢复后重入:部署 episode 复用,轮次收完
@@ -892,8 +994,8 @@ def test_a_close_failure_in_verification_cleanup_does_not_change_the_round_resul
     from actio.memory_port import MemoryFailureError
 
     class CloseFailingScratch(FileTupleStore):
-        def open(self, persona_id):
-            port = super().open(persona_id)
+        def open(self, world_id, holder):
+            port = super().open(world_id, holder)
             real_close = port.close
 
             def close():

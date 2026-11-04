@@ -2,7 +2,8 @@
 
 用例照 `tests/test_ma_deployment.py`、`tests/test_ma_admit.py` 里同名语义的替身用例写,辅助代码从那两个模块导入,
 不复制。差别只有三处:库换成 `StarlingDeploymentStore`(配 `suffix=".db"` 的 `MemoryLayout`);抽取失败改用
-假端点的 `fail_keys`(取代 `FileTupleStore(extraction_failure=)`);摘要比较用 `store.digest(pid)`,不比库文件内容。
+假端点的 `fail_keys`(取代 `FileTupleStore(extraction_failure=)`);摘要比较用 `store.digest(world)`,不比库文件内容。
+部署用例的世界是情境 s1(`WORLD`),智能体位主体是 pa。
 假端点是本机回环子进程(`tests/starling_fakes.py`),不发任何外网请求。"""
 import tempfile
 from pathlib import Path
@@ -20,7 +21,7 @@ from mindagent.deployment import DeploymentFailedError  # noqa: E402
 from mindagent.memory_layout import MemoryLayout  # noqa: E402
 from starling_fakes import FakeOpenAI, offline_api_key  # noqa: E402
 from test_ma_admit import KEY, PID, SKILL, _admit, _put  # noqa: E402
-from test_ma_deployment import EID, KEY0, ROUND, _Factory, _FakeClient, _run  # noqa: E402
+from test_ma_deployment import EID, KEY0, ROUND, WORLD, _Factory, _FakeClient, _run, _WorldFactory  # noqa: E402
 from test_ma_deployment import store  # noqa: E402,F401  (部署用例的夹具:情境 s1、s2 与人格 pa、pb)
 
 EID2 = "deploy-zengen-v1-s1-2"
@@ -51,13 +52,13 @@ def admit_store(tmp_path):
     return s
 
 
-def _pending_in_copy(path: Path, persona_id: str) -> list[str]:
-    """库文件(或起点副本)里还有哪些 pending 行,与 `pending_events` 同一个 agent。副本是提交点,
+def _pending_in_copy(path: Path) -> list[str]:
+    """库文件(或起点快照)里还有哪些 pending 行,不分主体(与 `pending_events` 同口径)。快照是提交点,
     字节不能变:拷出来再开。"""
     with tempfile.TemporaryDirectory() as tmp:
         copy = Path(tmp) / "peek.db"
         copy_library(path, copy)
-        memory = starling.Memory.open(str(copy), agent=persona_id)
+        memory = starling.Memory.open(str(copy), agent="peek")
         try:
             return [p.key for p in memory.pending_events()]
         finally:
@@ -65,32 +66,32 @@ def _pending_in_copy(path: Path, persona_id: str) -> list[str]:
 
 
 class _StartProbe:
-    """`_run` 的 started 参数只调 append。每条 episode 开始时(起点副本已落)顺手看一眼部署库与副本里的 pending 行。"""
+    """`_run` 的 started 参数只调 append。每条 episode 开始时(起点快照已落)顺手看一眼部署世界与快照里的 pending 行。"""
 
     def __init__(self, mem):
         self._mem = mem
         self.seen = []
 
     def append(self, item):
-        eid, by_persona = item
+        eid, digest = item
         self.seen.append({
-            "eid": eid, "digest": by_persona["pa"],
-            "library_pending": self._mem.store.pending_events("pa"),
-            "snapshot_pending": _pending_in_copy(self._mem.layout.snapshot(ROUND, eid, "pa"), "pa"),
+            "eid": eid, "digest": digest,
+            "library_pending": self._mem.store.pending_events(WORLD),
+            "snapshot_pending": _pending_in_copy(self._mem.layout.snapshot(ROUND, eid)),
         })
 
 
 # ---------------- 部署驱动器(替身用例:tests/test_ma_deployment.py) ----------------
 
 def _record_restores(mem, monkeypatch):
-    """记下每次 restore_from 之前人格库的摘要,用来证明回滚前库里确实有这次尝试写的记忆。
+    """记下每次 restore_from 之前世界的摘要,用来证明回滚前库里确实有这次尝试写的记忆。
     此时端口都已关,库静止,读摘要安全。不数调用次数。"""
     before_restore = []
     real = mem.store.restore_from
 
-    def spy(persona_id, path):
-        before_restore.append(mem.store.digest(persona_id))
-        return real(persona_id, path)
+    def spy(world, path):
+        before_restore.append(mem.store.digest(world))
+        return real(world, path)
 
     monkeypatch.setattr(mem.store, "restore_from", spy)
     return before_restore
@@ -104,16 +105,16 @@ def test_a_retry_rolls_the_library_back_to_the_same_digest(store, mem, monkeypat
     with pytest.raises(DeploymentFailedError) as info:
         _run(store, _Factory({"end_reason": "timeout"}, {"end_reason": "timeout"}), mem, digests=digests)
     assert info.value.transient and info.value.attempts == 2
-    start = digests[EID]["pa"]
+    start = digests[EID]
     assert before_restore and all(d != start for d in before_restore)  # 回滚前库里确实有这次尝试写的记忆
-    assert mem.store.digest("pa") == start                             # 用尽重试后库停在起点
-    assert mem.layout.snapshot(ROUND, EID, "pa").exists()              # 在途:留给重入或轮次回滚
+    assert mem.store.digest(WORLD) == start                            # 用尽重试后库停在起点
+    assert mem.layout.snapshot(ROUND, EID).exists()                    # 在途:留给重入或轮次回滚
     f = _Factory({"end_reason": "timeout"}, {})                        # 重入后第一次尝试再失败一次,第二次成功
     (ep,) = _run(store, f, mem, digests=digests)
     assert ep.id == EID and len(f.clients) == 2
     assert [c.traces[0]["memory"]["digest_before"] for c in f.clients] == [start, start]   # 两次尝试同一起点
-    assert not mem.layout.snapshot(ROUND, EID, "pa").exists()          # 删起点副本 = 提交
-    assert mem.store.digest("pa") != start                             # 提交了的记忆留在库里
+    assert not mem.layout.snapshot(ROUND, EID).exists()                # 删起点快照 = 提交
+    assert mem.store.digest(WORLD) != start                            # 提交了的记忆留在库里
 
 
 def test_a_crash_mid_episode_is_rerun_from_the_restored_start(store, mem):
@@ -130,15 +131,15 @@ def test_a_crash_mid_episode_is_rerun_from_the_restored_start(store, mem):
 
     with pytest.raises(Crash):
         _run(store, lambda **kw: Crashing(), mem, digests=digests)
-    start = digests[EID]["pa"]
-    assert mem.layout.snapshot(ROUND, EID, "pa").exists()
-    assert mem.store.digest("pa") != start                             # 半截记忆已写进部署库
+    start = digests[EID]
+    assert mem.layout.snapshot(ROUND, EID).exists()
+    assert mem.store.digest(WORLD) != start                            # 半截记忆已写进部署世界
     f = _Factory({"opening": "我换个说法"})
     (ep,) = _run(store, f, mem, digests=digests)                       # 重入:先覆盖、核对摘要、再重跑
     assert len(f.clients) == 1 and ep.id == EID
     assert f.clients[0].traces[0]["memory"]["digest_before"] == start  # 重跑从起点开始
-    assert not mem.layout.snapshot(ROUND, EID, "pa").exists()
-    assert not mem.store.remember_event("pa", KEY0, "pb：我换个说法", interlocutor="pb").failed
+    assert not mem.layout.snapshot(ROUND, EID).exists()
+    assert not mem.store.remember_event(WORLD, "pa", KEY0, "pb：我换个说法", interlocutor="pb").failed
 
 
 def test_a_pending_row_from_a_failed_attempt_does_not_conflict_on_the_retry(store, mem):
@@ -150,10 +151,10 @@ def test_a_pending_row_from_a_failed_attempt_does_not_conflict_on_the_retry(stor
     assert ep.id == EID and len(f.clients) == 2
     assert [c.created["episode_id"] for c in f.clients] == [EID, EID]  # 服务端拿不带轮次的 id
     # 不回滚的话 KEY0 的 pending 行带着旧文本,第二次尝试换了开场就会撞 MemoryEventConflict
-    assert mem.store.pending_events("pa") == []
+    assert mem.store.pending_events(WORLD) == []
     with pytest.raises(MemoryEventConflict):                           # 成功后被放弃,是终态
-        mem.store.remember_event("pa", KEY0, "pb：我换个说法", interlocutor="pb")
-    assert not mem.layout.snapshot(ROUND, EID, "pa").exists()          # 删起点副本 = 提交
+        mem.store.remember_event(WORLD, "pa", KEY0, "pb：我换个说法", interlocutor="pb")
+    assert not mem.layout.snapshot(ROUND, EID).exists()                # 删起点快照 = 提交
 
 
 def test_the_second_round_reuses_the_episode_id_but_not_the_event_keys(store, mem):
@@ -162,10 +163,10 @@ def test_the_second_round_reuses_the_episode_id_but_not_the_event_keys(store, me
     _run(store, _Factory(), mem)
     _run(store, _Factory({"opening": "今天好点了"}), mem, round_id="agent-round-zengen-v2", run_id="run-004")
     calls = mem.fake.chat_calls
-    again = mem.store.remember_event("pa", KEY0, "pb：我很生气!!", interlocutor="pb")
+    again = mem.store.remember_event(WORLD, "pa", KEY0, "pb：我很生气!!", interlocutor="pb")
     assert not again.failed and again.stored                           # 第一轮的行仍 committed、幂等
     assert mem.fake.chat_calls == calls                                # 幂等重放不再调抽取端点
-    second = mem.store.remember_event("pa", f"agent-round-zengen-v2/{EID}#0", "pb：今天好点了",
+    second = mem.store.remember_event(WORLD, "pa", f"agent-round-zengen-v2/{EID}#0@pa", "pb：今天好点了",
                                       interlocutor="pb")
     assert not second.failed and second.stored
     assert mem.fake.chat_calls == calls                                # 第二轮的行也是 committed 的
@@ -173,18 +174,18 @@ def test_the_second_round_reuses_the_episode_id_but_not_the_event_keys(store, me
 
 def test_no_pending_rows_survive_an_episode_and_the_next_start_snapshot_is_clean(store, mem, monkeypatch, tmp_path):
     """episodes_per_scenario=2:两条 episode 各有一个事件抽取失败、留 pending 行,episode 提交时驱动器放弃它们。
-    第二条开始时部署库与它的起点副本里都没有 pending 行;全部结束后仍没有,两份起点副本都已删。
+    第二条开始时部署世界与它的起点快照里都没有 pending 行;全部结束后仍没有,两份起点快照都已删。
     替身没有同名用例。"""
-    key2 = f"{ROUND}/{EID2}#2"
+    key2 = f"{ROUND}/{EID2}#2@pa"
     mem.failing.update({KEY0, key2})
     abandoned = []
     real = mem.store.abandon_event
 
-    def spy(persona_id, key):
+    def spy(world, key):
         copy = tmp_path / f"before-abandon-{len(abandoned)}.db"
-        copy_library(mem.layout.root / "deploy" / f"{persona_id}.db", copy)   # 端口都已关,库静止
-        abandoned.append((key, mem.store.pending_events(persona_id), _pending_in_copy(copy, persona_id)))
-        real(persona_id, key)
+        copy_library(mem.layout.root / "deploy" / f"{world}.db", copy)   # 端口都已关,库静止
+        abandoned.append((key, mem.store.pending_events(world), _pending_in_copy(copy)))
+        real(world, key)
 
     monkeypatch.setattr(mem.store, "abandon_event", spy)
     probe = _StartProbe(mem)
@@ -196,11 +197,30 @@ def test_no_pending_rows_survive_an_episode_and_the_next_start_snapshot_is_clean
     assert first["library_pending"] == second["library_pending"] == []
     assert first["snapshot_pending"] == second["snapshot_pending"] == []
     assert first["digest"] != second["digest"]                         # 第一条提交的记忆进了第二条的起点
-    assert mem.store.pending_events("pa") == []
+    assert mem.store.pending_events(WORLD) == []
     for eid in (EID, EID2):
-        assert not mem.layout.snapshot(ROUND, eid, "pa").exists()
+        snap = mem.layout.snapshot(ROUND, eid)
+        assert not snap.exists() and not snap.with_suffix(".world").exists()
     with pytest.raises(MemoryEventConflict):                           # 放弃是终态
-        mem.store.remember_event("pa", KEY0, "pb：我很生气!!", interlocutor="pb")
+        mem.store.remember_event(WORLD, "pa", KEY0, "pb：我很生气!!", interlocutor="pb")
+
+
+def test_a_failed_attempt_rolls_back_both_slots_writes_in_one_starling_world(store, mem, monkeypatch):
+    """两个主体(智能体位 pa 与对手位 pb)写进同一个 Starling 世界,尝试失败后整世界回到起点;成功的第二次尝试之后
+    两个主体的记忆都在。替身:test_a_failed_attempt_rolls_back_both_slots_writes。"""
+    digests = {}
+    before_restore = _record_restores(mem, monkeypatch)
+    f = _WorldFactory(mem, {"end_reason": "timeout"}, {})
+    (ep,) = _run(store, f, mem, digests=digests, **f.hooks())
+    assert ep.id == EID and len(f.clients) == 2
+    assert len(before_restore) == 1 and before_restore[0] != digests[EID]   # 回滚前两个主体都写过
+    assert [c.traces[0]["memory"]["digest_before"] for c in f.clients] == [digests[EID]] * 2
+    assert mem.store.pending_events(WORLD) == [] and f.registry == {}
+    heard = [("pa", f"{ROUND}/{EID}#0@pa", "pb", ep.turns[0].utterance),   # 智能体记对手开场
+             ("pb", f"{ROUND}/{EID}#1@pb", "pa", ep.turns[1].utterance)]   # 对手记智能体首轮
+    for holder, key, speaker, utterance in heard:
+        again = mem.store.remember_event(WORLD, holder, key, f"{speaker}：{utterance}", interlocutor=speaker)
+        assert not again.failed and again.stored                       # 已提交:同 key 同文本幂等
 
 
 # ---------------- 门② 记忆增量(替身用例:tests/test_ma_admit.py) ----------------

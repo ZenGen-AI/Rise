@@ -1,3 +1,4 @@
+import json
 import threading
 import time
 from types import SimpleNamespace
@@ -7,16 +8,17 @@ import pytest
 
 from actio.instance import instantiate
 from actio.memory import FileTupleStore
-from actio.memory_port import MemoryEventConflict, MemoryFailureError
+from actio.memory_port import MemoryEvent, MemoryEventConflict, MemoryFailureError
 from actio.skills import Skill
 from actio.trace import validate_trace
+from controlplane.deferred import DeferredError
 from controlplane.gitstore import GitStore
 from controlplane.paths import episode_file, episodes_dir
 from mindagent import deployment
 from mindagent.deployment import (
     PURPOSE, DeploymentFailedError, deployment_episode_id, rerun_episode_id, run_deployment_episodes,
 )
-from mindagent.errors import RestoreFailedError
+from mindagent.errors import MindAgentDataError, RestoreFailedError
 from mindagent.memory_layout import MemoryLayout
 from realtime_fixtures import plain_factory, plain_hook
 from simulator.backends import ScriptedBackend
@@ -46,7 +48,8 @@ OPP = RoleBinding("b", "pb", "frozen_reference", model_ref="zengen-v1")
 BINDINGS = (OPP, AGENT)  # 对手先说,Actio 实例后说
 ROUND = "agent-round-zengen-v1"
 EID = "deploy-zengen-v1-s1-1"
-KEY0 = f"{ROUND}/{EID}#0"          # 对手开场那句的事件 key:轮次前缀 + 部署 id + 轮次序号
+KEY0 = f"{ROUND}/{EID}#0@pa"       # 智能体记下对手开场那句的事件 key:轮次前缀 + 部署 id + 轮次序号 + 写入方主体
+WORLD = "s1"                        # 部署世界就是情境
 V0 = {"skill": "0", "memory": "0"}
 
 
@@ -59,11 +62,11 @@ CALM = Skill("skill-calm", 1, "micro", {"signal": "emotion_high"}, ("先回应�
 
 
 def _make(skills=(), version=None, seen=None, backend=None):
-    def make(episode_id, memory):
+    def make(episode_id, memory, holder):
         if seen is not None:
             seen.append(episode_id)
         return instantiate(backend or Echo(), skills=list(skills), memory=memory, episode_id=episode_id,
-                           interlocutors={"a": "pa", "b": "pb"},
+                           holder=holder, interlocutors={"a": "pa", "b": "pb", "c": "pc"},
                            library_version=version or V0, profile=None)
     return make
 
@@ -124,10 +127,10 @@ def live(store):
 def _run(store, client_factory, mem, *, make=None, digests=None, started=None, **kw):
     digests = {} if digests is None else digests
 
-    def on_start(eid, by_persona):
-        digests[eid] = dict(by_persona)
+    def on_start(eid, digest):
+        digests[eid] = digest
         if started is not None:
-            started.append((eid, dict(by_persona)))
+            started.append((eid, digest))
 
     args = dict(run_id=RUN, round_id=ROUND, scenario_ids=["s1"], personas=_personas(), bindings=BINDINGS,
                 model_id=MODEL, max_turns=4, library_version=V0)
@@ -395,18 +398,18 @@ def test_a_retry_restores_the_start_so_the_same_logical_id_never_conflicts(store
     assert ep.id == EID and len(f.clients) == 2
     assert [c.created["episode_id"] for c in f.clients] == [EID, EID]    # 服务端拿不带轮次的 id
     # 不回滚的话 KEY0 的 pending 行带着旧文本,第二次尝试换了开场就会撞 MemoryEventConflict
-    assert mem.store.pending_events("pa") == []
+    assert mem.store.pending_events(WORLD) == []
     with pytest.raises(MemoryEventConflict):                            # 成功后被放弃,是终态
-        mem.store.remember_event("pa", KEY0, "pb：我换个说法", interlocutor="pb")
-    assert not mem.layout.snapshot(ROUND, EID, "pa").exists()          # 删起点副本 = 提交
+        mem.store.remember_event(WORLD, "pa", KEY0, "pb：我换个说法", interlocutor="pb")
+    assert not mem.layout.snapshot(ROUND, EID).exists()                # 删起点快照 = 提交
 
 
 def test_a_second_round_with_the_same_deploy_id_does_not_hit_the_first_rounds_keys(store, mem):
     _run(store, _Factory(), mem)
     _run(store, _Factory({"opening": "今天好点了"}), mem, round_id="agent-round-zengen-v2", run_id="run-004")
-    again = mem.store.remember_event("pa", KEY0, "pb：我很生气!!", interlocutor="pb")
+    again = mem.store.remember_event(WORLD, "pa", KEY0, "pb：我很生气!!", interlocutor="pb")
     assert not again.failed and again.stored                           # 第一轮的行仍 committed、幂等
-    second = mem.store.remember_event("pa", f"agent-round-zengen-v2/{EID}#0", "pb：今天好点了",
+    second = mem.store.remember_event(WORLD, "pa", f"agent-round-zengen-v2/{EID}#0@pa", "pb：今天好点了",
                                       interlocutor="pb")
     assert not second.failed and second.stored
 
@@ -416,10 +419,10 @@ def test_each_episode_gets_a_fresh_instance_whose_id_carries_the_round(store, me
     eps = _run(store, _Factory(), mem, make=_make(seen=seen), started=started, episodes_per_scenario=2)
     assert seen == [f"{ROUND}/{EID}", f"{ROUND}/deploy-zengen-v1-s1-2"]
     assert [e.id for e in eps] == [EID, "deploy-zengen-v1-s1-2"]
-    for ep, (eid, by_persona) in zip(eps, started):
+    for ep, (eid, digest) in zip(eps, started):
         first = next(t for t in ep.turns if t.speaker_slot == "a")
-        assert eid == ep.id and first.activation_trace["memory"]["digest_before"] == by_persona["pa"]
-    assert started[0][1]["pa"] != started[1][1]["pa"]                   # 第一条提交的记忆进了第二条的起点
+        assert eid == ep.id and first.activation_trace["memory"]["digest_before"] == digest   # 两位:智能体首轮前没人写过
+    assert started[0][1] != started[1][1]                               # 第一条提交的记忆进了第二条的起点
 
 
 def test_a_crash_mid_episode_is_rerun_from_the_restored_start(store, mem):
@@ -434,13 +437,14 @@ def test_a_crash_mid_episode_is_rerun_from_the_restored_start(store, mem):
 
     with pytest.raises(Crash):
         _run(store, lambda **kw: Crashing(), mem, digests=digests)
-    assert mem.layout.snapshot(ROUND, EID, "pa").exists()
-    assert mem.store.digest("pa") != digests[EID]["pa"]                # 半截记忆已写进部署库
+    snap = mem.layout.snapshot(ROUND, EID)
+    assert snap.exists() and mem.layout.world_of(snap) == WORLD          # 在途快照带旁注
+    assert mem.store.digest(WORLD) != digests[EID]                     # 半截记忆已写进部署世界
     f = _Factory({"opening": "我换个说法"})
     (ep,) = _run(store, f, mem, digests=digests)                       # 重入:先覆盖、核对摘要、再重跑
     assert len(f.clients) == 1 and ep.id == EID
-    assert not mem.layout.snapshot(ROUND, EID, "pa").exists()
-    assert not mem.store.remember_event("pa", KEY0, "pb：我换个说法", interlocutor="pb").failed
+    assert not snap.exists() and not snap.with_suffix(".world").exists()
+    assert not mem.store.remember_event(WORLD, "pa", KEY0, "pb：我换个说法", interlocutor="pb").failed
 
 
 def test_an_episode_written_but_not_committed_is_rerun(store, mem, monkeypatch):
@@ -449,10 +453,10 @@ def test_an_episode_written_but_not_committed_is_rerun(store, mem, monkeypatch):
 
     digests = {}
     real = mem.store.pending_events
-    monkeypatch.setattr(mem.store, "pending_events", lambda pid: (_ for _ in ()).throw(Crash()))
+    monkeypatch.setattr(mem.store, "pending_events", lambda world: (_ for _ in ()).throw(Crash()))
     with pytest.raises(Crash):
-        _run(store, _Factory(), mem, digests=digests)                  # episode 已落盘、副本没删
-    assert store.exists(episode_file(RUN, EID)) and mem.layout.snapshot(ROUND, EID, "pa").exists()
+        _run(store, _Factory(), mem, digests=digests)                  # episode 已落盘、快照没删
+    assert store.exists(episode_file(RUN, EID)) and mem.layout.snapshot(ROUND, EID).exists()
     monkeypatch.setattr(mem.store, "pending_events", real)
     f = _Factory()
     _run(store, f, mem, digests=digests)
@@ -462,13 +466,15 @@ def test_an_episode_written_but_not_committed_is_rerun(store, mem, monkeypatch):
     assert f2.clients == []
 
 
-@pytest.mark.parametrize("op", ["mkdir", "backup_to", "open", "pending_events", "abandon_event", "unlink"])
+@pytest.mark.parametrize("op", ["mkdir", "write_world_tag", "backup_to", "open", "pending_events", "abandon_event",
+                                "unlink"])
 def test_a_permanent_memory_management_failure_is_a_round_failure_reporting_only_the_class(store, mem, monkeypatch, op):
-    """终审 I-2:管理面与副本文件操作的 OSError 与非瞬态 MemoryFailureError 改抛 AgentRoundFailedError
+    """终审 I-2:管理面与快照文件操作的 OSError 与非瞬态 MemoryFailureError 改抛 AgentRoundFailedError
     (失败点 mindagent.deployment.memory,只报类名),轮次处理器据此判 T3 并回滚;不原样逃出。"""
     from mindagent.errors import AgentRoundFailedError
     secret = "/secret/endpoint"
-    boom = OSError(secret) if op in ("mkdir", "open", "unlink", "abandon_event") else MemoryFailureError(secret, transient=False)
+    boom = (OSError(secret) if op in ("mkdir", "write_world_tag", "open", "unlink", "abandon_event")
+            else MemoryFailureError(secret, transient=False))
     if op == "abandon_event":
         mem.failing.add(KEY0)                                          # 留一条本 episode 的 pending 行,才会调 abandon
         f = _Factory({"end_reason": "timeout"}, {"opening": "我换个说法"})
@@ -479,8 +485,10 @@ def test_a_permanent_memory_management_failure_is_a_round_failure_reporting_only
     elif op == "unlink":
         real_unlink = deployment.Path.unlink
         monkeypatch.setattr(deployment.Path, "unlink",
-                            lambda self, *a, **kw: (_ for _ in ()).throw(boom) if self.name.endswith("-pa.json")
+                            lambda self, *a, **kw: (_ for _ in ()).throw(boom) if self.name == f"deploy-{EID}.json"
                             else real_unlink(self, *a, **kw))
+    elif op == "write_world_tag":
+        monkeypatch.setattr(MemoryLayout, "write_world_tag", lambda *a, **kw: (_ for _ in ()).throw(boom))
     else:
         monkeypatch.setattr(mem.store, op, lambda *a, **kw: (_ for _ in ()).throw(boom))
     with pytest.raises(AgentRoundFailedError) as exc:
@@ -501,11 +509,11 @@ def test_a_restore_whose_digest_disagrees_fails_and_keeps_library_and_copy(store
     digests = {}
     with pytest.raises(OSError):
         _run(store, lambda **kw: (_ for _ in ()).throw(OSError("x")), mem, digests=digests)
-    before = mem.store.digest("pa")
-    digests[EID] = {"pa": "not-the-recorded-digest"}
+    before = mem.store.digest(WORLD)
+    digests[EID] = "not-the-recorded-digest"
     with pytest.raises(RestoreFailedError, match=EID):
         _run(store, _Factory(), mem, digests=digests)
-    assert mem.layout.snapshot(ROUND, EID, "pa").exists() and mem.store.digest("pa") == before
+    assert mem.layout.snapshot(ROUND, EID).exists() and mem.store.digest(WORLD) == before
 
 
 def test_a_memory_admission_alone_reuses_committed_episodes(store, mem):
@@ -533,8 +541,8 @@ def test_exhausted_transient_retries_leave_the_library_at_the_start(store, mem):
     with pytest.raises(DeploymentFailedError) as info:
         _run(store, _Factory({"end_reason": "timeout"}, {"end_reason": "timeout"}), mem, digests=digests)
     assert info.value.transient
-    assert mem.store.digest("pa") == digests[EID]["pa"]
-    assert mem.layout.snapshot(ROUND, EID, "pa").exists()              # 在途:留给重入或轮次回滚
+    assert mem.store.digest(WORLD) == digests[EID]
+    assert mem.layout.snapshot(ROUND, EID).exists()                    # 在途:留给重入或轮次回滚
 
 
 def test_a_rejection_for_unavailable_role_memory_is_transient(store, mem):
@@ -548,32 +556,33 @@ def test_a_transient_failure_then_success_commits_once(store, mem, monkeypatch):
     real = deployment.write_episode
 
     def recording(store_, run_id, episode):
-        writes.append((episode.turns[0].utterance, mem.layout.snapshot(ROUND, EID, "pa").exists()))
+        writes.append((episode.turns[0].utterance, mem.layout.snapshot(ROUND, EID).exists()))
         return real(store_, run_id, episode)
 
     monkeypatch.setattr(deployment, "write_episode", recording)
     (ep,) = _run(store, _Factory({"end_reason": "timeout"}, {"opening": "我换个说法"}), mem)
-    assert writes == [("我换个说法", True)]                             # 只落一次,用第二次的结果,副本此时还在
+    assert writes == [("我换个说法", True)]                             # 只落一次,用第二次的结果,快照此时还在
     assert ep.turns[0].utterance == "我换个说法"
-    assert not mem.layout.snapshot(ROUND, EID, "pa").exists()          # 落盘之后才删副本
+    assert not mem.layout.snapshot(ROUND, EID).exists()                # 落盘之后才删快照
 
 
 def test_a_failed_attempt_is_rolled_back_after_its_port_is_closed(store, mem, tmp_path):
     log = []
 
     class Recording(FileTupleStore):
-        def open(self, persona_id):
-            log.append(("open", persona_id))
-            return super().open(persona_id)
+        def open(self, world_id, holder):
+            log.append(("open", world_id, holder))
+            return super().open(world_id, holder)
 
-        def restore_from(self, persona_id, path):
-            log.append(("restore", persona_id, self._open.get(persona_id, 0)))
-            return super().restore_from(persona_id, path)
+        def restore_from(self, world_id, path):
+            log.append(("restore", world_id, self._open.get(world_id, 0)))
+            return super().restore_from(world_id, path)
 
     rec = SimpleNamespace(store=Recording(tmp_path / "rec" / "deploy"), layout=MemoryLayout(tmp_path / "rec"))
     _run(store, _Factory({"end_reason": "timeout"}, {"end_reason": "timeout"}, {}), rec,
          max_retries_per_episode=2)
-    assert log == [("open", "pa"), ("restore", "pa", 0), ("open", "pa"), ("restore", "pa", 0), ("open", "pa")]
+    assert log == [("open", WORLD, "pa"), ("restore", WORLD, 0), ("open", WORLD, "pa"), ("restore", WORLD, 0),
+                   ("open", WORLD, "pa")]
 
 
 @pytest.mark.parametrize("transient,reason", [(True, "role_memory_unavailable"), (False, "role_memory_failure")])
@@ -591,8 +600,8 @@ def test_a_memory_failure_inside_respond_maps_to_a_role_memory_reason(store, mem
         def close(self):
             self.real.close()
 
-    def make(episode_id, memory):
-        real = inner(episode_id, memory)
+    def make(episode_id, memory, holder):
+        real = inner(episode_id, memory, holder)
         built.append(real)
         return Failing(real) if len(built) == 1 else real
 
@@ -639,7 +648,7 @@ def test_an_admission_refusal_backs_off_inside_the_attempt_and_does_not_count_as
     assert ep.id == EID and ep.terminated_reason == "max_turns"                # 一次计数的尝试就成了
     assert len(f.clients) == 3 and [c.created["episode_id"] for c in f.clients] == [EID] * 3
     assert clock.sleeps == [0.5, 1.0]                                          # 指数退避,没有真睡
-    assert not mem.layout.snapshot(ROUND, EID, "pa").exists()
+    assert not mem.layout.snapshot(ROUND, EID).exists()
 
 
 def test_an_exhausted_admission_budget_is_a_transient_failure_and_the_library_stays_at_the_start(store, mem):
@@ -651,8 +660,8 @@ def test_an_exhausted_admission_budget_is_a_transient_failure_and_the_library_st
     assert (exc.value.reason, exc.value.attempts, exc.value.transient) == ("role_backend_unavailable", 1, True)
     assert clock.sleeps[:5] == [0.5, 1.0, 2.0, 4.0, 8.0] and max(clock.sleeps) <= 8.0
     assert clock.now == 20.0                                                   # 用够预算,不超出
-    assert mem.store.digest("pa") == digests[EID]["pa"]
-    assert mem.layout.snapshot(ROUND, EID, "pa").exists()
+    assert mem.store.digest(WORLD) == digests[EID]
+    assert mem.layout.snapshot(ROUND, EID).exists()
 
 
 def test_other_create_rejections_are_not_backed_off(store, mem):
@@ -743,7 +752,7 @@ def test_a_same_id_rerun_after_a_hung_opponent_backs_off_and_succeeds_against_a_
     (ep,) = _run(store, env.make_factory(), mem, admission_wait_s=10.0)
     assert ep.id == EID and ep.terminated_reason == "max_turns"
     assert "role_backend_unavailable" in env.rejected
-    assert not mem.layout.snapshot(ROUND, EID, "pa").exists()               # 提交了
+    assert not mem.layout.snapshot(ROUND, EID).exists()                     # 提交了
 
 
 def test_a_same_id_rerun_after_a_client_abort_backs_off_and_succeeds_against_a_real_server(
@@ -766,8 +775,8 @@ class _CloseFailingStore(FileTupleStore):
         super().__init__(root)
         self._exc = exc
 
-    def open(self, persona_id):
-        port = super().open(persona_id)
+    def open(self, world_id, holder):
+        port = super().open(world_id, holder)
         real_close, exc = port.close, self._exc
 
         def close():
@@ -787,7 +796,7 @@ def test_a_close_failure_after_a_successful_run_is_a_round_failure_reporting_onl
         _run(store, _Factory(), m)
     assert info.value.point == "mindagent.deployment.memory"
     assert type(boom).__name__ in info.value.reason and "secret" not in info.value.reason
-    assert m.layout.snapshot(ROUND, EID, "pa").exists()                # 没走到提交点:副本留给轮次回滚
+    assert m.layout.snapshot(ROUND, EID).exists()                      # 没走到提交点:快照留给轮次回滚
 
 
 def test_a_transient_close_failure_propagates_unchanged_like_other_management_calls(store, tmp_path):
@@ -812,3 +821,292 @@ def test_a_close_failure_does_not_mask_the_original_exception(store, tmp_path, c
         with pytest.raises(RuntimeError, match="model bug"):          # 原异常优先,close 失败只记 warning
             _run(store, _Factory(), m, make=_make(backend=Broken()))
     assert "MemoryFailureError" in caplog.text and "checkpoint" not in caplog.text
+
+
+# ---------------- 部署世界(设计三 4.3–4.5 节):对手位进世界、未提交快照的守卫、等端口全关、新复用判据 ----------------
+
+class _WorldClient:
+    """替身客户端连同替身服务端的对手位(设计三 4.5 节):对手位按 register_episode 登记的 round_id,在情境世界里开
+    (世界, 对手人格) 端口;每次开口前把自己上次开口之后别人说的话记进世界,key 与 Actio 实例同一套
+    (<round_id>/<部署 id>#<turn>@<主体>)。order 是发言顺序。会话结束(到 max_turns 或 abort)时对每个对手端口调
+    release(port),缺省立即关;测试拿它推迟关(另一条线程)或干脆不关。"""
+
+    def __init__(self, mem, registry, *, order=("b", "a"), max_turns=4, end_reason="max_turns", release=None):
+        self._mem, self._registry = mem, registry
+        self._order, self._max_turns, self._end_reason = order, max_turns, end_reason
+        self._release = release or (lambda port: port.close())
+        self._turns, self._ports, self._seen = [], {}, {}
+        self.closed = False
+        self.created = None
+        self.traces = []
+
+    @property
+    def turns(self):
+        return list(self._turns)
+
+    def create_session(self, *, scenario_id, role_assignment, personas, purpose, client_driven_slot,
+                       episode_id=None):
+        self.created = dict(scenario_id=scenario_id, role_assignment=role_assignment, episode_id=episode_id)
+        self._agent = client_driven_slot
+        self._pid = {b.slot_id: b.persona_id for b in role_assignment.bindings}
+        self._prefix = f"{self._registry[episode_id]}/{episode_id}"     # 服务端只认登记表里的 round_id
+        for slot, pid in self._pid.items():
+            if slot != client_driven_slot:
+                self._ports[slot] = self._mem.store.open(scenario_id, pid)
+                self._seen[slot] = -1
+        self._advance()
+        return "sess"
+
+    def _advance(self):
+        while len(self._turns) < self._max_turns:
+            slot = self._order[len(self._turns) % len(self._order)]
+            if slot == self._agent:
+                return
+            pid = self._pid[slot]
+            for t in self._turns[self._seen[slot] + 1:]:
+                if t.speaker_slot != slot:
+                    speaker = self._pid[t.speaker_slot]
+                    self._ports[slot].remember(MemoryEvent(
+                        f"{self._prefix}#{t.turn_index}@{pid}", f"{speaker}：{t.utterance}", speaker))
+            self._seen[slot] = len(self._turns) - 1
+            self._turns.append(TurnRecord(len(self._turns), slot, f"{pid} 第 {len(self._turns)} 句"))
+        self._end()
+
+    def submit_turn(self, utterance, inner_thought=None, *, activation_trace=None):
+        self.traces.append(activation_trace)
+        self._turns.append(TurnRecord(len(self._turns), self._agent, utterance, inner_thought, activation_trace))
+        self._advance()
+        return []
+
+    def _end(self):
+        if not self.closed:
+            self.closed = True
+            for port in self._ports.values():
+                self._release(port)
+
+    def drain_until_end(self):
+        return Episode("ep-sess", self.created["scenario_id"], self.created["role_assignment"],
+                       self.turns, self._end_reason)
+
+    def abort(self):
+        self._end()
+
+
+class _WorldFactory:
+    """_WorldClient 的工厂;hooks() 是交给驱动器的 register_episode / unregister_episode,登记表就是 registry。"""
+
+    def __init__(self, mem, *plans, **common):
+        self.registry = {}
+        self._mem, self._plans, self._common = mem, list(plans), common
+        self.clients = []
+
+    def __call__(self, **kw):
+        plan = self._plans.pop(0) if self._plans else {}
+        c = _WorldClient(self._mem, self.registry, **{**self._common, **plan})
+        self.clients.append(c)
+        return c
+
+    def hooks(self):
+        return dict(register_episode=self.registry.__setitem__, unregister_episode=self.registry.pop)
+
+
+def _events(mem, world):
+    """世界文件里的事件行,按 seq 排(替身的落盘格式)。"""
+    path = mem.layout.root / "deploy" / f"{world}.json"
+    return json.loads(path.read_text(encoding="utf-8"))["events"] if path.exists() else []
+
+
+def test_both_slots_write_into_the_scenario_world_under_their_own_persona(store, mem):
+    # 智能体的 key 以 @<智能体位人格> 结尾(Task 2 的 holder 由驱动器传入),对手位的以 @<对手人格> 结尾
+    f = _WorldFactory(mem)
+    (ep,) = _run(store, f, mem, **f.hooks())
+    assert ep.id == EID
+    rows = _events(mem, WORLD)
+    assert [(r["key"], r["holder"], r["state"]) for r in rows] == [
+        (f"{ROUND}/{EID}#0@pa", "pa", "committed"),
+        (f"{ROUND}/{EID}#1@pb", "pb", "committed"),
+        (f"{ROUND}/{EID}#2@pa", "pa", "committed"),
+    ]
+    assert f.registry == {}                                            # 每次尝试结束都撤销登记
+    assert not (mem.layout.root / "deploy" / "pa.json").exists()       # 不再按人格建库
+
+
+def test_a_failed_attempt_rolls_back_both_slots_writes(store, mem, monkeypatch):
+    digests, before_restore = {}, []
+    real = mem.store.restore_from
+
+    def spy(world, path):
+        before_restore.append([r["key"] for r in _events(mem, world)])
+        return real(world, path)
+
+    monkeypatch.setattr(mem.store, "restore_from", spy)
+    f = _WorldFactory(mem, {"end_reason": "role_backend_failure"})
+    with pytest.raises(DeploymentFailedError):
+        _run(store, f, mem, digests=digests, **f.hooks())
+    # 对手位经 register_episode 拿到的 round_id 写进了世界;失败后整个世界(两个主体)回到起点
+    assert before_restore == [[f"{ROUND}/{EID}#0@pa", f"{ROUND}/{EID}#1@pb", f"{ROUND}/{EID}#2@pa"]]
+    assert mem.store.digest(WORLD) == digests[EID]
+    assert _events(mem, WORLD) == []
+    assert f.registry == {}                                            # 失败的尝试也撤销登记
+
+
+def test_another_rounds_uncommitted_snapshot_defers_the_episode(store, mem):
+    # 设计三 4.3 节:R1 回滚失败留下的快照在,R2 不往这个世界写;原因写出 R1 的轮次 id
+    p = mem.layout.snapshot("agent-round-zengen-v1", "deploy-zengen-v1-s1-1")
+    p.parent.mkdir(parents=True)
+    p.write_text("{}")
+    mem.layout.write_world_tag(p, WORLD)
+    f = _Factory()
+    with pytest.raises(DeferredError, match="round agent-round-zengen-v1; restore or delete it by hand"):
+        _run(store, f, mem, round_id="agent-round-zengen-v2")
+    assert f.clients == []
+    assert mem.layout.round_snapshots("agent-round-zengen-v2") == []   # 一点没写
+    assert not (mem.layout.root / "deploy" / f"{WORLD}.json").exists()
+
+
+def test_another_rounds_snapshot_of_a_different_world_does_not_defer(store, mem):
+    p = mem.layout.snapshot("agent-round-zengen-v1", "deploy-zengen-v1-s2-1")
+    mem.layout.write_world_tag(p, "s2")
+    p.write_text("{}")
+    (ep,) = _run(store, _Factory(), mem, round_id="agent-round-zengen-v2")
+    assert ep.id == EID
+
+
+def test_a_corrupt_world_tag_anywhere_stops_the_round_as_a_data_error(store, mem):
+    p = mem.layout.snapshot("agent-round-zengen-v0", "deploy-zengen-v0-s2-1")
+    p.parent.mkdir(parents=True)
+    p.write_text("{}")
+    p.with_suffix(".world").write_text("../s1")
+    f = _Factory()
+    with pytest.raises(MindAgentDataError):
+        _run(store, f, mem)
+    assert f.clients == []
+
+
+def test_the_world_tag_is_written_before_the_start_snapshot(store, mem, monkeypatch):
+    order = []
+    real_tag, real_backup = MemoryLayout.write_world_tag, mem.store.backup_to
+    monkeypatch.setattr(MemoryLayout, "write_world_tag",
+                        lambda self, snap, sid: order.append(("tag", snap.name, sid)) or real_tag(self, snap, sid))
+    monkeypatch.setattr(mem.store, "backup_to",
+                        lambda world, path: order.append(("backup", path.name, world)) or real_backup(world, path))
+    _run(store, _Factory(), mem, started=SimpleNamespace(append=lambda item: order.append(("start", item[0]))))
+    name = f"deploy-{EID}.json"
+    assert order == [("tag", name, WORLD), ("backup", name, WORLD), ("start", EID)]
+
+
+def test_a_committed_episode_drops_its_snapshot_before_its_world_tag(store, mem, monkeypatch):
+    removed = []
+    real_unlink = deployment.Path.unlink
+
+    def unlink(self, *a, **kw):
+        if self.parent.name == ROUND:
+            removed.append(self.name)
+        return real_unlink(self, *a, **kw)
+
+    monkeypatch.setattr(deployment.Path, "unlink", unlink)
+    _run(store, _Factory(), mem)
+    assert removed == [f"deploy-{EID}.json", f"deploy-{EID}.world"]
+
+
+THREE = (RoleBinding("c", "pc", "frozen_reference", model_ref="zengen-v1"), OPP, AGENT)
+
+
+def test_a_committed_episode_is_reused_when_a_second_opponent_spoke_before_the_agent(store, mem):
+    # 设计三 4.5 节"首轮摘要的顺序":c 先开口、b 第二个说话时把 c 的话记进世界,智能体位第三个说话,
+    # 首轮 digest_before 不再等于起点摘要;复用判据不比它
+    write_scenario(store, Scenario("s3", "bg", [RoleSlot("a", "a"), RoleSlot("b", "b"), RoleSlot("c", "c")],
+                                   "c", ["n"], PURPOSE))
+    personas = {**_personas(), "pc": Persona("pc", ["t"], "m", "s", ["v"])}
+    eid = "deploy-zengen-v1-s3-1"
+    digests = {}
+    kw = dict(scenario_ids=["s3"], bindings=THREE, personas=personas, max_turns=6)
+    f = _WorldFactory(mem, order=("c", "b", "a"), max_turns=6)
+    (ep,) = _run(store, f, mem, digests=digests, **kw, **f.hooks())
+    assert [t.speaker_slot for t in ep.turns] == ["c", "b", "a", "c", "b", "a"]
+    first = next(t for t in ep.turns if t.speaker_slot == "a")
+    assert first.activation_trace["memory"]["digest_before"] != digests[eid]
+    keys = [r["key"] for r in _events(mem, "s3")]
+    assert f"{ROUND}/{eid}#0@pb" in keys and f"{ROUND}/{eid}#0@pa" in keys   # 同一句被两个主体各记一份,key 不撞
+    again = _WorldFactory(mem, order=("c", "b", "a"), max_turns=6)
+    (reused,) = _run(store, again, mem, digests=digests, **kw, **again.hooks())
+    assert again.clients == [] and reused.to_dict() == ep.to_dict()
+
+
+def test_an_old_shape_start_digest_counts_as_not_recorded_and_the_episode_reruns(store, mem):
+    digests = {}
+    _run(store, _Factory(), mem, digests=digests)
+    digests[EID] = {"pa": digests[EID]}                                # 本次改动之前的轮次产物:{persona_id: 摘要}
+    f = _Factory()
+    (ep,) = _run(store, f, mem, digests=digests)
+    assert len(f.clients) == 1 and ep.id == EID
+    assert isinstance(digests[EID], str)                               # 重跑时按新形状重记
+
+
+def test_the_driver_waits_for_server_ports_before_restoring(store, mem):
+    # 服务端在另一条线程上晚 0.3 秒才关对手端口:驱动器先等端口全关再恢复,恢复不被"世界还开着端口"拒绝
+    def late(port):
+        threading.Timer(0.3, port.close).start()
+
+    f = _WorldFactory(mem, {"end_reason": "timeout"}, {}, release=late)
+    (ep,) = _run(store, f, mem, **f.hooks())
+    assert ep.id == EID and len(f.clients) == 2
+    assert not mem.layout.snapshot(ROUND, EID).exists()
+    assert mem.store.wait_closed(WORLD, 0)                             # 提交之前也等过
+
+
+def test_a_server_port_that_never_closes_fails_the_restore_and_keeps_the_snapshot(store, mem):
+    digests = {}
+    f = _WorldFactory(mem, {"end_reason": "timeout"}, release=lambda port: None)
+    with pytest.raises(RestoreFailedError, match="still open") as info:
+        _run(store, f, mem, digests=digests, close_wait_s=0.2, **f.hooks())
+    assert info.value.point == "mindagent.deployment.restore"
+    snap = mem.layout.snapshot(ROUND, EID)
+    assert snap.exists() and mem.layout.world_of(snap) == WORLD        # 库与快照都留给人
+    assert mem.store.digest(WORLD) != digests[EID]
+    assert len(f.clients) == 1
+
+
+def test_a_server_port_that_never_closes_after_a_success_defers_the_commit(store, mem):
+    f = _WorldFactory(mem, release=lambda port: None)
+    with pytest.raises(DeferredError, match=f"world {WORLD}"):
+        _run(store, f, mem, close_wait_s=0.2, **f.hooks())
+    assert not store.exists(episode_file(RUN, EID))                    # 没提交:重入时"快照在就先恢复"
+    assert mem.layout.snapshot(ROUND, EID).exists()
+
+
+def test_a_port_still_open_before_an_attempt_defers_without_opening_a_session(store, mem):
+    leftover = mem.store.open(WORLD, "pb")                             # 上一个会话的服务端还没收尾
+    f = _Factory()
+    with pytest.raises(DeferredError, match=f"world {WORLD} still has open memory ports .* before attempt 1"):
+        _run(store, f, mem, close_wait_s=0.2)
+    assert f.clients == [] and mem.layout.snapshot(ROUND, EID).exists()   # 快照已拍,重入时先恢复
+    leftover.close()
+    (ep,) = _run(store, _Factory(), mem)
+    assert ep.id == EID and not mem.layout.snapshot(ROUND, EID).exists()
+
+
+def test_pending_rows_of_deployment_opponents_are_abandoned_on_commit(store, mem):
+    opp_key = f"{ROUND}/{EID}#1@pb"                                    # 对手位记智能体第 1 轮那句
+    mem.failing.add(opp_key)
+    f = _WorldFactory(mem)
+    (ep,) = _run(store, f, mem, **f.hooks())
+    assert ep.id == EID
+    assert mem.store.pending_events(WORLD) == []
+    with pytest.raises(MemoryEventConflict):                           # 放弃是终态
+        mem.store.remember_event(WORLD, "pb", opp_key, f"pa：{ep.turns[1].utterance}", interlocutor="pa")
+
+
+@pytest.mark.parametrize("bad", [-1.0, float("nan"), float("inf"), True])
+def test_a_close_wait_that_is_not_a_finite_non_negative_number_is_refused(store, mem, bad):
+    f = _Factory()
+    with pytest.raises(ValueError, match="close_wait_s"):
+        _run(store, f, mem, close_wait_s=bad)
+    assert f.clients == []
+
+
+def test_the_default_close_wait_outlasts_the_servers_join_timeout():
+    import inspect
+    join = inspect.signature(create_server).parameters["resource_join_timeout_s"].default
+    assert deployment.SESSION_CLOSE_WAIT_S == 70.0 >= join + 10
+    assert inspect.signature(run_deployment_episodes).parameters["close_wait_s"].default == 70.0

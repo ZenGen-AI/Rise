@@ -11,21 +11,22 @@
   pending 的轮次在下一个 tick 重新触发 start_agent_round,所以本处理器的重入必须幂等:已提交的
   部署 episode 不重跑,提案按确定性 id 重写。
 
-部署记忆(设计二第 9 节):
-- 处理器一开始(写任何东西之前)按排序后的绑定人格 id 逐个拿 deploy/<persona_id>.lock,锁持到处理器
-  返回或抛出;拿不到就抛 DeferredError,轮次留在原状态,守护进程退避后重试。
-- 轮次产物带 memory_runtime(装配时给的运行时身份)与 episode_digests({部署 id: {persona_id: 起点摘要}}),
+部署记忆(设计二第 9 节,设计三 4.2–4.7 节:一个情境一个部署世界):
+- 处理器一开始(写任何东西之前)按排序后的本轮情境 id(AgentConfig.scenario_ids)逐个拿世界锁
+  deploy/<scenario_id>.lock,锁持到处理器返回或抛出;拿不到就抛 DeferredError,轮次留在原状态,守护进程退避后重试。
+- 轮次产物带 memory_runtime(装配时给的运行时身份)与 episode_digests({部署 id: 起点时的世界摘要}),
   每条 episode 开始前写回一次;pending 轮次重入时继承上一次记下的 episode_digests,已提交的才认得出来。
 - 把 pending 轮次写成终态的每条路径(T3、被取代、模型读不出、轮次产物读不出)都先走同一步 _close_round:
-  拿该轮次绑定人格的锁(被占抛 DeferredError,不写终态),用起点副本把在途 episode 覆盖回起点、删副本,
-  再写终态。覆盖失败时库与副本都保留,轮次照样写 failed(T3,失败点 mindagent.deployment.restore)并记
-  失败记录。驱动器自己抛的覆盖失败不再回滚。瞬态失败与其余异常不回滚:轮次留 pending,重入时由驱动器
-  "副本在就先覆盖"处理。
-- 验证重放在部署库的验证快照上做:基线与候选各从快照恢复一份临时副本,实例只读;轮次结束即删,
+  拿该轮次情境的世界锁(被占抛 DeferredError,不写终态),用起点快照把在途 episode 所在的世界覆盖回起点、
+  删快照与旁注,再写终态。覆盖失败时库与快照都保留,轮次照样写 failed(T3,失败点 mindagent.deployment.restore)
+  并记失败记录。驱动器自己抛的覆盖失败不再回滚。瞬态失败与其余异常不回滚:轮次留 pending,重入时由驱动器
+  "快照在就先覆盖"处理。
+- 验证重放在每个情境世界的验证快照上做:基线与候选各从该情境的快照恢复一份临时世界,实例只读;轮次结束即删,
   snapshots/<round_id>/ 空了也删。收尾关验证实例失败只记 warning,不抛(终审 M-1)。
-- 记忆层的确定性错误不从处理器逃出(终审 I-2):部署驱动器把管理面与副本文件操作的永久失败改抛
+- 记忆层的确定性错误不从处理器逃出(终审 I-2):部署驱动器把管理面与快照文件操作的永久失败改抛
   AgentRoundFailedError(失败点 mindagent.deployment.memory),验证快照段同样(mindagent.rounds.verify),都判 T3
-  并回滚;验证段(快照与重放)里的瞬态 MemoryFailureError 改抛 DeferredError,轮次留 pending、守护进程退避重试;绑定人格 id 拼不出锁路径(ActioDataError)判 T3、不回滚(失败点 mindagent.rounds.persona)。
+  并回滚;验证段(快照与重放)里的瞬态 MemoryFailureError 改抛 DeferredError,轮次留 pending、守护进程退避重试;
+  情境 id 拼不出世界锁路径(ValueError)判 T3、不回滚(失败点 mindagent.rounds.world)。
   原因只报类名。模型后端的 OSError 不在其内,照旧原样上抛、轮次留 pending。
 """
 from __future__ import annotations
@@ -55,11 +56,11 @@ from controlplane.states import assert_transition
 from inference_bridge import BridgeError
 from mindagent.analysis import analyze
 from mindagent.config import AgentConfig, agent_slot_of
-from mindagent.deployment import DeploymentFailedError, run_deployment_episodes
+from mindagent.deployment import SESSION_CLOSE_WAIT_S, DeploymentFailedError, run_deployment_episodes
 from mindagent.errors import AgentRoundFailedError, MindAgentDataError, ProposalParseError, RestoreFailedError
 from mindagent.failures import UNREADABLE, fail_once, read_or_none
 from mindagent.library import LibraryState, load_library
-from mindagent.memory_layout import MemoryLayout
+from mindagent.memory_layout import MemoryLayout, _tag_path
 from mindagent.packaging import Thresholds, package, screen, stale_proposals
 from mindagent.proposals import BRIDGE_GENERATOR, PROMPT_TEMPLATE_VERSION, RULE_GENERATOR, propose
 from mindagent.verify import verify
@@ -231,28 +232,29 @@ def _check_inputs(store: GitStore, config: AgentConfig) -> None:
             raise AgentRoundFailedError(f"persona {b.persona_id!r} not in the tree", point="mindagent.rounds.inputs")
 
 
-class _PersonaLocks:
-    """一次处理器调用里拿到的人格库锁。同一个人格只拿一次:flock 按打开的文件算,同一进程再开一次去拿
-    也会被拒。被占就抛 DeferredError(原因只有锁文件路径)。"""
+class _WorldLocks:
+    """一次处理器调用里拿到的世界锁(设计三 4.2 节)。同一个世界只拿一次:flock 按打开的文件算,同一进程再开
+    一次去拿也会被拒。按 scenario_id 排序依次拿,被占就抛 DeferredError(原因只有锁文件路径)。
+    情境 id 过不了世界 id 白名单时 hold_world 抛 ValueError,由调用方处理。"""
 
     def __init__(self, layout: MemoryLayout) -> None:
         self._layout = layout
         self._stack = ExitStack()
         self._held: set[str] = set()
 
-    def __enter__(self) -> "_PersonaLocks":
+    def __enter__(self) -> "_WorldLocks":
         return self
 
     def __exit__(self, *exc) -> bool:
         return self._stack.__exit__(*exc)
 
-    def hold(self, persona_ids) -> None:
-        for pid in sorted(set(persona_ids) - self._held):
+    def hold(self, scenario_ids) -> None:
+        for sid in sorted(set(scenario_ids) - self._held):
             try:
-                self._stack.enter_context(self._layout.persona_lock(pid))
+                self._stack.enter_context(self._layout.hold_world(sid))
             except FileLockBusyError as exc:
-                raise DeferredError(f"persona library locked: {exc}") from exc
-            self._held.add(pid)
+                raise DeferredError(f"world library locked: {exc}") from exc
+            self._held.add(sid)
 
 
 _T = TypeVar("_T")
@@ -280,15 +282,6 @@ def _rmdir_if_empty(path: Path) -> None:
         pass
 
 
-def _round_personas(env: Envelope, fallback: list[str]) -> list[str]:
-    """轮次绑定的人格:载荷的 persona_ids;最小产物(没有这个字段)用当前配置的。不合法的 id 不会有库
-    也不会有副本,跳过。"""
-    ids = env.payload.get("persona_ids")
-    if not isinstance(ids, list):
-        ids = fallback
-    return sorted({p for p in ids if isinstance(p, str) and PERSONA_ID_PATTERN.fullmatch(p)})
-
-
 def make_start_round_handler(
     *,
     config: AgentConfig,
@@ -301,15 +294,17 @@ def make_start_round_handler(
     scratch_store_factory: Callable[[Path], DeploymentMemoryStore],
     bridge=None,
     stream_deadline_s: float | None = None,
+    register_episode: Callable[[str, str], None] = lambda eid, rid: None,
+    unregister_episode: Callable[[str], None] = lambda eid: None,
 ) -> Handler:
     """backend_factory(model_id, checkpoint_ref) 每次调用返回一个新的模型后端(普通或带指导语的);
     personas_loader(store, persona_ids) 返回 {persona_id: Persona}。bridge 缺省走规则模板。
     memory_store 与 memory_layout 是部署记忆(与门② 共用同一份);memory_runtime 是记忆运行时身份,
-    装配时深拷贝一次;scratch_store_factory(root) 给验证重放造临时副本库。stream_deadline_s 原样交给
-    部署驱动器,None 时客户端工厂用它自己的现值。"""
+    装配时深拷贝一次;scratch_store_factory(root) 给验证重放造临时世界的管理面。stream_deadline_s、
+    register_episode(部署 id, round_id)与 unregister_episode(部署 id)原样交给部署驱动器:stream_deadline_s 为
+    None 时客户端工厂用它自己的现值;两个登记回调让服务端给部署会话的对手位在同一世界里开端口,缺省什么都不做。"""
     generator = RULE_GENERATOR if bridge is None else BRIDGE_GENERATOR
     runtime = copy.deepcopy(memory_runtime)
-    bound_personas = sorted({b.persona_id for b in config.bindings})
 
     def handle(store: GitStore, action: Action) -> None:
         model_id = action.target_id
@@ -317,44 +312,62 @@ def make_start_round_handler(
         existing = read_or_none(store, rel)
         if existing is not None and existing.status != "pending":
             return  # executed 或 failed:终态,空操作
-        with _PersonaLocks(memory_layout) as locks:
+        with _WorldLocks(memory_layout) as locks:
             try:
-                locks.hold(bound_personas)  # 写任何东西之前:被占就延后,树里什么都不写
-            except ActioDataError as exc:
-                # 人格 id 不合 PERSONA_ID_PATTERN,拼不出锁路径(装配期本已拦下,这里兜底):不能从处理器逃出,
-                # 否则守护进程每次重启都在同一处退出(终审 I-2)。一个锁都没拿到,所以不回滚:T3、只报类名。
-                _fail_bad_persona(store, model_id, existing, type(exc).__name__)
+                locks.hold(config.scenario_ids)  # 写任何东西之前:被占就延后,树里什么都不写
+            except ValueError as exc:
+                # 情境 id 过不了世界 id 白名单,拼不出锁路径:不能从处理器逃出,否则守护进程每次重启都在同一处
+                # 退出(终审 I-2)。按排序拿锁,坏 id 之前的锁已拿到,但世界库只在锁全部拿到之后才写,没有在途
+                # 快照要回滚:T3、只报类名。
+                _fail_bad_world(store, model_id, existing, type(exc).__name__)
                 return
             _handle(store, model_id, rel, existing, _rollback_with(locks))
 
-    def _fail_bad_persona(store: GitStore, model_id: str, existing: Envelope | None, cls: str) -> None:
+    def _fail_bad_world(store: GitStore, model_id: str, existing: Envelope | None, cls: str) -> None:
         try:
             _, run_id, _ = _read_model(store, model_id)
         except (AgentRoundFailedError, *UNREADABLE):
             run_id = ""
         env = existing if existing is not None else _round_envelope(
             model_id, {"model_id": model_id, "run_id": run_id, "failure": None})
-        _close_round(store, env, f"bound persona id refused by the memory layout: {cls}", category="T3",
-                     point="mindagent.rounds.persona", rollback=None, run_id=run_id, record=True)
+        _close_round(store, env, f"scenario id refused by the memory layout: {cls}", category="T3",
+                     point="mindagent.rounds.world", rollback=None, run_id=run_id, record=True)
 
-    def _rollback_with(locks: _PersonaLocks) -> Rollback:
+    def _rollback_with(locks: _WorldLocks) -> Rollback:
         def rollback(env: Envelope) -> None:
-            """该轮次每个还在的起点副本覆盖回它的人格库,再删副本(第 9 节"轮次失败收尾")。先拿该轮次
-            绑定人格的锁(被占抛 DeferredError)。驱动器每次尝试的 finally 已关掉实例与端口;restore_from
-            遇到仍打开的端口会拒绝覆盖,这里把它与文件系统错误一起改抛 RestoreFailedError,库与副本都不动。
-            副本按最长的人格 id 后缀认领:人格 id 里允许 '-',`...-x-pa` 不能被当成 `pa` 的副本。"""
-            personas = _round_personas(env, bound_personas)
-            locks.hold(personas)
-            by_length = sorted(personas, key=len, reverse=True)
-            for snap in memory_layout.round_snapshots(env.id):
-                pid = next((p for p in by_length if snap.name.endswith(f"-{p}{memory_layout.suffix}")), None)
-                if pid is None:
-                    continue
+            """该轮次每个还在的起点快照按它的 `.world` 旁注找到世界,覆盖回去,再删快照、后删旁注(设计二第 9 节
+            "轮次失败收尾",设计三 4.1 节)。先拿该轮次产物 scenario_ids 里的世界锁(被占抛 DeferredError);产物没有
+            这个字段(最小产物)时锁旁注里的世界。快照没有可读的旁注时不知道它属于哪个世界,改抛 RestoreFailedError
+            点名这些快照,一个世界都不碰。驱动器每次尝试的 finally 已关掉实例与端口,服务端的对手端口在另一条
+            线程上关:覆盖前先等世界的端口全关。等不到、restore_from 拒绝或文件系统出错都改抛 RestoreFailedError,
+            库与快照都不动。"""
+            ids = env.payload.get("scenario_ids")
+            if isinstance(ids, list):  # 不合法的 id 不会有世界,也不会有快照
+                locks.hold({s for s in ids if isinstance(s, str) and PERSONA_ID_PATTERN.fullmatch(s)})
+            snaps = memory_layout.round_snapshots(env.id)
+            worlds: dict[Path, str] = {}
+            untagged: list[str] = []
+            for snap in snaps:
                 try:
-                    memory_store.restore_from(pid, snap)
-                    snap.unlink()  # 删不掉的副本同样按覆盖失败处理:库与副本都留着等人,不从处理器逃出
+                    worlds[snap] = memory_layout.world_of(snap)
+                except MindAgentDataError:
+                    untagged.append(snap.name)
+            if untagged:
+                raise RestoreFailedError(f"rollback: start snapshots without a readable world tag: "
+                                         f"{', '.join(untagged)}", point="mindagent.deployment.restore")
+            locks.hold(worlds.values())  # 通常已持有;手改过的产物也不能让回滚绕过世界锁
+            for snap, world in worlds.items():
+                if not memory_store.wait_closed(world, SESSION_CLOSE_WAIT_S):
+                    raise RestoreFailedError(f"rollback {snap.name} in world {world}: memory ports still open "
+                                             f"after {SESSION_CLOSE_WAIT_S:g}s", point="mindagent.deployment.restore")
+                try:
+                    memory_store.restore_from(world, snap)
+                    # 删不掉的快照同样按覆盖失败处理:库与快照都留着等人,不从处理器逃出。先删快照、后删旁注:
+                    # 反过来崩在中间会留下没有旁注的快照,启动检查把它当旧布局
+                    snap.unlink()
+                    _tag_path(snap).unlink(missing_ok=True)
                 except (MemoryFailureError, OSError) as exc:
-                    raise RestoreFailedError(f"rollback {snap.name} for {pid}: {type(exc).__name__}",
+                    raise RestoreFailedError(f"rollback {snap.name} in world {world}: {type(exc).__name__}",
                                              point="mindagent.deployment.restore") from exc
 
         return rollback
@@ -421,8 +434,8 @@ def make_start_round_handler(
                 holder=holder, interlocutors=interlocutors, library_version=lib.version, profile=profile,
             )
 
-        def on_episode_start(eid: str, by_persona: dict[str, str]) -> None:
-            env.payload["episode_digests"][eid] = dict(by_persona)
+        def on_episode_start(eid: str, digest: str) -> None:
+            env.payload["episode_digests"][eid] = digest
             store.write_product(agent_round_file(model_id), env, f"mindagent: {env.id} start {eid}")
 
         persona_ids = sorted({b.persona_id for b in config.bindings})
@@ -436,24 +449,25 @@ def make_start_round_handler(
             episodes_per_scenario=config.episodes_per_scenario,
             max_retries_per_episode=config.max_retries_per_episode,
             stream_deadline_s=stream_deadline_s,
+            register_episode=register_episode, unregister_episode=unregister_episode,
         )
         findings = analyze(episodes, min_support=config.min_support, min_ratio=config.min_ratio, skills=lib.skills)
         drafts = propose(findings, bridge=bridge, run_id=run_id, task_id=f"{task_id_for(model_id)}-propose",
                          max_parse_retries=config.max_parse_retries)
         scenarios = {sid: read_scenario(store, sid) for sid in config.scenario_ids}
 
-        # 验证快照(第 9 节"验证重放"):部署跑完后把智能体位人格的部署库备份一份,基线与候选各从它恢复
-        # 一份临时副本、只读重放;部署库本身不被验证碰到。
+        # 验证快照(设计三 4.7 节):部署跑完后把本轮每个情境世界各备份一份,重放某个情境的 episode 时基线与候选
+        # 各从这个情境的快照恢复一份临时世界、以智能体位主体开只读端口;部署世界本身不被验证碰到。
         agent_pid = next(b.persona_id for b in config.bindings if b.slot_id == agent_slot_of(config.bindings))
-        verify_snap = memory_layout.verify_snapshot(env.id, agent_pid)
+        verify_snaps = {sid: memory_layout.verify_snapshot(env.id, sid) for sid in config.scenario_ids}
         scratch_root = memory_layout.verify_scratch(env.id)
         built: list = []
 
-        def instance_with(extra: tuple[Skill, ...] = ()):
+        def instance_with(extra: tuple[Skill, ...], scenario_id: str):
             # episode_id 在只读重放下不产生事件 key;给它只是让"给 memory 时要 episode_id"的校验不分叉
             scratch = _verify_op(lambda: scratch_store_factory(scratch_root / f"{len(built)}"))
-            _verify_op(lambda: scratch.restore_from(agent_pid, verify_snap))
-            port = _verify_op(lambda: scratch.open(agent_pid))
+            _verify_op(lambda: scratch.restore_from(scenario_id, verify_snaps[scenario_id]))
+            port = _verify_op(lambda: scratch.open(scenario_id, agent_pid))
             inst = instantiate(
                 backend_factory(model_id, ckpt), skills=lib.skills + tuple(extra),
                 memory=port, episode_id=f"{env.id}/verify", interlocutors=interlocutors,
@@ -464,8 +478,9 @@ def make_start_round_handler(
 
         try:
             try:
-                _verify_op(lambda: verify_snap.parent.mkdir(parents=True, exist_ok=True))
-                _verify_op(lambda: memory_store.backup_to(agent_pid, verify_snap))
+                _verify_op(lambda: scratch_root.parent.mkdir(parents=True, exist_ok=True))
+                for sid, snap in verify_snaps.items():
+                    _verify_op(lambda: memory_store.backup_to(sid, snap))
                 verifications = [
                     verify(d, findings, episodes, base_instance_factory=instance_with,
                            personas=personas, scenarios=scenarios)
@@ -486,9 +501,10 @@ def make_start_round_handler(
                 except Exception as exc:
                     # 终审 M-1:验证实例只读、临时副本随后整个删掉,关不上不影响轮次结果,也不能盖掉在途的异常
                     _log.warning("verify replay: closing a replay instance failed: %s", type(exc).__name__)
-            verify_snap.unlink(missing_ok=True)
+            for snap in verify_snaps.values():
+                snap.unlink(missing_ok=True)
             shutil.rmtree(scratch_root, ignore_errors=True)
-            _rmdir_if_empty(verify_snap.parent)
+            _rmdir_if_empty(scratch_root.parent)
         thresholds = Thresholds(config.min_fired_on_motivating, config.max_fired_elsewhere)
         written = package(store, env.id, findings, drafts, verifications, thresholds=thresholds,
                           run_id=run_id, bound_model_id=model_id)

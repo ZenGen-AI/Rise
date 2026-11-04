@@ -14,7 +14,8 @@ LV = {"skill": "1", "memory": "0"}
 GOAL = Skill("skill-goal", 1, "macro", {"turn_at_least": 0}, ("推进目标",))
 ANGRY = "我真的很生气!!"
 PERSONAS = {pid: Persona(pid, ["t"], "m", "s", ["v"]) for pid in ("pa", "pb")}
-SCENARIOS = {"s1": Scenario("s1", "bg", [RoleSlot("a", "a"), RoleSlot("b", "b")], "c", ["n"], "deployment_simulation")}
+SCENARIOS = {sid: Scenario(sid, "bg", [RoleSlot("a", "a"), RoleSlot("b", "b")], "c", ["n"], "deployment_simulation")
+             for sid in ("s1", "s2")}
 
 
 class Echo:
@@ -22,23 +23,26 @@ class Echo:
         return ("|".join(guidance) or "plain", None)
 
 
+def _instance(extra=(), base_skills=(GOAL,)):
+    return instantiate(Echo(), skills=list(base_skills) + list(extra), memories=[], library_version=LV, profile=None)
+
+
 def _factory(base_skills=(GOAL,)):
-    def make(extra=()):
-        return instantiate(Echo(), skills=list(base_skills) + list(extra), memories=[],
-                           library_version=LV, profile=None)
+    def make(extra, scenario_id):
+        return _instance(extra, base_skills)
     return make
 
 
-def _episode(eid, opp_lines):
+def _episode(eid, opp_lines, scenario_id="s1"):
     turns = []
     for line in opp_lines:
         turns.append(TurnRecord(len(turns), "b", line, "opp-thought"))
         trace = build_trace(signals=[], candidates=["skill-goal"], selected="skill-goal",
                             memory_hits=[], experience=None, library_version=LV)
         turns.append(TurnRecord(len(turns), "a", "old reply", None, trace))
-    ra = RoleAssignment("s1", [RoleBinding("b", "pb", "frozen_reference", model_ref="zengen-v1"),
-                               RoleBinding("a", "pa", "self_play")], len(turns))
-    return Episode(eid, "s1", ra, turns, "max_turns")
+    ra = RoleAssignment(scenario_id, [RoleBinding("b", "pb", "frozen_reference", model_ref="zengen-v1"),
+                                      RoleBinding("a", "pa", "self_play")], len(turns))
+    return Episode(eid, scenario_id, ra, turns, "max_turns")
 
 
 def _setup(lines=(ANGRY, "好吧")):
@@ -128,3 +132,37 @@ def test_verify_does_not_touch_its_inputs():
     before = [e.to_dict() for e in eps]
     verify(draft, findings, eps, base_instance_factory=_factory(), personas=PERSONAS, scenarios=SCENARIOS)
     assert [e.to_dict() for e in eps] == before
+
+
+class _ReplayInstance:
+    """只认一个情境的重放实例:回放别的情境的 episode 就记下来(重放不能借用别的世界的记忆)。"""
+
+    def __init__(self, scenario_id, extra, wrong):
+        self.scenario_id = scenario_id
+        self._inner = _instance(extra)
+        self._wrong = wrong
+        self.registry = self._inner.registry
+
+    def respond(self, persona, scenario, history, slot):
+        if scenario.id != self.scenario_id:
+            self._wrong.append((self.scenario_id, scenario.id))
+        return self._inner.respond(persona, scenario, history, slot)
+
+
+def test_a_finding_across_two_scenarios_replays_each_episode_in_its_own_world():
+    # 设计三 4.7 节:一个发现引用的 episode 跨情境;每个情境的基线与候选在一次 verify() 里各造一次、复用
+    eps = [_episode(f"e{i}", [ANGRY, "好吧"], sid) for i, sid in enumerate(("s1", "s2", "s1", "s2"))]
+    findings = analyze(eps, min_support=3, min_ratio=0.5, skills=[GOAL], signals=("emotion_high",))
+    (draft,) = propose(findings)
+    made, wrong = [], []
+
+    def factory(extra, scenario_id):
+        made.append((len(extra), scenario_id))
+        return _ReplayInstance(scenario_id, extra, wrong)
+
+    v = verify(draft, findings, eps, base_instance_factory=factory, personas=PERSONAS, scenarios=SCENARIOS)
+    assert sorted(made) == [(0, "s1"), (0, "s2"), (1, "s1"), (1, "s2")]
+    assert wrong == []
+    assert v.episodes == ("e0", "e1", "e2", "e3")
+    assert (v.fired_on_motivating, v.fired_elsewhere) == (1.0, 0.0)    # 指标照旧对全部 episode 累计
+    assert "motivating turns 4, other turns 4" in v.notes

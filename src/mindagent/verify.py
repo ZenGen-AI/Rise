@@ -4,6 +4,9 @@
 与加载候选技能后的实例驱动,度量候选技能在动机轮次(动机 episode 里该信号为真的 agent 轮次)上被
 选中的比例 fired_on_motivating,以及在动机 episode 其余 agent 轮次上被选中的比例 fired_elsewhere。
 它不度量对话质量;可选传入 judge 桥接做质量评分,结果单列在 quality_notes。
+
+记忆按情境世界组织(设计三 4.7 节):一个发现引用的 episode 可以跨情境,每条 episode 用它自己情境的基线与候选
+实例重放;候选技能对所有情境一样,只有记忆不同。
 """
 from __future__ import annotations
 
@@ -68,15 +71,16 @@ def verify(
     findings: list[BehaviorFinding] | tuple[BehaviorFinding, ...],
     episodes: list[Episode] | tuple[Episode, ...],
     *,
-    base_instance_factory: Callable[[tuple[Skill, ...]], object],
+    base_instance_factory: Callable[[tuple[Skill, ...], str], object],
     personas: dict[str, Persona],
     scenarios: dict[str, Scenario],
     judge=None,
     run_id: str = "",
     task_id: str = "mindagent-judge",
 ) -> Verification:
-    """base_instance_factory(extra_skills) 返回一个新实例:extra_skills 为空是基线,
-    为草案的技能是候选。episodes 里必须包含发现引用的全部动机 episode。
+    """base_instance_factory(extra_skills, scenario_id) 返回该情境世界上的一个新实例:extra_skills 为空是基线,
+    为草案的技能是候选。每个情境的基线与候选在一次调用里各造一次,回放这个情境的全部 episode 时复用;
+    指标对全部 episode 累计。episodes 里必须包含发现引用的全部动机 episode。
     传入 judge 时 run_id 必须非空(judge 是桥接,会记账),否则抛 MindAgentDataError。"""
     if judge is not None and not run_id:
         raise MindAgentDataError("verify with a judge needs a non-empty run_id")
@@ -89,8 +93,13 @@ def verify(
         raise MindAgentDataError(f"finding {finding.id}: motivating episodes not given: {missing}")
     candidate = tuple(Skill.from_dict(d) for d in draft.skill_definitions())
     candidate_ids = {s.id for s in candidate}
-    baseline = base_instance_factory(())
-    loaded = base_instance_factory(candidate)
+    instances: dict[str, tuple[object, object]] = {}   # scenario_id -> (基线, 候选)
+
+    def instances_for(scenario_id: str) -> tuple[object, object]:
+        if scenario_id not in instances:
+            instances[scenario_id] = (base_instance_factory((), scenario_id),
+                                      base_instance_factory(candidate, scenario_id))
+        return instances[scenario_id]
 
     on_hits = on_total = else_hits = else_total = base_on_hits = 0
     pairs: list[tuple[str, str, str]] = []
@@ -99,6 +108,7 @@ def verify(
         slot = agent_slot_of_episode(episode)
         persona_id = next(b.persona_id for b in episode.role_assignment.bindings if b.slot_id == slot)
         persona, scenario = personas[persona_id], scenarios[episode.scenario_id]
+        baseline, loaded = instances_for(episode.scenario_id)
         base_turns = replay(baseline, episode, persona, scenario)
         cand_turns = replay(loaded, episode, persona, scenario)
         signal_fn = loaded.registry.get(finding.signal)
