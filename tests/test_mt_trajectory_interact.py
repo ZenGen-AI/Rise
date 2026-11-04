@@ -74,17 +74,19 @@ def _shape(episode):
 
 
 def _fixed(policy):
-    return lambda episode_id: nullcontext(policy)
+    return lambda episode_id, scenario_id: nullcontext(policy)
 
 
 class _Rollouts:
-    """policy_for_rollout:记下每次进出与 id,进入时交出 policy。"""
+    """policy_for_rollout:记下每次进出与 id,进入时交出 policy。记下每次进入时给的情境 id。"""
     def __init__(self, policy, events):
         self.policy, self.events = policy, events
+        self.scenarios = []
 
     @contextmanager
-    def __call__(self, episode_id):
+    def __call__(self, episode_id, scenario_id):
         self.events.append(("enter", episode_id))
+        self.scenarios.append(scenario_id)
         try:
             yield self.policy
         finally:
@@ -759,6 +761,76 @@ def test_a_transient_memory_failure_of_the_trained_slot_aborts_and_retries_the_r
     assert batch.metadata["failed_attempts"][0]["detail"] == "RoleMemoryUnavailableError"
     assert events[:3] == [("enter", "run-1-grpo0-s1-r0"), ("exit", "run-1-grpo0-s1-r0"),
                           ("enter", "run-1-grpo0-s1-r0")]
+
+
+def test_a_transient_memory_failure_while_entering_the_policy_context_is_retried(store):
+    """进入期:同名世界还被服务端端口占着,policy_for_rollout 抛 FactoryMemoryUnavailableError(RoleMemoryUnavailableError
+    的子类)。记一次瞬态失败尝试 role_memory_unavailable(detail 只写类名),同一 episode id 重跑。"""
+    class Unavailable(RoleMemoryUnavailableError):
+        pass
+
+    entered = []
+
+    @contextmanager
+    def rollouts(episode_id, scenario_id):
+        entered.append((episode_id, scenario_id))
+        if len(entered) == 1:
+            raise Unavailable("rollout world run-1-grpo0-s1-r0 is still held")
+        yield ScriptedBackend({"a": ["x"] * 50})
+
+    factory = _FakeFactory()
+    batch = InteractTrajectorySource(factory, rollouts, store, _cfg(**_ONE_GROUP), run_id="run-1").collect()
+    assert len(batch.episodes) == 2
+    assert batch.metadata["failed_attempts"] == [{
+        "scenario_id": "s1", "rollout": 0, "attempt": 1, "reason": "role_memory_unavailable", "detail": "Unavailable",
+    }]
+    assert entered[:2] == [("run-1-grpo0-s1-r0", "s1"), ("run-1-grpo0-s1-r0", "s1")]
+    assert len(factory.clients) == 2                         # 进入失败的那次没有造客户端
+
+
+def test_a_transient_memory_failure_on_every_entry_exhausts_the_retries(store):
+    @contextmanager
+    def rollouts(episode_id, scenario_id):
+        raise RoleMemoryUnavailableError("held")
+        yield
+
+    with pytest.raises(RolloutFailedError) as caught:
+        InteractTrajectorySource(_FakeFactory(), rollouts, store, _cfg(**_ONE_GROUP), run_id="run-1").collect()
+    assert caught.value.reason == "role_memory_unavailable"
+    assert caught.value.attempts == 1 + _cfg().max_retries_per_episode
+
+
+@pytest.mark.parametrize("error", [RoleMemoryFailureError("broken seed"), RuntimeError("factory bug")])
+def test_other_exceptions_while_entering_the_policy_context_still_pass_through(store, error):
+    calls = []
+
+    @contextmanager
+    def rollouts(episode_id, scenario_id):
+        calls.append(episode_id)
+        raise error
+        yield
+
+    with pytest.raises(type(error)) as caught:
+        InteractTrajectorySource(_FakeFactory(), rollouts, store, _cfg(**_ONE_GROUP), run_id="run-1").collect()
+    assert caught.value is error and len(calls) == 1
+
+
+def test_a_transient_memory_failure_raised_while_leaving_the_context_is_not_swallowed(store):
+    """只接进入期:退出时(close_rollout 之类)抛的异常照旧原样上抛,不当成可重跑的失败尝试。"""
+    @contextmanager
+    def rollouts(episode_id, scenario_id):
+        yield ScriptedBackend({"a": ["x"] * 50})
+        raise RoleMemoryUnavailableError("on exit")
+
+    with pytest.raises(RoleMemoryUnavailableError, match="on exit"):
+        InteractTrajectorySource(_FakeFactory(), rollouts, store, _cfg(**_ONE_GROUP), run_id="run-1").collect()
+
+
+def test_each_rollout_context_is_given_its_scenario_id(store):
+    events = []
+    rollouts = _Rollouts(ScriptedBackend({"a": ["x"] * 50}), events)
+    InteractTrajectorySource(_FakeFactory(), rollouts, store, _cfg(), run_id="run-1").collect()
+    assert rollouts.scenarios == ["s1", "s1", "s2", "s2"]
 
 
 def test_a_deterministic_memory_failure_of_the_trained_slot_passes_through_unwrapped(store):

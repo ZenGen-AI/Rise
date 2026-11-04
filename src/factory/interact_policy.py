@@ -9,8 +9,10 @@
    改了不必重启守护进程;读不到或写坏了判 failed,原因只报段名与异常类型);
 5. 起 vLLM 服务(`policy_context`),在同一服务上造 vLLM 对手工厂;
 6. 把每个情境 id 登记到运行时(落盘钩子据此把 episode 写进本 run),交出 `policy_for_rollout`:
-   `policy_for_rollout(episode_id)` 是上下文管理器,每条 rollout 进出一次,进入时在 `VllmPolicy` 外面新造一个带记忆的
-   Actio 实例(`memory_role_backend`,每条 rollout 一份空 `TupleMemory`),退出时(正常、异常都一样)关掉它。
+   `policy_for_rollout(episode_id, scenario_id)` 是上下文管理器,每条 rollout 进出一次。进入时建这条 rollout 的世界
+   (`TrainingWorlds.open_rollout`,从种子里该情境的世界复制起点),在 `VllmPolicy` 外面新造一个带记忆的 Actio 实例
+   (`memory_role_backend`,端口是训练位人格在这个世界里的端口);服务端随后按 episode id 加入同一个世界开对手位端口。
+   退出时(正常、异常都一样)`close_rollout`:关训练位端口,等服务端端口关完再删世界。
 退出时(正常、训练抛异常都一样)先注销情境,再由 `policy_context` 停服务放租约。
 
 对手后端经 `OpponentSwitch` 交给运行时:运行时在装配期就造好(它还要服务 MindAgent 部署),而 vLLM 对手要用
@@ -38,7 +40,6 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, ExitStack, contextmanager
 from typing import TYPE_CHECKING
 
-from actio.memory import TupleMemory
 from actio.memory_port import MemoryFailureError
 from compute.client import ComputeClient
 from compute.endpoint import ComputeEndpoint
@@ -78,7 +79,7 @@ from simulator.store_adapter import read_scenario
 from trainscheduler.config import load_training_defaults
 
 if TYPE_CHECKING:       # 只给类型注解用:运行时不导入 factory.memory_runtime,没装 Starling 时本模块照常可用
-    from factory.memory_runtime import TrainingCopies
+    from factory.memory_runtime import TrainingWorlds
 
 TRAINED_ADAPTER = "trained"          # 训练位在 vLLM 服务里的适配器名;站内对手的适配器名就是它的 model_ref
 OPPONENT_TIMEOUT_S = 60.0            # 对手发言的 HTTP 上限:60 秒加一轮记忆最坏 20 秒,低于服务端后端调用上限 90 秒(factory.wire)
@@ -298,15 +299,16 @@ def make_policy_factory(
     serve: Callable[..., object] | None = None,
     policy_timeout_s: float = POLICY_TIMEOUT_S,
     opponent_timeout_s: float = OPPONENT_TIMEOUT_S,
-    training_copies: TrainingCopies | None = None,
+    training_worlds: TrainingWorlds,
 ) -> Callable[[str, TrainingConfig], AbstractContextManager[PolicyForRollout]]:
     """派发器要的 `policy_factory(run_id, cfg)`。serve 可注入,测试里不连 SSH。
-    上下文交出的是 `policy_for_rollout(episode_id)`,不是后端:轨迹源每条 rollout 进出一次,拿到该条 rollout 自己的、
-    包着同一个 `VllmPolicy` 的 Actio 实例。
+    上下文交出的是 `policy_for_rollout(episode_id, scenario_id)`,不是后端:轨迹源每条 rollout 进出一次,拿到该条
+    rollout 自己的、包着同一个 `VllmPolicy` 的 Actio 实例。
     外部对手的地址与模型不在这里传:每次进入上下文时从 `store` 里的 training_defaults.yaml 读(见 _opponent_section)。
     opponent_timeout_s 同时是站内 vLLM 对手与外部 API 对手的单次 HTTP 上限。
-    training_copies 非 None(Starling)时:进入上下文先 bind(run_id, 种子),退出时在注销情境之后 unbind;
-    训练位每条 rollout 一份从种子复制的私有副本,退出即删(见 policy_for_rollout)。None(替身)时与过去相同。"""
+    training_worlds 必须是 `runtime` 手里的同一个对象(组合根只造一个,替身或 Starling):客户端在这里建 rollout 世界,
+    服务端在运行时里按 episode id 加入它。进入上下文先 bind(run_id, 种子),退出时在注销情境之后 unbind;
+    每条 rollout 一个世界,退出时等服务端端口关完再删(见 policy_for_rollout)。"""
 
     @contextmanager
     def scope(run_id: str, cfg: TrainingConfig) -> Iterator[PolicyForRollout]:
@@ -351,51 +353,43 @@ def make_policy_factory(
                 interlocutors = {b.slot_id: b.persona_id for b in cfg.bindings}
 
                 @contextmanager
-                def policy_for_rollout(episode_id: str) -> Iterator[MemoryTranslatingBackend]:
+                def policy_for_rollout(episode_id: str, scenario_id: str) -> Iterator[MemoryTranslatingBackend]:
                     # 训练位与对手位同一写法:底座(VllmPolicy 有 respond_guided,不套 IgnoreGuidance)外面包带记忆的
-                    # Actio 实例。"从起点出发"的副本:替身是每条 rollout 一份新的空 TupleMemory;Starling 是每条
-                    # rollout 一份从种子复制的私有库(open_client_copy,同名目录先删后建,重试也从起点出发)。
-                    # 退出时(正常、异常都一样)替身 close 实例;Starling 由 release 关端口、全关上才删目录。
-                    # 两路 close 抛的 FactoryMemoryFailureError 都不接:它是 RoleMemoryFailureError 的子类,
-                    # 穿出轨迹源后由编排器写 failed、派发器判 T2。release 关不上时目录留给下次启动的清扫。
-                    if training_copies is None:
-                        memory = TupleMemory()
-                    else:
-                        try:
-                            memory = training_copies.open_client_copy(
-                                run_id, episode_id, cfg.trained_slot, interlocutors[cfg.trained_slot])
-                        except MemoryFailureError as exc:
-                            # 打不开副本(种子坏了、磁盘满、目录被占着)发生在转换后端造出来之前,要照
-                            # memory_translate 的口径自己译:编排器只认 RoleMemoryFailureError 判 T2,裸的
-                            # MemoryFailureError 会让 run 保持 pending 被反复重派。文字只放类名。
-                            message = f"trained slot memory copy could not be opened: {type(exc).__name__}"
-                            if exc.transient:
-                                raise FactoryMemoryUnavailableError(message) from exc
-                            raise FactoryMemoryFailureError(message) from exc
+                    # Actio 实例。记忆是这条 rollout 的世界里训练位人格的端口:open_rollout 先删后建,重试也从起点出发;
+                    # 服务端开会话时按 episode id 加入同一个世界开对手位端口。退出时(正常、异常都一样)close_rollout:
+                    # 关训练位端口,等服务端端口关完再删世界,等不到就留给保留表与启动清扫,这条 rollout 照常结束。
+                    # 训练位端口关不上时 close_rollout 重抛 FactoryMemoryFailureError(转换后端 close 译的)不接:
+                    # 它是 RoleMemoryFailureError 的子类,穿出轨迹源后由编排器写 failed、派发器判 T2。
+                    holder = interlocutors[cfg.trained_slot]
+                    try:
+                        memory = training_worlds.open_rollout(run_id, scenario_id, episode_id, holder)
+                    except MemoryFailureError as exc:
+                        # 打不开世界(种子坏了、磁盘满、同名世界还被服务端端口占着)发生在转换后端造出来之前,要照
+                        # memory_translate 的口径自己译:编排器只认 RoleMemoryFailureError 判 T2,裸的
+                        # MemoryFailureError 会让 run 保持 pending 被反复重派。瞬态的(同名世界还被占着)译成
+                        # FactoryMemoryUnavailableError,轨迹源记一次 role_memory_unavailable 再重跑。文字只放类名。
+                        message = f"trained slot rollout world could not be opened: {type(exc).__name__}"
+                        if exc.transient:
+                            raise FactoryMemoryUnavailableError(message) from exc
+                        raise FactoryMemoryFailureError(message) from exc
                     try:
                         backend = memory_role_backend(
-                            policy, memory=memory, episode_id=episode_id, interlocutors=interlocutors,
-                            holder=interlocutors[cfg.trained_slot],
+                            policy, memory=memory, episode_id=episode_id, interlocutors=interlocutors, holder=holder,
                         )
                     except BaseException:
-                        if training_copies is not None:
-                            # 端口已开、实例没造成:关上并删目录,别留一个开着的库;release 的失败不盖掉原异常
-                            try:
-                                training_copies.release([memory], training_copies.client_dir(run_id, episode_id))
-                            except Exception:
-                                pass        # release 已记 warning,目录留给清扫
+                        # 端口已开、实例没造成:关上并删世界(会话还没开,没有服务端端口要等);收尾的失败不盖掉原异常
+                        try:
+                            training_worlds.close_rollout(episode_id, [memory])
+                        except Exception:
+                            pass        # close_rollout 已记 warning,世界留给清扫
                         raise
                     try:
                         yield backend
                     finally:
-                        if training_copies is None:
-                            backend.close()
-                        else:
-                            training_copies.release([backend], training_copies.client_dir(run_id, episode_id))
+                        training_worlds.close_rollout(episode_id, [backend])
 
                 registered: list[str] = []
-                if training_copies is not None:
-                    training_copies.bind(run_id, cfg.memory["seed"])      # 先绑定再登记:会话一开就要查种子
+                training_worlds.bind(run_id, cfg.memory["seed"])      # 先绑定再交出 policy_for_rollout:建世界要查种子
                 try:
                     # 先登记再放行第一个会话
                     for sid in cfg.scenario_ids:
@@ -418,8 +412,7 @@ def make_policy_factory(
                 finally:
                     for sid in registered:
                         runtime.unregister_session(sid)
-                    if training_copies is not None:
-                        training_copies.unbind(run_id)
+                    training_worlds.unbind(run_id)
         except ServeStopError as exc:
             # 进入、训练中、退出时冒出来都在这里:各 finally 与服务上下文已经展开完,没有清理被跳过
             raise _stuck_service(run_id, exc) from exc

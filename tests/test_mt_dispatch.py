@@ -706,7 +706,7 @@ class _Scope:
         self.trace.append("enter")
         if self.enter_raises is not None:
             raise self.enter_raises
-        return lambda episode_id: nullcontext(self.policy)
+        return lambda episode_id, scenario_id: nullcontext(self.policy)
 
     def __exit__(self, exc_type, exc, tb):
         self.trace.append(("exit", exc_type))

@@ -337,8 +337,8 @@ def make_mindtrainer_dispatcher(
     - batch:按 stage_manifest_refs 读数据集清单。
     - interact:另需 client_factory 与策略,注入后 grpo_opd 走实时会话。策略二选一:
       policy 是现成的固定后端(每条 rollout 都用它);policy_factory(run_id, cfg) 每次派发调用一次,
-      返回一个上下文管理器,进入时交出 policy_for_rollout(episode_id),每条 rollout 进出一次,
-      交出该条 rollout 的后端;整个上下文退出时收尾(起停推理服务、登记会话都放在这一进一出里)。
+      返回一个上下文管理器,进入时交出 policy_for_rollout(episode_id, scenario_id),每条 rollout 进出一次,
+      交出该条 rollout 的后端(组合根按情境 id 建这条 rollout 的记忆世界);整个上下文退出时收尾(起停推理服务、登记会话都放在这一进一出里)。
       client_factory 必须收 keyword-only deadline_s。cfg 是回写后、
       严格校验过的配置。上下文覆盖 _interact_sources 与整个 resume_or_run,且在分类异常的 try 里:
       进入时抛的延后异常(租约被占、服务起不来)照常走延后通道,此时训练记录一个字节都没写;
@@ -409,7 +409,7 @@ def make_mindtrainer_dispatcher(
                 extra: dict = {}
                 if cfg.mode == "interact":
                     scope = (
-                        nullcontext(lambda episode_id: nullcontext(policy)) if policy is not None
+                        nullcontext(lambda episode_id, scenario_id: nullcontext(policy)) if policy is not None
                         else policy_factory(run_id, cfg)
                     )
                     make_sources = _interact_sources(

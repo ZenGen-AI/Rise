@@ -180,6 +180,28 @@ def test_interact_alone_builds_one_runtime_and_a_longer_turn_timeout(
         asm.close()
 
 
+def test_the_runtime_and_the_policy_factory_share_one_training_worlds(defaults_repo, env, runtimes, monkeypatch):
+    """客户端在策略工厂里建 rollout 世界,服务端在运行时里按 episode id 加入:两边必须是同一个对象,
+    替身也一样(没设记忆配置时是 StandInTrainingWorlds)。"""
+    import factory.interact_policy as ip
+    from factory.memory_runtime import StandInTrainingWorlds
+
+    seen = []
+    real = ip.make_policy_factory
+
+    def spy(**kwargs):
+        seen.append(kwargs["training_worlds"])
+        return real(**kwargs)
+
+    monkeypatch.setattr(ip, "make_policy_factory", spy)
+    asm = assemble(defaults_repo, FactoryOptions(interact=True), env=env)
+    try:
+        assert isinstance(seen[0], StandInTrainingWorlds)
+        assert runtimes[0]._training_worlds is seen[0]
+    finally:
+        asm.close()
+
+
 def test_both_switches_share_the_larger_turn_timeout(defaults_repo, env, runtimes):
     asm = assemble(defaults_repo, FactoryOptions(switches=("agent",), interact=True), env=env)
     try:
@@ -291,8 +313,11 @@ from controlplane.envelope import BigRef, Envelope, OwnerRef
 from controlplane.paths import (
     candidate_checkpoint_file, episodes_dir, model_file, run_dir, scheduler_config_file, training_defaults_file,
 )
+from actio.memory import TupleMemory
+from actio.memory_port import MemoryEvent, MemoryFailureError
 from factory.agent import AgentRuntime
 from factory.interact_policy import OpponentSwitch, make_policy_factory
+from factory.memory_runtime import StandInTrainingWorlds
 from factory.opponents import EXPORT_FORMAT, ExternalApiBackend
 from memory_fixtures import unresolved_memory
 from mindtrainer.training_config import RewardConfig, TrainingConfig
@@ -631,19 +656,21 @@ def test_a_deterministic_compute_error_fails_the_directive(world, tmp_path, fake
 
 # ---- 策略上下文本身:登记、deadline、清理、撞车 ----
 
-def _unit(store, tmp_path, stub, *, serve=None, opponent=None, env=None, runtime=None, training_copies=None):
+def _unit(store, tmp_path, stub, *, serve=None, opponent=None, env=None, runtime=None, training_worlds=None):
     """直接造策略工厂(不经装配),用真的 AgentRuntime 与注入的 serve。
-    opponent 非空时写进树里的 training_defaults.yaml:策略上下文每次进入时从树里读 opponent 段。"""
+    opponent 非空时写进树里的 training_defaults.yaml:策略上下文每次进入时从树里读 opponent 段。
+    training_worlds 没给时是替身;运行时与策略工厂拿同一个(组合根也是这样接的)。"""
     if opponent is not None:
         write_config(store, training_defaults_file(), "training-defaults", _interact_defaults(**opponent),
                      "test: defaults with opponent")
-    runtime = runtime or AgentRuntime(store, ("hi",))
+    training_worlds = training_worlds or StandInTrainingWorlds()
+    runtime = runtime or AgentRuntime(store, ("hi",), training_worlds=training_worlds)
     switch = OpponentSwitch(("hi",))
     endpoint = ComputeEndpoint(**{**ENDPOINT, "launch_prefix": (), "endpoint_id": "gpu-1"})
     serve = serve or FakeServe(stub.base_url)
     factory = make_policy_factory(
         store=store, runtime=runtime, switch=switch, client=SimpleNamespace(alias="gpu-181", endpoint=endpoint),
-        endpoint=endpoint, env=env or {}, serve=serve, training_copies=training_copies)
+        endpoint=endpoint, env=env or {}, serve=serve, training_worlds=training_worlds)
     return runtime, switch, factory, serve
 
 
@@ -676,15 +703,66 @@ def test_the_scope_yields_a_per_rollout_factory_of_actio_instances_around_the_vl
     _, _, factory, _ = _unit(world, tmp_path, stub)
     cfg = _cfg()
     with factory(RUN, cfg) as policy_for_rollout:
-        with policy_for_rollout(f"{RUN}-grpo0-t1-r0") as first:
+        with policy_for_rollout(f"{RUN}-grpo0-t1-r0", "t1") as first:
             assert isinstance(first, MemoryTranslatingBackend)
             inst = first.instance
             assert isinstance(inst.backend, VllmPolicy)                 # 有 respond_guided,不套 IgnoreGuidance
-            assert inst.episode_id == f"{RUN}-grpo0-t1-r0"
+            assert inst.episode_id == f"{RUN}-grpo0-t1-r0" and inst.holder == "pa"
             assert inst.interlocutors == {b.slot_id: b.persona_id for b in cfg.bindings}
-            assert isinstance(inst.memory, TupleMemory) and inst.memory.digest() == TupleMemory().digest()
-        with policy_for_rollout(f"{RUN}-grpo0-t1-r1") as second:
+            assert inst.memory.digest() == TupleMemory().digest()       # 替身:从空世界起
+        with policy_for_rollout(f"{RUN}-grpo0-t1-r1", "t1") as second:
             assert second.instance is not inst and second.instance.backend is inst.backend
+
+
+def test_the_stand_in_trained_slot_and_the_server_share_one_rollout_world(world, tmp_path, stub):
+    """替身也走 rollout 世界(设计 5.1 节):服务端按 episode id 加入的是训练位所在的同一个内存世界。"""
+    worlds = StandInTrainingWorlds()
+    _, _, factory, _ = _unit(world, tmp_path, stub, training_worlds=worlds)
+    episode = f"{RUN}-grpo0-t1-r0"
+    with factory(RUN, _cfg()) as policy_for_rollout:
+        with policy_for_rollout(episode, "t1") as backend:
+            server = worlds.join_rollout(episode, "pb")
+            before = backend.instance.memory.digest()
+            server.remember(MemoryEvent(f"{episode}#0@pb", "pa：你好", "pa"))
+            assert backend.instance.memory.digest() != before
+            worlds.release_session(episode, [server])
+        with pytest.raises(MemoryFailureError):                           # 退出即删
+            worlds.join_rollout(episode, "pb")
+
+
+def test_the_event_keys_of_each_slot_carry_its_own_persona(world, tmp_path, stub):
+    """经真 loopback 跑一条训练 rollout:训练位(pa)记下的是对手的话,key 以 @pa 结尾;对手位(pb)记下的是训练位的话,
+    key 以 @pb 结尾。位与人格接错(实例的 holder 与端口的主体不一致,或拿错了位的人格)在这里现形。"""
+    from simulator.datamodel import RoleAssignment
+    from simulator.store_adapter import read_persona, read_scenario
+
+    worlds = StandInTrainingWorlds()
+    runtime, _, factory, _ = _unit(world, tmp_path, stub, training_worlds=worlds)
+    cfg = _cfg()
+    episode = f"{RUN}-grpo0-t1-r0"
+    scenario = read_scenario(world, "t1")
+    personas = {pid: read_persona(world, pid) for pid in ("pa", "pb")}
+    try:
+        with factory(RUN, cfg) as policy_for_rollout:
+            with policy_for_rollout(episode, "t1") as backend:
+                ledger = backend.instance.memory._view._ledger
+                client = runtime.client_factory()
+                client.create_session(scenario_id="t1", role_assignment=RoleAssignment("t1", list(cfg.bindings), 4),
+                                      personas=personas, purpose="training", client_driven_slot="a",
+                                      episode_id=episode)
+                while not client.closed:
+                    utterance, thought, trace = backend.respond(personas["pa"], scenario, client.turns, "a")
+                    client.submit_turn(utterance, thought, activation_trace=trace)
+                assert client.drain_until_end().terminated_reason == "max_turns"
+    finally:
+        runtime.close()
+    rows = list(ledger.events.values())
+    by_holder = {h: [r for r in rows if r["holder"] == h] for h in ("pa", "pb")}
+    assert by_holder["pa"] and by_holder["pb"] and len(rows) == len(by_holder["pa"]) + len(by_holder["pb"])
+    assert all(r["key"].startswith(f"{episode}#") and r["key"].endswith("@pa") and r["interlocutor"] == "pb"
+               for r in by_holder["pa"])
+    assert all(r["key"].startswith(f"{episode}#") and r["key"].endswith("@pb") and r["interlocutor"] == "pa"
+               for r in by_holder["pb"])
 
 
 def test_leaving_a_rollout_closes_its_instance_even_when_the_rollout_raises(world, tmp_path, stub):
@@ -692,80 +770,85 @@ def test_leaving_a_rollout_closes_its_instance_even_when_the_rollout_raises(worl
     _, _, factory, _ = _unit(world, tmp_path, stub)
     with factory(RUN, _cfg()) as policy_for_rollout:
         with pytest.raises(RuntimeError, match="rollout broke"):
-            with policy_for_rollout(f"{RUN}-grpo0-t1-r0") as backend:
+            with policy_for_rollout(f"{RUN}-grpo0-t1-r0", "t1") as backend:
                 raise RuntimeError("rollout broke")
         with pytest.raises(FactoryMemoryFailureError, match="MemoryClosedError"):
             backend.respond(None, None, [], "a")
 
 
-def test_the_trained_slot_gets_a_starling_copy_per_rollout_and_it_is_removed_after(world, tmp_path, stub):
-    """训练位的私有副本(设计二 7.2 节):scope 绑定种子、每条 rollout 一份、退出即删,scope 退出后解绑。
+def test_the_trained_slot_gets_a_starling_world_per_rollout_and_it_is_removed_after(world, tmp_path, stub):
+    """rollout 世界(设计 5.1 节):scope 绑定种子、每条 rollout 一个世界、退出即删,scope 退出后解绑。
     importorskip 在函数体内:写在模块顶层,没装 Starling 时整个文件的替身路径用例都会被跳过。"""
     pytest.importorskip("starling")
-    from factory.memory_runtime import StarlingLayout, TrainingCopies
+    from factory.memory_runtime import StarlingLayout, StarlingTrainingWorlds
     from starling_fakes import FakeOpenAI, offline_api_key
 
     with FakeOpenAI(dim=256) as fake, offline_api_key():
-        copies = TrainingCopies(StarlingLayout(tmp_path / "mem"), fake.endpoints(), close_timeout_s=0.2)
-        _, _, factory, _ = _unit(world, tmp_path, stub, training_copies=copies)
+        layout = StarlingLayout(tmp_path / "mem")
+        worlds = StarlingTrainingWorlds(layout, fake.endpoints(), close_timeout_s=0.2)
+        _, _, factory, _ = _unit(world, tmp_path, stub, training_worlds=worlds)
         first, second = f"{RUN}-grpo0-t1-r0", f"{RUN}-grpo0-t1-r1"
         with factory(RUN, _cfg()) as policy_for_rollout:
-            assert copies.seed_of(RUN) is None
-            with policy_for_rollout(first) as backend:
+            assert worlds.seed_of(RUN) is None
+            with policy_for_rollout(first, "t1") as backend:
                 assert type(backend.instance.memory).__name__ == "StarlingMemory"
-                assert copies.client_dir(RUN, first).exists()
-            assert not copies.client_dir(RUN, first).exists()
-            with policy_for_rollout(second) as other:
+                assert layout.rollout_world(RUN, first).exists()
+            assert not layout.rollout_world(RUN, first).exists()
+            with policy_for_rollout(second, "t1") as other:
                 assert other.instance.memory is not backend.instance.memory
-                assert copies.client_dir(RUN, second).exists()
-            assert not copies.client_dir(RUN, second).exists()
+                assert layout.rollout_world(RUN, second).exists()
+            assert not layout.rollout_world(RUN, second).exists()
         with pytest.raises(KeyError):
-            copies.seed_of(RUN)
+            worlds.seed_of(RUN)
 
 
-def test_a_rollout_that_raises_still_removes_its_copy_and_the_scope_unbinds_on_a_training_exception(
+def test_a_rollout_that_raises_still_removes_its_world_and_the_scope_unbinds_on_a_training_exception(
         world, tmp_path, stub):
     pytest.importorskip("starling")
-    from factory.memory_runtime import StarlingLayout, TrainingCopies
+    from factory.memory_runtime import StarlingLayout, StarlingTrainingWorlds
     from starling_fakes import FakeOpenAI, offline_api_key
 
     with FakeOpenAI(dim=256) as fake, offline_api_key():
-        copies = TrainingCopies(StarlingLayout(tmp_path / "mem"), fake.endpoints(), close_timeout_s=0.2)
-        runtime, _, factory, _ = _unit(world, tmp_path, stub, training_copies=copies)
+        layout = StarlingLayout(tmp_path / "mem")
+        worlds = StarlingTrainingWorlds(layout, fake.endpoints(), close_timeout_s=0.2)
+        runtime, _, factory, _ = _unit(world, tmp_path, stub, training_worlds=worlds)
         episode = f"{RUN}-grpo0-t1-r0"
         with pytest.raises(RuntimeError, match="boom"):
             with factory(RUN, _cfg()) as policy_for_rollout:
                 with pytest.raises(RuntimeError, match="rollout broke"):
-                    with policy_for_rollout(episode):
+                    with policy_for_rollout(episode, "t1"):
                         raise RuntimeError("rollout broke")
-                assert not copies.client_dir(RUN, episode).exists()
+                assert not layout.rollout_world(RUN, episode).exists()
                 raise RuntimeError("boom")
         with pytest.raises(KeyError):
-            copies.seed_of(RUN)
+            worlds.seed_of(RUN)
         assert runtime._sessions == {}
 
 
-def test_the_scope_binds_the_configured_seed_and_the_trained_copy_starts_from_it(world, tmp_path, stub):
+def test_the_scope_binds_the_configured_seed_and_the_rollout_world_starts_from_the_scenario_seed(
+        world, tmp_path, stub):
     pytest.importorskip("starling")
     from actio.memory_starling import StarlingDeploymentStore, empty_digest
-    from factory.memory_runtime import StarlingLayout, TrainingCopies
+    from factory.memory_runtime import StarlingLayout, StarlingTrainingWorlds
     from starling_fakes import FakeOpenAI, offline_api_key
 
     with FakeOpenAI(dim=256) as fake, offline_api_key():
         layout = StarlingLayout(tmp_path / "mem")
         seeds = StarlingDeploymentStore(layout.seed_dir("s1"), endpoints=fake.endpoints())
-        seeds.remember_event("pa", "pa", "seed#0@pa", "pb：人手也不够", interlocutor="pb")
-        assert seeds.digest("pa") != empty_digest()                 # 种子有内容,"从种子起"才和"空库"分得开
-        copies = TrainingCopies(layout, fake.endpoints(), close_timeout_s=0.2)
-        _, _, factory, _ = _unit(world, tmp_path, stub, training_copies=copies)
+        seeds.remember_event("t1", "pa", "seed#0@pa", "pb：人手也不够", interlocutor="pb")
+        assert seeds.digest("t1") != empty_digest()                 # 种子有内容,"从种子起"才和"空库"分得开
+        worlds = StarlingTrainingWorlds(layout, fake.endpoints(), close_timeout_s=0.2)
+        _, _, factory, _ = _unit(world, tmp_path, stub, training_worlds=worlds)
         with factory(RUN, _cfg(memory=unresolved_memory("s1"))) as policy_for_rollout:
-            assert copies.seed_of(RUN) == "s1"
-            with policy_for_rollout(f"{RUN}-grpo0-t1-r0") as backend:
-                assert backend.instance.memory.digest() == seeds.digest("pa")     # 训练位绑的是 pa
+            assert worlds.seed_of(RUN) == "s1"
+            with policy_for_rollout(f"{RUN}-grpo0-t1-r0", "t1") as backend:
+                assert backend.instance.memory.digest() == seeds.digest("t1")     # 整个世界从情境 t1 的种子起
+            with policy_for_rollout(f"{RUN}-grpo0-t2-r0", "t2") as other:
+                assert other.instance.memory.digest() == empty_digest()           # t2 没有种子世界
 
 
-class _FailingCopies:
-    """策略上下文只用到这几个方法;open_client_copy 按给定的异常失败。不需要 Starling。"""
+class _FailingWorlds:
+    """策略上下文只用到这几个方法;open_rollout 按给定的异常失败。不需要 Starling。"""
 
     def __init__(self, exc: Exception) -> None:
         self._exc = exc
@@ -776,48 +859,74 @@ class _FailingCopies:
     def unbind(self, run_id):
         pass
 
-    def open_client_copy(self, run_id, episode_id, slot_id, persona_id):
+    def open_rollout(self, run_id, scenario_id, episode_id, holder):
         raise self._exc
 
 
 @pytest.mark.parametrize("transient", [False, True])
-def test_a_trained_copy_that_cannot_be_opened_is_translated_like_the_other_memory_failures(
+def test_a_rollout_world_that_cannot_be_opened_is_translated_like_the_other_memory_failures(
         world, tmp_path, stub, transient):
     """open 阶段的 MemoryFailureError 没经转换后端。不译的话编排器只认 RoleMemoryFailureError,裸异常让 run 保持
-    pending 被反复重派:确定性的(种子坏了、磁盘满)译成 FactoryMemoryFailureError(T2),瞬态的译成
-    FactoryMemoryUnavailableError(_attempt 接成可重试的 role_memory_unavailable)。文字只含类名。"""
-    from actio.memory_port import MemoryFailureError
+    pending 被反复重派:确定性的(种子坏了、磁盘满)译成 FactoryMemoryFailureError(T2),瞬态的(同名世界还被服务端
+    端口占着)译成 FactoryMemoryUnavailableError(_attempt 接成可重试的 role_memory_unavailable)。文字只含类名。"""
     from factory.memory_translate import FactoryMemoryFailureError, FactoryMemoryUnavailableError
 
     cause = MemoryFailureError("starling memory failed: OSError (secret-detail)", transient=transient)
-    _, _, factory, _ = _unit(world, tmp_path, stub, training_copies=_FailingCopies(cause))
+    _, _, factory, _ = _unit(world, tmp_path, stub, runtime=AgentRuntime(world, ("hi",)),
+                             training_worlds=_FailingWorlds(cause))
     expected = FactoryMemoryUnavailableError if transient else FactoryMemoryFailureError
     with factory(RUN, _cfg()) as policy_for_rollout:
         with pytest.raises(expected) as caught:
-            with policy_for_rollout(f"{RUN}-grpo0-t1-r0"):
+            with policy_for_rollout(f"{RUN}-grpo0-t1-r0", "t1"):
                 pytest.fail("the body must not run")
     assert caught.value.__cause__ is cause
     assert "MemoryFailureError" in str(caught.value) and "secret-detail" not in str(caught.value)
 
 
+def test_a_retry_while_the_server_still_holds_the_world_is_a_transient_memory_failure(world, tmp_path, stub):
+    """上一次尝试退出时服务端的端口还没关(close_rollout 等到期限,世界进保留表):同 id 重试抛
+    FactoryMemoryUnavailableError,轨迹源据此重跑;端口关上后重试从起点重建。"""
+    from factory.memory_translate import FactoryMemoryUnavailableError
+
+    worlds = StandInTrainingWorlds()
+    _, _, factory, _ = _unit(world, tmp_path, stub, training_worlds=worlds)
+    episode = f"{RUN}-grpo0-t1-r0"
+    with factory(RUN, _cfg()) as policy_for_rollout:
+        with policy_for_rollout(episode, "t1") as backend:
+            server = worlds.join_rollout(episode, "pb")
+            backend.instance.memory.remember(MemoryEvent(f"{episode}#1@pa", "pb：你好", "pb"))
+            real_close = worlds.close_rollout
+            # 退出时服务端的端口还开着:把等的期限压短,省得这个用例真等 70 秒
+            worlds.close_rollout = lambda eid, ports: real_close(eid, ports, wait_s=0.05)
+        del worlds.close_rollout
+        with pytest.raises(FactoryMemoryUnavailableError):
+            with policy_for_rollout(episode, "t1"):
+                pytest.fail("the body must not run")
+        worlds.release_session(episode, [server])
+        with policy_for_rollout(episode, "t1") as again:
+            assert again.instance.memory.digest() == TupleMemory().digest()   # 先删后建:从起点重来
+
+
 def test_a_corrupt_seed_fails_the_trained_slot_as_a_deterministic_memory_failure(world, tmp_path, stub):
     pytest.importorskip("starling")
-    from factory.memory_runtime import StarlingLayout, TrainingCopies
+    from factory.memory_runtime import StarlingLayout, StarlingTrainingWorlds
     from factory.memory_translate import FactoryMemoryFailureError
     from starling_fakes import FakeOpenAI, offline_api_key
 
     with FakeOpenAI(dim=256) as fake, offline_api_key():
         layout = StarlingLayout(tmp_path / "mem")
         layout.seed_dir("s1").mkdir(parents=True)
-        layout.seed("s1", "pa").write_bytes(b"this is not a sqlite library")
-        copies = TrainingCopies(layout, fake.endpoints(), close_timeout_s=0.2)
-        _, _, factory, _ = _unit(world, tmp_path, stub, training_copies=copies)
+        layout.scenario_seed("s1", "t1").write_bytes(b"this is not a sqlite library")
+        worlds = StarlingTrainingWorlds(layout, fake.endpoints(), close_timeout_s=0.2)
+        _, _, factory, _ = _unit(world, tmp_path, stub, training_worlds=worlds)
         episode = f"{RUN}-grpo0-t1-r0"
         with factory(RUN, _cfg(memory=unresolved_memory("s1"))) as policy_for_rollout:
             with pytest.raises(FactoryMemoryFailureError):
-                with policy_for_rollout(episode):
+                with policy_for_rollout(episode, "t1"):
                     pytest.fail("the body must not run")
-            assert not copies.client_dir(RUN, episode).exists()
+            assert not layout.rollout_world(RUN, episode).exists()
+            with pytest.raises(MemoryFailureError):                          # 表里也没留下它
+                worlds.join_rollout(episode, "pb")
 
 
 def test_an_interact_directive_records_v2_traces_on_the_trained_slot(world, tmp_path, stub, fake_serve):
@@ -967,7 +1076,8 @@ def test_the_external_opponent_gets_the_timeout_that_make_policy_factory_was_giv
     write_config(world, training_defaults_file(), "training-defaults", _interact_defaults(**opponent), "test: opponent")
     factory = make_policy_factory(
         store=world, runtime=runtime, switch=switch, client=SimpleNamespace(alias="gpu-181", endpoint=endpoint),
-        endpoint=endpoint, env={OPP_KEY_ENV: OPP_KEY}, serve=FakeServe(stub.base_url), opponent_timeout_s=0.7)
+        endpoint=endpoint, env={OPP_KEY_ENV: OPP_KEY}, serve=FakeServe(stub.base_url), opponent_timeout_s=0.7,
+        training_worlds=StandInTrainingWorlds())
     bindings = [RoleBinding("a", "pa", "self_play"),
                 _opponent_binding(model_ref="gpt-x", driver="external_api", backend="external_api")]
     scenario = Scenario("t1", "bg", [RoleSlot("a", "a"), RoleSlot("b", "b")], "c", ["n"], "training")
@@ -1648,7 +1758,6 @@ def test_item_11_is_satisfied_by_passing_interact(tmp_path):
 
 import logging
 
-from actio.memory import TupleMemory
 from factory.memory_runtime import STAND_IN_MEMORY_RUNTIME
 
 

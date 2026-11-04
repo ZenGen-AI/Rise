@@ -232,7 +232,7 @@ class StarlingMemory:
             self._memory.close(timeout=self._close_timeout_s)
         except Exception as exc:
             # 不置 _closed:超时意味着在途调用还没返回,门面仍开着,返回后可以再关一次。
-            # 训练副本的收尾靠这一点决定删不删目录。
+            # 训练路 rollout 世界的收尾靠这一点决定删不删世界。
             raise translate_failure(exc) from None
         self._closed = True       # 门面确实已经关了:先置位,on_close 抛了端口也不能再用
         if self._on_close is not None:
@@ -270,7 +270,7 @@ def copy_library(src: Path, dst: Path) -> None:
     """把库文件连同同名 -wal(有的话)拷到 dst。端口开着、WAL 没合并时,写入还在 -wal 里,只拷主文件
     算出的摘要会漏掉它们。-shm 不拷:它是 WAL 的索引,打开时由 -wal 重建。
 
-    公开名:`library_digest`、`restore_from` 用它,训练路的副本(`factory.memory_runtime.TrainingCopies`)
+    公开名:`library_digest`、`restore_from` 用它,训练路的 rollout 世界(`factory.memory_runtime.StarlingTrainingWorlds`)
     也用它从种子取起点。取副本用文件复制而不用 `backup_to`:`backup_to` 要先打开源库,`Memory.open` 会建
     -wal、-shm 并跑迁移,种子目录与文件是只读时失败;文件复制只读源,两种权限下摘要都等于 `library_digest`
     给的起点摘要。**源必须静止**(没有连接在写它),约束同 `library_digest`。"""

@@ -113,52 +113,37 @@ def test_a_different_starling_build_or_prompt_set_changes_the_identity(tmp_path,
     assert a != b
 
 
-@pytest.mark.parametrize("bad", ["..", "a/b", "", "x" * 129])
-def test_layout_refuses_unsafe_segments(tmp_path, bad):
-    with pytest.raises(ValueError):
-        StarlingLayout(tmp_path).client_copy("run-1", bad, "a")
-    with pytest.raises(ValueError):
-        StarlingLayout(tmp_path).session_copy(bad, "sess-1", "a")
-
-
 @pytest.mark.parametrize("bad", [".", "..", "a/b", "", "x" * 129, "a\n", "../deploy"])
 def test_layout_refuses_unsafe_names_in_every_position(tmp_path, bad):
     lay = StarlingLayout(tmp_path)
-    for call in (lambda: lay.session_copy("run-1", bad, "a"), lambda: lay.session_copy("run-1", "sess-1", bad),
-                 lambda: lay.client_copy(bad, "ep-1", "a"), lambda: lay.client_copy("run-1", "ep-1", bad)):
+    for call in (lambda: lay.rollout_world("run-1", bad), lambda: lay.rollout_world(bad, "ep-1")):
         with pytest.raises(ValueError):
             call()
 
 
 @pytest.mark.parametrize("bad", ["", ".hidden", "a/b", "..", "p" * 129, "pa\n", None, 7])
-def test_layout_refuses_unsafe_persona_ids(tmp_path, bad):
+def test_layout_refuses_unsafe_persona_and_scenario_ids(tmp_path, bad):
     with pytest.raises(ValueError):
         StarlingLayout(tmp_path).seed("s1", bad)
+    with pytest.raises(ValueError):
+        StarlingLayout(tmp_path).scenario_seed("s1", bad)
 
 
 def test_layout_refuses_an_unsafe_seed_id_as_a_readable_t2(tmp_path):
     for bad in ("..", "a/b", "../deploy", "", "x" * 129, None):
-        with pytest.raises(DirectiveFailedError, match="memory.seed") as info:
-            StarlingLayout(tmp_path).seed(bad, "pa")
-        assert info.value.category == "T2"
-        assert str(tmp_path) not in info.value.reason                      # 原因里没有根目录的绝对路径
-
-
-def test_a_session_named_client_would_land_in_the_client_directory_so_it_is_refused(tmp_path):
-    """5.3 节:runs/<run_id>/<session_id>/ 与 runs/<run_id>/client/<episode_id>/ 同级。会话 id 恰好是 client
-    时两条路径会撞;今天服务端生成的会话 id 都是 sess-<hex>,这里把"碰巧避开"变成强制。"""
-    lay = StarlingLayout(tmp_path)
-    with pytest.raises(ValueError, match="client"):
-        lay.session_copy("run-1", "client", "a")
-    assert lay.session_copy("run-1", "client2", "a").parent == tmp_path / "runs" / "run-1" / "client2"
-    assert lay.client_copy("run-1", "client", "a") == tmp_path / "runs" / "run-1" / "client" / "client" / "a.db"
+        for call in (lambda: StarlingLayout(tmp_path).seed(bad, "pa"),
+                     lambda: StarlingLayout(tmp_path).scenario_seed(bad, "s1")):
+            with pytest.raises(DirectiveFailedError, match="memory.seed") as info:
+                call()
+            assert info.value.category == "T2"
+            assert str(tmp_path) not in info.value.reason                  # 原因里没有根目录的绝对路径
 
 
 def test_layout_paths_follow_section_5_3(tmp_path):
     lay = StarlingLayout(tmp_path)
     assert lay.seed("s1", "pa") == tmp_path / "seeds" / "s1" / "pa.db"
-    assert lay.session_copy("run-1", "sess-1", "b") == tmp_path / "runs" / "run-1" / "sess-1" / "b.db"
-    assert lay.client_copy("run-1", "run-1-grpo0-s1-r0", "a") == tmp_path / "runs" / "run-1" / "client" / "run-1-grpo0-s1-r0" / "a.db"
+    assert lay.scenario_seed("s1", "t1") == tmp_path / "seeds" / "s1" / "t1.db"
+    assert lay.rollout_world("run-1", "run-1-grpo0-s1-r0") == tmp_path / "runs" / "run-1" / "run-1-grpo0-s1-r0.db"
     assert lay.deploy_dir() == tmp_path / "deploy"
     assert lay.runs_dir() == tmp_path / "runs"
     assert lay.seed_dir("s1") == tmp_path / "seeds" / "s1"
@@ -173,9 +158,13 @@ def test_importing_the_module_does_not_need_starling():
         f"sys.path.insert(0, {str(SRC)!r})\n"
         "from pathlib import Path\n"
         "from factory.memory_config import MemoryConfig\n"
-        "from factory.memory_runtime import StarlingLayout, starling_memory_resolver, starling_memory_runtime\n"
+        "from factory.memory_runtime import StandInTrainingWorlds, StarlingLayout, StarlingTrainingWorlds\n"
+        "from factory.memory_runtime import starling_memory_resolver, starling_memory_runtime\n"
         "assert 'actio.memory_starling' not in sys.modules\n"
         "assert StarlingLayout(Path('/m')).seed('s1', 'pa') == Path('/m/seeds/s1/pa.db')\n"
+        "assert StarlingLayout(Path('/m')).rollout_world('r', 'e') == Path('/m/runs/r/e.db')\n"
+        "w = StandInTrainingWorlds(); w.bind('r', None)\n"
+        "w.close_rollout('e', [w.open_rollout('r', 's1', 'e', 'pa')], wait_s=1.0)\n"
         "cfg = MemoryConfig(root=Path('/m'), extraction_base_url='https://e.example/v1', extraction_model='x',\n"
         "                   embedding_base_url='https://b.example/v1', embedding_model='y', embedding_dim=8)\n"
         "assert starling_memory_runtime(cfg, version='1', install_source='git:x', prompts_digest='p')['backend'] == 'starling'\n"

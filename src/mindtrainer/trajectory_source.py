@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import time
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, ExitStack
 from typing import Callable, Protocol
 
 import grpc
@@ -19,8 +19,9 @@ from simulator.store_adapter import read_persona, read_scenario
 
 
 # 每条 rollout 进出一次的策略上下文:交出 ModelBackend,respond 返回二元组或三元组。
-# 参数是这条 rollout 的逻辑 episode id(见 logical_episode_id)。
-PolicyForRollout = Callable[[str], AbstractContextManager[ModelBackend]]
+# 两个参数依次是这条 rollout 的逻辑 episode id(见 logical_episode_id)与情境 id:组合根据此建这条 rollout 的
+# 记忆世界(从种子里该情境的世界复制起点)。
+PolicyForRollout = Callable[[str, str], AbstractContextManager[ModelBackend]]
 
 # 一轮的最坏耗时取各轮上限中较大的那个:训练位的服务端等提交 150 秒(对手轮 90 秒),见 factory.wire。
 # 按 max_turns_per_episode 乘出整条会话的流 deadline。
@@ -166,9 +167,10 @@ class InteractTrajectorySource:
     """InteractTrain 的轨迹源:作为客户端驱动 Plan 4 的实时环境服务。
 
     - 一条 gRPC 流只承载一次会话,所以每条 rollout 用 client_factory(deadline_s=...) 新建客户端。
-    - policy_for_rollout 每条 rollout(含每次重试)进出一次,交出 simulator.backends.ModelBackend,
+    - policy_for_rollout(episode_id, scenario_id) 每条 rollout(含每次重试)进出一次,交出 simulator.backends.ModelBackend,
       respond 返回二元组 (utterance, inner_thought) 或三元组 (…, activation_trace);三元组的轨迹随
       submit_turn 上行。先进上下文、再造客户端、再 create_session;失败时先 abort 客户端、再退出上下文。
+      组合根在进入时建这条 rollout 的记忆世界、退出时等服务端端口关完再删它,所以服务端开会话时世界已经在了。
     - 每条 rollout 用逻辑 episode id `{run_id}-grpo{step}-{scenario_id}-r{k}`(step 是本次 collect 的
       GRPO step,k 是组内序号),随 create_session 上行,服务端按它落盘。同一条 rollout 的重试、失败后
       重做同一步、续训从同一步接着走,id 都不变(服务端按同名覆盖)。
@@ -184,7 +186,9 @@ class InteractTrajectorySource:
     - T1 瞬态(timeout、role_backend_timeout、role_backend_unavailable、role_memory_unavailable、persistence_failed、
       传输层 UNAVAILABLE;创建被拒时同样按 reason 判,上面这些原因的拒绝也重跑;训练位的
       RoleMemoryUnavailableError 记为 role_memory_unavailable、detail 只写类名)原样重跑,
-      上限 max_retries_per_episode,每次失败记入 metadata["failed_attempts"]。
+      上限 max_retries_per_episode,每次失败记入 metadata["failed_attempts"]。进入 policy_for_rollout 时抛的
+      RoleMemoryUnavailableError(同名 rollout 世界还被服务端端口占着)同样记成 role_memory_unavailable 重跑;
+      其余进入期异常不包装,原样上抛。
     - 创建被拒且原因是 role_backend_unavailable(同 id 的旧会话还在收尾,或名额满)时,先在同一次尝试里
       退避重建(见 ADMISSION_WAIT_S),不计入重试次数、不记 failed_attempts;预算用完仍被拒才按上一条算瞬态失败。
       sleep 与 clock 只为测试注入。
@@ -299,8 +303,13 @@ class InteractTrajectorySource:
 
     def _attempt(self, scenario, personas, episode_id: str) -> Episode:
         slot = self._cfg.trained_slot
-        # 上下文进入时抛的异常(工厂侧的确定性错误)不包装,原样上抛
-        with self._policy_for_rollout(episode_id) as policy:
+        with ExitStack() as stack:
+            try:
+                policy = stack.enter_context(self._policy_for_rollout(episode_id, scenario.id))
+            except RoleMemoryUnavailableError as exc:
+                # 进入期的瞬态记忆失败(同名 rollout 世界还被服务端端口占着):整条重跑。detail 只写类名。
+                # 其余进入期异常(工厂侧的确定性错误)不包装,原样上抛
+                raise _AttemptFailed("role_memory_unavailable", type(exc).__name__, True) from exc
             client = self._open_session(scenario, personas, episode_id)
             try:
                 persona = personas[self._trained_persona_id]

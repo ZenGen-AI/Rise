@@ -12,7 +12,13 @@ from factory import wire
 from factory.cli import main
 from factory.errors import FactoryConfigError
 from factory.memory_config import MEMORY_CONFIG_ENV
-from factory.memory_runtime import MemoryWiring, memory_wiring, stand_in_deployment_memory, stand_in_memory_resolver
+from factory.memory_runtime import (
+    MemoryWiring,
+    StandInTrainingWorlds,
+    memory_wiring,
+    stand_in_deployment_memory,
+    stand_in_memory_resolver,
+)
 from factory.wire import FactoryOptions, assemble, deploy_turn_timeout_s
 from factory_fixtures import closed_loop_repo
 
@@ -35,7 +41,7 @@ def _memory_env(tmp_path, root=None, **extra):
 
 def _fake_wiring(repo_root, sweep):
     return MemoryWiring(backend="stand-in", deployment=stand_in_deployment_memory(repo_root),
-                        memory_resolver=stand_in_memory_resolver, training_copies=None, sweep=sweep)
+                        memory_resolver=stand_in_memory_resolver, training_worlds=StandInTrainingWorlds(), sweep=sweep)
 
 
 def test_turn_timeouts_follow_section_6_4():
@@ -48,7 +54,7 @@ def test_turn_timeouts_follow_section_6_4():
 def test_without_the_variable_the_wiring_is_the_stand_in_and_logs_it_once(tmp_path, caplog):
     with caplog.at_level(logging.INFO, logger="factory.memory_runtime"):
         w = memory_wiring(tmp_path / "repo", {}, deployment=True)
-    assert w.backend == "stand-in" and w.training_copies is None and w.sweep is None
+    assert w.backend == "stand-in" and isinstance(w.training_worlds, StandInTrainingWorlds) and w.sweep is None
     assert w.deployment is not None and w.memory_resolver is stand_in_memory_resolver
     assert caplog.text.count("memory backend: stand-in") == 1
 
@@ -106,7 +112,7 @@ def test_the_starling_wiring_logs_only_its_backend_name(tmp_path, store, caplog)
     with caplog.at_level(logging.INFO, logger="factory.memory_runtime"):
         w = memory_wiring(store.repo_root, _memory_env(tmp_path), deployment=True)
     assert w.backend == "starling" and w.deployment is not None and callable(w.sweep)
-    assert w.training_copies is not None and w.sweep == w.training_copies.sweep
+    assert type(w.training_worlds).__name__ == "StarlingTrainingWorlds" and w.sweep == w.training_worlds.sweep
     assert caplog.text.count("memory backend: starling") == 1 and "stand-in" not in caplog.text
     assert str(tmp_path / "mem") not in caplog.text and "127.0.0.1" not in caplog.text
     assert w.deployment.runtime["backend"] == "starling"

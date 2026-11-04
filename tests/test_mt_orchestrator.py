@@ -575,7 +575,7 @@ def _interact_sources(store, env, cfg, calls):
         return {
             "sft": BatchTrajectorySource(store, read_manifest(store, RUN, "sft")),
             "grpo_opd": InteractTrajectorySource(
-                env.client_factory, lambda eid: nullcontext(policy), store, cfg, run_id=RUN, start_step=start
+                env.client_factory, lambda eid, sid: nullcontext(policy), store, cfg, run_id=RUN, start_step=start
             ),
         }
     return make

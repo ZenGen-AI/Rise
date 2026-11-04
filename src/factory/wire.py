@@ -32,7 +32,7 @@ if TYPE_CHECKING:  # factory.agent 与 factory.memory_runtime 拖进 grpc 与 mi
     from actio.memory_port import DeploymentMemoryStore
     from factory.agent import AgentRuntime
     from factory.interact_policy import OpponentSwitch
-    from factory.memory_runtime import DeploymentMemory, MemoryWiring, TrainingCopies
+    from factory.memory_runtime import DeploymentMemory, MemoryWiring, TrainingWorlds
 
 _log = logging.getLogger("factory.wire")
 
@@ -124,7 +124,7 @@ class Assembly:
     # --executor roll 时才有(设计 FC-15);mock 路径下两者都是 None,Assembly 与改动前等价
     executor_factory: Callable[[str], object] | None = None
     converter: object | None = None
-    # Starling 时清扫训练副本的函数(返回删了几项);替身与不需要记忆的路径是 None。
+    # Starling 时清扫 rollout 世界的函数(返回删了几项);替身与不需要记忆的路径是 None。
     # assemble 只交出它、不调它:清扫要等持仓库锁,由 run(经 run_daemon 的 on_locked)与 reconcile_one_tick 调用。
     sweep: Callable[[], int] | None = None
 
@@ -171,7 +171,7 @@ def deploy_turn_timeout_s(*, interact: bool, starling: bool) -> float | None:
 
 def _shared_runtime(
     store: GitStore, options: FactoryOptions, keys: frozenset[str],
-    *, turn_timeout_s: float | None, training_copies: TrainingCopies | None,
+    *, turn_timeout_s: float | None, training_worlds: TrainingWorlds | None,
     deployment_store: DeploymentMemoryStore | None = None,
 ) -> tuple[AgentRuntime | None, OpponentSwitch | None]:
     """`--interact` 或 `--enable agent` 时造那唯一的 AgentRuntime(进程内 loopback 实时服务端),否则 (None, None)。
@@ -184,8 +184,9 @@ def _shared_runtime(
     所以运行时先带着空开关造好,策略上下文进入时装上真工厂、退出时卸下(见 factory.interact_policy)。
     卸下的开关给的是运行时原来的罐头后端,所以共用运行时上的部署会话行为不变。
 
-    turn_timeout_s 为 None 时不传,保持 AgentRuntime 的默认值(见 `deploy_turn_timeout_s`)。training_copies 只在
-    --interact 时传:部署会话没登记给训练 run,用不到训练副本。deployment_store 只在启用了 start_agent_round 时传
+    turn_timeout_s 为 None 时不传,保持 AgentRuntime 的默认值(见 `deploy_turn_timeout_s`)。training_worlds 只在
+    --interact 时传,且必须是交给策略工厂的同一个对象(客户端在它里面建 rollout 世界,服务端按 episode id 加入):
+    部署会话没登记给训练 run,用不到它。deployment_store 只在启用了 start_agent_round 时传
     (部署记忆的那一个管理面,与轮次处理器、门② 同一个对象):运行时据此在部署世界里开对手位的端口。"""
     if not options.interact and "start_agent_round" not in keys:
         return None, None
@@ -201,7 +202,7 @@ def _shared_runtime(
         switch = OpponentSwitch(lines)
         return AgentRuntime(store, lines, message_timeout_s=INTERACT_MESSAGE_TIMEOUT_S,
                             backend_timeout_s=INTERACT_BACKEND_TIMEOUT_S,
-                            opponent_backend_factory=switch, training_copies=training_copies, **kwargs), switch
+                            opponent_backend_factory=switch, training_worlds=training_worlds, **kwargs), switch
     return AgentRuntime(store, lines, **kwargs), None
 
 
@@ -210,7 +211,8 @@ def _interact_wiring(
     environ: Mapping[str, str], memory: MemoryWiring,
 ) -> dict:
     """`--interact` 要交给派发器的东西:策略工厂、它所用端点的名字,以及解起点记忆的解析器(来自 `memory`:
-    替身或 Starling)。训练副本也经 `memory.training_copies` 交给策略工厂;启动日志在 `memory_wiring` 里记过一次,这里不再记。
+    替身或 Starling)。rollout 世界经 `memory.training_worlds` 交给策略工厂,与运行时手里的是同一个;启动日志在
+    `memory_wiring` 里记过一次,这里不再记。
 
     端点只选一次:点名的或唯一的那个。同一个端点既给 policy_context 起服务,也作为 policy_endpoint
     写进 training_run.policy_backend,所以记录里的端点就是服务实际起在的端点。配置错一律 FactoryConfigError。"""
@@ -225,7 +227,7 @@ def _interact_wiring(
     client = build_compute_client(endpoint, read_host_map(env=environ))
     policy_factory = make_policy_factory(
         store=store, runtime=runtime, switch=switch, client=client, endpoint=endpoint, env=environ,
-        training_copies=memory.training_copies,
+        training_worlds=memory.training_worlds,
     )
     return {
         "policy_factory": policy_factory,
@@ -425,7 +427,7 @@ def assemble(
         runtime, switch = _shared_runtime(
             store, options, keys,
             turn_timeout_s=deploy_turn_timeout_s(interact=True, starling=memory.backend == "starling"),
-            training_copies=memory.training_copies,
+            training_worlds=memory.training_worlds,
         )
         try:
             wiring = _interact_wiring(store, options, runtime, switch, environ, memory)
@@ -453,7 +455,7 @@ def assemble(
         store, options, keys,
         turn_timeout_s=deploy_turn_timeout_s(
             interact=options.interact, starling=memory is not None and memory.backend == "starling"),
-        training_copies=None if memory is None else memory.training_copies,
+        training_worlds=None if memory is None else memory.training_worlds,
         deployment_store=deployment_store,
     )
     ctx = BuildContext(
@@ -508,7 +510,7 @@ def run(
         run_daemon(
             store, interval_s, max_ticks=max_ticks, dispatcher=a.dispatcher,
             handlers=a.handlers, evaluator=a.evaluator, accept_mock_evidence=a.accept_mock_evidence,
-            on_locked=a.sweep,          # 清扫训练副本要等持锁(另一个守护进程可能正在用);run_daemon 在第一个 tick 前调
+            on_locked=a.sweep,          # 清扫 rollout 世界要等持锁(另一个守护进程可能正在用);run_daemon 在第一个 tick 前调
         )
     finally:
         a.close()          # --interact 单独用时没有处理器,但运行时仍要收尾
@@ -529,7 +531,7 @@ def reconcile_one_tick(
         a = assemble(store, options, env=env, log_dir=log_dir, builders=builders)
         try:
             if a.sweep is not None:
-                a.sweep()          # 持锁之后、第一个动作之前:上一个进程崩溃时留下的训练副本在这里清掉
+                a.sweep()          # 持锁之后、第一个动作之前:上一个进程崩溃时留下的 rollout 世界在这里清掉
             if not a.closed_loop:
                 # --evaluator someval 不开闭环,但评估器必须交给调和循环,否则 request_diagnostic 走占位桩
                 return reconcile_once(store, dispatcher=a.dispatcher, evaluator=a.evaluator)
