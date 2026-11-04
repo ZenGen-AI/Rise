@@ -140,6 +140,24 @@ def test_a_bound_persona_id_the_memory_layout_refuses_exits_2_at_assembly(store,
     assert "persona_id" in capsys.readouterr().err
 
 
+def test_an_agent_config_binding_one_persona_twice_exits_2(store, capsys):
+    """两个角色位绑同一人格会共用一个持有者与一份部署记忆:装配期就判 FactoryConfigError、退出码 2,
+    原因与训练配置那一侧是同一句。"""
+    from factory.cli import main
+    payload = dict(DEFAULT_AGENT_CONFIG)
+    payload["bindings"] = [dict(b) for b in payload["bindings"]]
+    payload["bindings"][1]["persona_id"] = payload["bindings"][0]["persona_id"]
+    shared = payload["bindings"][0]["persona_id"]
+    write_config(store, AGENT_CONFIG, "agent", payload, "human: one persona on two slots")
+    with pytest.raises(FactoryConfigError, match="bound to more than one slot") as caught:
+        read_agent_settings(store)
+    assert f"bindings: persona {shared!r} is bound to more than one slot" in str(caught.value)
+    with pytest.raises(FactoryConfigError, match="bound to more than one slot"):
+        assemble(store, FactoryOptions(switches=("agent",)), env={})
+    assert main(["reconcile", str(store.repo_root), "--once", "--enable", "agent"], env={}) == 2
+    assert "bound to more than one slot" in capsys.readouterr().err
+
+
 def test_the_agent_runtime_starts_lazily_and_closes(store):
     runtime = AgentRuntime(store, ("hi",))
     assert not runtime.started

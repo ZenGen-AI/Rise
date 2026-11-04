@@ -600,6 +600,36 @@ def test_a_write_back_that_still_fails_strict_validation_is_t2(store):
     assert not store.exists(f"{run_dir(RUN)}/training_run.yaml")
 
 
+class SharedPersonaProducer(WorldSpy):
+    """违约的生产器:给每个角色位同一份人格,回写出来的绑定就会有重复人格。"""
+
+    def world_for_interact(self, cfg, data_spec):
+        scenarios, personas = super().world_for_interact(cfg, data_spec)
+        shared = next(iter(personas.values()))
+        return scenarios, {slot: shared for slot in personas}
+
+
+def test_a_synthesized_persona_on_more_than_one_slot_fails_the_directive_before_memory_is_resolved(store):
+    """回写后的严格复校(派发器里记忆解析之前的那一次)拒绝人格重复的绑定:T2,原因同训练配置那一侧,
+    记忆解析器与服务端都没被碰。"""
+    resolver_calls = []
+
+    def resolver(seed, persona_ids):
+        resolver_calls.append(persona_ids)
+        return fake_memory_resolver(seed, persona_ids)
+
+    _directive(store, cfg=_interact_cfg())
+    reconcile_once(store, dispatcher=interact_dispatcher(
+        client_factory=_no_client, policy=ScriptedBackend({}),
+        data_producer=SharedPersonaProducer(), memory_resolver=resolver))
+    env = _status(store)
+    assert env.status == "failed"
+    assert env.payload["failure"]["category"] == "T2"
+    assert "bindings: persona 'pers-auto-0' is bound to more than one slot" in env.payload["failure"]["reason"]
+    assert resolver_calls == []
+    assert not store.exists(f"{run_dir(RUN)}/training_run.yaml")
+
+
 def test_a_pending_interact_directive_without_a_producer_fails_and_names_it(store):
     _directive(store, cfg=_interact_cfg())
     before = copy.deepcopy(_training_config(store))

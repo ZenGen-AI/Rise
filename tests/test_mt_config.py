@@ -171,6 +171,36 @@ def test_invalid_config_is_rejected_with_the_specific_reason(build, needle):
     assert needle in reason, reason
 
 
+def test_a_persona_bound_to_two_slots_is_refused():
+    """同一人格占两个角色位会共用一个记忆持有者、一份记忆和一组事件键:在配置层就拒绝。"""
+    cfg = _interact(bindings=[_trained(), RoleBinding("b", "pa", "frozen_reference", model_ref="zengen-v1")])
+    assert validate_training_config(cfg) == "bindings: persona 'pa' is bound to more than one slot"
+
+
+def test_the_refusal_names_the_first_repeated_persona_in_binding_order():
+    bindings = [
+        RoleBinding("a", "pa", "self_play"),
+        RoleBinding("b", "pb", "frozen_reference", model_ref="zengen-v1"),
+        RoleBinding("c", "pc", "frozen_reference", model_ref="zengen-v1"),
+        RoleBinding("d", "pb", "frozen_reference", model_ref="zengen-v1"),
+        RoleBinding("e", "pc", "frozen_reference", model_ref="zengen-v1"),
+    ]
+    assert validate_training_config(_interact(bindings=bindings)) == (
+        "bindings: persona 'pb' is bound to more than one slot")
+
+
+def test_distinct_personas_on_three_slots_pass():
+    bindings = [_trained(), _opponent(), RoleBinding("c", "pc", "frozen_reference", model_ref="zengen-v1")]
+    assert validate_training_config(_interact(bindings=bindings)) is None
+
+
+def test_a_persona_bound_to_two_slots_is_still_refused_in_the_strict_form_of_a_pending_config():
+    """生成路回写后的配置走严格口径;人格重复(生产器违约)在那里被拒。"""
+    cfg = _pending(scenario_ids=["s1", "s2"], bindings=[
+        dataclasses.replace(b, persona_id="pa") for b in _pending_bindings()])
+    assert validate_training_config(cfg) == "bindings: persona 'pa' is bound to more than one slot"
+
+
 @pytest.mark.parametrize("backend, driver", [
     ("frozen_reference", "vllm"), ("frozen_reference", "scripted"), ("frozen_reference", "external_api"),
     ("external_api", "external_api"), ("external_api", "scripted"), ("external_api", None),

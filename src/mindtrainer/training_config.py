@@ -399,6 +399,12 @@ def _validate_interact(cfg: TrainingConfig) -> str | None:
     duplicated = sorted({s for s in slots if slots.count(s) > 1})
     if duplicated:
         return f"duplicate slot_id in bindings: {duplicated}"
+    # 记忆按人格持有:两个角色位绑同一人格,就共用一个持有者、一份记忆和一组事件键,所以在配置层拒绝。
+    # 取按绑定顺序第一个出现不止一次的人格;部署侧(factory.agent.read_agent_settings)用同一句原因
+    pids = [b.persona_id for b in cfg.bindings]
+    if len(set(pids)) != len(pids):
+        repeated = next(pid for pid in pids if pids.count(pid) > 1)
+        return f"bindings: persona {repeated!r} is bound to more than one slot"
     by_slot = {b.slot_id: b for b in cfg.bindings}
     trained = by_slot.get(cfg.trained_slot)
     if trained is None:
@@ -426,7 +432,7 @@ def _validate_interact(cfg: TrainingConfig) -> str | None:
 def _validate_memory_against_bindings(cfg: TrainingConfig) -> str | None:
     """memory 段与绑定的对应关系(形状已由 _check_memory_types 查过)。interact 的 memory 为 None 已由 _validate_interact 先拒绝。
     digests 与 runtime 都空是"未解析"(调度器写进配置时的样子),放行;填了就要一起填、人格要对得上、
-    运行时身份要齐五个键。生成路 pending 时人格是空串、占位探针里是 "pending",digests 只能为空,这就是宽口径。"""
+    运行时身份要齐五个键。生成路 pending 时人格是空串、占位探针里是各不相同的 "pending-<序号>",digests 只能为空,这就是宽口径。"""
     memory = cfg.memory
     if memory is None:
         return None
@@ -531,7 +537,8 @@ def validate_pending_interact(cfg: TrainingConfig) -> str | None:
     probe = dataclasses.replace(
         cfg,
         scenario_ids=[f"pending-{i}" for i in range(cfg.groups_per_step)],
-        bindings=[dataclasses.replace(b, persona_id="pending") for b in cfg.bindings],
+        # 占位人格各不相同:严格口径拒绝同一人格占两个角色位,探针不能因占位撞名而被拒
+        bindings=[dataclasses.replace(b, persona_id=f"pending-{i}") for i, b in enumerate(cfg.bindings)],
     )
     return _validate_interact(probe)
 

@@ -105,6 +105,14 @@ def read_agent_settings(store: GitStore) -> tuple[AgentConfig, tuple[str, ...]]:
             f"{AGENT_CONFIG}: bindings persona_id {bad} must be 1 to 128 characters of [A-Za-z0-9._-] "
             "starting with a letter or digit (it names the deployment memory library and its lock)"
         )
+    # 记忆按人格持有:两个角色位绑同一人格,就共用一个持有者、一份记忆和一组事件键。
+    # 与训练配置(mindtrainer.training_config)同一句原因;三处调用方(装配两处、每次派发)都经过这里
+    pids = [b.persona_id for b in bindings]
+    if len(set(pids)) != len(pids):
+        repeated = next(pid for pid in pids if pids.count(pid) > 1)
+        raise FactoryConfigError(
+            f"{AGENT_CONFIG}: bindings: persona {repeated!r} is bound to more than one slot"
+        )
     return config, tuple(lines)
 
 
