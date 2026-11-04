@@ -112,7 +112,7 @@ class TrainingConfig:
     max_retries_per_episode: int = 2  # interact 专用
     min_group_size: int = 2
     max_resume_attempts: int = 3
-    # interact 专用的起点记忆:{"seed": str | None, "digests": {persona_id: digest}, "runtime": {...}}。
+    # interact 专用的起点记忆:{"seed": str | None, "digests": {scenario_id: digest}, "runtime": {...}}。
     # digests 与 runtime 都空是"未解析";None 表示没有 memory 段,to_dict 不写这个键,所以哈希不变
     memory: dict | None = None
 
@@ -426,21 +426,22 @@ def _validate_interact(cfg: TrainingConfig) -> str | None:
         if not b.model_ref:
             # 事后追查 reward hacking 要靠它:不记对手是谁,就无法判断是不是练偏了
             return f"non-trained slot {b.slot_id!r} needs a non-empty model_ref"
-    return _validate_memory_against_bindings(cfg)
+    return _validate_memory_against_scenarios(cfg)
 
 
-def _validate_memory_against_bindings(cfg: TrainingConfig) -> str | None:
-    """memory 段与绑定的对应关系(形状已由 _check_memory_types 查过)。interact 的 memory 为 None 已由 _validate_interact 先拒绝。
-    digests 与 runtime 都空是"未解析"(调度器写进配置时的样子),放行;填了就要一起填、人格要对得上、
-    运行时身份要齐五个键。生成路 pending 时人格是空串、占位探针里是各不相同的 "pending-<序号>",digests 只能为空,这就是宽口径。"""
+def _validate_memory_against_scenarios(cfg: TrainingConfig) -> str | None:
+    """memory 段与情境的对应关系(形状已由 _check_memory_types 查过)。interact 的 memory 为 None 已由 _validate_interact 先拒绝。
+    digests 与 runtime 都空是"未解析"(调度器写进配置时的样子),放行;填了就要一起填、情境要对得上、
+    运行时身份要齐五个键。起点是每个情境的世界,所以 digests 的键是情境 id,不是人格 id。
+    生成路 pending 时情境为空、占位探针里是 "pending-<序号>",digests 只能为空,这就是宽口径。"""
     memory = cfg.memory
     if memory is None:
         return None
     digests, runtime = memory["digests"], memory["runtime"]
     if bool(digests) != bool(runtime):
         return "memory.digests and memory.runtime must be filled together"
-    if digests and set(digests) != {b.persona_id for b in cfg.bindings}:
-        return "memory.digests must name exactly the bound personas"
+    if digests and set(digests) != set(cfg.scenario_ids):
+        return "memory.digests must name exactly the configured scenarios"
     if runtime and sorted(runtime) != list(MEMORY_RUNTIME_KEYS):
         return f"memory.runtime must have exactly the keys {list(MEMORY_RUNTIME_KEYS)}"
     return None

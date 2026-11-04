@@ -13,12 +13,13 @@ def unresolved_memory(seed=None) -> dict:
     return {"seed": seed, "digests": {}, "runtime": {}}
 
 
-def resolved_memory(persona_ids, *, seed=None, digest="d0") -> dict:
-    return {"seed": seed, "digests": {p: digest for p in persona_ids}, "runtime": dict(STAND_IN_RUNTIME)}
+def resolved_memory(scenario_ids, *, seed=None, digest="d0") -> dict:
+    """digests 的键是情境 id,不是人格 id(起点是每个情境的世界)。"""
+    return {"seed": seed, "digests": {s: digest for s in scenario_ids}, "runtime": dict(STAND_IN_RUNTIME)}
 
 
-def fake_memory_resolver(seed, persona_ids):
-    return {p: f"digest-{p}" for p in persona_ids}, dict(STAND_IN_RUNTIME)
+def fake_memory_resolver(seed, scenario_ids):
+    return {s: f"digest-{s}" for s in scenario_ids}, dict(STAND_IN_RUNTIME)
 
 
 def interact_dispatcher(**kw):

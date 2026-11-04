@@ -916,7 +916,7 @@ def test_a_corrupt_seed_fails_the_trained_slot_as_a_deterministic_memory_failure
     with FakeOpenAI(dim=256) as fake, offline_api_key():
         layout = StarlingLayout(tmp_path / "mem")
         layout.seed_dir("s1").mkdir(parents=True)
-        layout.scenario_seed("s1", "t1").write_bytes(b"this is not a sqlite library")
+        layout.seed("s1", "t1").write_bytes(b"this is not a sqlite library")
         worlds = StarlingTrainingWorlds(layout, fake.endpoints(), close_timeout_s=0.2)
         _, _, factory, _ = _unit(world, tmp_path, stub, training_worlds=worlds)
         episode = f"{RUN}-grpo0-t1-r0"
@@ -1767,7 +1767,7 @@ def test_the_assembled_dispatcher_records_the_stand_in_memory(world, tmp_path, s
     assert _read(world, "directive").status == "executed"
     empty = TupleMemory().digest()
     assert _read(world, "training_run").payload["policy_backend"]["memory"] == {
-        "seed": None, "digests": {"pa": empty, "pb": empty}, "runtime": STAND_IN_MEMORY_RUNTIME,
+        "seed": None, "digests": {"t1": empty, "t2": empty}, "runtime": STAND_IN_MEMORY_RUNTIME,
     }
 
 

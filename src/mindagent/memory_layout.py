@@ -132,13 +132,17 @@ class MemoryLayout:
             return []
         return sorted(p for d in base.iterdir() if d.is_dir() for p in d.iterdir() if self._is_snapshot(p))
 
+    def tagged_snapshots(self) -> list[Path]:
+        """带 `.world` 旁注文件的起点快照(任何情境、任何轮次),按路径排序。装配期逐个 `world_of` 它们,
+        坏旁注当场暴露,而不是留到门② 才抛。"""
+        return [p for p in self.any_uncommitted_snapshots() if _tag_path(p).is_file()]
+
     def uncommitted_snapshots(self, scenario_id: str) -> list[Path]:
         """任何轮次里旁注内容等于 scenario_id 的起点快照。没有旁注的快照是旧布局遗留,不在其中
         (`legacy_entries` 报它们)。任何一份快照的旁注坏了都抛 MindAgentDataError:宁可停下,
         也不漏判一份在途快照。"""
         _check_world(scenario_id)
-        return [p for p in self.any_uncommitted_snapshots()
-                if _tag_path(p).is_file() and self.world_of(p) == scenario_id]
+        return [p for p in self.tagged_snapshots() if self.world_of(p) == scenario_id]
 
     def legacy_entries(self, known_scenarios: Iterable[str]) -> list[str]:
         """记忆根下属于旧布局的文件,相对记忆根的 POSIX 路径,排序。两类:

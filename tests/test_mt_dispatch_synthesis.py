@@ -535,9 +535,9 @@ def test_the_recorded_backend_is_built_from_the_written_back_config(store, live)
         "trained": {"ref": "file:///ckpt/base", "kind": "base", "endpoint": "gpu-1"},
         "opponents": {"b": {"driver": "scripted", "source": "zengen-v1"}},
         "real_inference_with_mock_training": True,
-        # 解析器拿到的是回写后的人格 id(pers-auto-N),摘要按它们记
-        "memory": {**resolved_memory(["pers-auto-0", "pers-auto-1"]),
-                   "digests": {"pers-auto-0": "digest-pers-auto-0", "pers-auto-1": "digest-pers-auto-1"}},
+        # 解析器拿到的是回写后的情境 id(scen-auto-N),摘要按它们记
+        "memory": {**resolved_memory(["scen-auto-0", "scen-auto-1"]),
+                   "digests": {"scen-auto-0": "digest-scen-auto-0", "scen-auto-1": "digest-scen-auto-1"}},
     }
 
 
@@ -614,9 +614,9 @@ def test_a_synthesized_persona_on_more_than_one_slot_fails_the_directive_before_
     记忆解析器与服务端都没被碰。"""
     resolver_calls = []
 
-    def resolver(seed, persona_ids):
-        resolver_calls.append(persona_ids)
-        return fake_memory_resolver(seed, persona_ids)
+    def resolver(seed, scenario_ids):
+        resolver_calls.append(scenario_ids)
+        return fake_memory_resolver(seed, scenario_ids)
 
     _directive(store, cfg=_interact_cfg())
     reconcile_once(store, dispatcher=interact_dispatcher(

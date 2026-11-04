@@ -17,21 +17,21 @@ def test_the_stand_in_runtime_identity_is_the_one_the_design_fixes():
     }
 
 
-def test_every_persona_starts_from_the_empty_stand_in_library():
-    digests, runtime = stand_in_memory_resolver(None, ("pa", "pb"))
-    assert digests == {"pa": TupleMemory().digest(), "pb": TupleMemory().digest()}
+def test_every_scenario_starts_from_the_empty_stand_in_world():
+    digests, runtime = stand_in_memory_resolver(None, ("s1", "s2"))
+    assert digests == {"s1": TupleMemory().digest(), "s2": TupleMemory().digest()}
     assert runtime == STAND_IN_MEMORY_RUNTIME
 
 
 def test_the_returned_identity_is_a_copy():
-    _, runtime = stand_in_memory_resolver(None, ("pa",))
+    _, runtime = stand_in_memory_resolver(None, ("s1",))
     runtime["backend"] = "x"
     assert STAND_IN_MEMORY_RUNTIME["backend"] == "stand-in"
 
 
 def test_a_seed_needs_a_memory_config():
     with pytest.raises(DirectiveFailedError, match="needs a memory config") as info:
-        stand_in_memory_resolver("seed-1", ("pa",))
+        stand_in_memory_resolver("seed-1", ("s1",))
     assert "RISMFORGE_MEMORY_CONFIG" in info.value.reason and info.value.category == "T2"
 
 
@@ -121,28 +121,23 @@ def test_layout_refuses_unsafe_names_in_every_position(tmp_path, bad):
             call()
 
 
-@pytest.mark.parametrize("bad", ["", ".hidden", "a/b", "..", "p" * 129, "pa\n", None, 7])
-def test_layout_refuses_unsafe_persona_and_scenario_ids(tmp_path, bad):
+@pytest.mark.parametrize("bad", ["", ".hidden", "a/b", "..", "p" * 129, "t1\n", None, 7])
+def test_layout_refuses_unsafe_scenario_ids(tmp_path, bad):
     with pytest.raises(ValueError):
         StarlingLayout(tmp_path).seed("s1", bad)
-    with pytest.raises(ValueError):
-        StarlingLayout(tmp_path).scenario_seed("s1", bad)
 
 
 def test_layout_refuses_an_unsafe_seed_id_as_a_readable_t2(tmp_path):
     for bad in ("..", "a/b", "../deploy", "", "x" * 129, None):
-        for call in (lambda: StarlingLayout(tmp_path).seed(bad, "pa"),
-                     lambda: StarlingLayout(tmp_path).scenario_seed(bad, "s1")):
-            with pytest.raises(DirectiveFailedError, match="memory.seed") as info:
-                call()
-            assert info.value.category == "T2"
-            assert str(tmp_path) not in info.value.reason                  # 原因里没有根目录的绝对路径
+        with pytest.raises(DirectiveFailedError, match="memory.seed") as info:
+            StarlingLayout(tmp_path).seed(bad, "t1")
+        assert info.value.category == "T2"
+        assert str(tmp_path) not in info.value.reason                      # 原因里没有根目录的绝对路径
 
 
 def test_layout_paths_follow_section_5_3(tmp_path):
     lay = StarlingLayout(tmp_path)
-    assert lay.seed("s1", "pa") == tmp_path / "seeds" / "s1" / "pa.db"
-    assert lay.scenario_seed("s1", "t1") == tmp_path / "seeds" / "s1" / "t1.db"
+    assert lay.seed("s1", "t1") == tmp_path / "seeds" / "s1" / "t1.db"       # 种子按情境,一个情境一个世界
     assert lay.rollout_world("run-1", "run-1-grpo0-s1-r0") == tmp_path / "runs" / "run-1" / "run-1-grpo0-s1-r0.db"
     assert lay.deploy_dir() == tmp_path / "deploy"
     assert lay.runs_dir() == tmp_path / "runs"
@@ -161,7 +156,7 @@ def test_importing_the_module_does_not_need_starling():
         "from factory.memory_runtime import StandInTrainingWorlds, StarlingLayout, StarlingTrainingWorlds\n"
         "from factory.memory_runtime import starling_memory_resolver, starling_memory_runtime\n"
         "assert 'actio.memory_starling' not in sys.modules\n"
-        "assert StarlingLayout(Path('/m')).seed('s1', 'pa') == Path('/m/seeds/s1/pa.db')\n"
+        "assert StarlingLayout(Path('/m')).seed('s1', 't1') == Path('/m/seeds/s1/t1.db')\n"
         "assert StarlingLayout(Path('/m')).rollout_world('r', 'e') == Path('/m/runs/r/e.db')\n"
         "w = StandInTrainingWorlds(); w.bind('r', None)\n"
         "w.close_rollout('e', [w.open_rollout('r', 's1', 'e', 'pa')], wait_s=1.0)\n"
@@ -183,24 +178,37 @@ starling_only = pytest.mark.skipif(__import__("importlib.util").util.find_spec("
 
 
 @starling_only
-def test_the_resolver_digests_seed_libraries_and_empty_starts(tmp_path):
+def test_the_resolver_digests_seed_worlds_per_scenario_and_empty_starts(tmp_path):
     from actio.memory_starling import StarlingDeploymentStore, empty_digest
     from factory.memory_runtime import starling_memory_resolver
     from starling_fakes import FakeOpenAI, offline_api_key
     lay = StarlingLayout(tmp_path)
     with FakeOpenAI(dim=256) as fake, offline_api_key():
         seeds = StarlingDeploymentStore(tmp_path / "seeds" / "s1", endpoints=fake.endpoints())
-        seeds.remember_event("pa", "pa", "seed#0@pa", "pb：我担心预算超支", interlocutor="pb")
-        seeded = seeds.digest("pa")
-        before = (tmp_path / "seeds" / "s1" / "pa.db").read_bytes()
+        seeds.remember_event("t1", "pa", "seed#0@pa", "pb：我担心预算超支", interlocutor="pb")
+        seeded = seeds.digest("t1")
+        before = (tmp_path / "seeds" / "s1" / "t1.db").read_bytes()
         resolve = starling_memory_resolver(lay, {"backend": "starling"})
-        digests, rt = resolve("s1", ("pa", "pb"))
-        assert digests == {"pa": seeded, "pb": empty_digest()}    # 种子里没有的人格从空库起
-        assert seeded != empty_digest()                           # 上一句有分辨力:种子库不是空库
-        assert rt == {"backend": "starling"} and rt is not resolve("s1", ("pa",))[1]
-        assert (tmp_path / "seeds" / "s1" / "pa.db").read_bytes() == before   # 种子只读
-        assert sorted(p.name for p in (tmp_path / "seeds" / "s1").iterdir()) == ["pa.db"]   # 旁边没留 -wal、-shm
-        assert resolve(None, ("pa",)) == ({"pa": empty_digest()}, {"backend": "starling"})
+        digests, rt = resolve("s1", ("t1", "t2"))
+        assert digests == {"t1": seeded, "t2": empty_digest()}    # 种子里没有的情境从空世界起
+        assert seeded != empty_digest()                           # 上一句有分辨力:种子世界不是空库
+        assert rt == {"backend": "starling"} and rt is not resolve("s1", ("t1",))[1]
+        assert (tmp_path / "seeds" / "s1" / "t1.db").read_bytes() == before   # 种子只读
+        assert sorted(p.name for p in (tmp_path / "seeds" / "s1").iterdir()) == ["t1.db"]   # 旁边没留 -wal、-shm
+        assert resolve(None, ("t1",)) == ({"t1": empty_digest()}, {"backend": "starling"})
+
+
+@starling_only
+def test_the_resolver_ignores_a_per_persona_seed_file(tmp_path):
+    """旧布局的种子 `seeds/<seed>/<persona>.db` 不会被读:解析器只认情境 id 命名的库,人格名的文件对它不存在。"""
+    from actio.memory_starling import StarlingDeploymentStore, empty_digest
+    from factory.memory_runtime import starling_memory_resolver
+    from starling_fakes import FakeOpenAI, offline_api_key
+    with FakeOpenAI(dim=256) as fake, offline_api_key():
+        seeds = StarlingDeploymentStore(tmp_path / "seeds" / "s1", endpoints=fake.endpoints())
+        seeds.remember_event("pa", "pa", "seed#0@pa", "pb：我担心预算超支", interlocutor="pb")   # 世界 id 是人格名
+        resolve = starling_memory_resolver(StarlingLayout(tmp_path), {"backend": "starling"})
+        assert resolve("s1", ("t1",))[0] == {"t1": empty_digest()}
 
 
 @starling_only
@@ -209,9 +217,9 @@ def test_the_resolver_returns_a_copy_of_the_identity_it_was_built_with(tmp_path)
     runtime = {"backend": "starling", "extraction": {"model": "m"}}
     resolve = starling_memory_resolver(StarlingLayout(tmp_path), runtime)
     runtime["extraction"]["model"] = "changed-after-the-fact"            # 造完解析器再改原字典,不影响解出的身份
-    first = resolve(None, ("pa",))[1]
+    first = resolve(None, ("t1",))[1]
     first["extraction"]["model"] = "changed-by-the-caller"               # 调用方改返回值,也不影响下一次
-    assert resolve(None, ("pa",))[1] == {"backend": "starling", "extraction": {"model": "m"}}
+    assert resolve(None, ("t1",))[1] == {"backend": "starling", "extraction": {"model": "m"}}
 
 
 @starling_only
@@ -219,37 +227,37 @@ def test_a_missing_or_unsafe_seed_is_a_readable_t2(tmp_path):
     from factory.memory_runtime import starling_memory_resolver
     resolve = starling_memory_resolver(StarlingLayout(tmp_path), {"backend": "starling"})
     with pytest.raises(DirectiveFailedError, match="memory.seed 'nope' has no directory") as info:
-        resolve("nope", ("pa",))
+        resolve("nope", ("t1",))
     assert info.value.category == "T2" and str(tmp_path) not in info.value.reason
     with pytest.raises(DirectiveFailedError, match="memory.seed"):
-        resolve("../deploy", ("pa",))
+        resolve("../deploy", ("t1",))
     (tmp_path / "seeds").mkdir()
     (tmp_path / "seeds" / "afile").write_text("x")                       # 种子位置上是个文件,不是目录
     with pytest.raises(DirectiveFailedError, match="memory.seed 'afile' has no directory"):
-        resolve("afile", ("pa",))
+        resolve("afile", ("t1",))
 
 
 @starling_only
 def test_a_seed_library_that_cannot_be_read_is_never_taken_for_an_empty_start(tmp_path):
-    """库文件有问题(悬空链接、0 字节、不是库)时,不能静默当成"该人格从空库起":那会让一个点名了种子的实验
+    """库文件有问题(悬空链接、0 字节、不是库)时,不能静默当成"该情境从空世界起":那会让一个点名了种子的实验
     悄悄从空记忆开始。异常不接,计划 A 的 _resolve_memory 只报类名、判 T2。"""
     from factory.memory_runtime import starling_memory_resolver
     seed = tmp_path / "seeds" / "s1"
     seed.mkdir(parents=True)
     resolve = starling_memory_resolver(StarlingLayout(tmp_path), {"backend": "starling"})
-    (seed / "pa.db").symlink_to(tmp_path / "gone.db")                     # 悬空
-    (seed / "pb.db").write_bytes(b"")                                     # 0 字节
-    (seed / "pc.db").write_bytes(b"not a sqlite file at all")
-    for persona in ("pa", "pb", "pc"):
+    (seed / "t1.db").symlink_to(tmp_path / "gone.db")                     # 悬空
+    (seed / "t2.db").write_bytes(b"")                                     # 0 字节
+    (seed / "t3.db").write_bytes(b"not a sqlite file at all")
+    for scenario in ("t1", "t2", "t3"):
         with pytest.raises(MemoryFailureError):
-            resolve("s1", (persona,))
+            resolve("s1", (scenario,))
 
 
 @starling_only
 @pytest.mark.skipif(hasattr(__import__("os"), "geteuid") and __import__("os").geteuid() == 0,
                     reason="root 不受目录权限限制")
 def test_an_unreadable_seed_directory_is_not_taken_for_an_empty_start(tmp_path):
-    """种子目录在、但进不去:lstat 报的是 PermissionError 不是 FileNotFoundError,不能当"没有这个库"。"""
+    """种子目录在、但进不去:lstat 报的是 PermissionError 不是 FileNotFoundError,不能当"没有这个世界"。"""
     from factory.memory_runtime import starling_memory_resolver
     seed = tmp_path / "seeds" / "s1"
     seed.mkdir(parents=True)
@@ -257,7 +265,7 @@ def test_an_unreadable_seed_directory_is_not_taken_for_an_empty_start(tmp_path):
     seed.chmod(0o000)
     try:
         with pytest.raises(PermissionError):
-            resolve("s1", ("pa",))
+            resolve("s1", ("t1",))
     finally:
         seed.chmod(0o700)
 
@@ -273,9 +281,9 @@ def test_a_changed_embedding_vector_changes_the_seed_digest(tmp_path):
         with FakeOpenAI(dim=256) as fake, offline_api_key():
             fake.salt = salt
             store = StarlingDeploymentStore(tmp_path / salt / "seeds", endpoints=fake.endpoints())
-            store.remember_event("pa", "pa", "seed#0@pa", "pb：我担心预算超支", interlocutor="pb")
-            port = store.open("pa", "pa")
+            store.remember_event("t1", "pa", "seed#0@pa", "pb：我担心预算超支", interlocutor="pb")
+            port = store.open("t1", "pa")
             port.embed_pending()
             port.close()
-            out.append(store.digest("pa"))
+            out.append(store.digest("t1"))
     assert out[0] != out[1]

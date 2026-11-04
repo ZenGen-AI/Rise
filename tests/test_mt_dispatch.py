@@ -893,7 +893,7 @@ def test_an_interact_run_records_which_backend_produced_its_data(store, live):
         "trained": {"ref": "file:///ckpt/base", "kind": "base", "endpoint": "gpu-1"},
         "opponents": {"b": {"driver": "vllm", "source": "zengen-v1"}},
         "real_inference_with_mock_training": True,
-        "memory": {"seed": None, "digests": {"pa": "digest-pa", "pb": "digest-pb"}, "runtime": STAND_IN_RUNTIME},
+        "memory": {"seed": None, "digests": {"s1": "digest-s1", "s2": "digest-s2"}, "runtime": STAND_IN_RUNTIME},
     }
 
 
@@ -1049,7 +1049,7 @@ def test_the_backend_has_one_opponent_entry_per_non_trained_slot_and_none_for_a_
             RoleBinding("c", "pc", "external_api"),   # 没有 model_ref:不合规的配置,但映射不应抛错
             RoleBinding("d", "pd", "frozen_reference", model_ref="zengen-v2", driver="scripted"),
         ],
-        memory=resolved_memory(["pa", "pb"]),
+        memory=resolved_memory(["s1"]),
     )
     assert _policy_backend(cfg, None) == {
         "trained": {"ref": "file:///ckpt/base", "kind": "base", "endpoint": None},
@@ -1059,20 +1059,20 @@ def test_the_backend_has_one_opponent_entry_per_non_trained_slot_and_none_for_a_
             "d": {"driver": "scripted", "source": "zengen-v2"},
         },
         "real_inference_with_mock_training": True,
-        "memory": resolved_memory(["pa", "pb"]),
+        "memory": resolved_memory(["s1"]),
     }
 
 
 # ---------------- memory_resolver:进策略上下文之前解出起点摘要与运行时身份 ----------------
 
 def _recording_resolver(trace, digests=None):
-    def resolve(seed, persona_ids):
-        trace.append(("resolve", seed, persona_ids))
-        return (digests if digests is not None else {p: f"digest-{p}" for p in persona_ids}), dict(STAND_IN_RUNTIME)
+    def resolve(seed, scenario_ids):
+        trace.append(("resolve", seed, scenario_ids))
+        return (digests if digests is not None else {s: f"digest-{s}" for s in scenario_ids}), dict(STAND_IN_RUNTIME)
     return resolve
 
 
-def test_the_memory_is_resolved_before_the_policy_context_is_entered_and_recorded(store, live):
+def test_the_memory_is_resolved_per_scenario_before_the_policy_context_is_entered(store, live):
     _interact_directive(store, memory=unresolved_memory())
     trace, seen = [], []
 
@@ -1082,8 +1082,8 @@ def test_the_memory_is_resolved_before_the_policy_context_is_entered_and_recorde
 
     reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
         client_factory=live().client_factory, policy_factory=factory, memory_resolver=_recording_resolver(trace)))
-    assert trace[0] == ("resolve", None, ("pa", "pb")) and trace[1] == "enter"
-    resolved = {"seed": None, "digests": {"pa": "digest-pa", "pb": "digest-pb"}, "runtime": STAND_IN_RUNTIME}
+    assert trace[0] == ("resolve", None, ("s1", "s2")) and trace[1] == "enter"        # 入参是情境,不是人格
+    resolved = {"seed": None, "digests": {"s1": "digest-s1", "s2": "digest-s2"}, "runtime": STAND_IN_RUNTIME}
     assert seen == [resolved]
     assert _record(store).payload["policy_backend"]["memory"] == resolved
     # 解出的值只进这次派发的配置与记录,指令原样不动(续训时重新解)
@@ -1098,7 +1098,7 @@ def test_the_resolved_memory_is_part_of_the_config_hash(store, live):
             executor_factory=lambda run_id: MockExecutor(crash_at_step=1), client_factory=live().client_factory,
             policy=ScriptedBackend({"a": ["agreed", "x"] * 16}), memory_resolver=fake_memory_resolver))
     assert _record(store).status == "pending"
-    changed = _recording_resolver([], digests={"pa": "digest-pa", "pb": "other"})
+    changed = _recording_resolver([], digests={"s1": "digest-s1", "s2": "other"})
     reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
         client_factory=live().client_factory, policy=ScriptedBackend({"a": ["agreed", "x"] * 16}),
         memory_resolver=changed))
@@ -1119,7 +1119,7 @@ def test_an_interact_directive_without_a_memory_resolver_fails_naming_the_intera
 
 
 def test_a_resolver_exception_fails_the_directive_with_its_class_name_only(store, live):
-    def broken(seed, persona_ids):
+    def broken(seed, scenario_ids):
         raise RuntimeError("cannot open https://memory.example/secret")
 
     _interact_directive(store, memory=unresolved_memory())
@@ -1135,7 +1135,7 @@ def test_a_resolver_exception_fails_the_directive_with_its_class_name_only(store
 
 
 def test_a_resolver_that_refuses_with_a_reason_keeps_that_reason(store, live):
-    def refuses(seed, persona_ids):
+    def refuses(seed, scenario_ids):
         raise DirectiveFailedError("memory.seed 'seed-1' needs a memory config")
 
     _interact_directive(store, memory=unresolved_memory("seed-1"))
@@ -1145,13 +1145,14 @@ def test_a_resolver_that_refuses_with_a_reason_keeps_that_reason(store, live):
     assert env.status == "failed" and "memory.seed 'seed-1' needs a memory config" in env.payload["failure"]["reason"]
 
 
-def test_a_resolver_that_misses_a_persona_fails_the_directive(store, live):
+def test_a_resolver_that_misses_a_scenario_fails_the_directive(store, live):
     _interact_directive(store, memory=unresolved_memory())
     reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
         client_factory=live().client_factory, policy=ScriptedBackend({}),
-        memory_resolver=_recording_resolver([], digests={"pa": "digest-pa"})))
+        memory_resolver=_recording_resolver([], digests={"s1": "digest-s1"})))
     env = store.read_product(f"{run_dir(RUN)}/directive.yaml")
-    assert env.status == "failed" and "memory.digests must name exactly the bound personas" in env.payload["failure"]["reason"]
+    assert env.status == "failed"
+    assert "memory.digests must name exactly the configured scenarios" in env.payload["failure"]["reason"]
 
 
 def test_a_batch_directive_never_calls_the_resolver(store):
@@ -1163,7 +1164,7 @@ def test_a_batch_directive_never_calls_the_resolver(store):
 
 def test_a_resolver_that_returns_malformed_digests_fails_the_directive_with_the_class_name_only(store, live):
     """返回值形状不对是确定性的错:不能让转换时的 TypeError 逃出 dispatch,否则指令留在 pending 里每轮重派。"""
-    def malformed(seed, persona_ids):
+    def malformed(seed, scenario_ids):
         return None, dict(STAND_IN_RUNTIME)
 
     _interact_directive(store, memory=unresolved_memory())

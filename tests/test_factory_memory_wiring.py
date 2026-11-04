@@ -316,3 +316,162 @@ def test_a_memory_call_budget_over_four_seconds_is_exit_code_2(store, tmp_path, 
     assert err.startswith("factory: error: ") and "timeout_ms" in err and "max_retries" in err
     assert "2001" not in err and "127.0.0.1" not in err
     assert not (tmp_path / "mem").exists()                           # 拒绝先于认领记忆根目录
+
+
+# ---------------- 旧布局拒绝启动(设计三 4.8 节):记忆根是按人格建库的旧样子,退出码 2 ----------------
+
+def _starling_env(tmp_path, monkeypatch):
+    """装没装 Starling 都走到旧布局检查:把安装检查打桩成通过(旧布局检查排在导入 actio.memory_starling 之前)。"""
+    import factory.memory_runtime as mr
+    monkeypatch.setattr(mr, "starling_install_source", lambda: "git:abc")
+    return _memory_env(tmp_path)
+
+
+def _touch(root, *rels):
+    for rel in rels:
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"")
+
+
+def _stand_in_root(store):
+    from controlplane.lock import git_dir
+    return git_dir(store.repo_root) / "rismforge-memory"
+
+
+_LOST_TAG_HINT = ("a deploy-deploy-* snapshot listed here may instead be a new snapshot that lost its .world tag: "
+                  "write the scenario id into <snapshot>.world or delete the snapshot")
+
+
+def test_an_old_per_persona_memory_root_exits_2_naming_the_directories_to_clear(tmp_path, store, monkeypatch):
+    env = _starling_env(tmp_path, monkeypatch)
+    root = tmp_path / "mem"
+    _touch(root, "deploy/pa.db")
+    with pytest.raises(FactoryConfigError, match=r"old per-persona layout \(deploy/pa.db") as caught:
+        memory_wiring(store.repo_root, env, deployment=True)
+    assert str(caught.value) == (
+        "memory root has the old per-persona layout (deploy/pa.db); "
+        f"clear deploy/ and snapshots/ under the memory root; {_LOST_TAG_HINT}")
+    assert str(root) not in str(caught.value)
+    assert (root / "deploy" / "pa.db").exists() and not (root / "runs").exists()      # 只读检查:什么都没动
+
+
+def test_the_old_layout_refusal_is_exit_code_2_at_every_entry_that_needs_memory(tmp_path, store, monkeypatch, capsys):
+    env = _starling_env(tmp_path, monkeypatch)
+    _touch(tmp_path / "mem", "deploy/pa.db")
+    for args in (["--enable", "agent"], ["--enable", "admit"]):
+        assert main(["reconcile", str(store.repo_root), "--once", *args], env=env) == 2
+        err = capsys.readouterr().err
+        assert err.startswith("factory: error: memory root has the old per-persona layout (deploy/pa.db")
+        assert str(tmp_path / "mem") not in err
+
+
+def test_the_old_layout_message_counts_the_other_entries_and_lists_the_first_in_sorted_order(tmp_path, store, monkeypatch):
+    env = _starling_env(tmp_path, monkeypatch)
+    _touch(tmp_path / "mem", "deploy/pb.db", "deploy/pa.db", "snapshots/r1/deploy-m-s1-1-pa.db")
+    with pytest.raises(FactoryConfigError) as caught:
+        memory_wiring(store.repo_root, env, deployment=True)
+    assert "(deploy/pa.db and 2 more); clear deploy/ and snapshots/" in str(caught.value)
+
+
+def test_a_tagged_snapshot_and_the_known_scenarios_libraries_are_the_new_layout(tmp_path, store, monkeypatch):
+    pytest.importorskip("starling")
+    env = _starling_env(tmp_path, monkeypatch)
+    root = tmp_path / "mem"
+    _touch(root, "deploy/factory-deploy-s1.db", "deploy/factory-deploy-s1.lock", "deploy/factory-deploy-s2.db",
+           "snapshots/r1/deploy-deploy-m-s1-1.db", "snapshots/r1/verify-factory-deploy-s1.db",
+           "runs/run-1/ep.db", "seeds/s1/t1.db")
+    (root / "snapshots" / "r1" / "deploy-deploy-m-s1-1.world").write_text("factory-deploy-s1", encoding="utf-8")
+    w = memory_wiring(store.repo_root, env, deployment=True)
+    assert w.backend == "starling"
+
+
+def test_an_untagged_snapshot_is_the_old_layout_and_the_message_says_how_a_lost_tag_is_recovered(
+        tmp_path, store, monkeypatch):
+    env = _starling_env(tmp_path, monkeypatch)
+    _touch(tmp_path / "mem", "snapshots/r1/deploy-deploy-m-s1-1.db")
+    with pytest.raises(FactoryConfigError) as caught:
+        memory_wiring(store.repo_root, env, deployment=True)
+    text = str(caught.value)
+    assert "(snapshots/r1/deploy-deploy-m-s1-1.db)" in text and "and 0 more" not in text
+    assert text.endswith(f"; {_LOST_TAG_HINT}")
+
+
+def test_without_an_agent_yaml_every_library_under_deploy_is_the_old_layout(tmp_path, monkeypatch):
+    """repo 里没有 config/agent.yaml:已知情境是空集,deploy/ 下任何库都算旧布局(包括看起来像情境名的)。"""
+    env = _starling_env(tmp_path, monkeypatch)
+    _touch(tmp_path / "mem", "deploy/factory-deploy-s1.db")
+    with pytest.raises(FactoryConfigError, match=r"old per-persona layout \(deploy/factory-deploy-s1.db\)"):
+        memory_wiring(tmp_path / "repo", env, deployment=True)
+
+
+def test_a_library_outside_the_configured_scenarios_is_the_old_layout(tmp_path, store, monkeypatch):
+    env = _starling_env(tmp_path, monkeypatch)
+    _touch(tmp_path / "mem", "deploy/factory-deploy-s1.db", "deploy/factory-deploy-s9.db")
+    with pytest.raises(FactoryConfigError, match=r"old per-persona layout \(deploy/factory-deploy-s9.db\)"):
+        memory_wiring(store.repo_root, env, deployment=True)
+
+
+def test_a_broken_agent_yaml_propagates_as_its_own_config_error(tmp_path, store, monkeypatch):
+    from factory.agent import AGENT_CONFIG
+    env = _starling_env(tmp_path, monkeypatch)
+    (store.repo_root / AGENT_CONFIG).write_text("not: [an envelope", encoding="utf-8")
+    with pytest.raises(FactoryConfigError, match="agent.yaml cannot be read") as caught:
+        memory_wiring(store.repo_root, env, deployment=True)
+    assert "old per-persona layout" not in str(caught.value)
+
+
+def test_the_old_layout_check_runs_after_the_owner_claim_and_before_the_starling_import(tmp_path, store, monkeypatch):
+    env = _starling_env(tmp_path, monkeypatch)
+    _touch(tmp_path / "mem", "deploy/pa.db")
+    monkeypatch.setitem(sys.modules, "actio.memory_starling", None)          # 导入会抛 ImportError:要是先导入就是安装提示
+    with pytest.raises(FactoryConfigError, match="old per-persona layout"):
+        memory_wiring(store.repo_root, env, deployment=True)
+    assert (tmp_path / "mem" / ".owner").exists()                              # 认领在前
+
+
+def test_a_corrupt_snapshot_tag_is_exit_code_2_at_assembly_naming_the_tag_relative_to_the_root(
+        tmp_path, store, monkeypatch, capsys):
+    env = _starling_env(tmp_path, monkeypatch)
+    root = tmp_path / "mem"
+    _touch(root, "snapshots/r1/deploy-deploy-m-s1-1.db")
+    (root / "snapshots" / "r1" / "deploy-deploy-m-s1-1.world").write_text("../escape", encoding="utf-8")
+    assert main(["reconcile", str(store.repo_root), "--once", "--enable", "agent"], env=env) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("factory: error: ") and "snapshots/r1/deploy-deploy-m-s1-1.world" in err
+    assert str(root) not in err and "old per-persona layout" not in err
+
+
+def test_a_corrupt_tag_on_a_snapshot_of_the_stand_in_root_is_refused_too(store):
+    from factory.memory_runtime import stand_in_deployment_memory
+    root = _stand_in_root(store)
+    _touch(root, "snapshots/r1/deploy-deploy-m-s1-1.json")
+    (root / "snapshots" / "r1" / "deploy-deploy-m-s1-1.world").write_bytes(b"\xff\xfe")
+    with pytest.raises(FactoryConfigError, match=r"snapshots/r1/deploy-deploy-m-s1-1.world") as caught:
+        stand_in_deployment_memory(store.repo_root)
+    assert str(root) not in str(caught.value)
+
+
+def test_an_old_per_persona_stand_in_root_is_refused_with_the_json_suffix(store, capsys):
+    root = _stand_in_root(store)
+    _touch(root, "deploy/pa.json", "deploy/factory-deploy-s1.json", "deploy/pa.lock")
+    with pytest.raises(FactoryConfigError, match=r"old per-persona layout \(deploy/pa.json\); clear deploy/ and snapshots/"):
+        memory_wiring(store.repo_root, {}, deployment=True)
+    assert main(["reconcile", str(store.repo_root), "--once", "--enable", "agent"], env={}) == 2
+    assert "old per-persona layout (deploy/pa.json)" in capsys.readouterr().err
+    assert (root / "deploy" / "pa.json").exists()
+
+
+def test_a_stand_in_root_with_only_configured_scenario_worlds_and_tagged_snapshots_is_fine(store):
+    from factory.memory_runtime import stand_in_deployment_memory
+    root = _stand_in_root(store)
+    _touch(root, "deploy/factory-deploy-s1.json", "deploy/factory-deploy-s1.lock",
+           "snapshots/r1/deploy-deploy-m-s1-1.json", "snapshots/r1/verify-factory-deploy-s1.json")
+    (root / "snapshots" / "r1" / "deploy-deploy-m-s1-1.world").write_text("factory-deploy-s1\n", encoding="utf-8")
+    assert stand_in_deployment_memory(store.repo_root).layout.root == root
+
+
+def test_the_stand_in_without_deployment_memory_checks_nothing(store):
+    """--interact 单独用时替身不造部署记忆、不碰磁盘,记忆根里有旧文件也不拦。"""
+    _touch(_stand_in_root(store), "deploy/pa.json")
+    assert memory_wiring(store.repo_root, {}, deployment=False).deployment is None

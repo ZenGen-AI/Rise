@@ -266,7 +266,7 @@ def _is_adapter_export(ref: BigRef) -> bool:
     return hint.get("type") == "roll_ssh" and hint.get("format") == EXPORT_FORMAT
 
 
-# 注入的记忆解析器:(种子, 人格 id 元组) -> (人格 id -> 起点摘要, 运行时身份)。
+# 注入的记忆解析器:(种子, 情境 id 元组) -> (情境 id -> 起点世界摘要, 运行时身份)。
 # 派发器不知道记忆库长什么样,也不得导入 actio、factory;由装配方(组合根)注入。
 MemoryResolver = Callable[[str | None, tuple[str, ...]], tuple[dict[str, str], dict]]
 
@@ -275,12 +275,12 @@ def _resolve_memory(run_id: str, cfg: TrainingConfig, memory_resolver: MemoryRes
     """解出 cfg.memory 里的起点摘要与运行时身份,返回带解出值的新配置。解出值只进这次派发的配置
     (于是进 config_hash、policy_factory、policy_backend),不写回 directive.yaml:续训时要重新解。
 
-    入参人格按绑定顺序去重。解析器抛 DirectiveFailedError 就按它的原因重抛(组合根给出可读原因);
+    入参情境按配置顺序去重。解析器抛 DirectiveFailedError 就按它的原因重抛(组合根给出可读原因);
     抛其余任何异常只报类名,不带异常文本(起点库打不开、摘要算不出,文本里可能有端点地址)。
-    回写后再过一次严格校验:解析器给的摘要缺人格、身份缺键,都在这里判 T2。"""
-    persona_ids = tuple(dict.fromkeys(b.persona_id for b in cfg.bindings))
+    回写后再过一次严格校验:解析器给的摘要缺情境、身份缺键,都在这里判 T2。"""
+    scenario_ids = tuple(dict.fromkeys(cfg.scenario_ids))
     try:
-        digests, runtime = memory_resolver(cfg.memory["seed"], persona_ids)
+        digests, runtime = memory_resolver(cfg.memory["seed"], scenario_ids)
         # 返回值形状不对(摘要不是映射、身份拷不动)是确定性的错,与解析器自己抛错同样只报类名;
         # 转换放在 try 里,免得 TypeError 逃出 dispatch,让指令留在 pending 里每轮重派
         memory = {"seed": cfg.memory["seed"], "digests": dict(digests), "runtime": copy.deepcopy(runtime)}

@@ -1,12 +1,12 @@
 """组合根的记忆后端:替身运行时身份与替身解析器(设计二 7.1 节)。
 
-派发器在进入策略上下文之前调用注入的 `memory_resolver(seed, persona_ids)`,拿回每个人格的起点记忆摘要与
+派发器在进入策略上下文之前调用注入的 `memory_resolver(seed, scenario_ids)`,拿回每个情境的起点世界摘要与
 记忆运行时身份,两者一起进 config_hash 与训练记录。本模块有两路:
 
-- 替身:每个人格都从空库起步,没有任何种子库可用。
+- 替身:每个情境都从空世界起步,没有任何种子世界可用。
 - Starling(`StarlingLayout`、`starling_memory_runtime`、`starling_memory_resolver`、`StarlingTrainingWorlds`,按
-  RISMFORGE_MEMORY_CONFIG 装配):种子库由人放进 `seeds/<seed_id>/`,本仓库只读;解析器按种子库算每个人格的
-  起点摘要。
+  RISMFORGE_MEMORY_CONFIG 装配):种子世界由人放进 `seeds/<seed_id>/<scenario_id>.db`,本仓库只读;解析器按种子
+  世界算每个情境的起点摘要。
 
 训练路的记忆是 rollout 世界(设计 5.1、5.2、6.3 节,`TrainingWorlds`):一条 rollout 一个世界,训练位与对手位都是
 世界里的主体。客户端(`factory.interact_policy` 的 `policy_for_rollout`)建世界并开训练位端口,服务端
@@ -24,6 +24,8 @@
 
 组合根按记忆配置选后端(`memory_wiring`,设计二 5.1、6.2、6.4 节,第 10 节拒绝项):没设 RISMFORGE_MEMORY_CONFIG 走替身,
 设了就装配 Starling,配置有任何问题在装配期抛 `FactoryConfigError`(命令行退出码 2),不退回替身静默跑。
+记忆根是旧布局(按人格建库、没有 `.world` 旁注的起点快照)时同样在装配期拒绝启动,不迁移(设计三 4.8 节);
+`.world` 旁注坏了也在这里报,而不是留到门② 才抛。
 
 部署记忆(设计二第 9 节):轮次处理器与门② 共用的一份 DeploymentMemory。替身的根目录在这棵工作树的
 git 目录里(与仓库锁 rismforge.lock 同处):不进工作树、不进提交,跨进程重启保留,所以起点副本与门② 收录
@@ -52,6 +54,7 @@ from actio.memory_port import (
 )
 from actio.trace import TRACE_SCHEMA_V2
 from controlplane.daemon import DirectiveFailedError
+from controlplane.gitstore import GitStore
 from controlplane.lock import git_dir
 from factory.errors import FactoryConfigError
 from factory.memory_config import (
@@ -63,7 +66,8 @@ from factory.memory_config import (
     starling_install_source,
 )
 from mindagent.deployment import SESSION_CLOSE_WAIT_S
-from mindagent.memory_layout import MemoryLayout
+from mindagent.errors import MindAgentDataError
+from mindagent.memory_layout import MemoryLayout, _tag_path
 from simulator.realtime.validation import validate_episode_id
 
 if TYPE_CHECKING:       # 只给类型注解用:运行时不导入 actio.memory_starling(它导入 starling)
@@ -80,8 +84,8 @@ STAND_IN_MEMORY_RUNTIME: dict = {
 }
 
 
-def stand_in_memory_resolver(seed: str | None, persona_ids: tuple[str, ...]) -> tuple[dict[str, str], dict]:
-    """替身解析:seed 为 null 时每个人格得到空库摘要,runtime 是身份的一份拷贝(调用方改它不伤常量)。
+def stand_in_memory_resolver(seed: str | None, scenario_ids: tuple[str, ...]) -> tuple[dict[str, str], dict]:
+    """替身解析:seed 为 null 时每个情境得到空世界摘要,runtime 是身份的一份拷贝(调用方改它不伤常量)。
 
     seed 非 null 抛 DirectiveFailedError 而不是普通异常:派发器对普通异常只报类名,而种子需要记忆配置
     这件事要原样告诉人。原因里只有种子 id 与变量名,不含路径。"""
@@ -91,7 +95,7 @@ def stand_in_memory_resolver(seed: str | None, persona_ids: tuple[str, ...]) -> 
             "(the stand-in memory has no seed libraries)"
         )
     empty = TupleMemory().digest()
-    return {p: empty for p in persona_ids}, copy.deepcopy(STAND_IN_MEMORY_RUNTIME)
+    return {s: empty for s in scenario_ids}, copy.deepcopy(STAND_IN_MEMORY_RUNTIME)
 
 
 @dataclass(frozen=True)
@@ -111,11 +115,46 @@ def stand_in_memory_root(repo_root: Path) -> Path:
     return git_dir(Path(repo_root)) / "rismforge-memory"
 
 
+def check_memory_layout(layout: MemoryLayout, repo_root: Path) -> None:
+    """记忆根是旧布局(设计三 4.8 节)或有坏的 `.world` 旁注时拒绝启动,抛 `FactoryConfigError`(命令行退出码 2)。
+    只读磁盘,先于任何对记忆根的写。不迁移、不静默忽略:旧库里的记忆不会被任何世界读到,留着会让人以为还在用。
+
+    - 已知情境取自 `agent.yaml` 的 `scenario_ids`;文件不在时是空集,`deploy/` 下任何库都算旧布局。
+      `agent.yaml` 读不了的 `FactoryConfigError` 原样上抛。
+    - 旧布局条目由 `MemoryLayout.legacy_entries` 给。没有旁注的 `deploy-` 快照也算在里面,但新格式快照的旁注
+      丢了会被同样报出,所以文字里点明这一种恢复办法。
+    - 有旁注的快照逐个 `world_of`:旁注坏了在装配期报,而不是留到门② 才抛。文字里的路径相对记忆根。"""
+    from factory.agent import AGENT_CONFIG, read_agent_settings        # 惰性:拖进 grpc 与 mindagent
+
+    store = GitStore(str(repo_root))
+    known = read_agent_settings(store)[0].scenario_ids if store.exists(AGENT_CONFIG) else ()
+    entries = layout.legacy_entries(known)
+    if entries:
+        shown = entries[0] if len(entries) == 1 else f"{entries[0]} and {len(entries) - 1} more"
+        raise FactoryConfigError(
+            f"memory root has the old per-persona layout ({shown}); clear deploy/ and snapshots/ under the memory root; "
+            "a deploy-deploy-* snapshot listed here may instead be a new snapshot that lost its .world tag: "
+            "write the scenario id into <snapshot>.world or delete the snapshot"
+        )
+    for snapshot in layout.tagged_snapshots():
+        try:
+            layout.world_of(snapshot)
+        except MindAgentDataError:
+            tag = _tag_path(snapshot).relative_to(layout.root).as_posix()       # 不回显旁注内容和绝对路径
+            raise FactoryConfigError(
+                f"memory root has a snapshot world tag that cannot be used ({tag}); "
+                "write the scenario id into that .world file or delete the snapshot and its tag"
+            ) from None
+
+
 def stand_in_deployment_memory(repo_root: Path) -> DeploymentMemory:
     """替身部署记忆:FileTupleStore(<根>/deploy) 与 MemoryLayout(<根>) 共用一个根,运行时身份是替身那份的拷贝。
+    造之前先过 `check_memory_layout`(后缀 `.json`),旧布局拒绝启动。
     启动日志不在这里记:选后端是 `memory_wiring` 的事,它只记一次。"""
     root = stand_in_memory_root(repo_root)
-    return DeploymentMemory(FileTupleStore(root / "deploy"), MemoryLayout(root),
+    layout = MemoryLayout(root)
+    check_memory_layout(layout, repo_root)
+    return DeploymentMemory(FileTupleStore(root / "deploy"), layout,
                             copy.deepcopy(STAND_IN_MEMORY_RUNTIME), FileTupleStore)
 
 
@@ -172,13 +211,8 @@ class StarlingLayout:
             raise DirectiveFailedError(f"memory.seed {seed_id!r:.60} is not a safe directory name")
         return self.root / "seeds" / seed_id
 
-    def seed(self, seed_id: str, persona_id: str) -> Path:
-        """`seeds/<seed_id>/<persona_id>.db`:解析器今天按人格读的种子库,只读。"""
-        seed_dir = self.seed_dir(seed_id)
-        return seed_dir / f"{self._named('persona_id', persona_id)}.db"
-
-    def scenario_seed(self, seed_id: str, scenario_id: str) -> Path:
-        """`seeds/<seed_id>/<scenario_id>.db`:一个情境的种子世界,rollout 世界从它复制起点,只读。"""
+    def seed(self, seed_id: str, scenario_id: str) -> Path:
+        """`seeds/<seed_id>/<scenario_id>.db`:一个情境的种子世界,解析器算起点摘要、rollout 世界复制起点都读它,只读。"""
         seed_dir = self.seed_dir(seed_id)
         return seed_dir / f"{self._named('scenario_id', scenario_id)}.db"
 
@@ -188,7 +222,7 @@ class StarlingLayout:
 
     @staticmethod
     def _named(what: str, value: object) -> str:
-        """人格 id 与情境 id 过 `PERSONA_ID_PATTERN`。用 fullmatch:模式以 `$` 结尾,match 会放过 "pa\n"。"""
+        """情境 id 过 `PERSONA_ID_PATTERN`(部署库的世界 id 白名单)。用 fullmatch:模式以 `$` 结尾,match 会放过 "t1\n"。"""
         if not isinstance(value, str) or not PERSONA_ID_PATTERN.fullmatch(value):
             raise ValueError(f"{what} {value!r:.60}: expected 1 to 128 characters of [A-Za-z0-9._-] "
                              "starting with a letter or digit")
@@ -198,15 +232,15 @@ class StarlingLayout:
 def starling_memory_resolver(
     layout: StarlingLayout, runtime: dict,
 ) -> Callable[[str | None, tuple[str, ...]], tuple[dict[str, str], dict]]:
-    """Starling 的 `memory_resolver`:派发器进策略上下文之前调用,按种子库算每个人格的起点摘要。
+    """Starling 的 `memory_resolver`:派发器进策略上下文之前调用,按种子世界算每个情境的起点摘要。
 
-    - `seed` 为 None:每个人格都是空库的摘要。
-    - 否则 `seeds/<seed>/` 必须是目录。其中有 `<persona_id>.db` 的人格,摘要取这个库(只读,在临时副本上算);
-      没有的人格从空库起,与 `seed: null` 对单个人格的含义相同。
+    - `seed` 为 None:每个情境都是空世界的摘要。
+    - 否则 `seeds/<seed>/` 必须是目录。其中有 `<scenario_id>.db` 的情境,摘要取这个世界(只读,在临时副本上算);
+      没有的情境从空世界起,与 `seed: null` 对单个情境的含义相同。以人格命名的旧种子库不会被读到。
 
     种子 id 不合法或目录不在,抛 `DirectiveFailedError`(原因里只有种子 id,不含根目录路径)。库文件打不开、
     不是库、摘要算不出,抛 `MemoryFailureError` 且不接:派发器对普通异常只报类名、判 T2。**库文件在但坏,
-    绝不能当成"没有这个库"而悄悄从空库起**,所以只有 lstat 报 `FileNotFoundError`(文件根本不存在)才走空库,
+    绝不能当成"没有这个库"而悄悄从空世界起**,所以只有 lstat 报 `FileNotFoundError`(文件根本不存在)才走空世界,
     悬空的符号链接与读不了的目录都不算。
 
     `runtime` 在这里拷一份,每次返回再拷一份:调用方改返回值、装配方事后改原字典,都不影响解出的身份。
@@ -215,21 +249,21 @@ def starling_memory_resolver(
 
     identity = copy.deepcopy(runtime)
 
-    def resolve(seed: str | None, persona_ids: tuple[str, ...]) -> tuple[dict[str, str], dict]:
+    def resolve(seed: str | None, scenario_ids: tuple[str, ...]) -> tuple[dict[str, str], dict]:
         if seed is None:
             empty = empty_digest()
-            return {p: empty for p in persona_ids}, copy.deepcopy(identity)
+            return {s: empty for s in scenario_ids}, copy.deepcopy(identity)
         if not layout.seed_dir(seed).is_dir():
             raise DirectiveFailedError(f"memory.seed {seed!r} has no directory under the memory root's seeds/")
         digests: dict[str, str] = {}
-        for persona_id in persona_ids:
-            path = layout.seed(seed, persona_id)
+        for scenario_id in scenario_ids:
+            path = layout.seed(seed, scenario_id)
             try:
                 path.lstat()        # 不跟符号链接:悬空的链接算"有这个库",交给 library_digest 抛错
             except FileNotFoundError:
-                digests[persona_id] = empty_digest()          # 只有"确实没有这个文件"才从空库起
+                digests[scenario_id] = empty_digest()         # 只有"确实没有这个文件"才从空世界起
                 continue
-            digests[persona_id] = library_digest(path)       # 其余 OSError(如目录无权限)原样上抛,不当空库
+            digests[scenario_id] = library_digest(path)      # 其余 OSError(如目录无权限)原样上抛,不当空世界
         return digests, copy.deepcopy(identity)
 
     return resolve
@@ -546,7 +580,7 @@ class StarlingTrainingWorlds(_RolloutWorlds):
         from actio.memory_starling import copy_library, translate_failure
 
         path = self._layout.rollout_world(run_id, episode_id)      # 名字不合法在这里抛 ValueError
-        source = None if seed is None else self._layout.scenario_seed(seed, scenario_id)
+        source = None if seed is None else self._layout.seed(seed, scenario_id)
         try:
             _remove_library(path)
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -645,7 +679,8 @@ def memory_wiring(repo_root: Path, env: Mapping[str, str], *, deployment: bool) 
     - 没设(或空串):替身。`deployment` 为真才造替身的部署记忆。
     - 设了,按序:Starling 的安装来源(未安装、editable 在这里拒绝,先于任何对 `actio.memory_starling` 的导入与对记忆
       根目录的写)、`OPENAI_API_KEY` 非空、`runs/` 不是符号链接也不是文件、认领记忆根目录(被另一个仓库占用就拒绝)、
-      导入 `actio.memory_starling`。
+      记忆根不是旧布局且 `.world` 旁注都完好(`check_memory_layout`,后缀 `.db`)、导入 `actio.memory_starling`。
+      替身的同一项检查在 `stand_in_deployment_memory` 里,只在造部署记忆时做。
       装了包但 C++ 扩展载不进来(`ImportError`)译成与「没装」同一条安装提示的 `FactoryConfigError`。"""
     config = read_memory_config(env=env, repo_root=repo_root)
     if config is None:
@@ -658,6 +693,8 @@ def memory_wiring(repo_root: Path, env: Mapping[str, str], *, deployment: bool) 
     check_api_key(env)
     _check_runs_dir(config.root)
     claim_memory_root(config.root, repo_root)
+    memory_layout = MemoryLayout(config.root, suffix=".db")
+    check_memory_layout(memory_layout, repo_root)
     try:
         from actio.memory_starling import (
             StarlingDeploymentStore,
@@ -683,7 +720,7 @@ def memory_wiring(repo_root: Path, env: Mapping[str, str], *, deployment: bool) 
     if deployment:
         deployment_memory = DeploymentMemory(
             StarlingDeploymentStore(layout.deploy_dir(), endpoints=endpoints),
-            MemoryLayout(config.root, suffix=".db"),
+            memory_layout,
             copy.deepcopy(runtime),
             lambda path: StarlingDeploymentStore(path, endpoints=endpoints),
         )

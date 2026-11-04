@@ -850,16 +850,16 @@ def test_config_hash_keeps_the_formula_existing_records_were_hashed_with(build):
 def test_memory_is_written_only_when_present_so_batch_configs_stay_byte_identical():
     assert "memory" not in _batch().to_dict()
     assert TrainingConfig.from_dict(_batch().to_dict()).memory is None
-    mem = resolved_memory(["pa", "pb"])
+    mem = resolved_memory(["s1", "s2"])
     cfg = _interact(memory=mem)
     assert cfg.to_dict()["memory"] == mem
     assert TrainingConfig.from_dict(cfg.to_dict()).memory == mem
 
 
 def test_to_dict_copies_memory_so_a_caller_cannot_mutate_the_config():
-    cfg = _interact(memory=resolved_memory(["pa", "pb"]))
-    cfg.to_dict()["memory"]["digests"]["pa"] = "x"
-    assert cfg.memory["digests"]["pa"] == "d0"
+    cfg = _interact(memory=resolved_memory(["s1", "s2"]))
+    cfg.to_dict()["memory"]["digests"]["s1"] = "x"
+    assert cfg.memory["digests"]["s1"] == "d0"
 
 
 @pytest.mark.parametrize("memory, needle", [
@@ -893,36 +893,45 @@ def test_an_unresolved_memory_section_passes_the_strict_and_the_lenient_check():
     assert validate_pending_interact(_pending(memory=unresolved_memory("seed-1"))) is None
 
 
-def test_a_resolved_memory_section_that_matches_the_bindings_passes():
-    assert validate_training_config(_interact(memory=resolved_memory(["pa", "pb"]))) is None
+def test_a_resolved_memory_section_that_matches_the_scenarios_passes():
+    assert validate_training_config(_interact(memory=resolved_memory(["s1", "s2"]))) is None
 
 
 @pytest.mark.parametrize("memory, needle", [
-    ({"seed": None, "digests": {"pa": "d", "pb": "d"}, "runtime": {}},
+    ({"seed": None, "digests": {"s1": "d", "s2": "d"}, "runtime": {}},
      "memory.digests and memory.runtime must be filled together"),
     ({"seed": None, "digests": {}, "runtime": dict(STAND_IN_RUNTIME)},
      "memory.digests and memory.runtime must be filled together"),
-    ({"seed": None, "digests": {"pa": "d"}, "runtime": dict(STAND_IN_RUNTIME)},
-     "memory.digests must name exactly the bound personas"),
-    ({"seed": None, "digests": {"pa": "d", "pb": "d", "px": "d"}, "runtime": dict(STAND_IN_RUNTIME)},
-     "memory.digests must name exactly the bound personas"),
-    ({"seed": None, "digests": {"pa": "d", "pb": "d"}, "runtime": {"backend": "stand-in"}},
+    ({"seed": None, "digests": {"s1": "d", "s2": "d"}, "runtime": {"backend": "stand-in"}},
      "memory.runtime must have exactly the keys"),
 ])
-def test_a_resolved_memory_section_must_match_the_bindings(memory, needle):
+def test_a_resolved_memory_section_must_be_filled_together_and_carry_the_runtime_keys(memory, needle):
     reason = validate_training_config(_interact(memory=memory))
     assert reason is not None and needle in reason
 
 
+@pytest.mark.parametrize("digests", [
+    {"s1": "d"},                                   # 缺一个情境
+    {"s1": "d", "s2": "d", "s3": "d"},             # 多一个情境
+    {"pa": "d", "pb": "d"},                        # 旧形状:按人格
+    {"s1": "d", "pb": "d"},
+], ids=["missing", "extra", "per-persona", "mixed"])
+def test_a_resolved_memory_section_must_name_exactly_the_configured_scenarios(digests):
+    memory = {"seed": None, "digests": digests, "runtime": dict(STAND_IN_RUNTIME)}
+    reason = validate_training_config(_interact(memory=memory))        # 情境是 s1、s2,人格是 pa、pb
+    assert reason is not None and "memory.digests must name exactly the configured scenarios" in reason
+    assert validate_training_config(_interact(memory=resolved_memory(["s1", "s2"]))) is None
+
+
 @pytest.mark.parametrize("change", [
-    lambda m: m["digests"].update(pa="d1"),
+    lambda m: m["digests"].update(s1="d1"),
     lambda m: m["runtime"].update(backend="starling"),
     lambda m: m["runtime"].update(starling_version="0.3.0+abc"),
     lambda m: m["runtime"].update(embedding={"model": "e2"}),
     lambda m: m.update(seed="seed-1"),
 ], ids=["digest", "backend", "starling_version", "embedding", "seed"])
 def test_config_hash_changes_when_the_starting_memory_or_its_runtime_changes(change):
-    before = resolved_memory(["pa", "pb"])
+    before = resolved_memory(["s1", "s2"])
     after = copy.deepcopy(before)
     change(after)
     assert config_hash(_interact(memory=before)) != config_hash(_interact(memory=after))

@@ -235,7 +235,7 @@ def test_a_scenario_without_a_seed_file_starts_empty(starling):
 def test_a_read_only_seed_is_still_copied_and_stays_untouched(starling):
     """种子只读:从种子取世界用文件复制,不经 backup_to(它要在种子上建 -wal、-shm、跑迁移,只读时失败)。"""
     worlds, layout = starling.worlds, starling.layout
-    seed, seed_dir = layout.scenario_seed("s1", "s1"), layout.seed_dir("s1")
+    seed, seed_dir = layout.seed("s1", "s1"), layout.seed_dir("s1")
     before, mtime = seed.read_bytes(), seed.stat().st_mtime_ns
     names = sorted(p.name for p in seed_dir.iterdir())
     os.chmod(seed, 0o444)

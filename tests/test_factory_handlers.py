@@ -1244,10 +1244,11 @@ def test_a_deployment_round_through_the_real_server_writes_the_opponent_into_the
 
 def test_the_stand_in_memory_root_survives_a_second_assembly(store):
     from factory.memory_runtime import stand_in_deployment_memory
+    world = "factory-deploy-s1"                    # 默认 agent.yaml 里的情境:世界库不在配置的情境里就算旧布局,装配会拒绝
     first = stand_in_deployment_memory(store.repo_root)
-    first.store.remember_event("s1", "pa", "k#0@pa", "pb：你好", interlocutor="pb")
+    first.store.remember_event(world, "pa", "k#0@pa", "pb：你好", interlocutor="pb")
     second = stand_in_deployment_memory(store.repo_root)
-    assert second.store.digest("s1") == first.store.digest("s1")
+    assert second.store.digest(world) == first.store.digest(world)
 
 
 def test_switches_without_round_or_admit_build_no_deployment_memory(store, monkeypatch):

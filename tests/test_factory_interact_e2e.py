@@ -157,7 +157,7 @@ def test_an_interact_directive_runs_through_the_real_entry(tmp_path, capsys, stu
     persona_ids = [b["persona_id"] for b in cfg["bindings"]]
     assert persona_ids == ["pers-auto-0", "pers-auto-1"]
     assert backend["memory"]["runtime"]["backend"] == "stand-in"
-    assert set(backend["memory"]["digests"]) == set(persona_ids)    # 记录里有 memory 块:解析器在派发时解出
+    assert set(backend["memory"]["digests"]) == set(cfg["scenario_ids"])    # 记录里有 memory 块:解析器在派发时解出,键是情境
     assert new_personas == [persona_file(pid) for pid in persona_ids]
     for pid in persona_ids:
         assert read_persona(store, pid).id == pid
