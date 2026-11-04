@@ -199,16 +199,46 @@ def test_the_resolver_digests_seed_worlds_per_scenario_and_empty_starts(tmp_path
 
 
 @starling_only
-def test_the_resolver_ignores_a_per_persona_seed_file(tmp_path):
-    """旧布局的种子 `seeds/<seed>/<persona>.db` 不会被读:解析器只认情境 id 命名的库,人格名的文件对它不存在。"""
-    from actio.memory_starling import StarlingDeploymentStore, empty_digest
+def test_a_seed_whose_files_match_no_scenario_is_a_readable_t2(tmp_path):
+    """旧布局的种子 `seeds/<seed>/<persona>.db` 不会被读;配了种子却一个情境都对不上、目录里又有库时拒绝,
+    不让整批训练悄悄从空世界起(原因写种子 id 与文件主名,不含根目录路径)。"""
+    from actio.memory_starling import StarlingDeploymentStore
     from factory.memory_runtime import starling_memory_resolver
     from starling_fakes import FakeOpenAI, offline_api_key
     with FakeOpenAI(dim=256) as fake, offline_api_key():
         seeds = StarlingDeploymentStore(tmp_path / "seeds" / "s1", endpoints=fake.endpoints())
         seeds.remember_event("pa", "pa", "seed#0@pa", "pb：我担心预算超支", interlocutor="pb")   # 世界 id 是人格名
         resolve = starling_memory_resolver(StarlingLayout(tmp_path), {"backend": "starling"})
-        assert resolve("s1", ("t1",))[0] == {"t1": empty_digest()}
+        with pytest.raises(DirectiveFailedError) as info:
+            resolve("s1", ("t1", "t2"))
+    assert info.value.category == "T2"
+    assert "'s1'" in info.value.reason and "pa" in info.value.reason and "seeds/<seed>/<scenario_id>.db" in info.value.reason
+    assert str(tmp_path) not in info.value.reason
+
+
+@starling_only
+def test_a_seed_that_covers_some_scenarios_starts_the_others_from_the_empty_world(tmp_path):
+    """种子只覆盖部分情境是合法的:对上的取种子摘要,其余从空世界起;目录里多一份人格名的旧库不挡。"""
+    from actio.memory_starling import StarlingDeploymentStore, empty_digest
+    from factory.memory_runtime import starling_memory_resolver
+    from starling_fakes import FakeOpenAI, offline_api_key
+    with FakeOpenAI(dim=256) as fake, offline_api_key():
+        seeds = StarlingDeploymentStore(tmp_path / "seeds" / "s1", endpoints=fake.endpoints())
+        seeds.remember_event("t1", "pa", "seed#0@pa", "pb：我担心预算超支", interlocutor="pb")
+        seeds.remember_event("pa", "pa", "seed#1@pa", "pb：下周再谈", interlocutor="pb")
+        seeded = seeds.digest("t1")
+        resolve = starling_memory_resolver(StarlingLayout(tmp_path), {"backend": "starling"})
+        assert resolve("s1", ("t1", "t2"))[0] == {"t1": seeded, "t2": empty_digest()}
+    assert seeded != empty_digest()
+
+
+@starling_only
+def test_an_empty_seed_directory_still_starts_every_scenario_from_the_empty_world(tmp_path):
+    from actio.memory_starling import empty_digest
+    from factory.memory_runtime import starling_memory_resolver
+    (tmp_path / "seeds" / "s1").mkdir(parents=True)
+    resolve = starling_memory_resolver(StarlingLayout(tmp_path), {"backend": "starling"})
+    assert resolve("s1", ("t1", "t2"))[0] == {"t1": empty_digest(), "t2": empty_digest()}
 
 
 @starling_only

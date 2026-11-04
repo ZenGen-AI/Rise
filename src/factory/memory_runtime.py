@@ -246,7 +246,9 @@ def starling_memory_resolver(
 
     - `seed` 为 None:每个情境都是空世界的摘要。
     - 否则 `seeds/<seed>/` 必须是目录。其中有 `<scenario_id>.db` 的情境,摘要取这个世界(只读,在临时副本上算);
-      没有的情境从空世界起,与 `seed: null` 对单个情境的含义相同。以人格命名的旧种子库不会被读到。
+      没有的情境从空世界起,与 `seed: null` 对单个情境的含义相同。种子只覆盖部分情境是合法的;一个配置情境都
+      对不上、目录里却有 `*.db`(多半是以人格命名的旧种子库)时抛 `DirectiveFailedError`,原因写种子 id 与至多
+      5 个文件主名。目录里一个库都没有时仍是全部从空世界起。
 
     种子 id 不合法或目录不在,抛 `DirectiveFailedError`(原因里只有种子 id,不含根目录路径)。库文件打不开、
     不是库、摘要算不出,抛 `MemoryFailureError` 且不接:派发器对普通异常只报类名、判 T2。**库文件在但坏,
@@ -263,17 +265,30 @@ def starling_memory_resolver(
         if seed is None:
             empty = empty_digest()
             return {s: empty for s in scenario_ids}, copy.deepcopy(identity)
-        if not layout.seed_dir(seed).is_dir():
+        seed_dir = layout.seed_dir(seed)
+        if not seed_dir.is_dir():
             raise DirectiveFailedError(f"memory.seed {seed!r} has no directory under the memory root's seeds/")
         digests: dict[str, str] = {}
+        missing = 0
         for scenario_id in scenario_ids:
             path = layout.seed(seed, scenario_id)
             try:
                 path.lstat()        # 不跟符号链接:悬空的链接算"有这个库",交给 library_digest 抛错
             except FileNotFoundError:
                 digests[scenario_id] = empty_digest()         # 只有"确实没有这个文件"才从空世界起
+                missing += 1
                 continue
             digests[scenario_id] = library_digest(path)      # 其余 OSError(如目录无权限)原样上抛,不当空世界
+        if scenario_ids and missing == len(scenario_ids):
+            # 一个情境都对不上、目录里却有库:多半是按人格命名的旧种子,拒绝,不让整批悄悄从空世界起
+            stems = sorted(p.stem for p in seed_dir.glob("*.db"))
+            if stems:
+                shown = ", ".join(stems[:_SHOWN_ENTRIES])
+                if len(stems) > _SHOWN_ENTRIES:
+                    shown += f" and {len(stems) - _SHOWN_ENTRIES} more"
+                raise DirectiveFailedError(
+                    f"memory.seed {seed!r} matches none of the configured scenarios but holds libraries ({shown}); "
+                    "seed worlds are now named by scenario id (seeds/<seed>/<scenario_id>.db)")
         return digests, copy.deepcopy(identity)
 
     return resolve
