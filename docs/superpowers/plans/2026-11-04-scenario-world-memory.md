@@ -52,7 +52,7 @@
   - `DeploymentMemoryStore`（协议）八个方法：`open(world_id, holder)`、`remember_event(world_id, holder, key, text, *, interlocutor)`、`abandon_event(world_id, key)`、`pending_events(world_id)`、`backup_to(world_id, path) -> str`、`restore_from(world_id, path) -> str`、`digest(world_id) -> str`、`wait_closed(world_id, timeout_s: float) -> bool`。
   - `FileTupleStore` 实现上述八个方法：文件 `<root>/<world_id>.json`；`_open: dict[world_id, int]` 由 `threading.Lock` 守护（端口会在服务端线程关）；`wait_closed` 用 `threading.Condition`，计数归零时 `notify_all`。
 
-- [ ] **Step 1: 写失败的测试**（`tests/test_actio_file_tuple_store.py`，新增，旧的按人格用例同步改成按世界）
+- [x] **Step 1: 写失败的测试**（`tests/test_actio_file_tuple_store.py`，新增，旧的按人格用例同步改成按世界）
 
 ```python
 def test_two_holders_in_one_world_recall_only_their_own(tmp_path):
@@ -107,21 +107,21 @@ def test_world_ids_and_holders_are_checked_before_any_path_is_built(tmp_path):
 
 `tests/test_actio_memory_port.py::test_both_protocols_are_checked_by_method_names` 改成断言协议含 `wait_closed`。`tests/test_actio_memory_contract.py` 的两个实现各加 `holder` 参数后照旧过。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_actio_file_tuple_store.py tests/test_actio_memory_port.py`
 Expected: FAIL（`open()` 参数个数不对、没有 `wait_closed`）
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `_Ledger.begin` 的去重键仍是 `key`（key 已带主体）；`recall` 在 `holder` 非空时先按 `holders` 过滤条目再打分。`digest()` 把 `holders` 并进条目字典（`{"holder": ..., **entry_without_id}`）后排序，所以主体不同的同内容条目摘要不同。`TupleMemory.world(holder)` 返回共享 `_ledger` 的新端口对象，各自有 `closed` 状态。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_actio_file_tuple_store.py tests/test_actio_memory_port.py tests/test_actio_memory_contract.py tests/test_actio_instance.py`
 Expected: PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/actio/memory.py src/actio/memory_port.py tests/test_actio_file_tuple_store.py tests/test_actio_memory_port.py tests/test_actio_memory_contract.py
@@ -143,7 +143,7 @@ git commit -m "feat(actio): 替身账本带主体,部署管理面按世界 id,�
 - Consumes: Task 1 的 `TupleMemory.world(holder)`。
 - Produces: `ActioInstance` 多一个 keyword-only 构造参数 `holder: str`（可写端口时必填，与 `episode_id` 同一处在 `instantiate` 校验，缺了抛 `ActioDataError`）；事件 key `f"{episode_id}#{turn_index}@{holder}"`。`instantiate(..., holder=...)` 透传。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 def test_event_keys_carry_the_writing_holder():
@@ -170,19 +170,19 @@ def test_a_writable_port_without_a_holder_is_refused():
 
 `SLOTS3 = {"a": "pa", "b": "pb", "c": "pc"}`。已有用例里断言 key 字面量 `ep#3` 的改成 `ep#3@<holder>`。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_actio_instance.py`
 Expected: FAIL（`holder` 未知参数）
 
-- [ ] **Step 3: 实现** 让 `instantiate` 接收 `holder` 参数，`_remember_new` 按新格式拼 key。`replay_read_only=True` 的实例不要求传 `holder`。三个调用方按上面的 Files 一节改。
+- [x] **Step 3: 实现** 让 `instantiate` 接收 `holder` 参数，`_remember_new` 按新格式拼 key。`replay_read_only=True` 的实例不要求传 `holder`。三个调用方按上面的 Files 一节改。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_actio_instance.py tests/test_actio_memory_experience.py tests/test_factory_memory_translate.py`
 Expected: PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/actio/instance.py src/factory/memory_translate.py src/factory/agent.py src/factory/interact_policy.py src/mindagent/rounds.py src/mindagent/deployment.py tests/test_actio_instance.py tests/test_factory_memory_translate.py
@@ -199,21 +199,21 @@ git commit -m "feat(actio): 事件 key 带写入方主体,可写端口必须给 
 - Consumes: Task 1 的协议签名。
 - Produces: `StarlingDeploymentStore` 的八个方法，签名同 Task 1；文件 `<root>/<world_id>.db`；`_open` 计数加锁、`wait_closed` 同 Task 1 的 `Condition` 写法；`remember_event(world_id, holder, ...)` 以 `agent=holder` 开短连接。
 
-- [ ] **Step 1: 写失败的测试**：把 `tests/test_actio_deployment_store_contract.py` 的六个参数化用例改成按 `("s1", holder)` 调用，并加入 Task 1 Step 1 的前五条（同名，参数化到两个实现）。`tests/test_actio_starling_store.py` 里 `_lib(tmp_path, persona)` 改成 `_lib(tmp_path, world)`。
+- [x] **Step 1: 写失败的测试**：把 `tests/test_actio_deployment_store_contract.py` 的六个参数化用例改成按 `("s1", holder)` 调用，并加入 Task 1 Step 1 的前五条（同名，参数化到两个实现）。`tests/test_actio_starling_store.py` 里 `_lib(tmp_path, persona)` 改成 `_lib(tmp_path, world)`。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_actio_deployment_store_contract.py tests/test_actio_starling_store.py`
 Expected: FAIL（Starling 一侧签名不对）
 
-- [ ] **Step 3: 实现**：照 Task 1 的语义改 `StarlingDeploymentStore`；`restore_from` 的守卫读 `_open[world_id]`；`digest(world_id)` 不存在时照旧 `empty_digest()`。
+- [x] **Step 3: 实现**：照 Task 1 的语义改 `StarlingDeploymentStore`；`restore_from` 的守卫读 `_open[world_id]`；`digest(world_id)` 不存在时照旧 `empty_digest()`。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_actio_deployment_store_contract.py tests/test_actio_starling_store.py tests/test_actio_memory_starling.py`
 Expected: PASS（未装 Starling 时这些文件按现有 `importorskip` 跳过，本机已装）
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/actio/memory_starling.py tests/test_actio_deployment_store_contract.py tests/test_actio_starling_store.py tests/test_actio_memory_starling.py
@@ -231,7 +231,7 @@ git commit -m "feat(actio): Starling 部署管理面按世界 id,端口以 agent
 **Interfaces:**
 - Produces: 原因文字固定为 `bindings: persona {pid!r} is bound to more than one slot`（训练与部署两处同一句）。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 # tests/test_mt_config.py
@@ -248,19 +248,19 @@ def test_an_agent_config_binding_one_persona_twice_exits_2(tmp_path):
 
 `tests/test_mt_dispatch_synthesis.py` 加一条：合成出的绑定若人格重复（夹具强制），指令判 T2、原因同上。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_mt_config.py tests/test_factory_handlers.py tests/test_mt_dispatch_synthesis.py -k "two_slots or twice or more_than_one"`
 Expected: FAIL
 
-- [ ] **Step 3: 实现**：两处各加一次 `len(set(pids)) != len(pids)` 判断，取第一个重复的人格写进原因。
+- [x] **Step 3: 实现**：两处各加一次 `len(set(pids)) != len(pids)` 判断，取第一个重复的人格写进原因。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: 同 Step 2，去掉 `-k`
 Expected: PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/mindtrainer/training_config.py src/mindtrainer/dispatch.py src/factory/agent.py tests/test_mt_config.py tests/test_factory_handlers.py tests/test_mt_dispatch_synthesis.py
@@ -284,7 +284,7 @@ git commit -m "feat: 同一人格占两个角色位时拒绝(训练 T2,部署配
   - `any_uncommitted_snapshots() -> list[Path]`（不变语义）
   - `legacy_entries() -> list[str]`（Task 10 用）：`deploy/` 下不是 `.lock` 的文件名里 stem 不在 `known_scenarios` 的、`snapshots/*/` 下没有同名 `.world` 的 `deploy-*` 文件；参数 `known_scenarios: Iterable[str]`。
 
-- [ ] **Step 1: 写失败的测试**（重写 `tests/test_ma_memory_layout.py` 的六条）
+- [x] **Step 1: 写失败的测试**（重写 `tests/test_ma_memory_layout.py` 的六条）
 
 ```python
 def test_paths_follow_the_world_layout(tmp_path):
@@ -310,19 +310,19 @@ def test_legacy_entries_name_old_persona_files_and_untagged_snapshots(tmp_path):
     assert lay.legacy_entries(known_scenarios=["s1"]) == ["deploy/pa.json", "snapshots/r1/deploy-m-s1-1-pa.json"]
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_ma_memory_layout.py`
 Expected: FAIL
 
-- [ ] **Step 3: 实现**：`scenario_id` 过 `_check_segment`；`.world` 旁注与快照同名、后缀 `.world`；`legacy_entries` 返回相对记忆根的 POSIX 路径，排序。
+- [x] **Step 3: 实现**：`scenario_id` 过 `_check_segment`；`.world` 旁注与快照同名、后缀 `.world`；`legacy_entries` 返回相对记忆根的 POSIX 路径，排序。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: 同 Step 2
 Expected: PASS（调用方还没改，`tests/test_ma_*` 其余文件此时会失败，由 Task 6 一并改）
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/mindagent/memory_layout.py tests/test_ma_memory_layout.py
@@ -355,7 +355,7 @@ git commit -m "feat(mindagent): 记忆布局按情境世界:世界锁、整世�
 - 回滚 `_rollback_with`：对 `round_snapshots(env.id)` 的每个快照 `world_of(snap)` 找世界，`wait_closed` 后 `restore_from(world, snap)`，删快照与旁注。
 - 验证段：所有 episode 跑完后对 `config.scenario_ids` 每个 `backup_to(sid, verify_snapshot(env.id, sid))`；`instance_with(extra, scenario_id)` 从该情境的验证快照恢复一份临时世界、`open(scenario_id, agent_pid)`、`instantiate(..., replay_read_only=True)`。
 
-- [ ] **Step 1: 写失败的测试**（在 `tests/test_ma_deployment.py`；夹具 `mem` 改成按世界，`_run` 的 `on_start(eid, digest)`）
+- [x] **Step 1: 写失败的测试**（在 `tests/test_ma_deployment.py`；夹具 `mem` 改成按世界，`_run` 的 `on_start(eid, digest)`）
 
 ```python
 def test_a_failed_attempt_rolls_back_both_slots_writes(tmp_path, mem): ...
@@ -394,19 +394,19 @@ def test_a_finding_across_two_scenarios_replays_each_episode_in_its_own_world():
     assert sorted(made) == [(0, "s1"), (0, "s2"), (1, "s1"), (1, "s2")]
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_ma_deployment.py tests/test_ma_rounds.py tests/test_ma_verify.py`
 Expected: FAIL
 
-- [ ] **Step 3: 实现** 按上面的 Interfaces。`_restore` 签名改为 `(store, world_id, snap, expected, episode_id, close_wait_s)`。
+- [x] **Step 3: 实现** 按上面的 Interfaces。`_restore` 签名改为 `(store, world_id, snap, expected, episode_id, close_wait_s)`。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_ma_deployment.py tests/test_ma_rounds.py tests/test_ma_verify.py tests/test_ma_deployment_starling.py tests/test_ma_e2e.py tests/test_ma_memory_layout.py`
 Expected: PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/mindagent/deployment.py src/mindagent/rounds.py src/mindagent/verify.py tests/test_ma_deployment.py tests/test_ma_rounds.py tests/test_ma_verify.py tests/test_ma_deployment_starling.py tests/test_ma_e2e.py
@@ -429,7 +429,7 @@ git commit -m "feat(mindagent): 部署轮次按情境世界:世界锁、整世�
   - `memory_role_backend(base, *, memory, episode_id, interlocutors, holder)`。
   - `_backends` 对没登记给训练 run 的会话：`round_id = 登记表.get(info.episode_id)`；有且 `deployment_store` 非空 → 每个非客户端位 `deployment_store.open(scenario.id, binding.persona_id)`，实例 `episode_id=f"{round_id}/{info.episode_id}"`、`holder=binding.persona_id`；端口随 `SessionResources.close` 关。查不到 → 空 `TupleMemory()`，`logger.warning("deployment session %s has no registered round; opponents get an empty memory", info.episode_id)`。
 
-- [ ] **Step 1: 写失败的测试**（`tests/test_factory_handlers.py`）
+- [x] **Step 1: 写失败的测试**（`tests/test_factory_handlers.py`）
 
 ```python
 def test_a_registered_deployment_session_opens_opponents_in_the_scenario_world(tmp_path):
@@ -448,19 +448,19 @@ def test_round_and_admit_handlers_and_the_runtime_share_one_management_plane(tmp
     # 改写现有 test_round_and_admit_handlers_share_one_stand_in_deployment_memory,再断言 runtime 的 deployment_store 是同一个对象
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_factory_handlers.py`
 Expected: FAIL
 
-- [ ] **Step 3: 实现**：`wire` 在启用 `start_agent_round` 时把 `memory.deployment.store` 传给 `AgentRuntime`；`handlers._agent` 传 `register_episode=runtime.register_deployment_episode`、`unregister_episode=runtime.unregister_deployment_episode`。
+- [x] **Step 3: 实现**：`wire` 在启用 `start_agent_round` 时把 `memory.deployment.store` 传给 `AgentRuntime`；`handlers._agent` 传 `register_episode=runtime.register_deployment_episode`、`unregister_episode=runtime.unregister_deployment_episode`。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_factory_handlers.py tests/test_factory_memory_translate.py tests/test_factory_memory_wiring.py`
 Expected: PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/factory/agent.py src/factory/memory_translate.py src/factory/handlers.py src/factory/wire.py tests/test_factory_handlers.py
@@ -482,7 +482,7 @@ git commit -m "feat(factory): 部署对手位开部署世界的端口,经登记�
   - 锁：`hold_world` 涉及的每个 `scenario_id`；`uncommitted_snapshots(sid)` 非空即延后；全局 `any_uncommitted_snapshots()` 等待保留。
   - 写入：`memory_store.remember_event(sid, pid, key, text, interlocutor=...)`；`abandon_event(sid, key)`。
 
-- [ ] **Step 1: 写失败的测试**：`MEMORY`、`SECOND` 两个定义加 `"scenario_id": "s1"`；新增
+- [x] **Step 1: 写失败的测试**：`MEMORY`、`SECOND` 两个定义加 `"scenario_id": "s1"`；新增
 
 ```python
 def test_a_memory_increment_outside_the_bound_pairs_is_t2_and_touches_nothing(tmp_path): ...
@@ -491,19 +491,19 @@ def test_memory_definition_keys_are_the_four_required_keys():
     assert MEMORY_DEFINITION_KEYS == {"scenario_id", "persona_id", "text", "interlocutor"}
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_ma_admit.py`
 Expected: FAIL
 
-- [ ] **Step 3: 实现**：`scenario_id` 过 `_check_segment` 同一份白名单。
+- [x] **Step 3: 实现**：`scenario_id` 过 `_check_segment` 同一份白名单。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_ma_admit.py tests/test_ma_deployment_starling.py tests/test_factory_handlers.py`
 Expected: PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/mindagent/admit.py src/factory/handlers.py tests/test_ma_admit.py tests/test_ma_deployment_starling.py
@@ -533,7 +533,7 @@ git commit -m "feat(mindagent): 门② 记忆增量带 scenario_id,校验绑定�
 - `AgentRuntime._backends` 训练会话：`join_rollout(info.episode_id, binding.persona_id)`；失败按今天"造后端失败"收尾。
 - `trajectory_source._attempt`：`with self._policy_for_rollout(episode_id, scenario.id) as policy:` 外层捕获进入期的 `RoleMemoryUnavailableError` → `_AttemptFailed("role_memory_unavailable", type(exc).__name__, True)`。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 # tests/test_factory_training_worlds.py,参数化到两个实现
@@ -566,19 +566,19 @@ def test_a_transient_memory_failure_while_entering_the_policy_context_is_retried
     # policy_for_rollout 第一次进入抛 FactoryMemoryUnavailableError,第二次正常:episode 返回,failed_attempts 有一条 role_memory_unavailable
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_factory_training_worlds.py tests/test_factory_memory_runtime.py tests/test_factory_interact_wire.py`
 Expected: FAIL
 
-- [ ] **Step 3: 实现**：两个实现共享 `episode_id → (world, open_count, Condition)` 的表逻辑，放在 `memory_runtime.py` 的一个私有基类里；Starling 的端口用 `StarlingMemory.open(path, holder=..., on_close=...)`，`on_close` 减计数。
+- [x] **Step 3: 实现**：两个实现共享 `episode_id → (world, open_count, Condition)` 的表逻辑，放在 `memory_runtime.py` 的一个私有基类里；Starling 的端口用 `StarlingMemory.open(path, holder=..., on_close=...)`，`on_close` 减计数。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_factory_training_worlds.py tests/test_factory_memory_runtime.py tests/test_factory_interact_wire.py tests/test_factory_interact_e2e.py tests/test_mt_dispatch.py tests/test_mt_trajectory_interact.py tests/test_mt_orchestrator.py`
 Expected: PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/factory/memory_runtime.py src/factory/interact_policy.py src/factory/agent.py src/factory/wire.py src/mindtrainer/trajectory_source.py src/mindtrainer/dispatch.py tests/test_factory_training_worlds.py tests/test_factory_memory_runtime.py tests/test_factory_interact_wire.py tests/test_mt_trajectory_interact.py tests/test_mt_orchestrator.py
@@ -601,7 +601,7 @@ git commit -m "feat(factory): 训练一条 rollout 一个世界,客户端建删�
   - `memory_wiring` 在 `claim_memory_root` 之后、导入 `actio.memory_starling` 之前调 `MemoryLayout(config.root, suffix).legacy_entries(known_scenarios=agent_scenarios)`；替身在 `stand_in_deployment_memory` 里做同样检查。非空 → `FactoryConfigError(f"memory root has the old per-persona layout ({entries[0]} and {len(entries) - 1} more); clear deploy/ and snapshots/ under the memory root")`。`agent_scenarios` 来自 `agent.yaml`（不在场时为空集，此时 `deploy/` 下任何库都算旧布局）。
   - `tests/memory_fixtures.py`：`resolved_memory(scenario_ids)`、`fake_memory_resolver` 返回 `{s: f"digest-{s}"}`。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 # tests/test_mt_config.py
@@ -615,19 +615,19 @@ def test_an_old_per_persona_memory_root_exits_2_naming_the_directories_to_clear(
         memory_wiring(repo, {MEMORY_CONFIG_ENV: str(_config(root))}, deployment=True)
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_mt_config.py tests/test_mt_dispatch.py tests/test_factory_memory_runtime.py tests/test_factory_memory_wiring.py`
 Expected: FAIL
 
-- [ ] **Step 3: 实现** 按 Interfaces。`config_hash` 不用改代码：键变了，哈希自然变。
+- [x] **Step 3: 实现** 按 Interfaces。`config_hash` 不用改代码：键变了，哈希自然变。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: 同 Step 2，再加 `tests/test_factory_interact_wire.py tests/test_factory_interact_e2e.py tests/test_mt_dispatch_synthesis.py tests/test_ts_resolve.py`
 Expected: PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/factory/memory_runtime.py src/mindtrainer/dispatch.py src/mindtrainer/training_config.py tests/
@@ -640,19 +640,19 @@ git commit -m "feat: 起点摘要与种子按情境,memory.digests 键改为情�
 - Modify: `docs/design/00-overview.md`、`20-socialsimulator.md`、`30-mindtrainer.md`、`40-actio.md`、`50-mindagent.md`、`90-factory-and-cli.md`、`docs/design/_shared/context-block.md`
 - Modify: 本计划（勾选）
 
-- [ ] **Step 1: 跑全量**
+- [x] **Step 1: 跑全量**
 
 Run: `uv run --offline pytest -q -m 'not slow' -p no:cacheprovider`
 Expected: 0 failed
 
-- [ ] **Step 2: 改文档状态**：上面十个任务落地的每一行，[计划中] 改 [已落地]，"今天……[已落地];改为……[计划中]"的成对写法改成只写现在的行为。被取代的旧决策（SYS-27、SS-22、MT-22、MT-23、AC-14、AC-18、AC-24、MA-16、MA-22、MA-30、FC-27 等）的"将由 X 取代 [计划中]"改成"已由 X 取代"。共享区块同样改。第 9 章测试表填实测的文件与用例数（`grep -c "def test_"`）。
+- [x] **Step 2: 改文档状态**：上面十个任务落地的每一行，[计划中] 改 [已落地]，"今天……[已落地];改为……[计划中]"的成对写法改成只写现在的行为。被取代的旧决策（SYS-27、SS-22、MT-22、MT-23、AC-14、AC-18、AC-24、MA-16、MA-22、MA-30、FC-27 等）的"将由 X 取代 [计划中]"改成"已由 X 取代"。共享区块同样改。第 9 章测试表填实测的文件与用例数（`grep -c "def test_"`）。
 
-- [ ] **Step 3: 跑文档检查**
+- [x] **Step 3: 跑文档检查**
 
 Run: `python3 docs/design/tools/sync_docs.py && python3 docs/design/tools/check_docs.py && python3 docs/design/tools/check_consistency.py`
 Expected: 三者都是 0 个错误；`TrainingWorlds`、`wait_closed` 的符号告警消失
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git add docs/design docs/superpowers/plans/2026-11-04-scenario-world-memory.md

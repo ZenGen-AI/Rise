@@ -16,7 +16,7 @@ def build() -> Canvas:
     s2 = c.box(xs[1], 160, w, "读轮次产物", "终态:直接返回\n读不出:写 failed", kind="compute", h=h)
     s3 = c.box(xs[2], 160, w, "取代旧轮次", "旧模型 pending 轮次\n过期动作自身同样", kind="compute", h=h)
     s4 = c.box(xs[3], 160, w, "绑定并写 pending", "读模型与正式库\n轮次产物 = 幂等键", kind="compute", h=h)
-    s5 = c.box(xs[3], 340, w, "部署 episode", "技能版本一致 · 起点副本已删\ndigest_before 对得上\n则复用不重跑", kind="compute", h=h)
+    s5 = c.box(xs[3], 340, w, "部署 episode", "技能版本一致 · 起点快照已删\n起点摘要记过\n则复用不重跑", kind="compute", h=h)
     s6 = c.box(xs[2], 340, w, "分析 · 提案 · 验证", "纯函数为主\n桥接仅在提案生成", kind="compute", h=h)
     s7 = c.box(xs[1], 340, w, "筛选并打包", "提案 pending_review\nid 由轮次与序号确定", kind="compute", h=h)
     s8 = c.box(xs[0], 340, w, "轮次 executed", "写 findings · proposals\ndropped", kind="compute", h=h)

@@ -24,7 +24,7 @@ def build() -> Canvas:
     dm = c.box(28, 458, 244, "simulator.datamodel", "Persona · Scenario · TurnRecord",
                h=70, kind="compute")
     mb = c.box(288, 458, 244, "模型后端", "respond 或 respond_guided\n测试用罐头后端", h=70, kind="neutral")
-    mem = c.store(548, 448, 244, "Starling 记忆库", "每个人格一个 SQLite 库(树外)\n可选依赖 extra memory",
+    mem = c.store(548, 448, 244, "Starling 记忆库", "一个世界一个 SQLite 库(树外)\n可选依赖 extra memory",
                   h=90)
     lib = c.store(808, 448, 244, "技能库", "skill_library/\n由 MindAgent 读写", h=90)
     fac = c.box(730, 262, 200, "factory 组合根", "构造训练路的全部实例\n训练位 · 对手位", h=90, kind="neutral")
