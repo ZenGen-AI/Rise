@@ -4,7 +4,7 @@
 
 ## 1. 为什么要改
 
-rise（RismForge）现在在自己的进程里直接 `starling.Memory.open(db_path)`，每个人格一个 `.db`，散落在本机的记忆根目录下。代码在 `src/actio/memory_starling.py`（全仓库只有这一个文件导入 `starling`）。
+rise（Rise）现在在自己的进程里直接 `starling.Memory.open(db_path)`，每个人格一个 `.db`，散落在本机的记忆根目录下。代码在 `src/actio/memory_starling.py`（全仓库只有这一个文件导入 `starling`）。
 
 这样有两个问题：
 

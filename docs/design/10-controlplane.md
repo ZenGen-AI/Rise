@@ -15,7 +15,7 @@
 ## 0. 系统速览
 
 <!-- shared:begin context-block -->
-**系统是什么。** RismForge 是一套"AI 驱动的社会心智后训练工厂":输入通用开源基础模型,输出社会心智能力显著增强的模型,代号 **ZenGen**。工厂自己决定每一轮练什么、怎么练。训练决策可以交给外部更强的闭源模型(经命令行调用),关键决策点设人工审核门,其余环节自动。
+**系统是什么。** Rise(Recursive Interactive Social mind Evolution)是一套"AI 驱动的社会心智后训练工厂":输入通用开源基础模型,输出社会心智能力显著增强的模型,代号 **ZenGen**。工厂自己决定每一轮练什么、怎么练。训练决策可以交给外部更强的闭源模型(经命令行调用),关键决策点设人工审核门,其余环节自动。
 
 **七个子系统。** 六个能力子系统加一个协调层 ControlPlane。
 
@@ -75,7 +75,7 @@ ControlPlane 是系统的协调层:它不训练、不评测,只读写产物并�
 **节点**
 
 - 审核人:人工审核门① / 确认指令
-- 人工命令行 rismforge:TypeScript · 门控写命令 / review approve reject status
+- 人工命令行 rise:TypeScript · 门控写命令 / review approve reject status
 - 调和守护进程:Python · run_daemon / 纯函数 reconcile + 执行壳
 - 入口 run_controlplane:mindtrainer.wire.main / 注入 MindTrainer 派发器
 - factory 组合根:组装处理器与评估器
@@ -87,8 +87,8 @@ ControlPlane 是系统的协调层:它不训练、不评测,只读写产物并�
 
 **连线**
 
-- 审核人 → 人工命令行 rismforge:命令
-- 人工命令行 rismforge → git 产物树 control-plane/:改状态并提交
+- 审核人 → 人工命令行 rise:命令
+- 人工命令行 rise → git 产物树 control-plane/:改状态并提交
 - 调和守护进程 ↔ git 产物树 control-plane/:扫描 · 写回
 - 入口 run_controlplane → 调和守护进程:启动并注入
 - factory 组合根 → 调和守护进程
@@ -561,7 +561,7 @@ def evidence_acceptable(grade: str, accept_mock: bool) -> bool: ...
 | R9 | 不建 SQLite 索引,按目录扫描 | 从树重建的 SQLite 缓存 | 不出现第二套真相 | 配方到数百条以上扫描才会慢 |
 | R10 | 审核门记录就是产物自己的 `status` 与原因,不另建 `gate_*.yaml` | 每道门一个记录文件 | 与已落地的候选 checkpoint 一致 | 门的审核人与时间只能从 git 提交里看 |
 | R11 | 正式技能库放 `skill_library/`,记忆库放 `memory_library/`,库版本记在 `control-plane/library_state.yaml` | 混放在提案目录 | 已纳入与待审分开 | 无 [已落地] |
-| R16 | 命令拆两个入口:TypeScript 管门控写命令,Python 管调和与只读可观测 | 全部命令放一个 `rismforge` | 门控写命令与调和循环分属两种语言 | 用户要记两个入口 |
+| R16 | 命令拆两个入口:TypeScript 管门控写命令,Python 管调和与只读可观测 | 全部命令放一个 `rise` | 门控写命令与调和循环分属两种语言 | 用户要记两个入口 |
 | R17 | 诊断报告带 `backends` 标记;默认不接受 `mock` 证据驱动规划与提名,开发入口用显式开关打开 | 不区分证据来源 | 防止 mock 分数让闭环自己转起来 | 默认配置下闭环不会自转,开发要加开关 [已落地] |
 | R19 | 智能体轮次在"没有轮次产物或产物为 `pending`"时触发;产物在但读不出视同不存在 | 只在没有产物时触发 | 一次瞬态失败留下的 `pending` 轮次不会永远卡住 | 轮次处理器可能被连续唤醒,必须靠幂等键挡重复 [已落地] |
 
@@ -653,7 +653,7 @@ def evidence_acceptable(grade: str, accept_mock: bool) -> bool: ...
 | 每道门一个 `gate_*.yaml` 记录 | 门的结果就是候选自己的 `status`,拒绝原因写 `reject_reason` | 按 R10 不建记录文件 |
 | 从树重建的 SQLite 索引 | 没有索引,`list_products` 按目录扫描 | 按 R9 不建 |
 | `outcome.yaml` 汇总成本与失败 | `outcome.yaml` 只有 `promoted_model`;成本读 `run_trace.yaml`,失败写进指令 `payload.failure` | 成本与失败的写入函数 [已落地] |
-| 全部命令在一个 `rismforge` 下 | TypeScript 五个门控命令;Python 侧是 `factory` 的 `run`、`reconcile`、`trace`、`cost`、`logs` 等子命令 | 按 R16 拆两个入口,Python 子命令 [已落地] |
+| 全部命令在一个 `rise` 下 | TypeScript 五个门控命令;Python 侧是 `factory` 的 `run`、`reconcile`、`trace`、`cost`、`logs` 等子命令 | 按 R16 拆两个入口,Python 子命令 [已落地] |
 
 已知局限:
 

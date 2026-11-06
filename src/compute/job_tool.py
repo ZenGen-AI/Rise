@@ -237,7 +237,7 @@ def _status_result(jobdir):
 # ===== jobs =====
 
 SELF = os.path.abspath(__file__)
-WRAPPER_ENV = "RISMFORGE_JOBDIR"
+WRAPPER_ENV = "RISE_JOBDIR"
 
 
 def _ignore_signal(signum, frame):

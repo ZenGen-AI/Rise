@@ -173,7 +173,7 @@ class DeploymentMemoryStore(Protocol):     # 一个人格一个库,按人格 id 
     def digest(self, persona_id) -> str: ...
 ```
 
-`restore_from` 在该人格还有打开的端口时抛 `MemoryFailureError`（`transient` 为假）：覆盖正被打开的 SQLite 文件会写坏库。实现有两个：`StarlingDeploymentStore`（`actio/memory_starling.py`）与 `FileTupleStore`（`actio/memory.py`，把条目与事件表存成 JSON 文件，`backup_to` 是复制文件）。替身因此也落盘，提交点协议在两种实现上一样成立；人格 id 要过 `PERSONA_ID_PATTERN = ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`（`actio/memory_port.py`），两个实现拼库路径前都校验。不设记忆配置的部署路用 `FileTupleStore`，根目录是 `<git 目录>/rismforge-memory`（与 `rismforge.lock` 同处，不入树，跨重启保留）。不用 `mkdtemp`：每次重启换空库会让崩溃重入与门② 收录失效。
+`restore_from` 在该人格还有打开的端口时抛 `MemoryFailureError`（`transient` 为假）：覆盖正被打开的 SQLite 文件会写坏库。实现有两个：`StarlingDeploymentStore`（`actio/memory_starling.py`）与 `FileTupleStore`（`actio/memory.py`，把条目与事件表存成 JSON 文件，`backup_to` 是复制文件）。替身因此也落盘，提交点协议在两种实现上一样成立；人格 id 要过 `PERSONA_ID_PATTERN = ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`（`actio/memory_port.py`），两个实现拼库路径前都校验。不设记忆配置的部署路用 `FileTupleStore`，根目录是 `<git 目录>/rise-memory`（与 `rise.lock` 同处，不入树，跨重启保留）。不用 `mkdtemp`：每次重启换空库会让崩溃重入与门② 收录失效。
 
 两种实现过同一套契约测试与规范样例（M17）。样例是一份 YAML：固定的事件序列、每步之后的 recall 预期命中 id 顺序、每步之后的 digest、同 key 同文本重写的结果、同 key 不同文本抛 `MemoryEventConflict`、close 后再调抛 `MemoryClosedError`。替身与 Starling 对同一份样例必须给出同样的命中顺序与摘要变化曲线（摘要值本身两边不同）。事件 key 的去重由端口实现自己维护：`StarlingMemory` 在库旁的 `events` 表（第 8 节 PR 新增）里记 `key → 文本 sha256、语句 id 列表`，查表早于 `remember`；`TupleMemory` 用字典。
 
@@ -230,7 +230,7 @@ class DeploymentMemoryStore(Protocol):     # 一个人格一个库,按人格 id 
 
 ### 5.1 树外配置（M5、M12）
 
-环境变量 `RISMFORGE_MEMORY_CONFIG` 给出 YAML 文件的绝对路径，文件必须在仓库外、权限 0600，校验照 `eval_config.py` 另写一份（F15）。
+环境变量 `RISE_MEMORY_CONFIG` 给出 YAML 文件的绝对路径，文件必须在仓库外、权限 0600，校验照 `eval_config.py` 另写一份（F15）。
 
 | 键 | 必填 | 含义 |
 |---|---|---|
@@ -240,7 +240,7 @@ class DeploymentMemoryStore(Protocol):     # 一个人格一个库,按人格 id 
 | `timeout_ms` | 否 | 抽取与嵌入的单次上限，默认 4000 |
 | `max_retries` | 否 | 抽取与嵌入的重试次数，默认 0 |
 
-配置里不放密钥。启动时检查 `OPENAI_API_KEY` 非空，报错只写变量名。“配置不存在”只指环境变量 `RISMFORGE_MEMORY_CONFIG` 未设置：这时训练路与部署路都用替身，并在启动日志里写 `memory backend: stand-in`。变量设置了而文件不在、权限不是 0600、在仓库内、缺键或多键，一律装配期退出码 2，与评测配置同一做法。
+配置里不放密钥。启动时检查 `OPENAI_API_KEY` 非空，报错只写变量名。“配置不存在”只指环境变量 `RISE_MEMORY_CONFIG` 未设置：这时训练路与部署路都用替身，并在启动日志里写 `memory backend: stand-in`。变量设置了而文件不在、权限不是 0600、在仓库内、缺键或多键，一律装配期退出码 2，与评测配置同一做法。
 
 ### 5.2 记忆运行时身份
 
@@ -362,7 +362,7 @@ class SessionResources:
 - 派发器进入策略上下文之前，按 `seed` 打开每个绑定人格的起点库、算摘要、取运行时身份，写进本次派发的 `cfg` 的 `memory.digests` 与 `memory.runtime`，不回写指令：续训要重新算（见下一条），回写会多一笔提交，还会盖掉 T3 比较用的原值；训练记录的 `policy_backend.memory` 记下它们。之后才算 `config_hash`。`mindtrainer` 不导入 `actio` 与 `starling`，所以这一步靠组合根注入的可调用对象：`make_mindtrainer_dispatcher` 新增 keyword-only 参数 `memory_resolver: Callable[[str | None, tuple[str, ...]], tuple[dict[str, str], dict]]`，入参是种子 id 与绑定人格 id，返回每个人格的起点摘要与运行时身份。interact 指令没注入它时判 T2，原因点名 `--interact`；它抛的异常一律 T2。严格校验放行“未解析”的 `memory` 段（`digests` 与 `runtime` 都为空），只填一半拒绝；解析后再跑一次校验，摘要的人格集合要等于绑定人格集合，`runtime` 键集合要等于 5.2 节的五个键。解析器抛 `DirectiveFailedError` 时保留它自己的原因（替身拒绝种子要说清原因），其余异常只报类名。
 - 续训时重新算摘要与身份；种子库、Starling 版本、抽取或嵌入模型任一变了，`config_hash` 不同，升 T3（F13）。
 - 替身路径的 `digests` 是替身摘要、`runtime.backend` 是 `stand-in`，所以换成真 Starling 也会改哈希。
-- 替身没有记忆根目录，也就没有种子库：未设 `RISMFORGE_MEMORY_CONFIG` 时 `memory.seed` 必须是 `null`，否则 `memory_resolver` 抛错、指令 T2，原因写明种子需要记忆配置。
+- 替身没有记忆根目录，也就没有种子库：未设 `RISE_MEMORY_CONFIG` 时 `memory.seed` 必须是 `null`，否则 `memory_resolver` 抛错、指令 T2，原因写明种子需要记忆配置。
 
 ### 7.2 每条 rollout 的私有副本（M9）
 

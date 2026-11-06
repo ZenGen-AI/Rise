@@ -10,7 +10,7 @@
 
 **Spec:**
 - `docs/superpowers/specs/2026-10-09-closed-loop-integration-design.md`:§3.4 的状态机部分、§4.1 的路径、§5 全部、§11 的契约(名字逐字照用)。R1 至 R21 已定,本计划不推翻(R19 至 R21 是本计划落盘之后补的,与桥接和基础设施无交集)。
-- 上游:`docs/superpowers/specs/2026-09-24-rismforge-subsystem-design.md` 补充 D.4(`CostRecord`)、E.2(T1/T2/T3)、E.5(`FailureRecord`、`RetryPolicy`)、G.3(凭证只存变量名)。
+- 上游:`docs/superpowers/specs/2026-09-24-rise-subsystem-design.md` 补充 D.4(`CostRecord`)、E.2(T1/T2/T3)、E.5(`FailureRecord`、`RetryPolicy`)、G.3(凭证只存变量名)。
 - 前置:`main` 在 `0385004`,全量基线 **820 通过**、无警告。
 
 **依赖已有产出的名字(已逐个读源码核实)**
@@ -48,7 +48,7 @@
 - **Ruling: `BackendConfig` 的 `token_env` 键仍必须在场(缺键照旧 `KeyError`),值可以是变量名或显式 `null`;空串或非字符串抛 `ValueError`。`command` 必须是非空、元素为非空字符串的列表;`timeout_s` 必须是正数(`bool` 不算),缺省 `120.0`,一律转成 `float`。凭证值字段仍按现有 `_FORBIDDEN_SECRET_KEYS` 检查顶层,字段名比较改为 `k.lower()`(`Token`、`API_KEY` 也被拒);`timeout_s` 拒绝 NaN 与无穷;`env_allowlist` 缺省 `None`(用模块常量 `DEFAULT_ENV_ALLOWLIST`),给了就必须是元素为非空字符串的 `list`,空 `list` 合法;`workdir` 缺省且只接受 `"empty_tmp"`。** —— 原因:设计 R15 写的是"允许显式 `null`",显式比"漏写就当自带登录态"安全;现有 `tests/test_config.py` 不改仍通过。 —— 判错的代价:老配置漏写 `token_env` 的会继续报 `KeyError`,要显式写 `token_env: null`。
 - **Ruling: 配置信封:`write_config` 写 `type: config`、状态 `effective`,载荷相同且 id 相同时不写不提交,否则 `version` 加一;路径必须在 `control-plane/config/` 下且以 `.yaml` 结尾;路径先 `posixpath.normpath`,规范化前后必须一致且不含 `..` 段(`control-plane/config/../runs/x.yaml` 被拒);`config_id` 不能为空;目标位置已有非 `config` 信封时拒绝覆盖(`ConfigTypeError`);写前与读后都**递归**检查凭证值字段名(按小写比较),命中抛 `CredentialInGitTreeError`(只报键路径,不报值)。`read_config` 返回载荷的深拷贝,文件缺失抛 `FileNotFoundError`。** —— 原因:配置是"进 git 树的 L-A 层",递归检查挡住把凭证塞进嵌套配置;`planner_prompt_file` 在 `config/prompts/` 下但类型是 `prompt_template`,拒绝覆盖非配置信封,防止配置写方误盖模板。 —— 判错的代价:某份配置若真有名为 `token`、`secret` 之类的合法键,会被拒,要改键名。
 - **Ruling: `diagnostic_grade` 对 `stub` 字段按真值判定;只有 `backends` 为 `real` 且 `dimension_scores` 是非空列表才判 `real`;没有 `backends` 标记、取值不认识(含 `null`)、没有分数,都判 `stub`(失败关闭,设计 DX-12);载荷不是 `dict` 抛 `TypeError`。`evidence_acceptable` 收到 `GRADES` 以外的等级抛 `ValueError`。** —— 原因:任务说明的规则原样实现;"无法判断就按最弱证据算"能保证判错时闭环停住而不是被假证据推着走。现有 `run_diagnostic` 的报告没有 `backends` 标记,判 `stub`;计划 8 让 `write_report`、`run_diagnostic`、`resolve_baseline` 的 `backends` 成为必填关键字参数(设计 DX-12),之后写出的报告都带标记。 —— 判错的代价:手写的或旧版编排器写出的无标记报告永远不可接受,有人写 `backends: "Real"` 之类也会被当成 `stub`,闭环不转,要人补上或改正标记。
-- **Ruling: 桥接日志默认放 `<store.repo_root>/.rismforge/logs/<run_id>/<task_id>-<k>.log`(`k` 从 1 递增,不覆盖);首次写日志时在日志根目录放一个内容为 `*` 的 `.gitignore`,另在本仓库 `.gitignore` 加 `.rismforge/`;构造时可用 `log_dir` 改到任意位置;既没有 `store` 也没有 `log_dir` 时不写日志,`log_ref` 为 `None`。** —— 原因:设计 §5.1 的原文要"仓库外的日志目录,加进 `.gitignore`"(设计现已按本 Ruling 收窄,见设计 §5.1)。控制面仓库是 `GitStore` 指向的那个 git 仓库,不是本代码仓库,改它的 `.gitignore` 等于写一个被追踪的文件;日志根目录自带 `*` 的 `.gitignore` 不需要碰任何被追踪的文件,也不受仓库自身 `.gitignore` 是否存在影响(有测试用 `git status --porcelain --untracked-files=all` 与 `git ls-files` 证明)。 —— 判错的代价:日志实际在控制面仓库的工作区里,只是对 git 不可见;有人 `git add -f` 仍能加进去。要真正放到仓库外,构造时传 `log_dir`。
+- **Ruling: 桥接日志默认放 `<store.repo_root>/.rise/logs/<run_id>/<task_id>-<k>.log`(`k` 从 1 递增,不覆盖);首次写日志时在日志根目录放一个内容为 `*` 的 `.gitignore`,另在本仓库 `.gitignore` 加 `.rise/`;构造时可用 `log_dir` 改到任意位置;既没有 `store` 也没有 `log_dir` 时不写日志,`log_ref` 为 `None`。** —— 原因:设计 §5.1 的原文要"仓库外的日志目录,加进 `.gitignore`"(设计现已按本 Ruling 收窄,见设计 §5.1)。控制面仓库是 `GitStore` 指向的那个 git 仓库,不是本代码仓库,改它的 `.gitignore` 等于写一个被追踪的文件;日志根目录自带 `*` 的 `.gitignore` 不需要碰任何被追踪的文件,也不受仓库自身 `.gitignore` 是否存在影响(有测试用 `git status --porcelain --untracked-files=all` 与 `git ls-files` 证明)。 —— 判错的代价:日志实际在控制面仓库的工作区里,只是对 git 不可见;有人 `git add -f` 仍能加进去。要真正放到仓库外,构造时传 `log_dir`。
 - **Ruling: `CliBridge` 的失败分类:超时、非零退出、去掉空白后为空的输出算 T1 并重试;子进程启动阶段的任何 `OSError`(不存在、无权限、`NotADirectoryError`、无 shebang 脚本的 ENOEXEC、参数过长的 E2BIG……)算 T2,立即抛,不重试;子进程输出按 `encoding="utf-8", errors="replace"` 解码,不会因非 UTF-8 输出抛 `UnicodeDecodeError`;缺凭证在**构造时**抛现有的 `MissingCredentialError`(只报变量名),不是 `BridgeError`。退避是 `backoff_base_s * 2**(attempt-1)`,只在两次尝试之间睡,`retry_policy` 缺键时取 `max_attempts=3`、`backoff_base_s=1.0`,非法值在构造时抛 `ValueError`。** —— 原因:设计 §5.1 只列了三种 T1;起不来的可执行文件重试多少次都一样,按 E.2 是 T2;若让普通 `OSError` 或 `UnicodeDecodeError` 原样上抛,按 R18 会被当瞬态,守护循环退出、重启后又撞上同一处,形成循环;缺凭证是配置问题,早失败比等到第一次调用好。 —— 判错的代价:如果外部工具在 PATH 上是被异步装上的(罕见),第一次调用会直接 T2。
 - **Ruling: `CliBridge` 默认隔离子进程:环境变量只传「白名单 ∪ `{token_env}`」与 `CliBridge` 持有的环境的交集(白名单取 `BackendConfig.env_allowlist`,为 `None` 才用 `DEFAULT_ENV_ALLOWLIST`,给了空 `list` 就只传 `token_env`;`token_env` 为 `None` 时不传任何凭证变量);工作目录是每次 `complete` 调用新建的空临时目录,同一次调用的所有尝试共用它,调用结束(成功、T1 耗尽、T2)一律删除;`CliBridge` 自己持有的完整环境不变,只用于解析 `token_env` 与脱敏。`DEFAULT_COMMANDS`(`claude` 关闭全部工具、`codex` 开只读沙箱)只是放在 `inference_bridge` 里的常量,不自动写进任何配置。** —— 原因:设计 §5.1 与 BR-8 要「外部推理只产出文本」由配置强制而不是靠约定;整份环境交给子进程会把守护进程里的其他凭证一起交给外部工具,而脱敏只认 `token_env` 那一个值。 —— 判错的代价:白名单不含 `PATH` 时子进程按它自己的环境找可执行文件,找不到就是 T2;工具的登录态依赖白名单之外的变量时调用失败,要把变量名加进 `env_allowlist`;空临时目录不阻止工具按绝对路径读写 `HOME` 下的文件。
 - **Ruling: `BridgeError` 的构造签名为 `BridgeError(category, reason="", *, attempts=0, log_ref=None)`,`str(exc)` 为 `"<category>: <reason>"`;`category` 只能是 `T1`、`T2`。`CliBridge` 从不解析外部工具的输出,`BridgeResult.input_tokens`、`output_tokens` 恒为 `None`,`text` 是去掉首尾空白的标准输出;记账的 `calls` 是本次成功用掉的尝试次数,`tokens` 省略。异常信息里带脱敏后的 stderr 末尾 300 个字符;启动失败时只在 `except` 块里算出脱敏后的原因,出块后再抛 `BridgeError`,所以它的 `__cause__` 与 `__context__` 都是 `None`。** —— 原因:设计 §14 第 1 条说不知道 JSON 输出里有没有用量,所以不猜;原异常(如 `PermissionError` 的 `strerror`)可能带凭证,`raise ... from None` 只断 `__cause__`,`__context__` 仍挂着原异常,在块外抛才能让异常链上一个原异常都不挂。 —— 判错的代价:成本表里外部推理的 token 一直是 0,只有调用次数;以后确认了输出格式,要在 `CliBridge` 里加一个可选的用量解析器。
@@ -84,7 +84,7 @@
 | `src/inference_bridge/scripted.py` | 新建(48 行) | `ScriptedBridge`、`ScriptExhaustedError` |
 | `src/inference_bridge/cli.py` | 新建(203 行) | `CliBridge`、`RunOutcome`、`Runner`、`subprocess_runner`、`DEFAULT_COMMANDS` |
 | `pyproject.toml` | 修改(1 行) | wheel 包列表末尾追加 `src/inference_bridge`(正则定位,已有则不动) |
-| `.gitignore` | 修改(+3 行) | 忽略 `.rismforge/` |
+| `.gitignore` | 修改(+3 行) | 忽略 `.rise/` |
 | `tests/test_paths.py` | 修改(4 → 24 个用例) | `SUBDIRS` 精确相等断言同步;新路径;`init` 建目录 |
 | `tests/test_awaiting_confirmation.py` | 新建(6 个用例) | 新状态的迁移;`reconcile` 与调和循环不动它 |
 | `tests/test_ledger.py` | 新建(33 个用例) | 记账与失败留痕 |
@@ -2095,7 +2095,7 @@ git commit -m "feat: add the inference_bridge package (result, error, protocol, 
 **Files:**
 - Create: `src/inference_bridge/cli.py`(203 行)
 - Modify: `src/inference_bridge/__init__.py`(21 → 27 行,导出 `CliBridge`、`RunOutcome`、`Runner`、`subprocess_runner`、`DEFAULT_COMMANDS`)
-- Modify: `.gitignore`(+3 行,忽略 `.rismforge/`)
+- Modify: `.gitignore`(+3 行,忽略 `.rise/`)
 - Test: `tests/test_bridge_cli.py`(新建,47 个用例)、`tests/test_bridge_packaging.py`(加 1 个用例,共 3 个)
 
 **Interfaces:**
@@ -2106,7 +2106,7 @@ git commit -m "feat: add the inference_bridge package (result, error, protocol, 
   - `Runner = Callable[[list[str], str, float, Mapping[str, str], str], RunOutcome]`(argv、标准输入、超时秒数、子进程环境、工作目录)
   - `subprocess_runner`:默认 runner,真起子进程,工作目录是第五个参数 `cwd`;超时由 `subprocess.run(timeout=...)` 杀掉子进程,返回 `timed_out=True`
   - `DEFAULT_COMMANDS: dict[str, list[str]]`:`claude`、`codex` 两个工具的默认 argv 模板(定义在 `cli.py`,由包的 `__init__` 再导出)
-  - `LOG_SUBDIR = ".rismforge/logs"`
+  - `LOG_SUBDIR = ".rise/logs"`
 
 **设计要点:**
 - **提示词经标准输入传。** argv 来自 `BackendConfig.command`,模板里的 `{model}` 换成 `model_name`,其余原样;不经 shell。
@@ -2115,8 +2115,8 @@ git commit -m "feat: add the inference_bridge package (result, error, protocol, 
 - **默认参数模板是常量。** `DEFAULT_COMMANDS`(`claude`、`codex` 两项)定义在 `cli.py`、由包的 `__init__` 再导出:claude 关闭全部工具、不落会话文件,codex 只读沙箱、不要求在 git 仓库里、不落会话文件。它只是现成的 argv 模板,不自动写进任何配置。
 - **失败分类与重试**:超时、非零退出、空输出 → T1,`sleep(backoff_base_s * 2**(attempt-1))` 后重试;耗尽抛 `BridgeError("T1", ..., attempts=max_attempts)`,`reason` 带最后一次的原因和脱敏后的 stderr 末尾。子进程启动阶段的任何 `OSError` → 立即 `BridgeError("T2")`(参数化测试覆盖 `NotADirectoryError`、ENOEXEC、E2BIG;另有一条真起一个不带 shebang 的可执行文件)。退避测试断言 `sleep` 收到的序列(`[0.5, 1.0]`),最后一次失败后不睡。
 - **成功后记账**:构造时传了 `store`,就 `record_bridge_cost(..., calls=本次用掉的尝试次数)`,`tokens` 省略;失败不记。
-- **日志**:每次 `complete` 写一份日志(成功或失败都写),内容是后端名、模型、argv、`run_id`、`task_id`、提示词、每次尝试的 stdout/stderr,**整体过 `redact`**;路径 `<日志根>/<run_id>/<task_id>-<k>.log`;返回或异常里带 `BigRef(uri="file://<绝对路径>", sha256, size_bytes)`。日志根缺省是 `<store.repo_root>/.rismforge/logs`,首次写入时放一个内容为 `*` 的 `.gitignore`。`run_id`、`task_id` 会拼进路径,必须是不含分隔符的非空段,`.`、`..` 也拒绝。
-- **凭证不外泄,用测试证明**:日志全文不含凭证;`str(exc)`、`exc.reason`、`exc.args` 不含凭证;`PermissionError` 的信息里带凭证时也被脱敏,且 `BridgeError` 在 `except` 块外抛出,`__cause__` 与 `__context__` 都是 `None`;一次真实调用之后,控制面仓库里 `git ls-files` 列出的每个文件都不含凭证;`git status --porcelain --untracked-files=all` 看不到 `.rismforge`。
+- **日志**:每次 `complete` 写一份日志(成功或失败都写),内容是后端名、模型、argv、`run_id`、`task_id`、提示词、每次尝试的 stdout/stderr,**整体过 `redact`**;路径 `<日志根>/<run_id>/<task_id>-<k>.log`;返回或异常里带 `BigRef(uri="file://<绝对路径>", sha256, size_bytes)`。日志根缺省是 `<store.repo_root>/.rise/logs`,首次写入时放一个内容为 `*` 的 `.gitignore`。`run_id`、`task_id` 会拼进路径,必须是不含分隔符的非空段,`.`、`..` 也拒绝。
+- **凭证不外泄,用测试证明**:日志全文不含凭证;`str(exc)`、`exc.reason`、`exc.args` 不含凭证;`PermissionError` 的信息里带凭证时也被脱敏,且 `BridgeError` 在 `except` 块外抛出,`__cause__` 与 `__context__` 都是 `None`;一次真实调用之后,控制面仓库里 `git ls-files` 列出的每个文件都不含凭证;`git status --porcelain --untracked-files=all` 看不到 `.rise`。
 - **解码不抛。** `subprocess_runner` 用 `encoding="utf-8", errors="replace"`,不再用按 locale 严格解码的 `text=True`;非法字节变成 U+FFFD(有测试)。
 - **真起子进程的七条用例**:用 `sys.executable -c <脚本>` 做假可执行体,回显标准输入(大写)与 `{model}` 替换结果;非零退出且 stderr 带凭证(验证 T1 与脱敏);睡 5 秒配 `timeout_s=0.5`(验证超时是 T1);输出 `\xff\xfe`(验证替换解码);另有不存在的绝对路径与 `tmp_path` 里一个不带 shebang 的 `0o755` 脚本(都验证 T2)。第七条用一个打印自己环境变量名、工作目录与目录内容的假工具:父进程里用 `monkeypatch` 设一个不在白名单里的变量,验证子进程看不到它、看得到 `FAKE_TOKEN`,工作目录是空的、调用结束后已被删除。
 
@@ -2344,17 +2344,17 @@ def test_any_os_error_at_start_is_t2_and_not_retried(err):
 def test_logs_default_under_the_store_and_stay_untracked(store):
     r = _bridge(FakeRunner([_ok()]), store=store).complete("p", run_id="run-1", task_id="plan-1")
     path = _log_path(r.log_ref)
-    assert path.is_relative_to(store.repo_root.resolve() / ".rismforge" / "logs")
-    assert (store.repo_root / ".rismforge" / "logs" / ".gitignore").read_text() == "*\n"
+    assert path.is_relative_to(store.repo_root.resolve() / ".rise" / "logs")
+    assert (store.repo_root / ".rise" / "logs" / ".gitignore").read_text() == "*\n"
     status = subprocess.run(
         ["git", "-C", str(store.repo_root), "status", "--porcelain", "--untracked-files=all"],
         capture_output=True, text=True, check=True,
     ).stdout
-    assert ".rismforge" not in status  # 日志目录对 git 不可见
+    assert ".rise" not in status  # 日志目录对 git 不可见
     tracked = subprocess.run(
         ["git", "-C", str(store.repo_root), "ls-files"], capture_output=True, text=True, check=True,
     ).stdout
-    assert ".rismforge" not in tracked and "run_trace.yaml" in tracked
+    assert ".rise" not in tracked and "run_trace.yaml" in tracked
 
 
 def test_the_credential_is_never_written_into_the_git_tree(store):
@@ -2442,7 +2442,7 @@ def test_a_real_subprocess_timeout_is_t1():
 
 def test_a_real_missing_executable_is_t2():
     b = CliBridge(
-        _cfg(command=["/nonexistent/rismforge-no-such-tool"]), env={"FAKE_TOKEN": SECRET}, sleep=lambda s: None,
+        _cfg(command=["/nonexistent/rise-no-such-tool"]), env={"FAKE_TOKEN": SECRET}, sleep=lambda s: None,
     )
     with pytest.raises(BridgeError) as exc:
         b.complete("p", run_id="r", task_id="t")
@@ -2555,11 +2555,11 @@ _ENV_TOOL = (
 
 def test_a_real_subprocess_sees_only_allowlisted_variables_and_an_empty_working_directory(monkeypatch):
     monkeypatch.setenv("FAKE_TOKEN", SECRET)
-    monkeypatch.setenv("RISMFORGE_UNLISTED", "must-not-leak")
+    monkeypatch.setenv("RISE_UNLISTED", "must-not-leak")
     b = CliBridge(_cfg(command=[sys.executable, "-c", _ENV_TOOL]), sleep=lambda s: None)  # env 缺省取 os.environ
     seen = json.loads(b.complete("p", run_id="r", task_id="t").text)
     assert "FAKE_TOKEN" in seen["env"]
-    assert "RISMFORGE_UNLISTED" not in seen["env"]
+    assert "RISE_UNLISTED" not in seen["env"]
     assert seen["ls"] == []
     assert Path(seen["cwd"]).resolve() != Path.cwd().resolve()
     assert not Path(seen["cwd"]).exists()  # 调用结束后目录已删除
@@ -2601,7 +2601,7 @@ def test_a_default_command_template_is_filled_and_passed_as_argv(tool):
 
 def test_the_repo_gitignore_covers_the_default_log_dir():
     lines = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
-    assert ".rismforge/" in lines
+    assert ".rise/" in lines
 ```
 
 - [ ] **Step 2: 运行,确认失败**
@@ -2643,7 +2643,7 @@ from controlplane.envelope import BigRef
 from controlplane.gitstore import GitStore
 from inference_bridge.base import BridgeError, BridgeResult, _check_segment, record_bridge_cost
 
-LOG_SUBDIR = ".rismforge/logs"  # 相对 store.repo_root 的默认日志根目录
+LOG_SUBDIR = ".rise/logs"  # 相对 store.repo_root 的默认日志根目录
 _TAIL = 300  # 异常信息里最多带多少字符的 stderr 尾巴(已脱敏)
 
 # 两个工具的默认参数模板(设计 §5.1):claude 关闭全部工具、不落会话文件;codex 只读沙箱、
@@ -2773,7 +2773,7 @@ class CliBridge:
         _check_segment("run_id", run_id)
         _check_segment("task_id", task_id)
         # 每次调用(不是每次尝试)一个空临时目录:成功、T1 耗尽、T2 都由 with 删掉,一次调用的所有尝试共用它。
-        with tempfile.TemporaryDirectory(prefix="rismforge-bridge-") as cwd:
+        with tempfile.TemporaryDirectory(prefix="rise-bridge-") as cwd:
             return self._complete_in(cwd, prompt, run_id, task_id)
 
     def _complete_in(self, cwd: str, prompt: str, run_id: str, task_id: str) -> BridgeResult:
@@ -2862,7 +2862,7 @@ s = g.read_text(encoding="utf-8")
 old = "secrets/\n"
 assert s.count(old) == 1, s.count(old)
 g.write_text(
-    s.replace(old, "secrets/\n\n# 外部推理桥接的 L3 日志(已脱敏,仍不进 git 树;设计 §5.1)\n.rismforge/\n"),
+    s.replace(old, "secrets/\n\n# 外部推理桥接的 L3 日志(已脱敏,仍不进 git 树;设计 §5.1)\n.rise/\n"),
     encoding="utf-8",
 )
 PYEOF
@@ -2991,7 +2991,7 @@ Expected: `missing __future__: []`。
 ## 已知限制
 
 1. **外部推理没有 token 数。** `CliBridge` 不解析外部工具输出,`BridgeResult` 的 token 字段恒为 `None`,成本表里 `external_inference` 只有 `calls`,`tokens` 汇总为 0。要有用量,得先确认工具的 JSON 输出格式(设计 §14 第 1 条),再给 `CliBridge` 加一个可选的用量解析器。
-2. **日志不在控制面仓库的工作区之外。** 缺省位置是 `<repo_root>/.rismforge/logs`,只是对 git 不可见(自带 `*` 的 `.gitignore`)。这与设计 §5.1 原文"仓库外的日志目录"不同,设计 §5.1 已同步改为与本计划一致。`git add -f` 仍能加进去;`git clean -fdx` 会把日志删掉。要放到仓库外,组合根构造 `CliBridge` 时传 `log_dir`。
+2. **日志不在控制面仓库的工作区之外。** 缺省位置是 `<repo_root>/.rise/logs`,只是对 git 不可见(自带 `*` 的 `.gitignore`)。这与设计 §5.1 原文"仓库外的日志目录"不同,设计 §5.1 已同步改为与本计划一致。`git add -f` 仍能加进去;`git clean -fdx` 会把日志删掉。要放到仓库外,组合根构造 `CliBridge` 时传 `log_dir`。
 3. **日志无轮转、无清理。** 每次 `complete` 一份文件,长期运行会累积。
 4. **`log_ref` 的 `file://` 地址是本机绝对路径。** 换机器后 `observe.trace` 会把它标成 `unreachable`,与现有 L3 引用的行为一致。
 5. **同步阻塞。** `CliBridge.complete` 在超时和退避期间阻塞调用线程;最坏情况约 `max_attempts × timeout_s + backoff_base_s × (2^(max_attempts-1) - 1)` 秒。调和循环在这段时间不转(设计 §14 第 6 条)。

@@ -25,7 +25,7 @@ def store(tmp_path):
 
 
 def _lock_path(root):
-    return str(Path(root).absolute() / ".git" / "rismforge.lock")
+    return str(Path(root).absolute() / ".git" / "rise.lock")
 
 
 def _put_directive(store):
@@ -55,7 +55,7 @@ def test_a_relative_repo_root_is_reported_as_an_absolute_lock_path(store, monkey
                 pytest.fail("the second acquire must not succeed")
     message = str(exc.value)
     assert os.path.isabs(message)
-    assert Path(message).samefile(store.repo_root / ".git" / "rismforge.lock")
+    assert Path(message).samefile(store.repo_root / ".git" / "rise.lock")
 
 
 @pytest.mark.parametrize("body_raises", [False, True])
@@ -74,8 +74,8 @@ def test_the_lock_is_released_when_the_with_block_exits(store, body_raises):
 def test_the_lock_file_lives_under_dot_git_and_git_does_not_track_it(store):
     _put_directive(store)
     with acquire_repo_lock(store.repo_root):
-        assert (store.repo_root / ".git" / "rismforge.lock").is_file()
-        assert "rismforge.lock" not in store._git("ls-files")
+        assert (store.repo_root / ".git" / "rise.lock").is_file()
+        assert "rise.lock" not in store._git("ls-files")
         assert store._git("status", "--porcelain") == ""
 
 
@@ -96,8 +96,8 @@ def test_a_worktree_takes_its_lock_in_its_own_git_directory(store, tmp_path):
     with acquire_repo_lock(wt):
         gitdir = Path(subprocess.run(["git", "-C", str(wt), "rev-parse", "--absolute-git-dir"],
                                      check=True, capture_output=True, text=True).stdout.strip())
-        assert (gitdir / "rismforge.lock").exists()
-        with pytest.raises(RepoLockedError, match="rismforge.lock"):
+        assert (gitdir / "rise.lock").exists()
+        with pytest.raises(RepoLockedError, match="rise.lock"):
             with acquire_repo_lock(wt):
                 pass
         with acquire_repo_lock(store.repo_root):     # 主工作树是另一棵树,照常能取
@@ -110,7 +110,7 @@ def test_a_relative_gitdir_in_the_dot_git_file_is_resolved_against_it(store, tmp
     absolute = Path((wt / ".git").read_text().split(":", 1)[1].strip())
     (wt / ".git").write_text(f"gitdir: {os.path.relpath(absolute, wt)}\n")
     with acquire_repo_lock(wt):
-        assert (absolute / "rismforge.lock").exists()
+        assert (absolute / "rise.lock").exists()
 
 
 def test_run_daemon_refuses_to_start_while_the_lock_is_held_and_writes_nothing(store):

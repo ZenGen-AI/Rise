@@ -32,7 +32,7 @@ def test_the_returned_identity_is_a_copy():
 def test_a_seed_needs_a_memory_config():
     with pytest.raises(DirectiveFailedError, match="needs a memory config") as info:
         stand_in_memory_resolver("seed-1", ("s1",))
-    assert "RISMFORGE_MEMORY_CONFIG" in info.value.reason and info.value.category == "T2"
+    assert "RISE_MEMORY_CONFIG" in info.value.reason and info.value.category == "T2"
 
 
 # ---------------- Starling 那一路:运行时身份、目录布局、起点摘要解析器(设计二 5.2、5.3、7.1 节) ----------------

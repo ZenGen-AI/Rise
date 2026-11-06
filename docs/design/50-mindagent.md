@@ -14,7 +14,7 @@
 ## 0. 系统速览
 
 <!-- shared:begin context-block -->
-**系统是什么。** RismForge 是一套"AI 驱动的社会心智后训练工厂":输入通用开源基础模型,输出社会心智能力显著增强的模型,代号 **ZenGen**。工厂自己决定每一轮练什么、怎么练。训练决策可以交给外部更强的闭源模型(经命令行调用),关键决策点设人工审核门,其余环节自动。
+**系统是什么。** Rise(Recursive Interactive Social mind Evolution)是一套"AI 驱动的社会心智后训练工厂":输入通用开源基础模型,输出社会心智能力显著增强的模型,代号 **ZenGen**。工厂自己决定每一轮练什么、怎么练。训练决策可以交给外部更强的闭源模型(经命令行调用),关键决策点设人工审核门,其余环节自动。
 
 **七个子系统。** 六个能力子系统加一个协调层 ControlPlane。
 
@@ -249,7 +249,7 @@ MindAgent 是 AgentRSI 路径的执行者:不改权重,只让技能库与记忆�
 | `library_state` | `control-plane/library_state.yaml` | 恒为 `executed` | 收录处理器 | [已落地] |
 | 失败记录 | `control-plane/runs/<run>/failure-<task>.yaml` | 无 | 失败守卫 | [已落地] |
 
-**部署记忆库布局**:记忆根目录在产物树之外。配了记忆配置时由配置的 `root` 给出(在仓库之外),没配时是 `<git 目录>/rismforge-memory`。库文件后缀 Starling 是 `.db`,替身是 `.json`,下表写 `.db`。下表只列本包用到的路径。
+**部署记忆库布局**:记忆根目录在产物树之外。配了记忆配置时由配置的 `root` 给出(在仓库之外),没配时是 `<git 目录>/rise-memory`。库文件后缀 Starling 是 `.db`,替身是 `.json`,下表写 `.db`。下表只列本包用到的路径。
 
 | 路径(相对记忆根目录) | 内容 | 写方 | 生命周期 | 状态 |
 |---|---|---|---|---|
@@ -448,7 +448,7 @@ def load_library(store) -> LibraryState: ...
 | SocialSimulator | 实时环境服务客户端的"客户端后说"、`submit_turn` 带激活轨迹、回显自己轮次时保留轨迹、`write_episode` [已落地]。`CreateSession` 的可选 `episode_id` 字段:部署的逻辑 episode id `deploy-<model>-<scenario>-<k>` 重试不变,服务端据此落盘;事件 key 另带的轮次前缀不进这个字段。同一个 `episode_id` 仍有活动会话时,创建被拒为瞬态 `role_backend_unavailable`;格式不合白名单才是 `invalid_session`。“活动”从准入登记起,到 servicer 收尾完或移交滞留表为止 | 部署会话的 `purpose` 固定为 `deployment_simulation`;Actio 占 `self_play` 位;部署对手位的 Actio 实例开部署世界的端口 [已落地];创建被拒按终止原因查瞬态集合,不再一律不可重跑。`role_backend_unavailable`(准入满或 episode id 撞上活动会话)先在同一次尝试里退避重建(总等待 65 秒,不计入重试次数),仍被拒再按条重跑 |
 | SocialSimulator(部署对手位)[已落地] | 服务端造部署会话资源时按 `info.episode_id` 查 `AgentRuntime` 的部署登记表,拿到 `round_id`,以 `(scenario_id, persona_id)` 开部署世界的端口;会话终态随 `SessionResources.close` 关端口。查不到登记时对手位用空 `TupleMemory`,记一条 warning | 部署驱动器每次尝试前经组合根注入的 `register_episode` 登记 episode id 到轮次 id,尝试结束在 `finally` 里注销 |
 | 外部推理桥接 | `complete(prompt, *, run_id, task_id)`、`BridgeError` 带 `category` 与 `attempts`、每次成功调用记一条成本 [已落地] | 传入非空 `run_id`;每次尝试用不同 `task_id` |
-| factory 组合根 | 注入配置、客户端工厂、模型后端工厂、人格加载器、可选桥接 [已落地];读树外记忆配置,把部署记忆管理面交给本包:配置在场用 StarlingDeploymentStore(根目录是配置里的 `root`),不在场用 FileTupleStore,根目录是 `<git 目录>/rismforge-memory`(与 `rismforge.lock` 同处,不入树、跨重启保留;不用临时目录,每次重启换空库会让崩溃重入与门② 收录失效);部署会话的时间预算随配置在场与否取值 | 按名字 `mindagent.rounds.make_start_round_handler` 取工厂 [已落地];启动时 `memory_library/` 必须为空 |
+| factory 组合根 | 注入配置、客户端工厂、模型后端工厂、人格加载器、可选桥接 [已落地];读树外记忆配置,把部署记忆管理面交给本包:配置在场用 StarlingDeploymentStore(根目录是配置里的 `root`),不在场用 FileTupleStore,根目录是 `<git 目录>/rise-memory`(与 `rise.lock` 同处,不入树、跨重启保留;不用临时目录,每次重启换空库会让崩溃重入与门② 收录失效);部署会话的时间预算随配置在场与否取值 | 按名字 `mindagent.rounds.make_start_round_handler` 取工厂 [已落地];启动时 `memory_library/` 必须为空 |
 | factory 组合根(部署世界)[已落地] | 只造一个部署记忆管理面,交给两个处理器与服务端的 `AgentRuntime`(可选参数 `deployment_store`,只在启用部署轮次时传);`AgentRuntime` 持部署登记表,经 `register_deployment_episode` 与 `unregister_deployment_episode` 接到驱动器的两个回调;记忆根是旧布局、或部署配置里同一人格占两个角色位时拒绝启动(`FactoryConfigError`,退出码 2) | 无新增 |
 | 命令行 | 无 | 上表的提案载荷键 |
 

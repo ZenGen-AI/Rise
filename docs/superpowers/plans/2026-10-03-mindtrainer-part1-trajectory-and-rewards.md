@@ -10,7 +10,7 @@
 
 **Spec:**
 - `docs/superpowers/specs/2026-10-03-mindtrainer-design.md`(本计划实现其 §2–§5.1,以及 §7.3 的打包防回归部分)
-- 背景:`docs/superpowers/specs/2026-09-24-rismforge-subsystem-design.md` §3、§5.1、补充 D.2、补充 E
+- 背景:`docs/superpowers/specs/2026-09-24-rise-subsystem-design.md` §3、§5.1、补充 D.2、补充 E
 
 **依赖的既有实现(均已在 `main`,基线提交 `275781b`)**
 - `controlplane.envelope`:`Envelope`、`OwnerRef`、`BigRef(uri, sha256, size_bytes, fetch_hint=None)`,均带 `to_dict`/`from_dict`。
@@ -86,7 +86,7 @@
   - `controlplane.paths.training_run_file(run_id: str) -> str` = `f"{run_dir(run_id)}/training_run.yaml"`。
   - `controlplane.paths.candidate_checkpoint_file(run_id: str) -> str` = `f"{run_dir(run_id)}/candidate_checkpoint.yaml"`。
 
-**背景:** Plan 3 新增顶层包 `src/diagnostic` 时漏登记 wheel 包列表,那次修复只改了一行 `pyproject.toml`、没留任何测试。这里先加防回归测试,再建包,让测试先红后绿。两个路径助手都放 run 目录**顶层**——`GitStore.list_products` 不递归,`rismforge trace` 靠它扫描,放进子目录就看不见了。
+**背景:** Plan 3 新增顶层包 `src/diagnostic` 时漏登记 wheel 包列表,那次修复只改了一行 `pyproject.toml`、没留任何测试。这里先加防回归测试,再建包,让测试先红后绿。两个路径助手都放 run 目录**顶层**——`GitStore.list_products` 不递归,`rise trace` 靠它扫描,放进子目录就看不见了。
 
 - [ ] **Step 1: 写打包防回归测试**
 
@@ -226,7 +226,7 @@ Expected: FAIL,`ImportError: cannot import name 'candidate_checkpoint_file'`(收
 
 def training_run_file(run_id: str) -> str:
     """训练运行记录。放 run 目录顶层——GitStore.list_products 不递归,
-    rismforge trace 靠它扫描,放进子目录就看不到了。"""
+    rise trace 靠它扫描,放进子目录就看不到了。"""
     return f"{run_dir(run_id)}/training_run.yaml"
 
 

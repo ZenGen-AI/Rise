@@ -10,7 +10,7 @@
 
 **Spec:**
 - `docs/superpowers/specs/2026-10-09-closed-loop-integration-design.md`:§3.2(`start_agent_round`、`admit_proposal` 两行)、§4.1(`agent_round`、`skill_memory_proposal`、`skill`、`memory`、`library_state` 五类产物)、§4.2(技能提案载荷)、§5(桥接与 `ledger`)、§8.3(本计划主体)、§11(契约,名字逐字照用)、R11、R13、R18、R19。R1 至 R21 已定,本计划不推翻。
-- 上游:`docs/superpowers/specs/2026-09-24-rismforge-subsystem-design.md` §4(MindAgent)、补充 A(Actio)、补充 E.4(失败会话整条重跑)、场景三(AgentRSI 路径)。
+- 上游:`docs/superpowers/specs/2026-09-24-rise-subsystem-design.md` §4(MindAgent)、补充 A(Actio)、补充 E.4(失败会话整条重跑)、场景三(AgentRSI 路径)。
 - 前置计划:**计划 1** `2026-10-09-bridge-and-foundations.md`(路径函数、`ledger`、`inference_bridge`)与 **计划 6** `2026-10-09-actio.md`(`actio` 包、`SubmitTurn.activation_trace`、runner 三元组)必须已合并。计划 2 至 5 是否已合并不影响本计划,只影响基线测试数 B(见 Global Constraints)。
 
 **依赖已有产出的名字(撰写时逐个读源码核实)**

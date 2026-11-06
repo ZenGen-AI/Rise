@@ -1,6 +1,6 @@
 import { review, approve, reject, confirm, status } from "./commands.js";
 
-export const CLI_NAME = "rismforge";
+export const CLI_NAME = "rise";
 
 export const USAGE = `usage: ${CLI_NAME} <review|approve|reject|confirm|status> [id] [reason]`;
 

@@ -27,7 +27,7 @@ from controlplane.envelope import BigRef
 from controlplane.gitstore import GitStore
 from inference_bridge.base import BridgeError, BridgeResult, _check_segment, record_bridge_cost
 
-LOG_SUBDIR = ".rismforge/logs"  # 相对 store.repo_root 的默认日志根目录
+LOG_SUBDIR = ".rise/logs"  # 相对 store.repo_root 的默认日志根目录
 _TAIL = 300  # 异常信息里最多带多少字符的 stderr 尾巴(已脱敏)
 
 # 两个工具的默认参数模板(设计 §5.1):claude 关闭全部工具、不落会话文件;codex 只读沙箱、
@@ -157,7 +157,7 @@ class CliBridge:
         _check_segment("run_id", run_id)
         _check_segment("task_id", task_id)
         # 每次调用(不是每次尝试)一个空临时目录:成功、T1 耗尽、T2 都由 with 删掉,一次调用的所有尝试共用它。
-        with tempfile.TemporaryDirectory(prefix="rismforge-bridge-") as cwd:
+        with tempfile.TemporaryDirectory(prefix="rise-bridge-") as cwd:
             return self._complete_in(cwd, prompt, run_id, task_id)
 
     def _complete_in(self, cwd: str, prompt: str, run_id: str, task_id: str) -> BridgeResult:

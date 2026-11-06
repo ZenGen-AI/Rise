@@ -40,7 +40,7 @@
 
 ## 第 5 步(写作者交回 2026-10-27)
 - R27 门② 多条记忆增量的部分失败(写作者没覆盖,控制者补):前几条已 committed、后一条抽取失败时,提案**不**转 `rejected`(已提交事件放弃不了,转了就是"被拒提案在库里留着记忆");这一条 abandon,写 T2 失败记录"partial admission",提案留 `approved` 等人处理。一条都没提交时才整份拒绝。已改 S5-6 并加测试。
-- R28 替身部署记忆根目录 `<git 目录>/rismforge-memory`(与 `rismforge.lock` 同处,不入树、跨重启保留),`lock._git_dir` 公开为 `git_dir`。不用 `mkdtemp`:每次重启换空库会让崩溃重入与门② 收录失效。设计源 4.1 节"临时目录"的措辞第 8 步改。
+- R28 替身部署记忆根目录 `<git 目录>/rise-memory`(与 `rise.lock` 同处,不入树、跨重启保留),`lock._git_dir` 公开为 `git_dir`。不用 `mkdtemp`:每次重启换空库会让崩溃重入与门② 收录失效。设计源 4.1 节"临时目录"的措辞第 8 步改。
 - R29 成功路径的顺序 `write_episode` → 放弃本 episode 的 pending 行 → 删起点副本(提交点)。写作者把放弃放在删副本之前是对的:崩在放弃与删副本之间,重入会先用起点副本覆盖(覆盖后 abandoned 行也一起回到起点状态)再重跑,不会撞已放弃的 key。设计源 4.3 节"成功提交后放弃"第 8 步改成"提交前、落盘后"。
 - R30 起点副本删除失败上抛、轮次留 pending:副本留着就是未提交。第 10 节"副本删除失败只记日志"只指 `runs/` 下的会话副本。
 - R31 `episode_digests` 只记智能体位人格(部署对手位每会话一份空 TupleMemory,7.4 节);轮次锁覆盖所有绑定人格,保守,不改。
@@ -74,7 +74,7 @@
 - R52 改 S6-1:`make_openai_embedder` 无条件覆盖 `max_retries`(默认 0 照写),不照 `make_openai_llm` 的"非零才覆盖";`make_openai_llm` 同一 PR 一并改成无条件覆盖并加测试。理由:C++ 默认 3(`openai_embedding_adapter.hpp:21`,控制者已复核;`memory.py:66、90` 的 `if max_retries:`),配置写 0 会静默变成重试 3 次。S7-2 因此用这两个工厂函数,不绕开直接写 C++ 配置。已改 step-6;S7-2 实施时照此。
 - R53 训练副本从种子库用文件复制(`.db` 加 `-wal`),不用 `Memory.open` 后 `backup_to`:后者跑迁移、写 WAL,种子是只读的。`digest_of` 同理在临时副本上算。设计源 7.2 节第 8 步改措辞。复制前确认种子库没有打开的连接(种子由人放进 `seeds/`,运行期只读,不会并发写)。
 - R54 S7-3 管理面每次调用开短命连接、端口开着时同一库两条连接:前提成立。门② 在有未提交起点副本时延后(Task 34),轮次期间人格库锁由轮次持有;同一时刻对一个人格库只有一个写者。另一条连接只读(digest、pending_events)或在端口已关之后(restore_from 先确认没有打开的端口)。
-- R55 接受第 7 步的增补:`base_url` 带 query 或 fragment 拒绝;`.owner` 读回最多等 2 秒;运行时身份不含根目录路径;种子缺某人格从空库起;`tests/conftest.py` 清掉 `RISMFORGE_MEMORY_CONFIG`。
+- R55 接受第 7 步的增补:`base_url` 带 query 或 fragment 拒绝;`.owner` 读回最多等 2 秒;运行时身份不含根目录路径;种子缺某人格从空库起;`tests/conftest.py` 清掉 `RISE_MEMORY_CONFIG`。
 - R56 S7-8 部署用例的函数体照第 5 步测试文件的实际夹具写,实施时决定参数化还是新建文件。
 - 不符记录:本机装 Starling 要从源码编 C++(CMake ≥3.27、Ninja、编译器),本机目前缺 cmake 与 ninja(见记忆 interact-design-status)。计划 B 开工前要先装。
 

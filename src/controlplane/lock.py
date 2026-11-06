@@ -1,6 +1,6 @@
 """仓库文件锁(控制面 CP-12):同一棵 git 树同一时刻只许一个守护进程写。
 
-锁文件放在这个工作树的 git 目录下:普通仓库是 <repo_root>/.git/rismforge.lock;worktree 与子模块的
+锁文件放在这个工作树的 git 目录下:普通仓库是 <repo_root>/.git/rise.lock;worktree 与子模块的
 .git 是一个写着 `gitdir: <路径>` 的文件,锁放进它指向的目录。git 不追踪它,也不会出现在 status 里。
 锁按工作树隔离,与 git 的 index.lock 同一粒度。
 POSIX 用 fcntl.flock(LOCK_EX | LOCK_NB),Windows 用 msvcrt.locking(Windows 未验证)。两者都是
@@ -62,7 +62,7 @@ def git_dir(repo_root: Path) -> Path:
 @contextmanager
 def acquire_repo_lock(repo_root: str | Path) -> Iterator[None]:
     """取仓库写锁;被占用时立刻抛 RepoLockedError(不等待),退出上下文时释放。"""
-    lock_path = git_dir(Path(repo_root).absolute()) / "rismforge.lock"
+    lock_path = git_dir(Path(repo_root).absolute()) / "rise.lock"
     fh = open(lock_path, "a+b")
     try:
         try:

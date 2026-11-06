@@ -31,7 +31,7 @@ from compute.errors import ComputeError
 from compute.roll_env import CONTAINER_PREFIX, SFT_TEMPLATE, RollEnv
 
 DEPLOY_MARKER = ".deployed"
-SPEC_LABEL = "rismforge.roll-spec"
+SPEC_LABEL = "rise.roll-spec"
 
 # 原子改名:目标已存在且非空时 os.rename 失败(ENOTEMPTY/EEXIST),这就是"先到先得"。
 # 用宿主机的 python3 而不是 `mv -T`:后者只有 GNU coreutils 有。

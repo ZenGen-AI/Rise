@@ -4,7 +4,7 @@
 
 **Goal:** 把计划 A 里只用替身跑通的记忆换成 Starling:先在 Starling 仓库补齐本仓库需要的公开接口并经 PR 合入,再在本仓库接上适配器、树外记忆配置与训练路副本,最后把设计文档的状态与措辞收尾。
 
-**Architecture:** Starling 一侧按它自己的约定把状态机与算法写进 C++、经 pybind 暴露,门面只做转发(三段写入的事件表、逻辑摘要、备份、只嵌入不维护、召回放宽到 volatile 与降级即抛)。本仓库一侧,`actio/memory_starling.py` 是唯一导入 `starling` 的模块,`StarlingMemory` 与 `StarlingDeploymentStore` 过计划 A 的同一套契约测试;`factory/memory_config.py` 读树外配置并在装配期拒绝不合法的环境;未设 `RISMFORGE_MEMORY_CONFIG` 时一切照计划 A 的替身跑。
+**Architecture:** Starling 一侧按它自己的约定把状态机与算法写进 C++、经 pybind 暴露,门面只做转发(三段写入的事件表、逻辑摘要、备份、只嵌入不维护、召回放宽到 volatile 与降级即抛)。本仓库一侧,`actio/memory_starling.py` 是唯一导入 `starling` 的模块,`StarlingMemory` 与 `StarlingDeploymentStore` 过计划 A 的同一套契约测试;`factory/memory_config.py` 读树外配置并在装配期拒绝不合法的环境;未设 `RISE_MEMORY_CONFIG` 时一切照计划 A 的替身跑。
 
 **Tech Stack:** Python 3.11+、pytest;Starling 侧另有 C++17、CMake ≥3.27、Ninja、pybind11、GoogleTest、SQLite ≥3.46。CMake 与 Ninja 是 pip 轮子(Starling 的 `requirements-build.txt`),不装系统包;系统只需要 C++ 编译器(本机 Apple Clang)。本仓库 `uv` 装 `memory` extra 时由 scikit-build-core 在构建隔离里自取 cmake 与 ninja。
 
@@ -19,7 +19,7 @@
 - 依赖方向:本仓库只有 `src/actio/memory_starling.py` 导入 `starling`;`simulator`、`mindtrainer`、`mindagent` 不导入 `starling`。
 - 本仓库只加可选 extra `memory = ["starling-memory @ git+https://github.com/ruijieguo/starling@<合并提交>"]`,合并提交在第 6 步 PR 合入后才有。
 - 凭证只从环境变量读(`OPENAI_API_KEY`),异常信息只报变量名或异常类名与 `failure_category`,不含端点地址与密钥。
-- 真端点用例不进 CI,只在设 `RISMFORGE_MEMORY_LIVE=1` 时手动跑。
+- 真端点用例不进 CI,只在设 `RISE_MEMORY_LIVE=1` 时手动跑。
 - 每个任务先写失败的测试、确认失败、再实现。每个任务提交前跑本任务改动的测试文件与相邻测试(各任务 Step 4 列出的那组);全套 `-m "not slow"`(约 10 分钟)由控制者在每个任务提交后于后台跑、与评审并行,每一步结束时与终审修复波结束时各跑一次必须全绿。全套发现某任务弄红了别处,由该任务的实施者在下一笔提交里修。
 - 改 `docs/design` 的任务结束时 `check_docs.py`、`check_consistency.py` 都 0 错误 0 告警,`sync_docs.py --check` 通过;30、40、90 三篇贴着 900 行上限,只改写不净增;共享区块与图块改源头再同步,不手改。
 - 推送分支、开 PR 前停下征得用户同意。
@@ -1175,7 +1175,7 @@ Expected: FAIL,`ModuleNotFoundError: No module named 'starling_fakes'`;改 `pypr
 
 - [ ] **Step 3: 实现**
 
-- `pyproject.toml`:`memory = ["starling-memory @ git+https://github.com/ruijieguo/starling@<SHA>"]`,`<SHA>` 填 Task 12 记下的 40 位合并提交;`markers` 加 `"memory_live: 连真抽取与真嵌入端点的用例,只在设了 RISMFORGE_MEMORY_LIVE=1 时跑,不进 CI"`。跑 `uv lock` 更新 `uv.lock`。dev extra 不加 Starling:CI 不装它,本步所有真 Starling 用例都跳过,契约测试只跑替身(设计源第 11 节"Starling 未装时只跑替身")。
+- `pyproject.toml`:`memory = ["starling-memory @ git+https://github.com/ruijieguo/starling@<SHA>"]`,`<SHA>` 填 Task 12 记下的 40 位合并提交;`markers` 加 `"memory_live: 连真抽取与真嵌入端点的用例,只在设了 RISE_MEMORY_LIVE=1 时跑,不进 CI"`。跑 `uv lock` 更新 `uv.lock`。dev extra 不加 Starling:CI 不装它,本步所有真 Starling 用例都跳过,契约测试只跑替身(设计源第 11 节"Starling 未装时只跑替身")。
 - `tests/starling_fakes.py`:`http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)` 在 daemon 线程里 `serve_forever`,先例是 Starling 仓库的 `tests/python/test_evidence_answer_native.py:28-45`。
   - `POST .../embeddings`:`fail_embeddings` 为真回 503;否则对 `input`(字符串或列表)逐条 `fake_vector`,回 `{"data": [{"index": i, "embedding": v}], "model": ...}`。
   - `POST .../chat/completions`:取唯一一条 user 消息的 `content`;按开头判断是哪一遍抽取:以 `"You are an extractor for a Statement-based memory system."` 起头的是信念抽取,其余两遍(`general_fact_prompt.py`、`episodic_prompt.py` 的开头)一律回内容 `"[]"`。信念抽取用 `re.search(r"\[([^\]\n]+)\] ([^：\n]+)：([^\n]+)", content)` 取 key、说话方、原话:key 在 `fail_keys` 里回 500;否则回 `[{"holder":"self","holder_perspective":"FIRST_PERSON","subject":"cog-<说话方>","predicate":"responsible_for","object":"<原话>","modality":"BELIEVES","polarity":"POS","nesting_depth":0}]`。回之前 `time.sleep(chat_delay_s)`。每次请求把 `chat_calls` 或 `embedding_calls` 加一(持锁)。
@@ -1573,7 +1573,7 @@ git commit -m "feat(actio): StarlingDeploymentStore 部署管理面,库在 deplo
 **Interfaces:**
 - Consumes: `factory.errors.FactoryConfigError`(`factory.cli.main` 把它译成退出码 2,`cli.py:162-164`);`factory.configio.key_names`;`factory.eval_config` 的写法(`_check_private`、`_check_absolute` 照抄一份,不导入它的私有函数)。
 - Produces:
-  - `MEMORY_CONFIG_ENV = "RISMFORGE_MEMORY_CONFIG"`、`API_KEY_ENV = "OPENAI_API_KEY"`、`STARLING_DIST = "starling-memory"`、`REQUIRED_KEYS = ("root", "extraction_base_url", "extraction_model", "embedding_base_url", "embedding_model", "embedding_dim")`、`OPTIONAL_KEYS = ("timeout_ms", "max_retries")`、`DEFAULT_TIMEOUT_MS = 4000`、`DEFAULT_MAX_RETRIES = 0`。
+  - `MEMORY_CONFIG_ENV = "RISE_MEMORY_CONFIG"`、`API_KEY_ENV = "OPENAI_API_KEY"`、`STARLING_DIST = "starling-memory"`、`REQUIRED_KEYS = ("root", "extraction_base_url", "extraction_model", "embedding_base_url", "embedding_model", "embedding_dim")`、`OPTIONAL_KEYS = ("timeout_ms", "max_retries")`、`DEFAULT_TIMEOUT_MS = 4000`、`DEFAULT_MAX_RETRIES = 0`。
   - `MemoryConfig(root: Path, extraction_base_url: str, extraction_model: str, embedding_base_url: str, embedding_model: str, embedding_dim: int, timeout_ms: int = 4000, max_retries: int = 0)`,frozen dataclass;两个 `*_base_url` 存规范化后的值。
   - `read_memory_config(*, env: Mapping[str, str] | None = None, repo_root: Path) -> MemoryConfig | None`:变量未设置或为空串返回 `None`(替身);其余不合格一律 `FactoryConfigError`。
   - `normalize_base_url(key: str, value: object) -> str`。
@@ -2156,7 +2156,7 @@ git commit -m "feat(factory): 训练路副本从种子复制,对手位按会话�
 - Modify: `src/factory/memory_runtime.py`(加 `MemoryWiring`、`memory_wiring`、`DEPLOY_MEMORY_TURN_TIMEOUT_S`、`DEPLOY_MEMORY_PER_TURN_S`;计划 A Task 35 的 `stand_in_deployment_memory` 里那行启动日志移进 `memory_wiring`)
 - Modify: `src/factory/wire.py`(`Assembly` 加字段 `sweep`;`assemble` 在 计划 A Task 35 造部署记忆处改调 `memory_wiring`;`_shared_runtime` 收 `turn_timeout_s` 与 `training_copies`;`_interact_wiring` 收 `wiring`,去掉 计划 A Task 26 那行无条件的 `memory backend: stand-in` 日志与写死的 `stand_in_memory_resolver`;`run` 传 `on_locked`;`reconcile_one_tick` 在锁内装配后调 `sweep`)
 - Modify: `src/factory/handlers.py`(`_agent(ctx)`:Starling 时传 `stream_deadline_s`)
-- Create: `tests/conftest.py`(autouse 夹具:除 `memory_live` 标记的用例外,一律 `monkeypatch.delenv("RISMFORGE_MEMORY_CONFIG", raising=False)`。既有的 `assemble(...)`/`main(...)` 用例有不传 `env` 的,会读 `os.environ`;开发机设了这个变量就会让它们换成 Starling 路径)
+- Create: `tests/conftest.py`(autouse 夹具:除 `memory_live` 标记的用例外,一律 `monkeypatch.delenv("RISE_MEMORY_CONFIG", raising=False)`。既有的 `assemble(...)`/`main(...)` 用例有不传 `env` 的,会读 `os.environ`;开发机设了这个变量就会让它们换成 Starling 路径)
 - 随本任务改的既有测试:`tests/test_factory_interact_wire.py` 里 计划 A Task 26 的 `test_the_interact_assembly_logs_the_stand_in_memory_backend` 不改断言(日志仍出现一次);实施时先 `grep -rn 'stand_in_memory_resolver\|memory backend' tests src`,凡是断言 `_interact_wiring` 返回字典逐键相等的用例补上新形状
 - Test: `tests/test_factory_memory_wiring.py`(新)
 
@@ -2308,7 +2308,7 @@ Expected: FAIL,`ImportError: cannot import name 'memory_wiring' from 'factory.me
 - `run`:两处 `run_daemon(...)` 加 `on_locked=a.sweep`(为 `None` 时与第 3 步相同)。`on_locked` 抛异常时 `run_daemon` 不进第一个 tick(计划 A Task 23),`a.close()` 照旧在 `finally` 里。
 - `reconcile_one_tick`:`with acquire_repo_lock(repo_root):` 里装配之后、`try:` 之内第一句 `if a.sweep is not None: a.sweep()`。"清扫放在装配里"(6.2 节)按字面放进 `assemble` 会让 `run` 在取锁之前清扫,所以 `assemble` 只交出函数,由持锁的一方调用。
 - `handlers._agent(ctx)`:`mem.runtime["backend"] == "starling"` 时给 `make_start_round_handler` 加 `stream_deadline_s=config.max_turns * DEPLOY_MEMORY_PER_TURN_S`;替身照 计划 A Task 35 不传。`--interact` 与 `--enable agent` 同开时部署仍用自己的 `max_turns × 40`,训练用 `max_turns × 90`,各自经 `client_factory(deadline_s=)` 传。
-- `tests/conftest.py`:首条语句 `from __future__ import annotations`;一个 autouse 夹具,`request.node.get_closest_marker("memory_live")` 为空时 `monkeypatch.delenv("RISMFORGE_MEMORY_CONFIG", raising=False)`。
+- `tests/conftest.py`:首条语句 `from __future__ import annotations`;一个 autouse 夹具,`request.node.get_closest_marker("memory_live")` 为空时 `monkeypatch.delenv("RISE_MEMORY_CONFIG", raising=False)`。
 
 - [ ] **Step 4: 跑测试确认通过,并跑相邻回归**
 
@@ -2382,7 +2382,7 @@ def test_admission_extraction_failure_rejects_the_proposal_and_abandons_the_even
 ```python
 # tests/test_memory_live.py
 """设计源 §13 的两项未核实:真端点的单次延迟、真嵌入下的召回质量。连真网络、要真密钥,不进 CI:
-只有 RISMFORGE_MEMORY_LIVE=1 且 RISMFORGE_MEMORY_CONFIG 指向真配置时才跑。"""
+只有 RISE_MEMORY_LIVE=1 且 RISE_MEMORY_CONFIG 指向真配置时才跑。"""
 import os
 import statistics
 import time
@@ -2391,7 +2391,7 @@ import pytest
 
 pytestmark = [
     pytest.mark.memory_live,
-    pytest.mark.skipif(os.environ.get("RISMFORGE_MEMORY_LIVE") != "1", reason="set RISMFORGE_MEMORY_LIVE=1 to run"),
+    pytest.mark.skipif(os.environ.get("RISE_MEMORY_LIVE") != "1", reason="set RISE_MEMORY_LIVE=1 to run"),
 ]
 pytest.importorskip("starling")
 
@@ -2403,7 +2403,7 @@ def live_port(tmp_path):
     from actio.memory_starling import StarlingEndpoints, StarlingMemory
     from factory.memory_config import check_api_key, read_memory_config
     cfg = read_memory_config(env=os.environ, repo_root=__import__("pathlib").Path(__file__).resolve().parents[1])
-    assert cfg is not None, "RISMFORGE_MEMORY_CONFIG must point at a real config"
+    assert cfg is not None, "RISE_MEMORY_CONFIG must point at a real config"
     check_api_key(os.environ)
     port = StarlingMemory.open(tmp_path / "live.db", persona_id="pa", endpoints=StarlingEndpoints(
         cfg.extraction_base_url, cfg.extraction_model, cfg.embedding_base_url, cfg.embedding_model,
@@ -2442,7 +2442,7 @@ def test_recall_brings_back_the_related_sentence(live_port):
 
 Run(带 memory): `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev --extra memory pytest tests/test_ma_deployment_starling.py tests/test_memory_live.py -q -p no:cacheprovider`
 Expected: 部署用例 PASS(它们复用第 5 步已实现的行为,本任务不改源码;哪条红了,先按 Task 15 的管理面语义排查,不改第 5 步的驱动器);`test_memory_live.py` 两条 skipped
-手动(不进 CI,结果记进第 8 步的 §13 收尾): `RISMFORGE_MEMORY_LIVE=1 RISMFORGE_MEMORY_CONFIG=<真配置> OPENAI_API_KEY=<真密钥> PYTHONDONTWRITEBYTECODE=1 uv run --extra dev --extra memory pytest tests/test_memory_live.py -q -s -p no:cacheprovider`。`tests/conftest.py` 的 autouse 夹具对 `memory_live` 用例不清环境变量(Task 19)。
+手动(不进 CI,结果记进第 8 步的 §13 收尾): `RISE_MEMORY_LIVE=1 RISE_MEMORY_CONFIG=<真配置> OPENAI_API_KEY=<真密钥> PYTHONDONTWRITEBYTECODE=1 uv run --extra dev --extra memory pytest tests/test_memory_live.py -q -s -p no:cacheprovider`。`tests/conftest.py` 的 autouse 夹具对 `memory_live` 用例不清环境变量(Task 19)。
 
 - [ ] **Step 3: 跑相邻回归**
 
@@ -2596,7 +2596,7 @@ Run: `grep -n "\[计划中\]" docs/design/00-overview.md | cut -c1-110`
 | 492-494 | 场景二的记忆段 | 摘;措辞见 Step 3 的  条 |
 | 500 | `[计划中]:真机上的单轮延迟与两个 LoRA 的开销未测` | **保留**(未核实,要真机) |
 | 522-526 | 场景三的部署记忆 | 摘;措辞见 Step 3 的 、 两条 |
-| 590、613、618 | 部署与配置 | `RISMFORGE_MEMORY_CONFIG` 相关的依第 7 步 |
+| 590、613、618 | 部署与配置 | `RISE_MEMORY_CONFIG` 相关的依第 7 步 |
 | 644 | 测试策略表的契约行 | 摘(第 1 步契约测试已落地) |
 | 674-676 | 数据生命周期 | 摘;清扫行依第 7 步 |
 | 689 | 代码地图 | 摘或留依各模块 |
@@ -2961,7 +2961,7 @@ Run: `grep -n "\[计划中\]" docs/design/50-mindagent.md | cut -c1-100`
    - 727 行(测试)补"部分失败留 `approved`"。
 5. **新一轮第一次运行用不带后缀的 base id**():237、309(MA-I2)、473、668(MA-25)行写"技能版本变后的重跑加后缀 `-s<技能版本>`":补半句"新一轮第一次运行用不带后缀的 `deploy-<model>-<scenario>-<k>`;只有 base 已提交且技能版本旧了才用 `-s<版本>`(`rerun_episode_id(base, skill_version)`)"。237 行单元格并入,不增行。
 6. **人格库锁覆盖所有绑定人格、`episode_digests` 只记智能体位人格**():298 行 `episode_digests` 说明补"只记智能体位人格;部署对手位每会话一份空 TupleMemory,不进摘要。轮次锁覆盖全部绑定人格,保守,不改"。
-7. **替身部署记忆根目录不是临时目录**():407 行 `根目录取 \`control-plane/\` 之外的临时目录` → `根目录是 \`<git 目录>/rismforge-memory\`(与 \`rismforge.lock\` 同处,不入树、跨重启保留)`。730 行测试表"人格库锁 | 临时目录"的"临时目录"指测试夹具,保留。**不用 `mkdtemp`:每次重启换空库会让崩溃重入与门② 收录失效**——这半句并进 407 行。
+7. **替身部署记忆根目录不是临时目录**():407 行 `根目录取 \`control-plane/\` 之外的临时目录` → `根目录是 \`<git 目录>/rise-memory\`(与 \`rise.lock\` 同处,不入树、跨重启保留)`。730 行测试表"人格库锁 | 临时目录"的"临时目录"指测试夹具,保留。**不用 `mkdtemp`:每次重启换空库会让崩溃重入与门② 收录失效**——这半句并进 407 行。
 8. **门② 门锁与延后**():589 行"门② 与在途轮次"段与 MA-27(670 行)不变;补 `make_admit_proposal_handler`、`check_memory_library_empty`、`hold_file_lock` 三个名字只在 90 篇与代码里,50 篇不展开(`hold_file_lock` 在 `controlplane.lock`,50 篇依赖行已写 ControlPlane)。
 9. **验证快照与"覆盖"关系**:无新措辞。
 
@@ -3012,7 +3012,7 @@ git commit -m "docs(design): MindAgent 篇——部署记忆、轮次摘要、�
 - Test: 两个检查器 + `sync_docs --check`
 
 **Interfaces:**
-- Consumes: 第 3、4、5 步落地的名字:`factory.memory_translate`(`MemoryTranslatingBackend`、`FactoryMemoryUnavailableError`、`FactoryMemoryFailureError`)、`factory.memory_runtime`(`STAND_IN_MEMORY_RUNTIME`、`stand_in_memory_resolver`、`stand_in_memory_root`)、`AgentRuntime.client_factory(*, deadline_s=)`、`run_daemon(..., on_locked=)`、`PER_TURN_DEADLINE_S = 90.0` 在 `mindtrainer.trajectory_source`、`POLICY_TIMEOUT_S`、`INTERACT_TURN_TIMEOUT_S`、`controlplane.lock.git_dir`。第 7 步(依之而定):`factory.memory_config`、`RISMFORGE_MEMORY_CONFIG`、清扫函数、`.owner` 归属检查、`StarlingDeploymentStore` 的选择、Starling 运行时解析器。
+- Consumes: 第 3、4、5 步落地的名字:`factory.memory_translate`(`MemoryTranslatingBackend`、`FactoryMemoryUnavailableError`、`FactoryMemoryFailureError`)、`factory.memory_runtime`(`STAND_IN_MEMORY_RUNTIME`、`stand_in_memory_resolver`、`stand_in_memory_root`)、`AgentRuntime.client_factory(*, deadline_s=)`、`run_daemon(..., on_locked=)`、`PER_TURN_DEADLINE_S = 90.0` 在 `mindtrainer.trajectory_source`、`POLICY_TIMEOUT_S`、`INTERACT_TURN_TIMEOUT_S`、`controlplane.lock.git_dir`。第 7 步(依之而定):`factory.memory_config`、`RISE_MEMORY_CONFIG`、清扫函数、`.owner` 归属检查、`StarlingDeploymentStore` 的选择、Starling 运行时解析器。
 - Produces: 90 篇头部三行(「代码位置」「依赖」「对应实施计划」)与第 3 到 10 章。
 
 **一个关键事实**:90 篇里相当多的 `[计划中]` 讲的是**第 7 步**的东西(`factory.memory_config`、本机记忆配置、第 12 到 17 条拒绝项、`.owner`、Starling 解析器),它们依第 7 步。第 7 步未合入时这些行**全部保留**;第 3、4、5 步的东西(转换后端、对手包 Actio、`policy_for_rollout`、时间预算、替身解析器、替身部署根目录、部署实例工厂)摘。
@@ -3039,8 +3039,8 @@ Run: `grep -n "\[计划中\]" docs/design/90-factory-and-cli.md | cut -c1-100`
    - 545 行:`摘要与身份一起写回指令配置的 \`memory\` 块,之后才算 \`config_hash\`。训练记录的 \`policy_backend\` 带同一个 \`memory\` 块` → `摘要与身份一起写进本次派发的配置(不回写 \`directive.yaml\`),之后才算 \`config_hash\`。训练记录的 \`policy_backend.memory\` 带同一个块,读者由此看到记忆从哪来`。
    - 301 行:`调度器把它写进指令配置时,\`digests\` 与 \`runtime\` 留空,派发时才算` → 补"(称未解析;校验放行未解析的段,只填一半拒绝;解析后再校验一次)"。并入同一段,不增行。
 2. **替身部署记忆根目录**():374、733 行:
-   - 374 行:`它也落盘,根目录取控制面仓库之外的临时目录,不进产物树` → `它也落盘,根目录是 \`<git 目录>/rismforge-memory\`(与 \`rismforge.lock\` 同处,由 \`controlplane.lock.git_dir\` 给出;不入树,跨重启保留)。不用临时目录:每次重启换一个空库,崩溃重入与门② 收录都会失效`。
-   - 733 行 FC-29:`根目录取控制面仓库之外的临时目录` → `根目录是 \`<git 目录>/rismforge-memory\`,不是临时目录(重启要保留)`;备选列"替身不落盘"保留。
+   - 374 行:`它也落盘,根目录取控制面仓库之外的临时目录,不进产物树` → `它也落盘,根目录是 \`<git 目录>/rise-memory\`(与 \`rise.lock\` 同处,由 \`controlplane.lock.git_dir\` 给出;不入树,跨重启保留)。不用临时目录:每次重启换一个空库,崩溃重入与门② 收录都会失效`。
+   - 733 行 FC-29:`根目录取控制面仓库之外的临时目录` → `根目录是 \`<git 目录>/rise-memory\`,不是临时目录(重启要保留)`;备选列"替身不落盘"保留。
    - 810、813 行测试表"临时目录"指测试夹具,保留。
 3. **时间预算常量**():199、548、736 行 `(PER_TURN_DEADLINE_S 取 90)`:这个常量现在在 `mindtrainer.trajectory_source`,由轨迹源经 `client_factory(deadline_s=)` 传;`factory.interact_policy` 里原来那个常量与"改写运行时 `interact_deadline_s`"已删。在 199 行末补"`factory.interact_policy` 不再改写运行时的 `interact_deadline_s`;两开关同开时各自按自己传的值,部署会话不借用训练的 deadline"。848 行同理。
 4. **两个开关同开**(设计源 be2ebbd):876 行"同开时服务端等提交取 90 秒 | 部署会话只是多等" → 补"整条流 deadline 今天也只有一份,所以改为按调用方给:`client_factory(*, deadline_s=)`;轨迹源与部署驱动器各自传 `max_turns × 90` 与 `max_turns × 40`"。并入同一单元格。
@@ -3185,7 +3185,7 @@ git commit -m "docs(design): 调度器篇的 interact 段加 memory 键与样例
    - 357 行:`派发时写回` → `派发时算出,同上`。
    - 362 行:`写回 \`memory.digests\` 与 \`memory.runtime\`` → `写进本次派发的 \`cfg\` 的 \`memory.digests\` 与 \`memory.runtime\`,不回写指令:续训要重新算(7.1 节),回写会多一笔提交,还会盖掉 T3 比较用的原值;训练记录的 \`policy_backend.memory\` 记下它们`。并补两句 、R21:`严格校验放行"未解析"的 \`memory\` 段(\`digests\` 与 \`runtime\` 都为空),只填一半拒绝;解析后再跑一次校验,摘要的人格集合要等于绑定人格集合,\`runtime\` 键集合要等于 5.2 节的五个键。解析器抛 \`DirectiveFailedError\` 时保留它自己的原因(替身拒绝种子要说清原因),其余异常只报类名。`
    - 434 行(`agent_round` 载荷 `episode_digests` 的"每条 episode 开始前写回一次"):这是轮次产物自己的逐步回写,**保留**。
-2. R28——替身部署记忆根目录:`grep -n "临时目录" $S` 得 176、521。176 行 `根目录取 \`control-plane/\` 之外的临时目录,不进树` → `根目录是 \`<git 目录>/rismforge-memory\`(与 \`rismforge.lock\` 同处,不入树,跨重启保留)。不用 \`mkdtemp\`:每次重启换空库会让崩溃重入与门② 收录失效`。521 行是测试夹具的"临时目录",保留。
+2. R28——替身部署记忆根目录:`grep -n "临时目录" $S` 得 176、521。176 行 `根目录取 \`control-plane/\` 之外的临时目录,不进树` → `根目录是 \`<git 目录>/rise-memory\`(与 \`rise.lock\` 同处,不入树,跨重启保留)。不用 \`mkdtemp\`:每次重启换空库会让崩溃重入与门② 收录失效`。521 行是测试夹具的"临时目录",保留。
 3. R29——放弃 pending 的时机:200 行"部署库由 MindAgent 在一条 episode **最终**结束时放弃:成功提交后对这条 episode 留下的 `pending` 行逐个 `abandon_event`" → `……成功时先落盘 episode,再放弃本 episode 留下的 \`pending\` 行,最后删起点副本(提交点)。崩在放弃与删副本之间:重入先用起点副本覆盖(覆盖后 abandoned 行也回到起点状态)再重跑,不会撞已放弃的 key`。
 4. R30——起点副本删除失败:482 行 `副本删除失败 | 不分类 | 记日志;清扫兜底` 是 `runs/` 下的会话副本,保留;在 435 行(episode 起点与重试,"成功时先落盘 episode,再删起点副本")后补:`起点副本删除失败上抛,轮次留 \`pending\`:副本留着就是未提交`。
 5. R35——拿不到人格库锁判 T3:432 行 `拿不到锁的轮次判 \`AgentRoundFailedError\`(M20)` 保留(它说的正是 `AgentRoundFailedError`);440 行 `覆盖失败……轮次判 \`AgentRoundFailedError\`,T3` → `覆盖失败抛 \`RestoreFailedError\`(继承 \`AgentRoundFailedError\`),轮次 T3`。

@@ -7,7 +7,7 @@ def build() -> Canvas:
         1080, 560, title="命令地图",
         desc="TypeScript 命令行管门控写命令,直接改产物状态并提交。Python 一侧管调和与只读可观测,"
              "只读子命令不提交。两侧只经产物树通信。")
-    c.lane(14, 44, 500, 450, "TypeScript 命令行 rismforge(门控写)", kind="human", dashed=False)
+    c.lane(14, 44, 500, 450, "TypeScript 命令行 rise(门控写)", kind="human", dashed=False)
     c.lane(566, 44, 500, 450, "Python 入口 factory(调和与只读)", kind="control", dashed=False)
 
     rv = c.box(40, 90, 210, "review <id>", "按类型打印证据\n只读", kind="human", h=64)

@@ -1,7 +1,7 @@
 # 闭环集成设计:把 RecipeStore、TrainScheduler、TrainPlanner、Actio、MindAgent 接进调和循环
 
 > 状态:设计稿。日期 2026-10-09。基线:`main` 在 `0385004`,全量测试 820 通过。
-> 上游设计:`2026-09-22-rismforge-architecture-design.md`、`2026-09-24-rismforge-subsystem-design.md`、`2026-10-03-mindtrainer-design.md`。
+> 上游设计:`2026-09-22-rise-architecture-design.md`、`2026-09-24-rise-subsystem-design.md`、`2026-10-03-mindtrainer-design.md`。
 > 修订(2026-10-11):八项设计决策已写进 `docs/design/`(SYS-14 至 SYS-21),本稿下列各处随之改正,其余不变;与本稿冲突时以 `docs/design/` 为准。证据等级失败关闭,`backends` 缺失判 `stub`,`run_diagnostic`、`write_report`、`resolve_baseline` 的 `backends` 必填(DX-12,见 R17、§3.1);`plan_next_round` 在启用提名时还要等配方入库门(CP-11,见 §3.2);晋级幂等、仓库文件锁、提交只带本文件(CP-7、CP-12);桥接子进程默认隔离(BR-8,见 §5.1)。
 
 ## 0. 这份文档做什么
@@ -38,7 +38,7 @@
 - **G7 桥接配置过窄。** `BackendConfig` 要求 `token_env` 必填,命令行形态若用工具自带的登录态就没有环境变量可填。
 - **G8 诊断是桩,且没有注入缝。** `request_diagnostic` 在 `apply_action` 里直接调桩,不能像派发器那样替换。
 - **G9 没有谁驱动数据合成。** MindTrainer 派发器要求数据集清单已在树里,否则指令判 `failed`。调度器自动构造的指令没有清单,必有一步先合成数据,现有代码里没有这一步。
-- **G10 命令清单分在两种语言。** 旧设计 G.5 把全部命令列在 `rismforge` 下。现状是 TypeScript 命令行只有 `review/approve/reject/status`,Python 只有 `observe` 里的函数,没有对应的命令。
+- **G10 命令清单分在两种语言。** 旧设计 G.5 把全部命令列在 `rise` 下。现状是 TypeScript 命令行只有 `review/approve/reject/status`,Python 只有 `observe` 里的函数,没有对应的命令。
 
 ## 2. 裁决总表
 
@@ -246,7 +246,7 @@ class InferenceBridge(Protocol):
 - **测试替身**:`ScriptedBridge`,按顺序吐罐头回答,可注入失败序列。
 - **配置**:`BackendConfig` 增加可选 `command`(参数列表模板)和 `timeout_s`;`token_env` 允许显式 `null`,表示该工具用自带登录态,此时不解析凭证。其余约束不变:出现凭证值字段仍然报错。
 - **调用方的升级规则(R18)**:`BridgeError` 的 T1 表示桥接已用尽自己的重试,T2 表示确定性故障。TrainScheduler 的规划处理器与 MindAgent 的轮次处理器遇到任何 `BridgeError` 都升级为 T3:决策或轮次置 `failed`,经 `record_failure` 留痕,不再自动重试,等人处理。非桥接的瞬态异常(如 `OSError`)才原样上抛、保持 `pending`。原因:桥接已经退避重试过,把耗尽的 T1 留作 `pending` 会让守护循环重启后无限空转外部推理。
-- **日志(L3,计划 1 的桥接日志 Ruling)**:请求与响应过 `redact` 之后写进 `<store.repo_root>/.rismforge/logs/<run_id>/<task_id>-<k>.log`,`k` 从 1 递增、不覆盖;日志根目录里放一份内容为 `*` 的 `.gitignore`,所以这些文件对 git 不可见,`git status` 干净,不必改动控制面仓库里任何被追踪的文件(本代码仓库的 `.gitignore` 会加一行 `.rismforge/`;构造 `CliBridge` 时可用 `log_dir` 改到任意位置;既没有 `store` 也没有 `log_dir` 时不写日志)。树里只留 `BigRef`(`file://` 地址、sha256 与大小);`trace` 已能识别 `log_refs`。**这是对"仓库外"的收窄**:默认值改在仓库工作区内,靠自带的 `.gitignore` 隔离。残留风险:`git add -f` 或 `git clean -fdx` 会动到它,设计接受这一点。
+- **日志(L3,计划 1 的桥接日志 Ruling)**:请求与响应过 `redact` 之后写进 `<store.repo_root>/.rise/logs/<run_id>/<task_id>-<k>.log`,`k` 从 1 递增、不覆盖;日志根目录里放一份内容为 `*` 的 `.gitignore`,所以这些文件对 git 不可见,`git status` 干净,不必改动控制面仓库里任何被追踪的文件(本代码仓库的 `.gitignore` 会加一行 `.rise/`;构造 `CliBridge` 时可用 `log_dir` 改到任意位置;既没有 `store` 也没有 `log_dir` 时不写日志)。树里只留 `BigRef`(`file://` 地址、sha256 与大小);`trace` 已能识别 `log_refs`。**这是对"仓库外"的收窄**:默认值改在仓库工作区内,靠自带的 `.gitignore` 隔离。残留风险:`git add -f` 或 `git clean -fdx` 会动到它,设计接受这一点。
 
 ### 5.2 统一的记账与失败写入
 

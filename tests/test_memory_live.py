@@ -1,5 +1,5 @@
 """设计源 §13 的两项未核实:真端点的单次延迟、真嵌入下的召回质量。连真网络、要真密钥,不进 CI:
-只有 RISMFORGE_MEMORY_LIVE=1 且 RISMFORGE_MEMORY_CONFIG 指向真配置时才跑。"""
+只有 RISE_MEMORY_LIVE=1 且 RISE_MEMORY_CONFIG 指向真配置时才跑。"""
 import os
 import statistics
 import time
@@ -9,7 +9,7 @@ import pytest
 
 pytestmark = [
     pytest.mark.memory_live,
-    pytest.mark.skipif(os.environ.get("RISMFORGE_MEMORY_LIVE") != "1", reason="set RISMFORGE_MEMORY_LIVE=1 to run"),
+    pytest.mark.skipif(os.environ.get("RISE_MEMORY_LIVE") != "1", reason="set RISE_MEMORY_LIVE=1 to run"),
 ]
 pytest.importorskip("starling")
 
@@ -21,7 +21,7 @@ def live_port(tmp_path):
     from actio.memory_starling import StarlingEndpoints, StarlingMemory
     from factory.memory_config import check_api_key, read_memory_config
     cfg = read_memory_config(env=os.environ, repo_root=Path(__file__).resolve().parents[1])
-    assert cfg is not None, "RISMFORGE_MEMORY_CONFIG must point at a real config"
+    assert cfg is not None, "RISE_MEMORY_CONFIG must point at a real config"
     check_api_key(os.environ)
     port = StarlingMemory.open(tmp_path / "live.db", holder="pa", endpoints=StarlingEndpoints(
         cfg.extraction_base_url, cfg.extraction_model, cfg.embedding_base_url, cfg.embedding_model,

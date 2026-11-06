@@ -1,1 +1,1 @@
-"""RismForge ControlPlane core."""
+"""Rise ControlPlane core."""

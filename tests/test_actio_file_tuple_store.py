@@ -623,7 +623,7 @@ def test_two_ports_on_one_world_both_have_to_close_before_a_restore(tmp_path):
 
 def test_constructing_a_store_touches_no_disk_and_the_first_write_creates_the_root(tmp_path):
     # 终审 M-1:装配在预检之前就构造替身;预检失败(退出码 2)时不能在 .git 里留下空目录
-    root = tmp_path / "git" / "rismforge-memory" / "deploy"
+    root = tmp_path / "git" / "rise-memory" / "deploy"
     store = FileTupleStore(root)
     assert not (tmp_path / "git").exists()
     assert store.pending_events("s1") == [] and store.digest("s1") == FileTupleStore(tmp_path / "x").digest("s1")

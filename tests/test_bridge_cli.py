@@ -216,17 +216,17 @@ def test_any_os_error_at_start_is_t2_and_not_retried(err):
 def test_logs_default_under_the_store_and_stay_untracked(store):
     r = _bridge(FakeRunner([_ok()]), store=store).complete("p", run_id="run-1", task_id="plan-1")
     path = _log_path(r.log_ref)
-    assert path.is_relative_to(store.repo_root.resolve() / ".rismforge" / "logs")
-    assert (store.repo_root / ".rismforge" / "logs" / ".gitignore").read_text() == "*\n"
+    assert path.is_relative_to(store.repo_root.resolve() / ".rise" / "logs")
+    assert (store.repo_root / ".rise" / "logs" / ".gitignore").read_text() == "*\n"
     status = subprocess.run(
         ["git", "-C", str(store.repo_root), "status", "--porcelain", "--untracked-files=all"],
         capture_output=True, text=True, check=True,
     ).stdout
-    assert ".rismforge" not in status  # 日志目录对 git 不可见
+    assert ".rise" not in status  # 日志目录对 git 不可见
     tracked = subprocess.run(
         ["git", "-C", str(store.repo_root), "ls-files"], capture_output=True, text=True, check=True,
     ).stdout
-    assert ".rismforge" not in tracked and "run_trace.yaml" in tracked
+    assert ".rise" not in tracked and "run_trace.yaml" in tracked
 
 
 def test_the_credential_is_never_written_into_the_git_tree(store):
@@ -314,7 +314,7 @@ def test_a_real_subprocess_timeout_is_t1():
 
 def test_a_real_missing_executable_is_t2():
     b = CliBridge(
-        _cfg(command=["/nonexistent/rismforge-no-such-tool"]), env={"FAKE_TOKEN": SECRET}, sleep=lambda s: None,
+        _cfg(command=["/nonexistent/rise-no-such-tool"]), env={"FAKE_TOKEN": SECRET}, sleep=lambda s: None,
     )
     with pytest.raises(BridgeError) as exc:
         b.complete("p", run_id="r", task_id="t")
@@ -427,11 +427,11 @@ _ENV_TOOL = (
 
 def test_a_real_subprocess_sees_only_allowlisted_variables_and_an_empty_working_directory(monkeypatch):
     monkeypatch.setenv("FAKE_TOKEN", SECRET)
-    monkeypatch.setenv("RISMFORGE_UNLISTED", "must-not-leak")
+    monkeypatch.setenv("RISE_UNLISTED", "must-not-leak")
     b = CliBridge(_cfg(command=[sys.executable, "-c", _ENV_TOOL]), sleep=lambda s: None)  # env 缺省取 os.environ
     seen = json.loads(b.complete("p", run_id="r", task_id="t").text)
     assert "FAKE_TOKEN" in seen["env"]
-    assert "RISMFORGE_UNLISTED" not in seen["env"]
+    assert "RISE_UNLISTED" not in seen["env"]
     assert seen["ls"] == []
     assert Path(seen["cwd"]).resolve() != Path.cwd().resolve()
     assert not Path(seen["cwd"]).exists()  # 调用结束后目录已删除

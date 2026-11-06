@@ -1,8 +1,8 @@
 {
-  "name": "rismforge-cli",
+  "name": "rise-cli",
   "version": "0.1.0",
   "type": "module",
-  "bin": { "rismforge": "./dist/index.js" },
+  "bin": { "rise": "./dist/index.js" },
   "scripts": {
     "build": "tsc",
     "test": "vitest run"

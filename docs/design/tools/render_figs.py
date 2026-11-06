@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""把 diagrams/*.svg 用无头浏览器渲染成 PNG,供目检。PNG 写在 /private/tmp/rismforge-preview,不入库。
+"""把 diagrams/*.svg 用无头浏览器渲染成 PNG,供目检。PNG 写在 /private/tmp/rise-preview,不入库。
 
   python3 docs/design/tools/render_figs.py              渲染全部
   python3 docs/design/tools/render_figs.py 名字 ...      只渲染指定的图(不带 .svg)
@@ -15,7 +15,7 @@ from pathlib import Path
 
 BROWSE = Path.home() / ".claude/skills/gstack/browse/dist/browse"
 DIAG = Path(__file__).resolve().parent.parent / "diagrams"
-OUT = Path("/private/tmp/rismforge-preview")
+OUT = Path("/private/tmp/rise-preview")
 OUT.mkdir(parents=True, exist_ok=True)
 names = sys.argv[1:] or [p.stem for p in sorted(DIAG.glob("*.svg"))]
 

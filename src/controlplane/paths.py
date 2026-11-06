@@ -57,13 +57,13 @@ def item_pool_file(version: str) -> str:
 
 def dataset_manifest_file(run_id: str, name: str) -> str:
     """数据集清单。按阶段（name，如 "sft" / "grpo_opd"）各一份，放 run 目录顶层——
-    GitStore.list_products 不递归，顶层文件才能被 rismforge trace 扫到。"""
+    GitStore.list_products 不递归，顶层文件才能被 rise trace 扫到。"""
     return f"{run_dir(run_id)}/dataset_manifest_{name}.yaml"
 
 
 def training_run_file(run_id: str) -> str:
     """训练运行记录。放 run 目录顶层——GitStore.list_products 不递归,
-    rismforge trace 靠它扫描,放进子目录就看不到了。"""
+    rise trace 靠它扫描,放进子目录就看不到了。"""
     return f"{run_dir(run_id)}/training_run.yaml"
 
 

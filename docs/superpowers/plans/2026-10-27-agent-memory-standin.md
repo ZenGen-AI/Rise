@@ -3389,7 +3389,7 @@ git commit -m "feat(mindtrainer): 派发器经注入的 memory_resolver 解出�
 ### Task 26: 组合根的替身 `memory_resolver`,`--interact` 装配时注入
 
 **Files:**
-- Create: `src/factory/memory_runtime.py`(替身运行时身份与替身解析器;计划 B 第 7 步在同一模块按 `RISMFORGE_MEMORY_CONFIG` 加 Starling 那一路)
+- Create: `src/factory/memory_runtime.py`(替身运行时身份与替身解析器;计划 B 第 7 步在同一模块按 `RISE_MEMORY_CONFIG` 加 Starling 那一路)
 - Modify: `src/factory/wire.py`(`_interact_wiring` 的返回字典加 `memory_resolver`,并写启动日志;模块级 `_log = logging.getLogger("factory.wire")`)
 - Test: `tests/test_factory_memory_runtime.py`(新)、`tests/test_factory_interact_wire.py`
 
@@ -3397,7 +3397,7 @@ git commit -m "feat(mindtrainer): 派发器经注入的 memory_resolver 解出�
 - Consumes: 第 1 步 `actio.memory.TupleMemory`(`TupleMemory().digest()` 是空库摘要,`FileTupleStore` 对没有文件的人格给的也是它);Task 25 的 `make_mindtrainer_dispatcher(..., memory_resolver=...)` 与"解析器抛 `DirectiveFailedError` 时保留其 `reason`"。
 - Produces:
   - `factory.memory_runtime.STAND_IN_MEMORY_RUNTIME: dict = {"backend": "stand-in", "starling_version": None, "extraction": None, "embedding": None, "trace_schema": "actio.trace.v2"}`(`trace_schema` 取第 1 步的 `actio.trace.TRACE_SCHEMA_V2`,不另写字面量)。
-  - `factory.memory_runtime.stand_in_memory_resolver(seed: str | None, persona_ids: tuple[str, ...]) -> tuple[dict[str, str], dict]`:`seed is None` 时返回 `({p: TupleMemory().digest() for p in persona_ids}, copy.deepcopy(STAND_IN_MEMORY_RUNTIME))`;`seed` 非 null 抛 `DirectiveFailedError(f"memory.seed {seed!r} needs a memory config: set RISMFORGE_MEMORY_CONFIG (the stand-in memory has no seed libraries)")`。
+  - `factory.memory_runtime.stand_in_memory_resolver(seed: str | None, persona_ids: tuple[str, ...]) -> tuple[dict[str, str], dict]`:`seed is None` 时返回 `({p: TupleMemory().digest() for p in persona_ids}, copy.deepcopy(STAND_IN_MEMORY_RUNTIME))`;`seed` 非 null 抛 `DirectiveFailedError(f"memory.seed {seed!r} needs a memory config: set RISE_MEMORY_CONFIG (the stand-in memory has no seed libraries)")`。
   - `_interact_wiring(...)` 返回 `{"policy_factory": ..., "policy_endpoint": ..., "memory_resolver": stand_in_memory_resolver}`;装配时 `_log.info("memory backend: stand-in")`。
 
 - [ ] **Step 1: 写失败的测试**
@@ -3432,7 +3432,7 @@ def test_the_returned_identity_is_a_copy():
 def test_a_seed_needs_a_memory_config():
     with pytest.raises(DirectiveFailedError, match="needs a memory config") as info:
         stand_in_memory_resolver("seed-1", ("pa",))
-    assert "RISMFORGE_MEMORY_CONFIG" in info.value.reason and info.value.category == "T2"
+    assert "RISE_MEMORY_CONFIG" in info.value.reason and info.value.category == "T2"
 ```
 
 ```python
@@ -3481,7 +3481,7 @@ Expected: FAIL,`ModuleNotFoundError: No module named 'factory.memory_runtime'`
 
 - `src/factory/memory_runtime.py`:首条语句 `from __future__ import annotations`;导入 `copy`、`actio.memory.TupleMemory`、`actio.trace.TRACE_SCHEMA_V2`、`controlplane.daemon.DirectiveFailedError`。按 Produces 写两个名字。抛 `DirectiveFailedError` 而不是普通异常,是因为 Task 25 对普通异常只报类名,而 7.1 节要求原因写明"种子需要记忆配置";原因里只有种子 id 与变量名,不含路径。
 - `wire.py` 的 `_interact_wiring`:在 `make_policy_factory(...)` 之后惰性导入 `from factory.memory_runtime import stand_in_memory_resolver`(与本函数其余惰性导入同一做法),返回字典加 `"memory_resolver": stand_in_memory_resolver`,返回前 `_log.info("memory backend: stand-in")`。`_dispatcher` 已经把 `**wiring` 原样交给 `make_mindtrainer_dispatcher`,两个装配点(`--interact` 单独用、与 `--enable` 同开)都经过 `_interact_wiring`,不用另改。不走 `--interact` 的三处 `make_mindtrainer_dispatcher(...)`(`wire.py` 约 231、326 行与 `mindtrainer/wire.py:32`)不注入:那里 interact 指令先因缺 `client_factory` 判 T2,原因已点名 `--interact`。
-- 启动日志用 `logging` 的 INFO,与 `factory.agent`、`controlplane.daemon` 同一做法。`RISMFORGE_MEMORY_CONFIG` 的判定在计划 B 第 7 步才有;本任务无条件用替身。
+- 启动日志用 `logging` 的 INFO,与 `factory.agent`、`controlplane.daemon` 同一做法。`RISE_MEMORY_CONFIG` 的判定在计划 B 第 7 步才有;本任务无条件用替身。
 
 - [ ] **Step 4: 跑测试确认通过,并跑相邻回归**
 
@@ -4570,11 +4570,11 @@ Expected: PASS(`tests/test_ma_e2e.py`、`tests/test_factory_handlers.py` 仍导�
 - Consumes:Task 31 `MemoryLayout`;Task 33 `make_start_round_handler(..., memory_store, memory_layout, memory_runtime, scratch_store_factory, stream_deadline_s=None)`;Task 34 `make_admit_proposal_handler(*, memory_store, memory_layout)`;第 1 步 `FileTupleStore`;第 4 步 `factory.memory_runtime.STAND_IN_MEMORY_RUNTIME`
 - Produces:
   - `factory.memory_runtime.DeploymentMemory(store: DeploymentMemoryStore, layout: MemoryLayout, runtime: dict, scratch_store_factory: Callable[[Path], DeploymentMemoryStore])`,frozen dataclass
-  - `factory.memory_runtime.stand_in_memory_root(repo_root: Path) -> Path`:`controlplane.lock.git_dir(repo_root) / "rismforge-memory"`(Task 31 已动 `lock.py`,本任务把私有的 `_git_dir` 改名公开为 `git_dir`,`acquire_repo_lock` 跟着改调用,`tests/factory_fixtures.py` 若引用 `_git_dir` 一并改——实施时先 `grep -rn '_git_dir' src tests`)
+  - `factory.memory_runtime.stand_in_memory_root(repo_root: Path) -> Path`:`controlplane.lock.git_dir(repo_root) / "rise-memory"`(Task 31 已动 `lock.py`,本任务把私有的 `_git_dir` 改名公开为 `git_dir`,`acquire_repo_lock` 跟着改调用,`tests/factory_fixtures.py` 若引用 `_git_dir` 一并改——实施时先 `grep -rn '_git_dir' src tests`)
   - `factory.memory_runtime.stand_in_deployment_memory(repo_root: Path) -> DeploymentMemory`:`root = stand_in_memory_root(repo_root)`,`DeploymentMemory(FileTupleStore(root / "deploy"), MemoryLayout(root), copy.deepcopy(STAND_IN_MEMORY_RUNTIME), FileTupleStore)`
-  - `BuildContext.deployment_memory: DeploymentMemory | None = None`;`assemble` 在启用的处理器键含 `start_agent_round` 或 `admit_proposal` 时造一次填进去(未设 `RISMFORGE_MEMORY_CONFIG` 走替身;计划 B 第 7 步在这里按配置换成 Starling)
+  - `BuildContext.deployment_memory: DeploymentMemory | None = None`;`assemble` 在启用的处理器键含 `start_agent_round` 或 `admit_proposal` 时造一次填进去(未设 `RISE_MEMORY_CONFIG` 走替身;计划 B 第 7 步在这里按配置换成 Starling)
 
-根目录取在 git 目录里(与仓库锁 `rismforge.lock` 同处):不进工作树、不进提交;跨进程重启保留,所以第 9 节"起点副本跨重启保留"与"门② 收录的记忆不随进程退出丢失"在替身上也成立;一棵树一个 git 目录,`.owner` 防混写的问题在替身上不存在。设计源 4.1 节写的是"`control-plane/` 之外的临时目录",按字面做成 `mkdtemp` 会让进程每次重启都换一个空库,崩溃重入与门② 收录都失效;这一点列为待裁定。
+根目录取在 git 目录里(与仓库锁 `rise.lock` 同处):不进工作树、不进提交;跨进程重启保留,所以第 9 节"起点副本跨重启保留"与"门② 收录的记忆不随进程退出丢失"在替身上也成立;一棵树一个 git 目录,`.owner` 防混写的问题在替身上不存在。设计源 4.1 节写的是"`control-plane/` 之外的临时目录",按字面做成 `mkdtemp` 会让进程每次重启都换一个空库,崩溃重入与门② 收录都失效;这一点列为待裁定。
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -4593,10 +4593,10 @@ def test_round_and_admit_handlers_share_one_stand_in_deployment_memory(store, mo
         r, a = seen["round"], seen["admit"]
         assert isinstance(r["memory_store"], FileTupleStore) and r["memory_store"] is a["memory_store"]
         assert r["memory_layout"] is a["memory_layout"]
-        assert r["memory_layout"].root == git_dir(store.repo_root) / "rismforge-memory"
+        assert r["memory_layout"].root == git_dir(store.repo_root) / "rise-memory"
         assert r["memory_runtime"] == STAND_IN_MEMORY_RUNTIME and r["scratch_store_factory"] is FileTupleStore
         assert r.get("stream_deadline_s") is None                       # 替身保持现值
-        assert not (store.repo_root / "control-plane" / "rismforge-memory").exists()
+        assert not (store.repo_root / "control-plane" / "rise-memory").exists()
     finally:
         asm.close()
 

@@ -1,8 +1,8 @@
-# RismForge:七个子系统详细设计
+# Rise:七个子系统详细设计
 
 - **状态**:待用户审阅
 - **日期**:2026-09-24
-- **前置文档**:`2026-09-22-rismforge-architecture-design.md`(总体架构)
+- **前置文档**:`2026-09-22-rise-architecture-design.md`(总体架构)
 - **范围**:七个能力子系统的内部模块划分、数据模型、模块间协作方式。不包含字段级schema、算法伪代码、任何代码实现。
 
 ---
@@ -94,7 +94,7 @@ control-plane/                              # git仓库根
 
 1. 扫描git树(文件监听或轮询),比对当前状态与期望状态
 2. 发现"directive=待执行" → 通过SSH向计算层下发任务
-3. 发现"candidate=待审" → 等待人工CLI命令(`rismforge approve/reject <id>`)
+3. 发现"candidate=待审" → 等待人工CLI命令(`rise approve/reject <id>`)
 4. 任务运行完毕 → 产物/结果经SSH同步回git树,状态更新
 
 **幂等可恢复**:调和循环进程崩溃重启、SSH连接中断后,下次扫描重新评估当前git树状态并正确续接,不丢事件,不重复执行已完成动作。这是补充 E.3"机制一:调和循环幂等自愈"的核心,幂等键与断点续接细节见该节。
@@ -102,8 +102,8 @@ control-plane/                              # git仓库根
 ### 1.5 三个审核门(统一交互流程,以门①为例)
 
 1. 调和循环检测到候选产物"待审"且依赖产物已就位,停止等待人工命令
-2. 人工执行 `rismforge review <id>` — CLI读取产物+对比摘要打印
-3. 人工执行 `rismforge approve/reject <id> [--reason "..."]` — 修改状态字段,提交git commit
+2. 人工执行 `rise review <id>` — CLI读取产物+对比摘要打印
+3. 人工执行 `rise approve/reject <id> [--reason "..."]` — 修改状态字段,提交git commit
 4. 调和循环下次扫描读到新状态,执行后续动作
 
 **v2升级路径**:CLI从"直接读本地文件"改为"通过RPC问远程ControlPlane服务",交互命令不变。
@@ -675,7 +675,7 @@ ControlPlane(轮次结果事件)
 ### 6.3 指令确认模式(人在环路)
 
 在训练指令的状态机里加一个可配置的"待确认"状态:
-- **手动模式**:TrainScheduler构造的指令进入"待确认"状态,人工执行 `rismforge confirm <directive-id>` 后才进入"待执行"
+- **手动模式**:TrainScheduler构造的指令进入"待确认"状态,人工执行 `rise confirm <directive-id>` 后才进入"待执行"
 - **自动模式**:跳过"待确认"状态,信任建立后切换
 
 另外,人工随时可以绕过TrainPlanner直接向ControlPlane写入指令——作为最强的人工干预手段(开发策略中"第一轮打通时决策人工写死"就是这个路径,它是正式能力而非临时脚手架)。
@@ -766,7 +766,7 @@ flowchart TD
     subgraph CTL["控制层 (本地开发机)"]
         B["ControlPlane 调和循环\n写入 directive.yaml\n状态=待执行"]
         G["ControlPlane\n写入 diagnostic_report.yaml"]
-        H{{"审核门①\nCheckpoint 晋级\n人工 rismforge approve"}}
+        H{{"审核门①\nCheckpoint 晋级\n人工 rise approve"}}
         I["ControlPlane\n写入 zengen-v1.yaml\n状态=已晋级"]
         J["TrainScheduler\n配方提名器\n打包 BatchTrain 配方候选"]
         K{{"审核门③\n配方入库\n人工确认"}}
@@ -809,7 +809,7 @@ flowchart TD
 诊断评测器加载候选 checkpoint,打分器(规则式,HiToM 题有客观答案)产出诊断报告:三阶信念+12.3 分,四阶信念+8.7 分,通用推理无退化(-0.3 分,在 OPD 容忍范围内)。
 
 **Step 5:审核门① Checkpoint 晋级(人工)**
-人工执行 `rismforge review run-001` 看报告,执行 `rismforge approve run-001`。ControlPlane 状态变更提交 git commit,checkpoint 写入 `models/zengen-v1.yaml`,状态=已晋级。
+人工执行 `rise review run-001` 看报告,执行 `rise approve run-001`。ControlPlane 状态变更提交 git commit,checkpoint 写入 `models/zengen-v1.yaml`,状态=已晋级。
 
 **Step 6:MindAgent 并行自动触发**
 MindAgent 自主订阅"checkpoint 已晋级"事件,绑定 zengen-v1,通过受限接口②调用 SocialSimulator 实时环境服务跑部署仿真 episode。**⚠️ 第一轮技能库/记忆库为空,沉默是预期行为**。✅ 自洽。
@@ -833,7 +833,7 @@ flowchart TD
         B["TrainScheduler\n动作解析器\n解析决策→全新指令\nRoleAssignment:\n  zengen-v2=坚守立场方\n  冻结 zengen-v1=试图说服方"]
         C["ControlPlane\n写入 directive.yaml\n状态=待执行"]
         H["ControlPlane\n写入 diagnostic_report.yaml\n状态=候选待审"]
-        I{{"审核门①\nCheckpoint 晋级\n人工 rismforge approve"}}
+        I{{"审核门①\nCheckpoint 晋级\n人工 rise approve"}}
         J["ControlPlane\n写入 zengen-v3.yaml\n状态=已晋级"]
         K["TrainScheduler\n配方提名器\n打包 InteractTrain 配方候选\n标注:含 LLM 非确定性组件\n复现=高度相似而非字节级一致"]
         L{{"审核门③\n配方入库\n人工确认"}}
@@ -902,7 +902,7 @@ flowchart TD
     end
 
     subgraph CTL["控制层 (本地开发机)"]
-        G{{"审核门②\n技能/记忆增量纳入\n人工 rismforge review proposal-007\n→ approve"}}
+        G{{"审核门②\n技能/记忆增量纳入\n人工 rise review proposal-007\n→ approve"}}
         H["ControlPlane\n情绪激活检测器\n纳入正式技能库"]
         I["TrainScheduler\n配方提名器\n打包 AgentRSI 类型配方:\n  锁定 zengen-v3 版本\n  模板精确 ID 集合\n  分析器阈值配置\n  Claude Code prompt 模板版本"]
         J{{"审核门③\n配方入库\n人工确认"}}
@@ -929,7 +929,7 @@ flowchart TD
 **⚠️ 已知局限**:验证器回放的是"触发提案的同批数据",有过拟合风险。应对:审核门②后续轮次 MindAgent 经验采集会用新 episode 持续验证,战绩追踪器记录后续表现。审核门是第一道关,不是最后一道。🔶 局限已知,架构设计一致。
 
 **Step 4:审核门②(人工)**
-人工执行 `rismforge review proposal-007`,看到完整证据链后 `rismforge approve proposal-007`,情绪激活检测器纳入正式技能库。
+人工执行 `rise review proposal-007`,看到完整证据链后 `rise approve proposal-007`,情绪激活检测器纳入正式技能库。
 
 **Step 5:AgentRSI 配方入库**
 TrainScheduler 配方提名器打包 AgentRSI 类型配方:锁定 zengen-v3 版本、模拟部署用到的情境/人格模板精确 ID 集合、经验分析器显著性阈值配置、技能提案生成器调用的 Claude Code prompt 模板版本。审核门③批准后入库 recipe-008(AgentRSI 类型)。
@@ -1073,11 +1073,11 @@ Actio 只是执行引擎:给定绑定的版本快照,忠实地路由技能、检
 
 #### B.3 调和循环的两种调用模式:一次性 vs 守护进程
 
-人工命令(`rismforge approve <id>`)本身是同步、立即生效的——命令执行时直接写 git 树并 commit,不需要等待任何守护进程。守护进程模式(长期运行、定期轮询)只负责处理**不依赖人工触发**的那部分状态迁移(比如"数据集生成完毕,自动启动训练")。
+人工命令(`rise approve <id>`)本身是同步、立即生效的——命令执行时直接写 git 树并 commit,不需要等待任何守护进程。守护进程模式(长期运行、定期轮询)只负责处理**不依赖人工触发**的那部分状态迁移(比如"数据集生成完毕,自动启动训练")。
 
 **因此调和循环设计成两种调用模式共享同一个核心 `reconcile()` 函数**:
-- **一次性模式**(`rismforge reconcile --once`):扫描一次,处理完当前所有待办状态迁移,退出
-- **守护进程模式**(`rismforge daemon`):循环调用一次性模式,每次间隔可配置
+- **一次性模式**(`rise reconcile --once`):扫描一次,处理完当前所有待办状态迁移,退出
+- **守护进程模式**(`rise daemon`):循环调用一次性模式,每次间隔可配置
 
 这个设计直接延续了之前"调和循环核心逻辑是纯函数,可用fixture测试"的既定原则,现在补齐了"这个纯函数具体怎么被调用"这一层。
 
@@ -1181,7 +1181,7 @@ v2+ 明确延伸(现在只留认知):多租户服务化后,可在 ControlPlane �
 - `outcome.yaml` 的成本汇总逻辑同样纯函数:给定一组 `CostRecord` fixture,断言汇总结果,与调和循环"给定 git 树状态→决定动作"的纯函数测试(1.7 节)同一风格。
 - L2/L3 引用的完整性校验(引用指向的文件存在、sha256 匹配)可用构造的目录 fixture 测试,不需要真实 SSH。
 
-**取用入口**:本节定义的是数据结构;人工把这些数据读出来的命令(`rismforge trace/logs/cost`)见补充 G.4。
+**取用入口**:本节定义的是数据结构;人工把这些数据读出来的命令(`rise trace/logs/cost`)见补充 G.4。
 
 ---
 
@@ -1358,7 +1358,7 @@ V1 是单开发者、单能力维度的研究原型,但 V2 已确定三个演进
 
 **V1 明确不做图形界面**,全部人机交互经命令行。理由与补充 D.1 一致:V1 是单开发者的研究原型,控制层就跑在本人的开发机上,CLI 直接读写本地 git 树是最短路径;引入 Web 界面等于要先有服务端,那是 V2 服务化(1.5 节已定的 CLI→RPC 升级路径)才该做的事。
 
-`docs/assets/rismforge-architecture.html` 是设计文档的架构配图,不是产品界面,不要误读为 V1 有 UI。
+`docs/assets/rise-architecture.html` 是设计文档的架构配图,不是产品界面,不要误读为 V1 有 UI。
 
 **v2+ 延伸(只留认知)**:服务化后,同一套命令语义可以包一层 Web 界面或看板(配合 D.1 提到的时序库),命令语义不变——这与 1.5 节"CLI 交互命令在 V2 不变"是同一条升级路径。
 
@@ -1368,7 +1368,7 @@ V1 是单开发者、单能力维度的研究原型,但 V2 已确定三个演进
 |---|---|---|---|
 | **L-A 可复现性配置** | 外部推理后端选择(claude/codex/deepseek)、调用形态(CLI 进程/API)、模型名、prompt 模板版本、RetryPolicy、单价表、轮询间隔 | git 树 `control-plane/config/` | **进** |
 | **L-B 环境配置** | 远程 GPU 的逻辑端点、工作目录、模型路径、预检阈值、轮询与超时 | git 树 `control-plane/compute/endpoints.yaml`(1.2 节已定) | **进**(仅非秘密字段) |
-| **L-B′ 主机定位** | 逻辑端点到 ssh 别名的映射(主机、端口、用户、跳板都在 `~/.ssh/config`) | 仓库之外的本机文件,路径由 `RISMFORGE_COMPUTE_HOSTS` 指定 | **不进**(依据:真实后端设计 D9) |
+| **L-B′ 主机定位** | 逻辑端点到 ssh 别名的映射(主机、端口、用户、跳板都在 `~/.ssh/config`) | 仓库之外的本机文件,路径由 `RISE_COMPUTE_HOSTS` 指定 | **不进**(依据:真实后端设计 D9) |
 | **L-C 凭证** | API token、SSH 密码/私钥口令 | 环境变量,或 gitignored 的本地文件 | **绝不进** |
 
 **L-A 必须进 git 的理由**:它直接决定实验能不能复现。RecipeStore 要求锚定"外部推理桥接的精确 prompt 模板版本"(5.1 节),而配方锚定的是**版本引用**,被引用的配置本体必须在 git 树里可追溯,否则锚定就是空指针。这与"元数据唯一真相"完全一致,配置本就是元数据的一种。
@@ -1399,9 +1399,9 @@ token_env: ANTHROPIC_API_KEY      # 只记变量名,值从环境读取
 
 | 命令 | 用途 | 数据来源 |
 |---|---|---|
-| `rismforge trace <run-id>` | 打印某轮的全链路:该轮各产物状态 + 沿 `links` 的溯源链 + L2/L3 引用清单 | git 树 `RunTrace` + 各产物 |
-| `rismforge logs <run-id> [--task <task-id>]` | 定位并打印 L3 原始日志位置/内容 | `LogRef` 引用 → 计算层文件 |
-| `rismforge cost <run-id>` | 打印本轮成本明细与汇总(GPU·时、token 数、可选金额) | `CostRecord` + `outcome.yaml` 汇总 |
+| `rise trace <run-id>` | 打印某轮的全链路:该轮各产物状态 + 沿 `links` 的溯源链 + L2/L3 引用清单 | git 树 `RunTrace` + 各产物 |
+| `rise logs <run-id> [--task <task-id>]` | 定位并打印 L3 原始日志位置/内容 | `LogRef` 引用 → 计算层文件 |
+| `rise cost <run-id>` | 打印本轮成本明细与汇总(GPU·时、token 数、可选金额) | `CostRecord` + `outcome.yaml` 汇总 |
 
 **设计约束**:这三个命令**不重新计算、不聚合出新真相**,只做"定位 + 呈现"——分数、曲线、成本的唯一真相仍在各自产物里(D.2 的"L1 不复制既有产物指标"原则)。若引用指向的计算层文件不可达(如远程未挂载),命令须明确报告"引用存在但文件不可达"及其 `uri`,而不是假装没有数据。
 
@@ -1411,14 +1411,14 @@ token_env: ANTHROPIC_API_KEY      # 只记变量名,值从环境读取
 
 | 命令 | 出处 | 类别 |
 |---|---|---|
-| `rismforge review <id>` | 1.5 | 审核门(读) |
-| `rismforge approve/reject <id> [--reason "..."]` | 1.5 | 审核门(写状态) |
-| `rismforge confirm <directive-id>` | 6.3 | 指令确认(写状态) |
-| `rismforge reconcile --once` | 补充 B.3 | 调和(一次性) |
-| `rismforge daemon` | 补充 B.3 | 调和(轮询守护) |
-| `rismforge trace <run-id>` | G.4 | 可观测(只读) |
-| `rismforge logs <run-id> [--task <id>]` | G.4 | 可观测(只读) |
-| `rismforge cost <run-id>` | G.4 | 可观测(只读) |
+| `rise review <id>` | 1.5 | 审核门(读) |
+| `rise approve/reject <id> [--reason "..."]` | 1.5 | 审核门(写状态) |
+| `rise confirm <directive-id>` | 6.3 | 指令确认(写状态) |
+| `rise reconcile --once` | 补充 B.3 | 调和(一次性) |
+| `rise daemon` | 补充 B.3 | 调和(轮询守护) |
+| `rise trace <run-id>` | G.4 | 可观测(只读) |
+| `rise logs <run-id> [--task <id>]` | G.4 | 可观测(只读) |
+| `rise cost <run-id>` | G.4 | 可观测(只读) |
 
 此外 SocialSimulator 提供**开发者工具接口**(2.2、2.6):人工经 CLI 直接发起交互式仿真会话、实时观察模型表现,明确不产出标准化诊断报告、不是流水线的一环,仅用于开发迭代调试。
 

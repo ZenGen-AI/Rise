@@ -66,7 +66,7 @@
 | A7-3 | `mindagent.library.load_library` | `(store) -> LibraryState` | 任务 108 断言收录后的库版本是字符串 |
 | A7-4 | `mindagent.config.AgentConfig` | 冻结数据类 `(scenario_ids, bindings, max_turns=6, episodes_per_scenario=1, max_retries_per_episode=1, min_support=3, min_ratio=0.5, min_fired_on_motivating=0.8, max_fired_elsewhere=0.2, max_parse_retries=2)` | 任务 107 由 `agent.yaml` 构造 |
 | A-H | `controlplane.daemon.Handler` | `Callable[[GitStore, Action], None]`;`handlers` 的键只能是 `CLOSED_LOOP_ACTIONS` 的六个名字(计划 8 Ruling 7) | 任务 104 的表与任务 107 的构造器 |
-| A8-1 | `controlplane.lock.acquire_repo_lock` | `(repo_root)`,返回上下文管理器;锁文件 `<repo_root>/.git/rismforge.lock`(**计划 8** 任务 98) | 任务 104:`reconcile_one_tick` 在装配之前取锁 |
+| A8-1 | `controlplane.lock.acquire_repo_lock` | `(repo_root)`,返回上下文管理器;锁文件 `<repo_root>/.git/rise.lock`(**计划 8** 任务 98) | 任务 104:`reconcile_one_tick` 在装配之前取锁 |
 | A8-2 | `controlplane.lock.RepoLockedError` | 异常类;`str(exc)` 是锁文件路径(**计划 8** 任务 98) | 任务 104:`factory.cli.main` 捕获并退出码 2 |
 
 行为上的依赖,任务 108 在真实代码上验证:
@@ -92,7 +92,7 @@
 7. **Ruling: 闭环模式的装配全部在第一个 tick 之前完成;缺 `evaluator.yaml`、缺资产、缺 `backends.yaml` 或其中的角色、字段不合法、缺凭证,都抛 `FactoryConfigError`,命令行打印一行 `factory: error: ...` 到标准错误并以退出码 2 退出,树里不写任何东西。** —— 原因:设计要求"缺配置或缺凭证给明确错误并退出码非 0,而不是静默降级";启动即失败比"守护进程跑到第一个候选才崩"好查。计划 8 的评估器每次调用仍会重读资产,启动检查只是提前把错误暴露出来。 —— 判错的代价:资产在守护进程运行中被删时,仍按计划 8 Ruling 13 在调用处抛 `DiagnosticAssetError`。
 8. **Ruling: `backends.yaml` 的载荷形状是 `{<角色>: <BackendConfig 原始字典>}`,V1 的角色只有 `planner`(规划后端)与 `agent`(技能提案生成器);`build_bridge(store, role, *, env=None, log_dir=None)` 每次新建一个 `CliBridge`(传 `store` 与 `log_dir`)。只有 `invocation_form: cli` 能构造,`api` 报"only 'cli' is implemented in V1 (R15)"。** —— 原因:计划 1 把形状留给计划 8,计划 8 声明不读任何配置文件,只剩组合根来定;计划 1 的测试已用 `{"planner": ...}` 演示过。 —— 判错的代价:要加第三种外部推理用途(例如 judge)时,在 `BRIDGE_ROLES` 里加一个名字。
 9. **Ruling: 凭证相关的错误一律 `raise FactoryConfigError(...) from None`,信息只用计划 1 已脱敏的原文(变量名、键路径),绝不拼进配置值;有测试断言凭证值不出现在异常信息、`__cause__` 为空、桥接日志里也没有。** —— 原因:设计 G.3 与计划 1 的约定;断开异常链才能保证 traceback 里也没有。 —— 判错的代价:排查配置错误时看不到原始异常类型,只能看信息文字。
-10. **Ruling: `logs` 只扫 run 目录顶层产物的 `payload["log_refs"]`(与 `observe.trace` 同一口径,不递归 `episodes/`);`--task <id>` 按产物载荷的 `task_id` 或桥接日志文件名 `<id>-<k>.log` 过滤;`file://` 之外的地址、文件不存在都标 `[unreachable]` 并写明"contents not shown";`sha256` 对不上照样打印内容但标 `[sha256 mismatch]`。** —— 原因:计划 1 的 `record_failure` 把 L3 引用放在 `log_refs` 列表里,`CliBridge` 的日志文件名是 `<task_id>-<k>.log`;设计要求"引用存在但文件不可达要明说"。 —— 判错的代价:成功调用的桥接日志只登记在桥接返回值里、不写进树(计划 1 的 `record_bridge_cost` 只记成本),所以 `logs` 只能看到失败记录与人工登记的引用;要看成功调用的日志,直接去 `.rismforge/logs/<run>/` 目录。
+10. **Ruling: `logs` 只扫 run 目录顶层产物的 `payload["log_refs"]`(与 `observe.trace` 同一口径,不递归 `episodes/`);`--task <id>` 按产物载荷的 `task_id` 或桥接日志文件名 `<id>-<k>.log` 过滤;`file://` 之外的地址、文件不存在都标 `[unreachable]` 并写明"contents not shown";`sha256` 对不上照样打印内容但标 `[sha256 mismatch]`。** —— 原因:计划 1 的 `record_failure` 把 L3 引用放在 `log_refs` 列表里,`CliBridge` 的日志文件名是 `<task_id>-<k>.log`;设计要求"引用存在但文件不可达要明说"。 —— 判错的代价:成功调用的桥接日志只登记在桥接返回值里、不写进树(计划 1 的 `record_bridge_cost` 只记成本),所以 `logs` 只能看到失败记录与人工登记的引用;要看成功调用的日志,直接去 `.rise/logs/<run>/` 目录。
 11. **Ruling: 退出码约定:0 成功;1 只读子命令发现缺失(`trace` 的 run 不存在、`logs` 的 run 不存在或有引用不可达/哈希不符);2 用法错误、装配错误或仓库被另一个进程锁住(Ruling 27)。`cost` 在没有 `run_trace` 时退出 0。** —— 原因:没有记账是正常状态(设计 §14 第 7 条),不是错误;`trace` 与 `cost` 的文本原样来自 `controlplane.observe`,不改它们的输出。 —— 判错的代价:脚本若用 `cost` 的退出码判断"run 是否存在"会判错,要用 `trace`。
 12. **Ruling: `reconcile` 子命令的 `--once` 是必填开关,不带就是用法错误;输出每个动作一行 `<kind> <target_id>`,没有动作时打印 `no actions`。** —— 原因:设计 §10.2 写的就是 `reconcile --once`;把"跑一轮"与"一直跑"分成两个子命令(`reconcile --once` 与 `run`),不留无 `--once` 的歧义形态。 —— 判错的代价:多打一个开关。
 13. **Ruling: `--confirm-directives/--no-confirm-directives` 是三态(不传为 `None`,表示用 `scheduler.yaml` 的 `confirm_directives`,默认真);值经 `BuildContext.confirm_directives` 交给规划与提名处理器的构造器(实现见 Ruling 21)。** —— 原因:设计 §3.4 规定确认模式由配置决定,开关只是覆盖;不传开关时不该悄悄改变配置的语义。 —— 判错的代价:无。
@@ -1546,7 +1546,7 @@ def test_dev_entry_turns_mock_evidence_on(tmp_path):
 def _locked_message(capsys):
     err = capsys.readouterr().err
     assert err.startswith("factory: error: repository is locked by another process: ")
-    assert "rismforge.lock" in err
+    assert "rise.lock" in err
 
 
 def test_run_exits_2_when_the_repository_is_locked_and_writes_nothing(twin, capsys):
@@ -1967,7 +1967,7 @@ def _assembly_flags(p: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="factory", description="RismForge 组合根:调和循环与只读可观测")
+    parser = argparse.ArgumentParser(prog="factory", description="Rise 组合根:调和循环与只读可观测")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_run = sub.add_parser("run", help="跑调和循环")
@@ -3109,7 +3109,7 @@ def test_the_whole_loop_turns_twice(store, capsys):
     assert "data_spec" not in d2.payload  # clone 复用配方锚定的清单
     assert tick(store, enable, *LOOP) == []  # 等人确认,闭环不动
 
-    # 模拟 rismforge confirm run-002 → 第二轮
+    # 模拟 rise confirm run-002 → 第二轮
     set_status(store, f"{run_dir('run-002')}/directive.yaml", "pending")
     train_and_promote(store, "run-002", enable, *LOOP)
     assert store.exists(model_file(3))
@@ -3439,7 +3439,7 @@ git commit -m "test: closed-loop and MindAgent end to end through the factory"
 10. **controlplane 不导入任何新包。** 设计 §11 的依赖方向要求 `controlplane` 不导入 `inference_bridge`、`recipestore`、`trainplanner`、`trainscheduler`、`actio`、`mindagent`、`factory`;各计划的边界测试只检查自己包往外的导入(计划 3 与 `actio` 一侧都没有反向检查)。`test_controlplane_imports_none_of_the_new_packages` 用 `ast` 解析 `src/controlplane` 下全部 `.py`,收集绝对导入的顶层包名,失败信息写出"哪个文件第几行导入了哪个包"。变异检查(撰写时做过):往 `controlplane/ledger.py` 末尾加一行 `import recipestore`,这条失败,信息为 `controlplane/ledger.py:138 imports recipestore`。
 11. **run 编号的两份解析。** 计划 5 的 `trainscheduler.run_ids.run_number` 与计划 8 的 `controlplane.reconcile._RUN_ID` 各写了一份 run 编号正则;早先一边用 `\d`、一边用 `[0-9]`,遇到 Unicode 数字会分叉(计划 5 分配出来的 id 计划 8 不认,或反过来),现在两边与设计 §3.2 统一成 `^run-([0-9]+)$`。`test_run_number_parsers_agree` 对同一组名字比较两边:`run-1`、`run-001`、`run-999`、`run-1000`、`run-٥٠`(阿拉伯-印度数字 U+0665 U+0660)、`run-1b`、`run-`、`RUN-001`、`run-+1`、`scratch`;断言计划 5 解析出编号当且仅当计划 8 的正则匹配,且两边编号相等,失败信息写明"两边都要改"。其中 `run-٥٠` 正好区分 `[0-9]` 与 `\d`(`\d` 会匹配它),任何一边退回 `\d` 这条就失败。变异检查(撰写时做过):把计划 8 的 `_RUN_ID` 临时改回 `^run-(\d+)$`,只有 `test_run_number_parsers_agree[run-٥٠]` 失败,其余 9 个参数通过;改回后 10 个全过。
 12. **分层规则。** 设计 §11 规定 `controlplane` 不导入 `diagnostic` 与 `mindtrainer`、`mindtrainer` 不导入 `diagnostic`、`diagnostic` 不导入 `mindtrainer`;原先只有计划 2、计划 8 里的一次性 grep(计划 8 另有一条 `diagnostic` 不导入 `mindtrainer` 的测试,与这里重复无妨)。`test_layer_rules_hold` 用 `ast` 扫 `src/` 下这三个包的真实源码(只看绝对导入),失败信息写出"文件:行号 imports 包"。撰写时在按计划 1–8 重放出的集成拷贝上确认现状成立;变异检查(撰写时做过):分别往 `controlplane/ledger.py`、`controlplane/daemon.py`、`mindtrainer/dispatch.py`、`diagnostic/evaluator.py` 末尾加一行越界导入,四次都失败,信息依次为 `controlplane/ledger.py:138 imports diagnostic`、`controlplane/daemon.py:360 imports mindtrainer`、`mindtrainer/dispatch.py:245 imports diagnostic`、`diagnostic/evaluator.py:112 imports mindtrainer`。
-13. **仓库排他锁。** 计划 8 任务 98 的 `controlplane.lock` 只用标准库,锁文件在控制面仓库的 `.git/rismforge.lock`:它不在 `control-plane/` 下,也不被 git 追踪,所以任务 104 的"逐字节相同"比较不受影响;第 10 条(`controlplane` 不导入新包)与第 12 条(分层规则)的 `ast` 检查对它同样成立。`factory` 自己不取 `run` 的锁(Ruling 27):`run` 的锁由 `run_daemon` 取,`reconcile_one_tick` 在装配之前取。两条用例在任务 104,不在 `tests/test_factory_cross_plan.py`,所以任务 109 的用例数不变。
+13. **仓库排他锁。** 计划 8 任务 98 的 `controlplane.lock` 只用标准库,锁文件在控制面仓库的 `.git/rise.lock`:它不在 `control-plane/` 下,也不被 git 追踪,所以任务 104 的"逐字节相同"比较不受影响;第 10 条(`controlplane` 不导入新包)与第 12 条(分层规则)的 `ast` 检查对它同样成立。`factory` 自己不取 `run` 的锁(Ruling 27):`run` 的锁由 `run_daemon` 取,`reconcile_one_tick` 在装配之前取。两条用例在任务 104,不在 `tests/test_factory_cross_plan.py`,所以任务 109 的用例数不变。
 
 - [ ] **Step 1: 前置检查**
 
@@ -3784,7 +3784,7 @@ Expected:第一条无输出;第二条恰好两行(`-packages = [...]` 与以 `, 
 
 1. **闭环模式的诊断一律是 mock 证据。** V1 没有真实 SoMEval 与真实 judge(设计 §15),所以默认入口下闭环永远不会自己转;开发入口打开 `--allow-mock-evidence` 才转(R17)。审核门会醒目标出 `[MOCK BACKENDS]`。
 2. **mock 诊断对每个候选打同样的分**(Ruling 5)。第一次闭环要有人登记一个更低分的基线,提名才有正增益;之后各轮增益恒为 0,不再提名新配方,只有收录过的配方被 clone。闭环里不会出现退化标记,配方的自动 `deprecated` 不会被端到端触发。
-3. **`logs` 看不到成功调用的桥接日志**(Ruling 10):树里只有失败记录登记的 `log_refs`;成功调用的日志在 `<repo>/.rismforge/logs/<run>/`(计划 1)。
+3. **`logs` 看不到成功调用的桥接日志**(Ruling 10):树里只有失败记录登记的 `log_refs`;成功调用的日志在 `<repo>/.rise/logs/<run>/`(计划 1)。
 4. **装配是一次性的。** 守护进程运行期间改了 `backends.yaml`、`evaluator.yaml` 或 `agent.yaml`,要重启才生效。`scheduler.yaml`、`training_defaults.yaml` 与规划模板由计划 5 的 loader 每次调用时重读,改了下一次规划就生效。
 5. **规划、外部推理与部署会话都是同步的**(设计 §14 第 6 条):调用期间调和循环不转,审批被饿住。
 6. **瞬态异常让守护进程退出**,与派发器、处理器的既有约定相同,需要外部监督者重启。`factory run` 自己不重试。

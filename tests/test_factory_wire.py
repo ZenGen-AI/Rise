@@ -270,7 +270,7 @@ def test_dev_entry_turns_mock_evidence_on(tmp_path):
 def _locked_message(capsys):
     err = capsys.readouterr().err
     assert err.startswith("factory: error: repository is locked by another process: ")
-    assert "rismforge.lock" in err
+    assert "rise.lock" in err
 
 
 def test_run_exits_2_when_the_repository_is_locked_and_writes_nothing(twin, capsys):
@@ -337,7 +337,7 @@ def _write_endpoints(store, *ids):
 def _hosts(tmp_path, text):
     path = tmp_path / "hosts.yaml"
     path.write_text(text, encoding="utf-8")
-    return {"RISMFORGE_COMPUTE_HOSTS": str(path)}
+    return {"RISE_COMPUTE_HOSTS": str(path)}
 
 
 def _eval_env(tmp_path):
@@ -368,7 +368,7 @@ def _eval_env(tmp_path):
         encoding="utf-8",
     )
     os.chmod(config, 0o600)
-    return {"RISMFORGE_EVAL_CONFIG": str(config)}
+    return {"RISE_EVAL_CONFIG": str(config)}
 
 
 @pytest.fixture

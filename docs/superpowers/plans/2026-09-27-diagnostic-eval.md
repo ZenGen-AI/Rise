@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 实现 RismForge 的诊断评测体系(spec §2.5)——全工厂的"导航仪"。加载候选 checkpoint,跑**双轨诊断**(静态轨集成 SoMEval 适配层 + 动态轨复用 SocialSimulator 的 `run_episode`),经统一打分器(规则式 + LLM-as-judge)、错误归类器、带置信区间的统计聚合、退化判定,产出结构化 `DiagnosticReport` 写入 ControlPlane。全部逻辑核心为纯函数/可 mock,不需 GPU、不需真实 SoMEval 调用、不需 gRPC,用 fixture 测试(spec §2.5.10)。
+**Goal:** 实现 Rise 的诊断评测体系(spec §2.5)——全工厂的"导航仪"。加载候选 checkpoint,跑**双轨诊断**(静态轨集成 SoMEval 适配层 + 动态轨复用 SocialSimulator 的 `run_episode`),经统一打分器(规则式 + LLM-as-judge)、错误归类器、带置信区间的统计聚合、退化判定,产出结构化 `DiagnosticReport` 写入 ControlPlane。全部逻辑核心为纯函数/可 mock,不需 GPU、不需真实 SoMEval 调用、不需 gRPC,用 fixture 测试(spec §2.5.10)。
 
 **Architecture:** 计算层子系统,与 SocialSimulator 同属 **Python 侧**。诊断评测器不直接调用任何 TypeScript,只通过 ControlPlane 的 git 树 YAML 产物 + `schemas/` 语言中立 JSON Schema 与其余子系统通信。双轨输出在"错误归类器 + G 组探针 + 隔离校验器"层汇合成统一 `DiagnosticReport`(spec §2.5.2 架构图)。静态轨的 SoMEval 是执行层基础设施,通过薄适配层集成(子进程/库),其原始输出转成本项目 `ItemResult` 格式;适配层用 SoMEval 固定输出样本 mock 测试,不依赖真实调用(spec §2.5.10)。动态轨复用 Plan 2 已合入 main 的纯函数 `run_episode`,角色分配为"候选 checkpoint vs 标准化对手人格池"(spec §2.5.2)。
 
@@ -13,8 +13,8 @@
 - LLM-as-judge:V1 通过 `JudgeBackend` Protocol 抽象,真实调用留到接入外部推理桥接的计划;本计划用确定性 mock judge 测试(§2.5.10 "judge 部分整体 mock")
 
 **Spec:**
-- `docs/superpowers/specs/2026-09-24-rismforge-subsystem-design.md`(七子系统详细设计,本计划实现其 **§2.5 诊断评测体系**)
-- `docs/superpowers/specs/2026-09-22-rismforge-architecture-design.md`(总体架构)
+- `docs/superpowers/specs/2026-09-24-rise-subsystem-design.md`(七子系统详细设计,本计划实现其 **§2.5 诊断评测体系**)
+- `docs/superpowers/specs/2026-09-22-rise-architecture-design.md`(总体架构)
 
 **依赖的既有实现(Plan 1 ControlPlane + Plan 2 SocialSimulator,均已合入 main):**
 - `controlplane.envelope`:`Envelope(id, type, version, created_at, created_by, status, schema_version, links=[], payload={})`;`OwnerRef()` 默认 `owner="default"`/`visibility="shared"`;`BigRef(uri, sha256, size_bytes, fetch_hint=None)`。均带 `to_dict`/`from_dict`。

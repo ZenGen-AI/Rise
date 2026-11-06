@@ -56,7 +56,7 @@ def _assembly_flags(p: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="factory", description="RismForge 组合根:调和循环与只读可观测")
+    parser = argparse.ArgumentParser(prog="factory", description="Rise 组合根:调和循环与只读可观测")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_run = sub.add_parser("run", help="跑调和循环")

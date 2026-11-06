@@ -145,7 +145,7 @@ INTERACT_MESSAGE_TIMEOUT_S = 120.0  # 客户端相邻两条服务端消息:间�
 
 
 def memory_wiring(repo_root: Path, env: Mapping[str, str], *, deployment: bool) -> MemoryWiring:
-    """按 RISMFORGE_MEMORY_CONFIG 选记忆后端,真实现在 `factory.memory_runtime.memory_wiring`。
+    """按 RISE_MEMORY_CONFIG 选记忆后端,真实现在 `factory.memory_runtime.memory_wiring`。
 
     这里只是薄的转发,保证 `factory.wire` 上有这个名字(装配与测试都从这里取)而不在导入期拖进 mindagent:
     `factory.cli` 顶层导入本模块,而不带 --enable 的入口不许载入 mindagent(Ruling 16)。"""
@@ -441,7 +441,7 @@ def assemble(
     if missing:
         raise FactoryConfigError(f"no handler builder for {missing}")
     evaluator = build_mock_evaluator(store)
-    # 记忆后端只在需要时选(--interact,或启用了轮次与收录处理器之一);没设 RISMFORGE_MEMORY_CONFIG 走替身。
+    # 记忆后端只在需要时选(--interact,或启用了轮次与收录处理器之一);没设 RISE_MEMORY_CONFIG 走替身。
     # 其余入口不读这个变量。早于 _shared_runtime:运行时的等提交上限随后端取值。
     needs_deployment = bool(keys & {"start_agent_round", "admit_proposal"})
     memory = None

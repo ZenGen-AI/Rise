@@ -1,4 +1,4 @@
-# RismForge 系统总体设计
+# Rise 系统总体设计
 
 | 项 | 内容 |
 |---|---|
@@ -10,7 +10,7 @@
 
 ## 1. 一页读懂
 
-RismForge 是一套"AI 驱动的社会心智后训练工厂"。输入通用开源基础模型,输出社会心智能力显著增强的模型,代号 ZenGen。工厂把五件事串成一个闭环:社会情境仿真、权重级训练、诊断评测、训练配方沉淀、智能体技能与记忆自进化。每一轮由 AI 决定练什么,由人在三道审核门把关。Actio 的记忆由 Starling 提供,场景二里每个角色位都是带记忆的 Actio 智能体。
+Rise(Recursive Interactive Social mind Evolution,递归交互式社会心智进化)是一套"AI 驱动的社会心智后训练工厂"。输入通用开源基础模型,输出社会心智能力显著增强的模型,代号 ZenGen。工厂把五件事串成一个闭环:社会情境仿真、权重级训练、诊断评测、训练配方沉淀、智能体技能与记忆自进化。每一轮由 AI 决定练什么,由人在三道审核门把关。Actio 的记忆由 Starling 提供,场景二里每个角色位都是带记忆的 Actio 智能体。
 
 **五句话讲清工作原理**
 
@@ -89,9 +89,9 @@ RismForge 是一套"AI 驱动的社会心智后训练工厂"。输入通用开�
 图 1 给出四层结构。控制层放决策与配方组件,协调层 ControlPlane 承载产物树与三道人工门,计算层放训练、仿真与智能体,共享基础设施提供智能体框架与引擎。除两条橙色的受限直连接口外,所有交互都经 ControlPlane 的产物。
 
 <!-- figure:begin 00-architecture -->
-![RismForge 系统架构](diagrams/00-architecture.svg)
+![Rise 系统架构](diagrams/00-architecture.svg)
 
-**图 1　RismForge 系统架构**　四层结构。控制层放决策与配方相关的四个组件。协调层 ControlPlane 配三道人工审核门。计算层放三个子系统。共享基础设施放 Actio、Starling 记忆库、远端计算层、训练与推理引擎。三个计算层子系统都使用 Actio 实例,MindTrainer 用的是训练位实例。所有子系统经 ControlPlane 读写产物,只有两条受限直连接口绕过它。
+**图 1　Rise 系统架构**　四层结构。控制层放决策与配方相关的四个组件。协调层 ControlPlane 配三道人工审核门。计算层放三个子系统。共享基础设施放 Actio、Starling 记忆库、远端计算层、训练与推理引擎。三个计算层子系统都使用 Actio 实例,MindTrainer 用的是训练位实例。所有子系统经 ControlPlane 读写产物,只有两条受限直连接口绕过它。
 
 <details>
 <summary>文字版:图中的节点与连线</summary>
@@ -147,7 +147,7 @@ RismForge 是一套"AI 驱动的社会心智后训练工厂"。输入通用开�
 
 外部推理桥接在概念上属共享基础设施(可被规划器、智能体等多个子系统调用),物理上运行在控制层所在的本地开发机,原因:命令行工具的登录态与网络出口绑定在本地。
 
-Starling 是内嵌的 SQLite 记忆库,属共享基础设施。它从源码构建,经可选 extra `memory` 安装。环境变量 `RISMFORGE_MEMORY_CONFIG` 未设时才用替身。设了而文件或依赖不合规(含 Starling 未装),装配期退出码 2。库文件在仓库之外,根目录由本机记忆配置给出。库必须和 Actio 实例同机,否则每轮召回都要跨机往返。
+Starling 是内嵌的 SQLite 记忆库,属共享基础设施。它从源码构建,经可选 extra `memory` 安装。环境变量 `RISE_MEMORY_CONFIG` 未设时才用替身。设了而文件或依赖不合规(含 Starling 未装),装配期退出码 2。库文件在仓库之外,根目录由本机记忆配置给出。库必须和 Actio 实例同机,否则每轮召回都要跨机往返。
 
 ### 3.2 七个子系统
 
@@ -654,7 +654,7 @@ rollout 世界的建与删 [已落地]:客户端进入 `policy_for_rollout` 时�
 |---|---|---|---|
 | L1 结构化摘要 | 外部推理的成本与失败记录、指向证据产物的索引 | git 树,`run_trace.yaml` | 规划器、审核人 |
 | L2 指标流 | 逐步 loss、reward、学习率 | 计算层文件,树里只存引用 | 研究者 |
-| L3 原始日志 | 进程输出、外部命令行完整请求与响应,须脱敏 | 进程输出与训练日志在计算层;外部推理桥接的请求响应日志在控制面仓库内的 `.rismforge/logs/`,由自带的忽略规则挡在版本控制之外 | 研究者 |
+| L3 原始日志 | 进程输出、外部命令行完整请求与响应,须脱敏 | 进程输出与训练日志在计算层;外部推理桥接的请求响应日志在控制面仓库内的 `.rise/logs/`,由自带的忽略规则挡在版本控制之外 | 研究者 |
 
 全链路追踪复用两个键:`run_id` 与 `links`。成本是规划的一等输入信号:桥接每次成功调用外部模型,都经记账模块把这次的尝试次数写进 `run_trace.yaml`,规划上下文直接读它,不经结果摘要;重试耗尽的失败调用不记账。GPU 小时与墙钟时长在真实执行器接入前没有写入方 [推迟]。未记录的成本省略该键,不写 0,因为 0 会被读成"免费"。只读命令 `trace`、`cost`、`logs` 的函数 [已落地]。
 
@@ -665,13 +665,13 @@ rollout 世界的建与删 [已落地]:客户端进入 `policy_for_rollout` 时�
 | 可复现性配置 | 后端选择、模型名、提示模板版本、重试策略 | `control-plane/config/` | 进 |
 | 环境配置 [已落地] | 远程服务器的路径与阈值:工作目录、基座与留出集路径、依赖源码副本的父目录(`host_deps_root`,只有 `--executor roll` 要)、预检阈值、轮询间隔与作业超时。ROLL 代码不再由人放上主机:`--executor roll` 从本仓库的 submodule 部署钉住的版本,端点里的 `roll_root` 与 `sft_template` 只剩 `--interact` 与 SoMEval 在用 | `control-plane/compute/endpoints.yaml` | 进,不含秘密;人工写,`install_defaults` 不安装 |
 | ROLL 运行环境 [已落地] | ROLL4ZenGen 的版本(rise 仓库 HEAD 里 `third_party/ROLL4ZenGen` 的 gitlink)、训练镜像 id、Megatron-LM 与 fla 源码副本的内容指纹、容器参数 | ROLL 是 git submodule;其余是 `src/compute/roll_env.py` 的代码常量 | 进:改任何一项要改代码、过评审,训练记录的 `policy_backend` 记下实际用的那一份 |
-| 主机映射 [已落地] | `endpoint_id` 到 ssh 别名,主机、端口、用户与密钥都在 `~/.ssh/config` | 本机文件,路径由环境变量 `RISMFORGE_COMPUTE_HOSTS` 指定 | 不进:地址一旦进了提交就清不掉 |
-| 本机记忆配置 | 记忆库根目录、抽取与嵌入的端点和模型 | 树外,路径由 `RISMFORGE_MEMORY_CONFIG` 指定,权限 0600 | 不进;密钥是 `OPENAI_API_KEY` |
+| 主机映射 [已落地] | `endpoint_id` 到 ssh 别名,主机、端口、用户与密钥都在 `~/.ssh/config` | 本机文件,路径由环境变量 `RISE_COMPUTE_HOSTS` 指定 | 不进:地址一旦进了提交就清不掉 |
+| 本机记忆配置 | 记忆库根目录、抽取与嵌入的端点和模型 | 树外,路径由 `RISE_MEMORY_CONFIG` 指定,权限 0600 | 不进;密钥是 `OPENAI_API_KEY` |
 | 凭证 | API token、SSH 口令 | 环境变量或被忽略的本地文件 | 绝不进 |
 
 配置只写环境变量名。加载器按变量名解析,缺失就明确报错;树里出现凭证值字段就拒绝加载;写日志前过脱敏函数。
 
-记忆配置照同一思路另写一份。配置里不放密钥,抽取与嵌入的密钥是 Starling 固定读取的 `OPENAI_API_KEY`。启动时只检查它非空,报错只写变量名。端点地址带用户名口令时读取即拒绝。`RISMFORGE_MEMORY_CONFIG` 未设时才用替身,训练路与部署路都是,并在启动日志里写 `memory backend: stand-in`。设了而文件不在、权限不是 0600、在仓库内、缺键多键、依赖未装,或记忆根下的 `runs/` 是符号链接或不是目录,装配期一律退出码 2。
+记忆配置照同一思路另写一份。配置里不放密钥,抽取与嵌入的密钥是 Starling 固定读取的 `OPENAI_API_KEY`。启动时只检查它非空,报错只写变量名。端点地址带用户名口令时读取即拒绝。`RISE_MEMORY_CONFIG` 未设时才用替身,训练路与部署路都是,并在启动日志里写 `memory backend: stand-in`。设了而文件不在、权限不是 0600、在仓库内、缺键多键、依赖未装,或记忆根下的 `runs/` 是符号链接或不是目录,装配期一律退出码 2。
 
 ### 7.3 面向 V2 的四项扩展性税
 

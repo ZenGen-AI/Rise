@@ -20,7 +20,7 @@ PKGS = {"controlplane", "simulator", "diagnostic", "mindtrainer", "actio", "reci
         "trainscheduler", "mindagent", "inference_bridge", "factory"}
 # 项目专有名词与外部名称:不是代码符号,不核对
 ALLOW = set(dir(builtins)) | {
-    "RismForge", "ZenGen", "SocialSimulator", "MindTrainer", "MindAgent", "RecipeStore", "TrainScheduler",
+    "Rise", "ZenGen", "SocialSimulator", "MindTrainer", "MindAgent", "RecipeStore", "TrainScheduler",
     "TrainPlanner", "ControlPlane", "InteractTrain", "BatchTrain", "AgentRSI", "SoMEval", "SoMBench", "ToMBench",
     "EmoBench", "HiToM", "FANToM", "GitHub", "PyYAML", "TypeScript", "JavaScript", "SQLite", "DeepSeek",
     "TensorBoard", "OpenAI", "JsonSchema", "ClaudeCode", "VariantFamily", "QuickLook",

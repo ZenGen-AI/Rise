@@ -51,7 +51,7 @@ def test_closed_loop_run_exits_2_when_the_repository_is_locked_and_writes_nothin
     assert code == 2
     err = capsys.readouterr().err
     assert err.startswith("factory: error: repository is locked by another process: ")
-    assert "rismforge.lock" in err
+    assert "rise.lock" in err
     assert (git_head(store), tree_files(store)) == (head, files)
 
 

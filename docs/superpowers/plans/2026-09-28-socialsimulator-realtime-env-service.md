@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 实现 RismForge SocialSimulator 的**实时环境服务模块**(spec §2.6)——一个常驻 gRPC 双向流服务,把已合入 main 的纯函数 Simulation Runner 核心(`run_episode`)包装成支持多轮交互、会话隔离、异常检测的实时服务,供未来 MindTrainer 的 InteractTrain(受限接口①)与 MindAgent 的经验采集(受限接口②)调用。产出:完整的 gRPC 消息协议 + 会话状态机 + 会话驱动器 + 服务端 + 客户端包装器,端到端在真实本地 socket 上验证,复用同一个 `run_episode` 核心(不重新实现轮次驱动逻辑)。
+**Goal:** 实现 Rise SocialSimulator 的**实时环境服务模块**(spec §2.6)——一个常驻 gRPC 双向流服务,把已合入 main 的纯函数 Simulation Runner 核心(`run_episode`)包装成支持多轮交互、会话隔离、异常检测的实时服务,供未来 MindTrainer 的 InteractTrain(受限接口①)与 MindAgent 的经验采集(受限接口②)调用。产出:完整的 gRPC 消息协议 + 会话状态机 + 会话驱动器 + 服务端 + 客户端包装器,端到端在真实本地 socket 上验证,复用同一个 `run_episode` 核心(不重新实现轮次驱动逻辑)。
 
 **Architecture:** 计算层子系统,Python 侧。协议层用 Protocol Buffers + gRPC 双向流(spec 补充 C.1 已定技术选型)。核心设计:服务端为每个会话在后台线程里驱动 `run_episode`(本计划扩展其签名新增 `on_turn` 回调,向后兼容,与 Plan 3 扩展 `stop_predicate` 同一模式),客户端驱动的角色位(如被训练模型的自博弈角色)由一个新的 `ClientDrivenBackend` 实现 `ModelBackend` Protocol——其 `respond()` 阻塞等待 gRPC 主循环转发来的客户端消息,从而让 `run_episode` 的轮次驱动逻辑**完全不变**即可支持"部分角色由跨进程客户端实时驱动"。服务端主循环(`Interact` 方法)是一个简单的"收一条 ClientMessage → 路由到会话驱动器 → 转发驱动器产出的 ServerMessage"循环,不做自己的轮次计数,所有轮次语义都在 `run_episode` 内部。
 
@@ -13,8 +13,8 @@
 - 标准库 `threading`/`queue`/`uuid` 做会话驱动的线程桥接,零新第三方并发依赖
 
 **Spec:**
-- `docs/superpowers/specs/2026-09-24-rismforge-subsystem-design.md`(七子系统详细设计,本计划实现其 **§2.6 实时环境服务接口协议设计** + 补充 C.1/C.2)
-- `docs/superpowers/specs/2026-09-22-rismforge-architecture-design.md`(总体架构)
+- `docs/superpowers/specs/2026-09-24-rise-subsystem-design.md`(七子系统详细设计,本计划实现其 **§2.6 实时环境服务接口协议设计** + 补充 C.1/C.2)
+- `docs/superpowers/specs/2026-09-22-rise-architecture-design.md`(总体架构)
 
 **依赖的既有实现(Plan 1 ControlPlane + Plan 2 SocialSimulator 批量模块,均已合入 main):**
 - `simulator.datamodel`:`Persona(id, traits, motivation, speech_style, values, source="auto")`、`RoleSlot(slot_id, description)`、`Scenario(id, background, role_slots, conflict, norms, purpose, source="auto")`、`RoleBinding(slot_id, persona_id, model_backend)`、`RoleAssignment(scenario_id, bindings, max_turns)`(`.slot_ids() -> set[str]`)、`TurnRecord(turn_index, speaker_slot, utterance, inner_thought=None, activation_trace=None)`、`Episode(id, scenario_id, role_assignment, turns, terminated_reason)`。均带对称 `to_dict`/`from_dict`。
@@ -93,7 +93,7 @@
 ```protobuf
 syntax = "proto3";
 
-package rismforge.realtime;
+package rise.realtime;
 
 import "google/protobuf/struct.proto";
 

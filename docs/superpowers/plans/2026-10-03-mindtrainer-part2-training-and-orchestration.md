@@ -11,7 +11,7 @@
 **Spec:**
 - `docs/superpowers/specs/2026-10-03-mindtrainer-design.md`(本计划实现其 §5.3、§6、§7、§9)
 - 上半段计划:`docs/superpowers/plans/2026-10-03-mindtrainer-part1-trajectory-and-rewards.md`(**必须先完成**;任务编号接着它的 1–9 往下排)
-- 背景:`docs/superpowers/specs/2026-09-24-rismforge-subsystem-design.md` 补充 D.2、补充 E
+- 背景:`docs/superpowers/specs/2026-09-24-rise-subsystem-design.md` 补充 D.2、补充 E
 
 **依赖上半段产出的名字(签名以上半段计划为准)**
 
@@ -92,7 +92,7 @@
 - **状态属于信封,不属于业务字段**:`TrainingRun.status` 只是为了让 `decide_resume` 在一个对象上判定,落盘时写进信封的 `status`,读回时由 `read_training_run` 填回。
 - **状态机沿用非审核类**:`pending → executed | failed`。同状态重写(`pending → pending`,更新存点进度)允许;终态不能被改回 `pending`,也不能互相改写,违者抛 `InvalidTransitionError`。
 - **失败是数据**:`failed` 记录必须带 `failure["category"]`(确定性失败为 `T2`),否则抛 `ValueError`,事后才追查得到为什么失败。
-- **`metric_stream_refs` 的键名固定**:`rismforge trace` 读的就是这个键,有测试用真实的 `trace()` 验证。逐步指标序列不进 git(补充 D.2),只留摘要和引用。
+- **`metric_stream_refs` 的键名固定**:`rise trace` 读的就是这个键,有测试用真实的 `trace()` 验证。逐步指标序列不进 git(补充 D.2),只留摘要和引用。
 - **放在 run 目录顶层**:`GitStore.list_products` 只扫 `*.yaml` 且不递归,放进子目录 `trace` 就看不到。
 - **时间戳用固定常量**:产物内容必须是输入的纯函数,崩溃后重放才会逐字节相同,`write_product` 对此是空操作(有测试数提交数)。
 - 信封:`id = trainrun-{run_id}`,`type = training_run`,`links = [run_id]`。
@@ -298,7 +298,7 @@ class TrainingRun:
     判定:pending(运行中)| executed(成功)| failed(确定性失败,保留)。
     failure 仅在 failed 时有值:{"category": "T2", "point": ..., "detail": ...}。
     逐步指标序列不进 git(补充 D.2),只留 curve_summary 摘要和指标流引用。
-    metric_stream_refs 的键名固定,rismforge trace 读的就是它。
+    metric_stream_refs 的键名固定,rise trace 读的就是它。
     """
 
     run_id: str

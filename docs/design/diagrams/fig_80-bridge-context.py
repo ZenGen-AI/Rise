@@ -20,7 +20,7 @@ def build() -> Canvas:
     ext = c.box(820, 230, 230, "外部强模型命令行", "claude -p · codex exec\n本机登录态", kind="neutral", h=80)
 
     tree = c.store(30, 410, 300, "ControlPlane 产物树", "run_trace · failure_record\nconfig/backends.yaml")
-    logs = c.store(400, 410, 300, "桥接日志目录", ".rismforge/logs\n对 git 不可见")
+    logs = c.store(400, 410, 300, "桥接日志目录", ".rise/logs\n对 git 不可见")
     env = c.box(800, 410, 250, "环境变量", "凭证值只在这里\n不进 git 树", kind="human", h=80)
 
     c.edge(ts, tp, label="plan()")

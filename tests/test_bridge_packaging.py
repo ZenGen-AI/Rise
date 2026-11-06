@@ -33,4 +33,4 @@ def test_the_bridge_only_depends_on_controlplane_and_the_stdlib():
 
 def test_the_repo_gitignore_covers_the_default_log_dir():
     lines = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
-    assert ".rismforge/" in lines
+    assert ".rise/" in lines

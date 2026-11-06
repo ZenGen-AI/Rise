@@ -9,7 +9,7 @@
 走的是真正入口会走的那条配置路径(factory.compute_config),所以这里暴露的配置错误,
 `factory run --executor roll` 也会在同一处暴露。需要:
   - <repo_root>/control-plane/compute/endpoints.yaml        (人工写,见设计 90 号文档)
-  - 环境变量 RISMFORGE_COMPUTE_HOSTS 指向 {endpoint_id: ssh 别名} 的 YAML 文件
+  - 环境变量 RISE_COMPUTE_HOSTS 指向 {endpoint_id: ssh 别名} 的 YAML 文件
   - 本机 `ssh <别名> true` 免密可通
 
 步骤(按顺序,前一步不过不会跑后一步):
@@ -52,8 +52,8 @@ import compute.roll_env as roll_env  # noqa: E402  依赖清单在调用时读(�
 from compute.roll_deploy import _host_tree as host_tree  # noqa: E402  与部署时同一个口径
 from compute.roll_source import pinned_roll_commit, roll_archive  # noqa: E402
 
-# rise 仓库根:ROLL submodule 在它下面。RISMFORGE_RISE_ROOT 只给本脚本的测试用,真用时不设。
-REPO_ROOT = Path(os.environ.get("RISMFORGE_RISE_ROOT") or Path(__file__).resolve().parent.parent)
+# rise 仓库根:ROLL submodule 在它下面。RISE_ROOT 只给本脚本的测试用,真用时不设。
+REPO_ROOT = Path(os.environ.get("RISE_ROOT") or Path(__file__).resolve().parent.parent)
 
 
 class Stop(Exception):
@@ -101,7 +101,7 @@ def run(repo_root: str, endpoint_name: str | None, *, local: bool) -> int:
         hosts = read_host_map(env=os.environ)
         alias = hosts.get(ep.endpoint_id)
         if alias is None:
-            raise Stop(f"RISMFORGE_COMPUTE_HOSTS has no entry for endpoint {ep.endpoint_id!r}")
+            raise Stop(f"RISE_COMPUTE_HOSTS has no entry for endpoint {ep.endpoint_id!r}")
         ctx["ep"] = ep
         # 不用 build_compute_client:--local 要换 runner,而它没有这个口子。形态校验是同一条(SshTransport)。
         runner = _local_runner if local else None

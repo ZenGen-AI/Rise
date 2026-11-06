@@ -25,7 +25,7 @@ _sym_db = _symbol_database.Default()
 from google.protobuf import struct_pb2 as google_dot_protobuf_dot_struct__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n+simulator/realtime/proto/realtime_env.proto\x12\x12rismforge.realtime\x1a\x1cgoogle/protobuf/struct.proto\"t\n\x0cPersonaProto\x12\n\n\x02id\x18\x01 \x01(\t\x12\x0e\n\x06traits\x18\x02 \x03(\t\x12\x12\n\nmotivation\x18\x03 \x01(\t\x12\x14\n\x0cspeech_style\x18\x04 \x01(\t\x12\x0e\n\x06values\x18\x05 \x03(\t\x12\x0e\n\x06source\x18\x06 \x01(\t\"\x94\x01\n\x10RoleBindingProto\x12\x0f\n\x07slot_id\x18\x01 \x01(\t\x12\x12\n\npersona_id\x18\x02 \x01(\t\x12\x15\n\rmodel_backend\x18\x03 \x01(\t\x12\x16\n\tmodel_ref\x18\x04 \x01(\tH\x00\x88\x01\x01\x12\x13\n\x06\x64river\x18\x05 \x01(\tH\x01\x88\x01\x01\x42\x0c\n\n_model_refB\t\n\x07_driver\"u\n\x13RoleAssignmentProto\x12\x13\n\x0bscenario_id\x18\x01 \x01(\t\x12\x36\n\x08\x62indings\x18\x02 \x03(\x0b\x32$.rismforge.realtime.RoleBindingProto\x12\x11\n\tmax_turns\x18\x03 \x01(\x05\"\xc9\x01\n\x0fTurnRecordProto\x12\x12\n\nturn_index\x18\x01 \x01(\x05\x12\x14\n\x0cspeaker_slot\x18\x02 \x01(\t\x12\x11\n\tutterance\x18\x03 \x01(\t\x12\x1a\n\rinner_thought\x18\x04 \x01(\tH\x00\x88\x01\x01\x12\x36\n\x10\x61\x63tivation_trace\x18\x05 \x01(\x0b\x32\x17.google.protobuf.StructH\x01\x88\x01\x01\x42\x10\n\x0e_inner_thoughtB\x13\n\x11_activation_trace\"\xbd\x02\n\rCreateSession\x12\x13\n\x0bscenario_id\x18\x01 \x01(\t\x12@\n\x0frole_assignment\x18\x02 \x01(\x0b\x32\'.rismforge.realtime.RoleAssignmentProto\x12\x41\n\x08personas\x18\x03 \x03(\x0b\x32/.rismforge.realtime.CreateSession.PersonasEntry\x12\x0f\n\x07purpose\x18\x04 \x01(\t\x12\x1a\n\x12\x63lient_driven_slot\x18\x05 \x01(\t\x12\x12\n\nepisode_id\x18\x06 \x01(\t\x1aQ\n\rPersonasEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12/\n\x05value\x18\x02 \x01(\x0b\x32 .rismforge.realtime.PersonaProto:\x02\x38\x01\"\"\n\x0cSessionReady\x12\x12\n\nsession_id\x18\x01 \x01(\t\"\x9a\x01\n\nSubmitTurn\x12\x11\n\tutterance\x18\x01 \x01(\t\x12\x1a\n\rinner_thought\x18\x02 \x01(\tH\x00\x88\x01\x01\x12\x36\n\x10\x61\x63tivation_trace\x18\x03 \x01(\x0b\x32\x17.google.protobuf.StructH\x01\x88\x01\x01\x42\x10\n\x0e_inner_thoughtB\x13\n\x11_activation_trace\"?\n\nTurnUpdate\x12\x31\n\x04turn\x18\x01 \x01(\x0b\x32#.rismforge.realtime.TurnRecordProto\"`\n\nEndSession\x12\x0e\n\x06reason\x18\x01 \x01(\t\x12\x12\n\nepisode_id\x18\x02 \x01(\t\x12\x1b\n\x0e\x66\x61ilure_detail\x18\x03 \x01(\tH\x00\x88\x01\x01\x42\x11\n\x0f_failure_detail\"\xc5\x01\n\rClientMessage\x12;\n\x0e\x63reate_session\x18\x01 \x01(\x0b\x32!.rismforge.realtime.CreateSessionH\x00\x12\x35\n\x0bsubmit_turn\x18\x02 \x01(\x0b\x32\x1e.rismforge.realtime.SubmitTurnH\x00\x12\x35\n\x0b\x65nd_session\x18\x03 \x01(\x0b\x32\x1e.rismforge.realtime.EndSessionH\x00\x42\t\n\x07payload\"\xc3\x01\n\rServerMessage\x12\x39\n\rsession_ready\x18\x01 \x01(\x0b\x32 .rismforge.realtime.SessionReadyH\x00\x12\x35\n\x0bturn_update\x18\x02 \x01(\x0b\x32\x1e.rismforge.realtime.TurnUpdateH\x00\x12\x35\n\x0b\x65nd_session\x18\x03 \x01(\x0b\x32\x1e.rismforge.realtime.EndSessionH\x00\x42\t\n\x07payload2j\n\x12\x45nvironmentService\x12T\n\x08Interact\x12!.rismforge.realtime.ClientMessage\x1a!.rismforge.realtime.ServerMessage(\x01\x30\x01\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n+simulator/realtime/proto/realtime_env.proto\x12\rrise.realtime\x1a\x1cgoogle/protobuf/struct.proto\"t\n\x0cPersonaProto\x12\n\n\x02id\x18\x01 \x01(\t\x12\x0e\n\x06traits\x18\x02 \x03(\t\x12\x12\n\nmotivation\x18\x03 \x01(\t\x12\x14\n\x0cspeech_style\x18\x04 \x01(\t\x12\x0e\n\x06values\x18\x05 \x03(\t\x12\x0e\n\x06source\x18\x06 \x01(\t\"\x94\x01\n\x10RoleBindingProto\x12\x0f\n\x07slot_id\x18\x01 \x01(\t\x12\x12\n\npersona_id\x18\x02 \x01(\t\x12\x15\n\rmodel_backend\x18\x03 \x01(\t\x12\x16\n\tmodel_ref\x18\x04 \x01(\tH\x00\x88\x01\x01\x12\x13\n\x06\x64river\x18\x05 \x01(\tH\x01\x88\x01\x01\x42\x0c\n\n_model_refB\t\n\x07_driver\"p\n\x13RoleAssignmentProto\x12\x13\n\x0bscenario_id\x18\x01 \x01(\t\x12\x31\n\x08\x62indings\x18\x02 \x03(\x0b\x32\x1f.rise.realtime.RoleBindingProto\x12\x11\n\tmax_turns\x18\x03 \x01(\x05\"\xc9\x01\n\x0fTurnRecordProto\x12\x12\n\nturn_index\x18\x01 \x01(\x05\x12\x14\n\x0cspeaker_slot\x18\x02 \x01(\t\x12\x11\n\tutterance\x18\x03 \x01(\t\x12\x1a\n\rinner_thought\x18\x04 \x01(\tH\x00\x88\x01\x01\x12\x36\n\x10\x61\x63tivation_trace\x18\x05 \x01(\x0b\x32\x17.google.protobuf.StructH\x01\x88\x01\x01\x42\x10\n\x0e_inner_thoughtB\x13\n\x11_activation_trace\"\xae\x02\n\rCreateSession\x12\x13\n\x0bscenario_id\x18\x01 \x01(\t\x12;\n\x0frole_assignment\x18\x02 \x01(\x0b\x32\".rise.realtime.RoleAssignmentProto\x12<\n\x08personas\x18\x03 \x03(\x0b\x32*.rise.realtime.CreateSession.PersonasEntry\x12\x0f\n\x07purpose\x18\x04 \x01(\t\x12\x1a\n\x12\x63lient_driven_slot\x18\x05 \x01(\t\x12\x12\n\nepisode_id\x18\x06 \x01(\t\x1aL\n\rPersonasEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12*\n\x05value\x18\x02 \x01(\x0b\x32\x1b.rise.realtime.PersonaProto:\x02\x38\x01\"\"\n\x0cSessionReady\x12\x12\n\nsession_id\x18\x01 \x01(\t\"\x9a\x01\n\nSubmitTurn\x12\x11\n\tutterance\x18\x01 \x01(\t\x12\x1a\n\rinner_thought\x18\x02 \x01(\tH\x00\x88\x01\x01\x12\x36\n\x10\x61\x63tivation_trace\x18\x03 \x01(\x0b\x32\x17.google.protobuf.StructH\x01\x88\x01\x01\x42\x10\n\x0e_inner_thoughtB\x13\n\x11_activation_trace\":\n\nTurnUpdate\x12,\n\x04turn\x18\x01 \x01(\x0b\x32\x1e.rise.realtime.TurnRecordProto\"`\n\nEndSession\x12\x0e\n\x06reason\x18\x01 \x01(\t\x12\x12\n\nepisode_id\x18\x02 \x01(\t\x12\x1b\n\x0e\x66\x61ilure_detail\x18\x03 \x01(\tH\x00\x88\x01\x01\x42\x11\n\x0f_failure_detail\"\xb6\x01\n\rClientMessage\x12\x36\n\x0e\x63reate_session\x18\x01 \x01(\x0b\x32\x1c.rise.realtime.CreateSessionH\x00\x12\x30\n\x0bsubmit_turn\x18\x02 \x01(\x0b\x32\x19.rise.realtime.SubmitTurnH\x00\x12\x30\n\x0b\x65nd_session\x18\x03 \x01(\x0b\x32\x19.rise.realtime.EndSessionH\x00\x42\t\n\x07payload\"\xb4\x01\n\rServerMessage\x12\x34\n\rsession_ready\x18\x01 \x01(\x0b\x32\x1b.rise.realtime.SessionReadyH\x00\x12\x30\n\x0bturn_update\x18\x02 \x01(\x0b\x32\x19.rise.realtime.TurnUpdateH\x00\x12\x30\n\x0b\x65nd_session\x18\x03 \x01(\x0b\x32\x19.rise.realtime.EndSessionH\x00\x42\t\n\x07payload2`\n\x12\x45nvironmentService\x12J\n\x08Interact\x12\x1c.rise.realtime.ClientMessage\x1a\x1c.rise.realtime.ServerMessage(\x01\x30\x01\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -34,30 +34,30 @@ if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
   _globals['_CREATESESSION_PERSONASENTRY']._loaded_options = None
   _globals['_CREATESESSION_PERSONASENTRY']._serialized_options = b'8\001'
-  _globals['_PERSONAPROTO']._serialized_start=97
-  _globals['_PERSONAPROTO']._serialized_end=213
-  _globals['_ROLEBINDINGPROTO']._serialized_start=216
-  _globals['_ROLEBINDINGPROTO']._serialized_end=364
-  _globals['_ROLEASSIGNMENTPROTO']._serialized_start=366
-  _globals['_ROLEASSIGNMENTPROTO']._serialized_end=483
-  _globals['_TURNRECORDPROTO']._serialized_start=486
-  _globals['_TURNRECORDPROTO']._serialized_end=687
-  _globals['_CREATESESSION']._serialized_start=690
-  _globals['_CREATESESSION']._serialized_end=1007
-  _globals['_CREATESESSION_PERSONASENTRY']._serialized_start=926
-  _globals['_CREATESESSION_PERSONASENTRY']._serialized_end=1007
-  _globals['_SESSIONREADY']._serialized_start=1009
-  _globals['_SESSIONREADY']._serialized_end=1043
-  _globals['_SUBMITTURN']._serialized_start=1046
-  _globals['_SUBMITTURN']._serialized_end=1200
-  _globals['_TURNUPDATE']._serialized_start=1202
-  _globals['_TURNUPDATE']._serialized_end=1265
-  _globals['_ENDSESSION']._serialized_start=1267
-  _globals['_ENDSESSION']._serialized_end=1363
-  _globals['_CLIENTMESSAGE']._serialized_start=1366
-  _globals['_CLIENTMESSAGE']._serialized_end=1563
-  _globals['_SERVERMESSAGE']._serialized_start=1566
-  _globals['_SERVERMESSAGE']._serialized_end=1761
-  _globals['_ENVIRONMENTSERVICE']._serialized_start=1763
-  _globals['_ENVIRONMENTSERVICE']._serialized_end=1869
+  _globals['_PERSONAPROTO']._serialized_start=92
+  _globals['_PERSONAPROTO']._serialized_end=208
+  _globals['_ROLEBINDINGPROTO']._serialized_start=211
+  _globals['_ROLEBINDINGPROTO']._serialized_end=359
+  _globals['_ROLEASSIGNMENTPROTO']._serialized_start=361
+  _globals['_ROLEASSIGNMENTPROTO']._serialized_end=473
+  _globals['_TURNRECORDPROTO']._serialized_start=476
+  _globals['_TURNRECORDPROTO']._serialized_end=677
+  _globals['_CREATESESSION']._serialized_start=680
+  _globals['_CREATESESSION']._serialized_end=982
+  _globals['_CREATESESSION_PERSONASENTRY']._serialized_start=906
+  _globals['_CREATESESSION_PERSONASENTRY']._serialized_end=982
+  _globals['_SESSIONREADY']._serialized_start=984
+  _globals['_SESSIONREADY']._serialized_end=1018
+  _globals['_SUBMITTURN']._serialized_start=1021
+  _globals['_SUBMITTURN']._serialized_end=1175
+  _globals['_TURNUPDATE']._serialized_start=1177
+  _globals['_TURNUPDATE']._serialized_end=1235
+  _globals['_ENDSESSION']._serialized_start=1237
+  _globals['_ENDSESSION']._serialized_end=1333
+  _globals['_CLIENTMESSAGE']._serialized_start=1336
+  _globals['_CLIENTMESSAGE']._serialized_end=1518
+  _globals['_SERVERMESSAGE']._serialized_start=1521
+  _globals['_SERVERMESSAGE']._serialized_end=1701
+  _globals['_ENVIRONMENTSERVICE']._serialized_start=1703
+  _globals['_ENVIRONMENTSERVICE']._serialized_end=1799
 # @@protoc_insertion_point(module_scope)

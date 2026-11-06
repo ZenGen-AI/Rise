@@ -88,7 +88,7 @@ class TrainingRun:
     判定:pending(运行中)| executed(成功)| failed(确定性失败,保留)。
     failure 仅在 failed 时有值:{"category": "T2", "point": ..., "detail": ...}。
     逐步指标序列不进 git(补充 D.2),只留 curve_summary 摘要和指标流引用。
-    metric_stream_refs 的键名固定,rismforge trace 读的就是它。
+    metric_stream_refs 的键名固定,rise trace 读的就是它。
     policy_backend 只在 interact 训练里有值:说明这条记录的数据是哪种后端产出的(训练位的起点与
     端点、各对手位的驱动与来源),读的人不必从配置里重新推导。纯 JSON 类型的字典,形状由派发器定。
     与 last_checkpoint_ref 不同,to_dict 在它为 None 时不写这个键:加字段之前写下的记录

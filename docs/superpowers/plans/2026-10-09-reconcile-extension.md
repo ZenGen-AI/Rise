@@ -142,14 +142,14 @@ def max_model_version(store) -> int                  # 没有模型为 0;按 zen
 TreeState.max_model_version: int | None = None        # 非 None 时 reconcile 用它加一定新版本号,否则沿用 model_count
 # controlplane.lock
 class RepoLockedError(Exception)                      # str(exc) 恰好是锁文件的绝对路径
-def acquire_repo_lock(repo_root: str | Path)          # 上下文管理器;锁文件 <repo_root>/.git/rismforge.lock
+def acquire_repo_lock(repo_root: str | Path)          # 上下文管理器;锁文件 <repo_root>/.git/rise.lock
 ```
 
 - `controlplane.daemon.run_daemon` 在第一个 tick 之前取锁、退出(含异常)时释放;`reconcile_once`、`apply_action` 不取锁。一次性的调用方(计划 9 的 `reconcile_one_tick`)自己用 `acquire_repo_lock` 取同一把锁。
 - `apply_action("promote_candidate")` 以模型产物的 `payload.promoted_from` 为幂等键:已有模型指向该候选就复用它的版本号,只补做候选置 `effective` 与写结果摘要。
 - `GitStore.write_product` 与 `cli/src/gittree.ts` 的 `writeProduct` 的提交只带本文件(`git commit -m <信息> -- <路径>`)。
 
-**命令行(给计划 9 的文档与端到端)**:`rismforge <review|approve|reject|confirm|status> [id] [reason]`。
+**命令行(给计划 9 的文档与端到端)**:`rise <review|approve|reject|confirm|status> [id] [reason]`。
 
 ## 跨语言约定
 
@@ -3483,7 +3483,7 @@ git apply <<'PATCH'
 +
 +describe("index dispatch", () => {
 +  it("usage names every command", () => {
-+    expect(USAGE).toBe("usage: rismforge <review|approve|reject|confirm|status> [id] [reason]");
++    expect(USAGE).toBe("usage: rise <review|approve|reject|confirm|status> [id] [reason]");
 +  });
 +
 +  it("confirm is routed through main", () => {
@@ -3611,7 +3611,7 @@ git apply <<'PATCH'
 -import { review, approve, reject, status } from "./commands.js";
 +import { review, approve, reject, confirm, status } from "./commands.js";
  
- export const CLI_NAME = "rismforge";
+ export const CLI_NAME = "rise";
  
 +export const USAGE = `usage: ${CLI_NAME} <review|approve|reject|confirm|status> [id] [reason]`;
 +
@@ -3670,7 +3670,7 @@ git commit -m "feat: cli confirm for awaiting_confirmation directives; status li
 - **新版本号取现有最大版本号加一,不数文件个数。** `max_model_version(store)` 按文件名 `zengen-v(\d+).yaml` 取最大,没有模型为 0。`TreeState` 新增 `max_model_version: int | None = None`:非 `None` 时 `reconcile` 用它加一,`None` 时沿用 `model_count`,所以只传 `model_count` 的既有 fixture 与既有测试不变;`read_tree_state` 的两条返回路径都填它。人工删掉中间的版本文件会留下版本号空洞,但新号不会撞上用过的号。
 - **复用模型时,那一次写入也照发。** 内容与已提交的逐字节相同时 `write_product` 什么都不做;若上次崩在 `git add` 与 `git commit` 之间,模型文件还停在暂存区,这一次的写入把它提交掉(有测试)。
 - **提交只带本文件(设计 CP-12)。** `GitStore.write_product` 与 TypeScript 的 `writeProduct` 改成 `git commit -m <信息> -- <路径>`:别的文件若已在暂存区(命令行写到一半,或别的进程暂存的),不被卷进这次提交,也不丢。「内容相同不提交」的既有检查保留。
-- **仓库文件锁(设计 CP-12)。** 锁文件是 `<repo_root>/.git/rismforge.lock`:在 `.git/` 下,git 不追踪,`git status` 看不到。POSIX 用 `fcntl.flock(LOCK_EX | LOCK_NB)`,Windows 用 `msvcrt.locking`(Windows 未验证)。被占用时立刻抛 `RepoLockedError`,不等待。锁是内核级的:持锁进程崩溃,系统随进程收回,不留死锁;锁文件本身不删。
+- **仓库文件锁(设计 CP-12)。** 锁文件是 `<repo_root>/.git/rise.lock`:在 `.git/` 下,git 不追踪,`git status` 看不到。POSIX 用 `fcntl.flock(LOCK_EX | LOCK_NB)`,Windows 用 `msvcrt.locking`(Windows 未验证)。被占用时立刻抛 `RepoLockedError`,不等待。锁是内核级的:持锁进程崩溃,系统随进程收回,不留死锁;锁文件本身不删。
 - **`run_daemon` 在第一个 tick 之前取锁,退出(含异常)时释放;`reconcile_once` 与 `apply_action` 不取锁。** 一次性的调用方(计划 9 的 `reconcile_one_tick`)自己用 `acquire_repo_lock` 取同一把锁。锁被占用时 `run_daemon` 一个产物都不写。`mindtrainer/wire.py` 与 `scripts/run_controlplane.py` 一个字不改,但它们调 `run_daemon`,同样被保护。TypeScript 命令行不取锁,它靠"只带本文件"与守护进程共存。
 - **既有测试一行不改。** 任务 92 的 `tests/test_daemon_closed_loop_views.py` 是本计划自己的文件,里面那条 `state == TreeState(...)` 的等值断言要带上 `max_model_version=1`,因为 `read_tree_state` 现在会填它;仓库里既有的测试不受影响(步骤 6 的全量回归证明)。
 
@@ -4028,7 +4028,7 @@ def store(tmp_path):
 
 
 def _lock_path(root):
-    return str(Path(root).absolute() / ".git" / "rismforge.lock")
+    return str(Path(root).absolute() / ".git" / "rise.lock")
 
 
 def _put_directive(store):
@@ -4058,7 +4058,7 @@ def test_a_relative_repo_root_is_reported_as_an_absolute_lock_path(store, monkey
                 pytest.fail("the second acquire must not succeed")
     message = str(exc.value)
     assert os.path.isabs(message)
-    assert Path(message).samefile(store.repo_root / ".git" / "rismforge.lock")
+    assert Path(message).samefile(store.repo_root / ".git" / "rise.lock")
 
 
 @pytest.mark.parametrize("body_raises", [False, True])
@@ -4077,8 +4077,8 @@ def test_the_lock_is_released_when_the_with_block_exits(store, body_raises):
 def test_the_lock_file_lives_under_dot_git_and_git_does_not_track_it(store):
     _put_directive(store)
     with acquire_repo_lock(store.repo_root):
-        assert (store.repo_root / ".git" / "rismforge.lock").is_file()
-        assert "rismforge.lock" not in store._git("ls-files")
+        assert (store.repo_root / ".git" / "rise.lock").is_file()
+        assert "rise.lock" not in store._git("ls-files")
         assert store._git("status", "--porcelain") == ""
 
 
@@ -4249,7 +4249,7 @@ Expected: `3 failed, 1 passed`。三个参数化用例失败(`expected [ …(2) 
 ```python
 """仓库文件锁(控制面 CP-12):同一棵 git 树同一时刻只许一个守护进程写。
 
-锁文件是 <repo_root>/.git/rismforge.lock:放在 .git 下,git 不追踪它,也不会出现在 status 里。
+锁文件是 <repo_root>/.git/rise.lock:放在 .git 下,git 不追踪它,也不会出现在 status 里。
 POSIX 用 fcntl.flock(LOCK_EX | LOCK_NB),Windows 用 msvcrt.locking(Windows 未验证)。两者都是
 内核级锁:持锁进程退出或崩溃,系统随进程收回,不会留下死锁。锁文件本身不删(删了会和并发的
 取锁竞争)。
@@ -4292,7 +4292,7 @@ class RepoLockedError(Exception):
 @contextmanager
 def acquire_repo_lock(repo_root: str | Path) -> Iterator[None]:
     """取仓库写锁;被占用时立刻抛 RepoLockedError(不等待),退出上下文时释放。"""
-    lock_path = Path(repo_root).absolute() / ".git" / "rismforge.lock"
+    lock_path = Path(repo_root).absolute() / ".git" / "rise.lock"
     fh = open(lock_path, "a+b")
     try:
         try:

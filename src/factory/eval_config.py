@@ -1,6 +1,6 @@
 """树外的本机评测配置(设计 21 的 DX-20)。
 
-评测用的端点地址与密钥只在这里:文件路径由环境变量 `RISMFORGE_EVAL_CONFIG` 给出,必须在仓库
+评测用的端点地址与密钥只在这里:文件路径由环境变量 `RISE_EVAL_CONFIG` 给出,必须在仓库
 之外、权限必须是 0600。报错只写键名与路径,不回显任何取值。密钥只经子进程环境变量交给
 SoMEval,不进命令行、日志、报告与树。
 """
@@ -17,7 +17,7 @@ import yaml
 from factory.configio import key_names
 from factory.errors import FactoryConfigError
 
-EVAL_CONFIG_ENV = "RISMFORGE_EVAL_CONFIG"
+EVAL_CONFIG_ENV = "RISE_EVAL_CONFIG"
 DEFAULT_SERVE_PORT = 18081
 DEFAULT_CONTENT_NONE_RATIO_MAX = 0.01
 

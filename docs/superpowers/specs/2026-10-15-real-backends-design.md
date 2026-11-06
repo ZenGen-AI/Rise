@@ -104,7 +104,7 @@ SoMEval(未核对):
 | `min_free_host_mem_gib`、`min_free_disk_gib` | 预检阈值 |
 | `poll_seconds`、`job_timeout_seconds` | 轮询间隔与整段作业超时 |
 
-**本机主机映射。** 一个 YAML 文件,路径由环境变量 `RISMFORGE_COMPUTE_HOSTS` 指定,放在仓库之外,内容是 `{<endpoint_id>: <ssh 别名>}`。别名指向 `~/.ssh/config` 里的主机条目,密钥、跳板、端口都在那里,所以两处配置都不存凭据。映射里查不到树内的 `endpoint_id` 时退出码 2,报错写环境变量名和 `endpoint_id`。换机器只改本机映射,树内记录与已有存点引用都不用动。
+**本机主机映射。** 一个 YAML 文件,路径由环境变量 `RISE_COMPUTE_HOSTS` 指定,放在仓库之外,内容是 `{<endpoint_id>: <ssh 别名>}`。别名指向 `~/.ssh/config` 里的主机条目,密钥、跳板、端口都在那里,所以两处配置都不存凭据。映射里查不到树内的 `endpoint_id` 时退出码 2,报错写环境变量名和 `endpoint_id`。换机器只改本机映射,树内记录与已有存点引用都不用动。
 
 **与子系统设计 G.2 的关系。** G.2 的 L-B 一行把主机、端口、用户名都放进 `endpoints.yaml`。这里收窄为只放路径与阈值,主机定位退到本机,理由与 G.3 相同:地址一旦进了提交就清不掉。G.2 已按此同步修订。
 

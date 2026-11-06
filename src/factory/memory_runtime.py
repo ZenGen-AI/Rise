@@ -5,7 +5,7 @@
 
 - 替身:每个情境都从空世界起步,没有任何种子世界可用。
 - Starling(`StarlingLayout`、`starling_memory_runtime`、`starling_memory_resolver`、`StarlingTrainingWorlds`,按
-  RISMFORGE_MEMORY_CONFIG 装配):种子世界由人放进 `seeds/<seed_id>/<scenario_id>.db`,本仓库只读;解析器按种子
+  RISE_MEMORY_CONFIG 装配):种子世界由人放进 `seeds/<seed_id>/<scenario_id>.db`,本仓库只读;解析器按种子
   世界算每个情境的起点摘要。
 
 训练路的记忆是 rollout 世界(设计 5.1、5.2、6.3 节,`TrainingWorlds`):一条 rollout 一个世界,训练位与对手位都是
@@ -22,13 +22,13 @@
 
 运行时身份里没有记忆根目录:同一份库搬了目录不是另一个实验,路径进了哈希会让换机即 T3。
 
-组合根按记忆配置选后端(`memory_wiring`,设计二 5.1、6.2、6.4 节,第 10 节拒绝项):没设 RISMFORGE_MEMORY_CONFIG 走替身,
+组合根按记忆配置选后端(`memory_wiring`,设计二 5.1、6.2、6.4 节,第 10 节拒绝项):没设 RISE_MEMORY_CONFIG 走替身,
 设了就装配 Starling,配置有任何问题在装配期抛 `FactoryConfigError`(命令行退出码 2),不退回替身静默跑。
 记忆根是旧布局(按人格建库、没有 `.world` 旁注的起点快照)时同样在装配期拒绝启动,不迁移(设计三 4.8 节);
 `.world` 旁注坏了也在这里报,而不是留到门② 才抛。
 
 部署记忆(设计二第 9 节):轮次处理器与门② 共用的一份 DeploymentMemory。替身的根目录在这棵工作树的
-git 目录里(与仓库锁 rismforge.lock 同处):不进工作树、不进提交,跨进程重启保留,所以起点副本与门② 收录
+git 目录里(与仓库锁 rise.lock 同处):不进工作树、不进提交,跨进程重启保留,所以起点副本与门② 收录
 的记忆不随进程退出丢失;一棵树一个 git 目录,两个仓库混写同一个根的问题在替身上不存在。
 """
 from __future__ import annotations
@@ -91,7 +91,7 @@ def stand_in_memory_resolver(seed: str | None, scenario_ids: tuple[str, ...]) ->
     这件事要原样告诉人。原因里只有种子 id 与变量名,不含路径。"""
     if seed is not None:
         raise DirectiveFailedError(
-            f"memory.seed {seed!r} needs a memory config: set RISMFORGE_MEMORY_CONFIG "
+            f"memory.seed {seed!r} needs a memory config: set RISE_MEMORY_CONFIG "
             "(the stand-in memory has no seed libraries)"
         )
     empty = TupleMemory().digest()
@@ -111,8 +111,8 @@ class DeploymentMemory:
 
 
 def stand_in_memory_root(repo_root: Path) -> Path:
-    """替身部署记忆的根目录:<git 目录>/rismforge-memory。"""
-    return git_dir(Path(repo_root)) / "rismforge-memory"
+    """替身部署记忆的根目录:<git 目录>/rise-memory。"""
+    return git_dir(Path(repo_root)) / "rise-memory"
 
 
 _SHOWN_ENTRIES = 5     # 旧布局拒绝启动时文字里列出的条目数,多出来的只报个数
@@ -713,7 +713,7 @@ def _check_runs_dir(root: Path) -> None:
 
 
 def memory_wiring(repo_root: Path, env: Mapping[str, str], *, deployment: bool) -> MemoryWiring:
-    """读 RISMFORGE_MEMORY_CONFIG 选后端,只在这里记一次启动日志。日志与异常文字都不含记忆根目录与端点地址(第 10 节)。
+    """读 RISE_MEMORY_CONFIG 选后端,只在这里记一次启动日志。日志与异常文字都不含记忆根目录与端点地址(第 10 节)。
 
     - 没设(或空串):替身。`deployment` 为真才造替身的部署记忆。
     - 设了,按序:Starling 的安装来源(未安装、editable 在这里拒绝,先于任何对 `actio.memory_starling` 的导入与对记忆

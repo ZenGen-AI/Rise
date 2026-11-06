@@ -271,4 +271,4 @@ def test_the_environment_digest_changes_with_the_roll_commit_or_a_dependency():
 
 
 def test_the_spec_label_is_what_the_container_is_matched_on():
-    assert SPEC_LABEL == "rismforge.roll-spec"
+    assert SPEC_LABEL == "rise.roll-spec"

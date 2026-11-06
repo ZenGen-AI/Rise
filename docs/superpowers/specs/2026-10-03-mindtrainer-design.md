@@ -3,8 +3,8 @@
 - **状态**:待用户审阅
 - **日期**:2026-10-03
 - **前置文档**:
-  - `2026-09-22-rismforge-architecture-design.md`(总体架构,§4.2、§6)
-  - `2026-09-24-rismforge-subsystem-design.md`(§3 MindTrainer、§5.1 配方锚定、补充 D 成本与可观测、补充 E 失败与断点恢复)
+  - `2026-09-22-rise-architecture-design.md`(总体架构,§4.2、§6)
+  - `2026-09-24-rise-subsystem-design.md`(§3 MindTrainer、§5.1 配方锚定、补充 D 成本与可观测、补充 E 失败与断点恢复)
 - **范围**:MindTrainer 的模块划分、数据模型、与已落地子系统的接缝、测试策略,以及明确不做的事。本文不含实现代码,接口草图只用来钉死字段和签名。
 - **与上一版口头设计的关系**:本文是评审走查(三个端到端场景)之后的定稿,吸收了其中发现的全部缺口。
 
@@ -131,7 +131,7 @@ class TrainingRun:                              # 产物 type="training_run"
     last_checkpoint_ref: BigRef | None
     resume_attempts: int
     curve_summary: dict                         # 摘要;逐步序列不进 git(补充 D.2)
-    metric_stream_refs: list[BigRef]            # 键名必须是 metric_stream_refs,rismforge trace 读的就是它
+    metric_stream_refs: list[BigRef]            # 键名必须是 metric_stream_refs,rise trace 读的就是它
     # status: pending(运行中)| executed(成功)| failed(确定性失败,保留);失败时 payload 带
     # failure: {category, point, detail}。完整 FailureRecord 产物(补充 E.5)不在本计划。
 ```
@@ -144,7 +144,7 @@ class TrainingRun:                              # 产物 type="training_run"
 | `training_run` | `{run_dir}/training_run.yaml` | `pending` → `executed` \| `failed`,沿用非审核类状态机,负面状态保留 |
 | `candidate_checkpoint` | `{run_dir}/candidate_checkpoint.yaml` | `pending_review`(沿用现有形状) |
 
-**为什么放 run 目录顶层**:`GitStore.list_products` 只扫 `*.yaml`、不递归,`rismforge trace` 靠它,放进 `episodes/` 这类子目录就看不到了。`controlplane/paths.py` 需新增 `training_run_file(run_id)`、`candidate_checkpoint_file(run_id)`(后者目前在 daemon 里是内联字符串)。
+**为什么放 run 目录顶层**:`GitStore.list_products` 只扫 `*.yaml`、不递归,`rise trace` 靠它,放进 `episodes/` 这类子目录就看不到了。`controlplane/paths.py` 需新增 `training_run_file(run_id)`、`candidate_checkpoint_file(run_id)`(后者目前在 daemon 里是内联字符串)。
 
 ---
 

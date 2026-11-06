@@ -1125,7 +1125,7 @@ def test_a_non_empty_memory_library_exits_2_at_assembly(store, capsys, switch):
     assert main(["reconcile", str(store.repo_root), "--once", "--enable", switch], env={}) == 2
     assert "memory_library/ must be empty" in capsys.readouterr().err
     from controlplane.lock import git_dir
-    assert not (git_dir(store.repo_root) / "rismforge-memory").exists()   # 终审 M-1:预检失败不在 .git 里留目录
+    assert not (git_dir(store.repo_root) / "rise-memory").exists()   # 终审 M-1:预检失败不在 .git 里留目录
 
 
 def test_round_and_admit_handlers_and_the_runtime_share_one_management_plane(store, monkeypatch):
@@ -1141,10 +1141,10 @@ def test_round_and_admit_handlers_and_the_runtime_share_one_management_plane(sto
         r, a = seen["round"], seen["admit"]
         assert isinstance(r["memory_store"], FileTupleStore) and r["memory_store"] is a["memory_store"]
         assert r["memory_layout"] is a["memory_layout"]
-        assert r["memory_layout"].root == git_dir(store.repo_root) / "rismforge-memory"
+        assert r["memory_layout"].root == git_dir(store.repo_root) / "rise-memory"
         assert r["memory_runtime"] == STAND_IN_MEMORY_RUNTIME and r["scratch_store_factory"] is FileTupleStore
         assert r.get("stream_deadline_s") is None                       # 替身保持现值
-        assert not (store.repo_root / "control-plane" / "rismforge-memory").exists()
+        assert not (store.repo_root / "control-plane" / "rise-memory").exists()
         # 运行时开对手端口用的是同一个管理面:端口数是实例内状态,不共用的话驱动器的 wait_closed 看不见对手端口
         runtime = r["client_factory"].__self__
         assert runtime._deployment_store is r["memory_store"]
@@ -1230,7 +1230,7 @@ def test_a_deployment_round_through_the_real_server_writes_the_opponent_into_the
     finally:
         asm.close()
     assert store.read_product(agent_round_file("zengen-v1")).status == "executed"
-    deploy = git_dir(store.repo_root) / "rismforge-memory" / "deploy"
+    deploy = git_dir(store.repo_root) / "rise-memory" / "deploy"
     agent, user = "factory-agent-persona", "factory-user-persona"      # 默认 agent.yaml:user 位先说
     for world in ("factory-deploy-s1", "factory-deploy-s2", "factory-deploy-s3"):
         prefix = f"agent-round-zengen-v1/deploy-zengen-v1-{world}-1"

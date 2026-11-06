@@ -93,7 +93,7 @@ def write_endpoints(store, *ids):
 def hosts_env(tmp_path, text="gpu-1: gpu-181\n"):
     path = tmp_path / "hosts.yaml"
     path.write_text(text, encoding="utf-8")
-    return {"RISMFORGE_COMPUTE_HOSTS": str(path)}
+    return {"RISE_COMPUTE_HOSTS": str(path)}
 
 
 # ---------------- Part 2:一个共用的运行时 ----------------

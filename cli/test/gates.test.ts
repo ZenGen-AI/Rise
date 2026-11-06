@@ -379,7 +379,7 @@ describe("status", () => {
 
 describe("index dispatch", () => {
   it("usage names every command", () => {
-    expect(USAGE).toBe("usage: rismforge <review|approve|reject|confirm|status> [id] [reason]");
+    expect(USAGE).toBe("usage: rise <review|approve|reject|confirm|status> [id] [reason]");
   });
 
   it("confirm is routed through main", () => {

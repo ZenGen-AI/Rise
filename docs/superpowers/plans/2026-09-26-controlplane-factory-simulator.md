@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 实现 RismForge 的 ControlPlane 核心与一套 7 子系统轻量 stub 替身，跑通一个假的端到端 RSI 编排闭环（人工写训练指令 → 调和循环下发 → SocialSimulator/MindTrainer stub 产出候选 checkpoint → 审核门①批准 → 登记 ZenGen 版本并写本轮结果），验证产物存储、状态机、调和循环、审核门 CLI 的编排逻辑正确。
+**Goal:** 实现 Rise 的 ControlPlane 核心与一套 7 子系统轻量 stub 替身，跑通一个假的端到端 RSI 编排闭环（人工写训练指令 → 调和循环下发 → SocialSimulator/MindTrainer stub 产出候选 checkpoint → 审核门①批准 → 登记 ZenGen 版本并写本轮结果），验证产物存储、状态机、调和循环、审核门 CLI 的编排逻辑正确。
 
 **Architecture:** 控制层双语言分工——Python 负责 ControlPlane 核心（git 树产物存储、产物信封、状态机、纯函数 `reconcile()`、git CLI 封装、调和守护进程）与工厂模拟器 stub；TypeScript 负责人工审核门 CLI（`review/approve/reject/status`）。两种语言**互不直接调用**，只通过 git 树里的 YAML 产物 + `schemas/` 下的语言中立 JSON Schema 通信，这正是设计"元数据唯一真相"与"CLI 直接读本地文件"的落地。全部逻辑核心设计为纯函数，可在无 SSH/GPU/子系统的情况下用 fixture 测试。
 
@@ -13,8 +13,8 @@
 - YAML（产物序列化，pyyaml + js-yaml）/ JSON Schema（校验，jsonschema + ajv）
 
 **Spec:**
-- `docs/superpowers/specs/2026-09-22-rismforge-architecture-design.md`（总体架构）
-- `docs/superpowers/specs/2026-09-24-rismforge-subsystem-design.md`（七子系统详细设计，本计划实现其 §1 ControlPlane + §7 测试策略"工厂模拟器优先"）
+- `docs/superpowers/specs/2026-09-22-rise-architecture-design.md`（总体架构）
+- `docs/superpowers/specs/2026-09-24-rise-subsystem-design.md`（七子系统详细设计，本计划实现其 §1 ControlPlane + §7 测试策略"工厂模拟器优先"）
 
 ## Global Constraints
 
@@ -113,9 +113,9 @@ Expected: FAIL（`ModuleNotFoundError` / 无 pyproject）
 `pyproject.toml`:
 ```toml
 [project]
-name = "rismforge-controlplane"
+name = "rise-controlplane"
 version = "0.1.0"
-description = "RismForge ControlPlane core and factory simulator stubs"
+description = "Rise ControlPlane core and factory simulator stubs"
 requires-python = ">=3.11"
 dependencies = [
     "pyyaml>=6.0",
@@ -139,12 +139,12 @@ testpaths = ["tests"]
 
 `src/controlplane/__init__.py`:
 ```python
-"""RismForge ControlPlane core."""
+"""Rise ControlPlane core."""
 ```
 
 `src/simulator/__init__.py`:
 ```python
-"""RismForge factory simulator stubs."""
+"""Rise factory simulator stubs."""
 ```
 
 - [ ] **Step 4: 运行 Python 测试确认通过**
@@ -161,7 +161,7 @@ import { CLI_NAME } from "../src/index.js";
 
 describe("cli smoke", () => {
   it("exposes the cli name", () => {
-    expect(CLI_NAME).toBe("rismforge");
+    expect(CLI_NAME).toBe("rise");
   });
 });
 ```
@@ -171,10 +171,10 @@ describe("cli smoke", () => {
 `cli/package.json`:
 ```json
 {
-  "name": "rismforge-cli",
+  "name": "rise-cli",
   "version": "0.1.0",
   "type": "module",
-  "bin": { "rismforge": "./dist/index.js" },
+  "bin": { "rise": "./dist/index.js" },
   "scripts": {
     "build": "tsc",
     "test": "vitest run"
@@ -220,7 +220,7 @@ export default defineConfig({
 
 `cli/src/index.ts`:
 ```typescript
-export const CLI_NAME = "rismforge";
+export const CLI_NAME = "rise";
 ```
 
 - [ ] **Step 7: 运行 TS 测试确认通过**
@@ -478,7 +478,7 @@ Expected: FAIL（`ModuleNotFoundError: controlplane.validate`）
 ```json
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "RismForge Product Envelope",
+  "title": "Rise Product Envelope",
   "type": "object",
   "required": ["id", "type", "version", "created_at", "created_by", "status", "schema_version"],
   "properties": {
@@ -986,8 +986,8 @@ class GitStore:
         if not (self.repo_root / ".git").is_dir():
             self._git("init")
             # 保证提交可用（测试与 CI 环境可能无全局 git 身份）
-            self._git("config", "user.email", "rismforge@example.com")
-            self._git("config", "user.name", "rismforge")
+            self._git("config", "user.email", "rise@example.com")
+            self._git("config", "user.name", "rise")
         for sub in SUBDIRS:
             (self.repo_root / CONTROL_PLANE_ROOT / sub).mkdir(parents=True, exist_ok=True)
 
@@ -1776,7 +1776,7 @@ export function status(repoRoot: string): string {
 ```typescript
 import { review, approve, reject, status } from "./commands.js";
 
-export const CLI_NAME = "rismforge";
+export const CLI_NAME = "rise";
 
 export function main(argv: string[]): void {
   const [cmd, ...rest] = argv;
@@ -2353,7 +2353,7 @@ git commit -m "feat: read-only observability commands (trace/cost)"
 | 补充 G.3 凭证不进 git 树 + 脱敏 | Task 12（`CredentialInGitTreeError`、`resolve_credential`、`redact`、`.gitignore`） |
 | 补充 G.4 可观测只读命令 | Task 13 `trace`/`cost`（含"引用不可达"分支） |
 
-**明确不在本计划范围（后续计划）**：SQLite 索引（RecipeStore 计划）、指令确认门 `confirm`（TrainScheduler 计划）、审核门②③（RecipeStore/MindAgent 计划）、真实 SSH 传输与计算层、SocialSimulator/MindTrainer/MindAgent/RecipeStore/TrainScheduler/TrainPlanner 真实实现、诊断评测、gRPC 实时环境服务、`rismforge logs`（需真实计算层日志才有意义，本计划只实现 `trace`/`cost`，`logs` 留到接入真实 SSH 的计划）、外部推理桥接的实际调用（Task 12 只建配置与凭证边界，真实调用在 TrainPlanner 计划）。这些在本计划里以 stub 或"不实现"占位，符合 §7"逐步替换"策略。
+**明确不在本计划范围（后续计划）**：SQLite 索引（RecipeStore 计划）、指令确认门 `confirm`（TrainScheduler 计划）、审核门②③（RecipeStore/MindAgent 计划）、真实 SSH 传输与计算层、SocialSimulator/MindTrainer/MindAgent/RecipeStore/TrainScheduler/TrainPlanner 真实实现、诊断评测、gRPC 实时环境服务、`rise logs`（需真实计算层日志才有意义，本计划只实现 `trace`/`cost`，`logs` 留到接入真实 SSH 的计划）、外部推理桥接的实际调用（Task 12 只建配置与凭证边界，真实调用在 TrainPlanner 计划）。这些在本计划里以 stub 或"不实现"占位，符合 §7"逐步替换"策略。
 
 **2. Placeholder scan**：无 TBD/TODO；每个 code 步骤含完整可运行代码；无"类似 Task N"引用（各任务代码自包含）；错误处理为具体实现（`assert_transition` 抛具体异常、CLI `assertTransition` 抛 `not allowed`）。
 
@@ -2369,4 +2369,4 @@ git commit -m "feat: read-only observability commands (trace/cost)"
 
 ## Execution Handoff
 
-计划已保存至 `docs/superpowers/plans/2026-09-26-controlplane-factory-simulator.md`。这是 RismForge 计划序列的第 1 个（ControlPlane + 工厂模拟器骨架），后续计划：SocialSimulator → MindTrainer → RecipeStore+TrainScheduler → MindAgent+Actio → TrainPlanner → InteractTrain 闭环。
+计划已保存至 `docs/superpowers/plans/2026-09-26-controlplane-factory-simulator.md`。这是 Rise 计划序列的第 1 个（ControlPlane + 工厂模拟器骨架），后续计划：SocialSimulator → MindTrainer → RecipeStore+TrainScheduler → MindAgent+Actio → TrainPlanner → InteractTrain 闭环。

@@ -16,7 +16,7 @@ def build() -> Canvas:
     rt = c.box(330, 76, 220, "run_trace.yaml", "cost_records", kind="store", h=64)
     fr = c.box(330, 164, 220, "failure-<task>.yaml", "category · log_refs", kind="store", h=64)
     cb = c.box(30, 290, 230, "CliBridge", "每次调用一份日志", kind="infra", h=70)
-    lf = c.store(330, 284, 220, "本地日志文件", ".rismforge/logs/<run>/")
+    lf = c.store(330, 284, 220, "本地日志文件", ".rise/logs/<run>/")
     ct = c.box(30, 424, 230, "计算层任务", "训练 · 评测进程", kind="compute", h=70)
     cf = c.store(330, 418, 220, "计算层文件", "指标流 · 进程日志")
 

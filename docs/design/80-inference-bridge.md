@@ -14,7 +14,7 @@
 ## 0. 系统速览
 
 <!-- shared:begin context-block -->
-**系统是什么。** RismForge 是一套"AI 驱动的社会心智后训练工厂":输入通用开源基础模型,输出社会心智能力显著增强的模型,代号 **ZenGen**。工厂自己决定每一轮练什么、怎么练。训练决策可以交给外部更强的闭源模型(经命令行调用),关键决策点设人工审核门,其余环节自动。
+**系统是什么。** Rise(Recursive Interactive Social mind Evolution)是一套"AI 驱动的社会心智后训练工厂":输入通用开源基础模型,输出社会心智能力显著增强的模型,代号 **ZenGen**。工厂自己决定每一轮练什么、怎么练。训练决策可以交给外部更强的闭源模型(经命令行调用),关键决策点设人工审核门,其余环节自动。
 
 **七个子系统。** 六个能力子系统加一个协调层 ControlPlane。
 
@@ -80,7 +80,7 @@
 - 外部推理桥接:InferenceBridge 协议 / CliBridge · ScriptedBridge
 - 外部强模型命令行:claude -p · codex exec / 本机登录态
 - ControlPlane 产物树:run_trace · failure_record / config/backends.yaml
-- 桥接日志目录:.rismforge/logs / 对 git 不可见
+- 桥接日志目录:.rise/logs / 对 git 不可见
 - 环境变量:凭证值只在这里 / 不进 git 树
 
 **连线**
@@ -202,7 +202,7 @@
 | 后端配置 | `control-plane/config/backends.yaml`,载荷 `{<角色>: <BackendConfig 原始字典>}` | 配置信封,`effective` | 人;`install-defaults` 不写这份文件,选 `--planner-backend bridge` 时必须先写 | [已落地] |
 | 成本记录 | `control-plane/runs/<run>/run_trace.yaml` 的 `cost_records` | 非审核,`executed` | `controlplane.ledger` | [已落地] |
 | 失败记录 | `control-plane/runs/<run>/failure-<task>.yaml` | 非审核,`executed` | 调用方经 `controlplane.ledger` | [已落地] |
-| 桥接日志 | `<store.repo_root>/.rismforge/logs/<run>/<task>-<k>.log` | 不是产物,普通文件 | `CliBridge` | [已落地] |
+| 桥接日志 | `<store.repo_root>/.rise/logs/<run>/<task>-<k>.log` | 不是产物,普通文件 | `CliBridge` | [已落地] |
 
 后端配置的载荷示例,V1 的角色只有 `planner` 与 `agent`:
 
@@ -272,7 +272,7 @@ class CredentialInGitTreeError(Exception): ...
 | 权限 | 默认参数模板关闭工具或开只读沙箱,见下表 |
 | 输出解码 | UTF-8,非法字节替换为 U+FFFD |
 | 返回文本 | 标准输出去掉首尾空白 |
-| 日志位置 | 有 `log_dir` 用它;否则有 `store` 用 `<repo_root>/.rismforge/logs`;两者都无则不写,`log_ref` 为 `None` |
+| 日志位置 | 有 `log_dir` 用它;否则有 `store` 用 `<repo_root>/.rise/logs`;两者都无则不写,`log_ref` 为 `None` |
 | 记账位置 | 有 `store` 才记;`calls` 为本次成功用掉的尝试次数,`tokens` 省略 |
 
 两个工具的默认参数模板 [已落地](未在真实工具上跑过):
@@ -380,7 +380,7 @@ class CredentialInGitTreeError(Exception): ...
 | BR-1 | 启动阶段的任何 `OSError` 判 T2,不重试 | 原样上抛 | 起不来的可执行文件重试多少次都一样;原样上抛会被当瞬态,形成循环 | 异步装上的工具第一次调用会直接 T2 |
 | BR-2 | 缺凭证在构造时抛 `MissingCredentialError` | 第一次调用时抛 `BridgeError` | 配置问题早失败,启动即报错 | 无 |
 | BR-3 | 每次 `complete` 写一份日志,含全部尝试 | 每次尝试一份 | 一个 `log_ref` 就能看到整次调用的来龙去脉 | 单次尝试的输出要在同一文件里按分隔行找 |
-| BR-4 | 日志默认放在控制面仓库工作区的 `.rismforge/logs`,目录自带 `*` 的 `.gitignore` | 放到仓库外 | 不需要改控制面仓库里任何被追踪的文件 | `git add -f` 能加进去;`git clean -fdx` 会删掉日志;要放仓库外就传 `log_dir` |
+| BR-4 | 日志默认放在控制面仓库工作区的 `.rise/logs`,目录自带 `*` 的 `.gitignore` | 放到仓库外 | 不需要改控制面仓库里任何被追踪的文件 | `git add -f` 能加进去;`git clean -fdx` 会删掉日志;要放仓库外就传 `log_dir` |
 | BR-5 | 不解析外部工具输出,token 字段恒为 `None` | 猜测 JSON 输出格式 | 不确定输出里是否有用量 | 成本表里外部推理只有调用次数 |
 | BR-6 | `BridgeError` 在 `except` 块外抛出,异常链上不挂原异常 | `raise ... from None` | 原异常信息可能带凭证;`from None` 只断 `__cause__`,不断 `__context__` | 排查时看不到原异常对象,只有脱敏后的原因文本 [已落地] |
 | BR-7 | 记账只有 `record_bridge_cost` 一处,`ScriptedBridge` 也调它 | 各实现自己记 | 测试替身也能走完记账路径 | 无 |
@@ -447,7 +447,7 @@ class CredentialInGitTreeError(Exception): ...
 - run_trace.yaml:cost_records
 - failure-<task>.yaml:category · log_refs
 - CliBridge:每次调用一份日志
-- 本地日志文件:.rismforge/logs/<run>/
+- 本地日志文件:.rise/logs/<run>/
 - 计算层任务:训练 · 评测进程
 - 计算层文件:指标流 · 进程日志
 - cost:明细与汇总
@@ -518,14 +518,14 @@ class CredentialInGitTreeError(Exception): ...
 | `command`、`timeout_s`、`token_env: null`、`env_allowlist`、`workdir` | [已落地] | 工作包 1 任务 22 |
 | `controlplane.ledger` | [已落地] | 工作包 1 任务 21 |
 | `inference_bridge` 包、`DEFAULT_COMMANDS`、白名单环境与空临时目录 | [已落地] | 工作包 1 任务 25、26 |
-| 本代码仓库 `.gitignore` 加 `.rismforge/` | [已落地] | 工作包 1 任务 26 |
+| 本代码仓库 `.gitignore` 加 `.rise/` | [已落地] | 工作包 1 任务 26 |
 | 按角色装配与 `logs` 子命令 | [已落地] | 工作包 9 任务 101、102 |
 
 | 局限 | 影响 | 缓解 |
 |---|---|---|
 | 无 token 数 | 成本表里外部推理只有 `calls` | 确认输出格式后加可选的用量解析器 |
 | 同步阻塞 | 调用期间调和循环不转,审核动作被饿住 | 调小 `timeout_s` 与 `max_attempts` |
-| 日志无轮转 | 长期运行累积文件 | 人工清理 `.rismforge/logs` |
+| 日志无轮转 | 长期运行累积文件 | 人工清理 `.rise/logs` |
 | `file://` 是本机绝对路径 | 换机器后 `trace` 标为不可达 | 在原机器上查看 |
 | 脱敏只替换 `token_env` 指向的值 | 工具自行打印的其他敏感变量不被脱敏 | 子进程只拿白名单环境变量与 `token_env` 那一个,其余凭证不会进入子进程,也就不会被打印 [已落地] |
 | 默认隔离只限制写与环境,不限制读 | 默认模板关闭工具或开只读沙箱,工作目录是空临时目录;外部工具仍能读 `HOME` 下的文件,因为登录态在那里 | 不在 `HOME` 下放无关的敏感文件;要彻底隔离得把工具放进容器,V1 不做 [已落地] |
@@ -551,6 +551,6 @@ class CredentialInGitTreeError(Exception): ...
 | 桥接 | 外部推理桥接的简称,即 `InferenceBridge` 的实现 [已落地] |
 | 角色 | `backends.yaml` 的顶层键,V1 为 `planner` 与 `agent` |
 | 一次尝试 | 一次子进程调用;一次 `complete` 含 1 到 `max_attempts` 次尝试 |
-| 桥接日志 | L3 原始日志,已脱敏,位于 `.rismforge/logs` |
+| 桥接日志 | L3 原始日志,已脱敏,位于 `.rise/logs` |
 | 日志引用 | 指向桥接日志的 `BigRef`,在失败记录里存为 `log_refs` 列表 |
 | `external_inference` | 桥接记账用的成本类型 |

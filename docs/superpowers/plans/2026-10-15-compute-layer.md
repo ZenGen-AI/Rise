@@ -532,7 +532,7 @@ def _status_result(jobdir):
 # ===== jobs =====
 
 SELF = os.path.abspath(__file__)
-WRAPPER_ENV = "RISMFORGE_JOBDIR"
+WRAPPER_ENV = "RISE_JOBDIR"
 
 
 def _ignore_signal(signum, frame):
@@ -1902,7 +1902,7 @@ PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_factory_compute_c
 - 树内 `control-plane/compute/endpoints.yaml`(config 信封,与 `evaluator.yaml` 同一条路径),
   读出 `compute.ComputeEndpoint` 列表。缺文件、信封不合、键缺失或多余、取值不合数据类约束,
   一律 `FactoryConfigError`,装配期就报,不等首次 reconcile。
-- 本机主机映射:路径由环境变量 `RISMFORGE_COMPUTE_HOSTS` 指定,内容是 `{endpoint_id: ssh 别名}`,
+- 本机主机映射:路径由环境变量 `RISE_COMPUTE_HOSTS` 指定,内容是 `{endpoint_id: ssh 别名}`,
   放在仓库之外,凭据都在 `~/.ssh/config` 里。
 
 `read_tree_config` 返回 payload 的深拷贝,不是 Envelope;信封 type 与 schema_version 已由
@@ -1925,7 +1925,7 @@ from factory.configio import key_names, read_tree_config
 from factory.errors import FactoryConfigError
 
 COMPUTE_ENDPOINTS_FILE = compute_endpoints_file()
-HOSTS_ENV = "RISMFORGE_COMPUTE_HOSTS"
+HOSTS_ENV = "RISE_COMPUTE_HOSTS"
 
 _ENDPOINT_KEYS = (
     "endpoint_id", "work_root", "roll_root", "launch_prefix", "base_model_path",
@@ -2077,7 +2077,7 @@ PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_factory_compute_c
 
 ```python
 def read_host_map(*, env: Mapping[str, str] | None = None) -> dict[str, str]:
-    """本机主机映射 `{endpoint_id: ssh 别名}`。路径由 `RISMFORGE_COMPUTE_HOSTS` 指定。
+    """本机主机映射 `{endpoint_id: ssh 别名}`。路径由 `RISE_COMPUTE_HOSTS` 指定。
 
     映射放在仓库之外,别名指向 `~/.ssh/config` 的主机条目,所以两处配置都不存凭据。
     报错只写环境变量名与路径,不回显内容。

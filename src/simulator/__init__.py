@@ -1,1 +1,1 @@
-"""RismForge factory simulator stubs."""
+"""Rise factory simulator stubs."""

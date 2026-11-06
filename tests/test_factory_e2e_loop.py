@@ -129,7 +129,7 @@ def test_the_whole_loop_turns_twice(store, capsys):
     assert "data_spec" not in d2.payload  # clone 复用配方锚定的清单
     assert tick(store, enable, *LOOP) == []  # 等人确认,闭环不动
 
-    # 模拟 rismforge confirm run-002 → 第二轮
+    # 模拟 rise confirm run-002 → 第二轮
     set_status(store, f"{run_dir('run-002')}/directive.yaml", "pending")
     train_and_promote(store, "run-002", enable, *LOOP)
     assert store.exists(model_file(3))

@@ -43,7 +43,7 @@ def _env(tmp_path, *, index_digest=None, with_eval=True):
     index.write_bytes(build_index(["这是评测题面里的一段话，训练数据里不该出现同样的这一段文字。"], index_digest or digest))
     hosts = tmp_path / "hosts.yaml"
     hosts.write_text("gpu-1: gpu-181\n", encoding="utf-8")
-    env = {"RISMFORGE_COMPUTE_HOSTS": str(hosts)}
+    env = {"RISE_COMPUTE_HOSTS": str(hosts)}
     if with_eval:
         config = tmp_path / "eval.yaml"
         config.write_text(
@@ -52,7 +52,7 @@ def _env(tmp_path, *, index_digest=None, with_eval=True):
             "judge_base_url: https://judge.example/v1\njudge_api_key: sk-test\n",
             encoding="utf-8")
         os.chmod(config, 0o600)
-        env["RISMFORGE_EVAL_CONFIG"] = str(config)
+        env["RISE_EVAL_CONFIG"] = str(config)
     return env, digest
 
 
@@ -87,7 +87,7 @@ def test_someval_cannot_be_combined_with_enable(tmp_path):
 def test_a_real_training_run_without_the_eval_config_is_refused(tmp_path):
     store = _repo(tmp_path)
     env, _ = _env(tmp_path, with_eval=False)
-    with pytest.raises(FactoryConfigError, match="RISMFORGE_EVAL_CONFIG"):
+    with pytest.raises(FactoryConfigError, match="RISE_EVAL_CONFIG"):
         assemble(store, FactoryOptions(executor="roll"), env=env)
 
 

@@ -50,8 +50,8 @@ class GitStore:
         if not (self.repo_root / ".git").is_dir():
             self._git("init")
             # 保证提交可用（测试与 CI 环境可能无全局 git 身份）
-            self._git("config", "user.email", "rismforge@example.com")
-            self._git("config", "user.name", "rismforge")
+            self._git("config", "user.email", "rise@example.com")
+            self._git("config", "user.name", "rise")
         for sub in SUBDIRS:
             (self.repo_root / CONTROL_PLANE_ROOT / sub).mkdir(parents=True, exist_ok=True)
 

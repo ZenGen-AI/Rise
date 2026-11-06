@@ -1,6 +1,6 @@
 """树外的本机记忆配置(设计二 5.1、5.3 节,F15)。
 
-与 `eval_config.py` 同一做法:文件路径由环境变量 `RISMFORGE_MEMORY_CONFIG` 给出,必须在控制面仓库之外、
+与 `eval_config.py` 同一做法:文件路径由环境变量 `RISE_MEMORY_CONFIG` 给出,必须在控制面仓库之外、
 权限必须是 0600。变量没设或为空串,返回 `None`,装配期照计划 A 的替身走;设了,配置有任何问题都抛
 `FactoryConfigError`(命令行译成退出码 2),不退回替身。报错只写键名、路径与变量名,不回显任何取值:
 端点地址可能带 `user:password@`。密钥不在这份文件里,只从 `OPENAI_API_KEY` 读。
@@ -29,7 +29,7 @@ import yaml
 from factory.configio import key_names
 from factory.errors import FactoryConfigError
 
-MEMORY_CONFIG_ENV = "RISMFORGE_MEMORY_CONFIG"
+MEMORY_CONFIG_ENV = "RISE_MEMORY_CONFIG"
 API_KEY_ENV = "OPENAI_API_KEY"
 STARLING_DIST = "starling-memory"
 DEFAULT_TIMEOUT_MS = 4000

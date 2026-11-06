@@ -6,7 +6,7 @@ ORANGE = "#d97706"
 
 def build() -> Canvas:
     c = Canvas(
-        1080, 730, title="RismForge 系统架构",
+        1080, 730, title="Rise 系统架构",
         desc="四层结构。控制层放决策与配方相关的四个组件。协调层 ControlPlane 配三道人工审核门。"
              "计算层放三个子系统。共享基础设施放 Actio、Starling 记忆库、远端计算层、训练与推理引擎。"
              "三个计算层子系统都使用 Actio 实例,MindTrainer 用的是训练位实例。"

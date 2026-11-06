@@ -35,7 +35,7 @@ class EnvironmentServiceStub:
             channel: A grpc.Channel.
         """
         self.Interact = channel.stream_stream(
-                '/rismforge.realtime.EnvironmentService/Interact',
+                '/rise.realtime.EnvironmentService/Interact',
                 request_serializer=simulator_dot_realtime_dot_proto_dot_realtime__env__pb2.ClientMessage.SerializeToString,
                 response_deserializer=simulator_dot_realtime_dot_proto_dot_realtime__env__pb2.ServerMessage.FromString,
                 _registered_method=True)
@@ -61,9 +61,9 @@ def add_EnvironmentServiceServicer_to_server(servicer, server):
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
-            'rismforge.realtime.EnvironmentService', rpc_method_handlers)
+            'rise.realtime.EnvironmentService', rpc_method_handlers)
     server.add_generic_rpc_handlers((generic_handler,))
-    server.add_registered_method_handlers('rismforge.realtime.EnvironmentService', rpc_method_handlers)
+    server.add_registered_method_handlers('rise.realtime.EnvironmentService', rpc_method_handlers)
 
 
  # This class is part of an EXPERIMENTAL API.
@@ -84,7 +84,7 @@ class EnvironmentService:
         return grpc.experimental.stream_stream(
             request_iterator,
             target,
-            '/rismforge.realtime.EnvironmentService/Interact',
+            '/rise.realtime.EnvironmentService/Interact',
             simulator_dot_realtime_dot_proto_dot_realtime__env__pb2.ClientMessage.SerializeToString,
             simulator_dot_realtime_dot_proto_dot_realtime__env__pb2.ServerMessage.FromString,
             options,

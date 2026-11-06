@@ -11,7 +11,7 @@ def build() -> Canvas:
     c.lane(250, 150, 560, 150, "ControlPlane(协调层,本地开发机)", kind="control", dashed=False)
 
     rev = c.box(30, 196, 190, "审核人", "人工审核门①\n确认指令", kind="human", h=76)
-    cli = c.box(270, 196, 250, "人工命令行 rismforge", "TypeScript · 门控写命令\nreview approve reject status", kind="control", h=76)
+    cli = c.box(270, 196, 250, "人工命令行 rise", "TypeScript · 门控写命令\nreview approve reject status", kind="control", h=76)
     dmn = c.box(550, 196, 240, "调和守护进程", "Python · run_daemon\n纯函数 reconcile + 执行壳", kind="control", h=76)
 
     ent = c.box(550, 44, 240, "入口 run_controlplane", "mindtrainer.wire.main\n注入 MindTrainer 派发器", kind="compute", h=70)

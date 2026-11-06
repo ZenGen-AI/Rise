@@ -12,7 +12,7 @@ def build() -> Canvas:
 
     human = c.box(24, 238, 160, "人工", "审核人 · 开发者", kind="human", h=64)
 
-    ts = c.box(236, 80, 270, "TypeScript 命令行", "rismforge review · approve\nreject · status · confirm",
+    ts = c.box(236, 80, 270, "TypeScript 命令行", "rise review · approve\nreject · status · confirm",
                kind="human", h=80)
     py = c.box(236, 230, 270, "Python 入口", "run_factory.py · run_factory_dev.py\nrun · reconcile · 只读子命令",
                kind="control", h=80)

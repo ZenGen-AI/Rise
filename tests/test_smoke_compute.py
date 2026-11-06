@@ -20,7 +20,7 @@ SCRIPT = Path(__file__).parent.parent / "scripts" / "smoke_compute.py"
 LINUX = Path("/proc/meminfo").exists()
 GIT = ("-c", "user.email=t@example.com", "-c", "user.name=t", "-c", "protocol.file.allow=always")
 
-# 脚本作为子进程跑。rise 根由 RISMFORGE_RISE_ROOT 指到测试世界里的假仓库;依赖指纹是代码常量,
+# 脚本作为子进程跑。rise 根由 RISE_ROOT 指到测试世界里的假仓库;依赖指纹是代码常量,
 # 子进程里先换成测试世界的值再进脚本的 main。不能依赖开发机上 rise 仓库此刻的 git 状态。
 BOOT = (
     "import json, os, runpy, sys\n"
@@ -91,8 +91,8 @@ def world(tmp_path):
         created_by=OwnerRef(), status="effective", schema_version=1, payload={"endpoints": [item]}), "endpoints")
     hosts = tmp_path / "hosts.yaml"
     hosts.write_text("local-1: whatever\n")
-    env = {**os.environ, "RISMFORGE_COMPUTE_HOSTS": str(hosts), "SMOKE_DEPS": json.dumps(deps),
-           "RISMFORGE_RISE_ROOT": str(_fake_rise(tmp_path)), "SMOKE_SCRIPT": str(SCRIPT),
+    env = {**os.environ, "RISE_COMPUTE_HOSTS": str(hosts), "SMOKE_DEPS": json.dumps(deps),
+           "RISE_ROOT": str(_fake_rise(tmp_path)), "SMOKE_SCRIPT": str(SCRIPT),
            "SMOKE_SRC": str(SCRIPT.parent.parent / "src")}
     return tmp_path, str(tmp_path / "cp"), env
 
@@ -137,13 +137,13 @@ def test_the_script_never_asks_for_the_gpu_lease(world, monkeypatch):
 
     monkeypatch.setattr(ComputeClient, "lease_acquire", spy)
     tmp, repo, env = world
-    monkeypatch.setenv("RISMFORGE_RISE_ROOT", env["RISMFORGE_RISE_ROOT"])
+    monkeypatch.setenv("RISE_ROOT", env["RISE_ROOT"])
     monkeypatch.setattr(roll_env, "DEPENDENCIES", tuple(
         roll_env.Dependency(n, m, f) for n, m, f in json.loads(env["SMOKE_DEPS"])))
     spec = importlib.util.spec_from_file_location("smoke_compute_under_test", SCRIPT)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    monkeypatch.setenv("RISMFORGE_COMPUTE_HOSTS", env["RISMFORGE_COMPUTE_HOSTS"])
+    monkeypatch.setenv("RISE_COMPUTE_HOSTS", env["RISE_COMPUTE_HOSTS"])
     assert module.run(repo, None, local=True) == 0
     assert acquired == []  # 一次都没取
 
@@ -181,9 +181,9 @@ def test_a_host_map_without_the_endpoint_fails_at_step_one(world):
 
 def test_a_missing_hosts_variable_fails_at_step_one_naming_the_variable(world):
     _, repo, env = world
-    env = {k: v for k, v in env.items() if k != "RISMFORGE_COMPUTE_HOSTS"}
+    env = {k: v for k, v in env.items() if k != "RISE_COMPUTE_HOSTS"}
     r = _smoke(repo, env)
-    assert r.returncode == 1 and "RISMFORGE_COMPUTE_HOSTS is not set" in r.stdout
+    assert r.returncode == 1 and "RISE_COMPUTE_HOSTS is not set" in r.stdout
 
 
 def test_an_unknown_endpoint_name_lists_what_exists(world):

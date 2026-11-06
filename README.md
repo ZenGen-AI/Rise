@@ -1,6 +1,6 @@
-# RismForge
+# Rise
 
-RismForge 是一套"AI 驱动的社会心智后训练工厂"。输入一个通用开源基础模型，输出社会心智能力增强的模型，代号 ZenGen。
+**Rise**（Recursive Interactive Social mind Evolution，递归交互式社会心智进化）是一套"AI 驱动的社会心智后训练工厂"。输入一个通用开源基础模型，输出社会心智能力增强的模型，代号 ZenGen。
 
 工厂把五件事串成一个闭环：社会情境仿真、权重级训练、诊断评测、训练配方沉淀、智能体技能与记忆自进化。每一轮练什么由 AI 决定，人在三道审核门把关。
 
@@ -37,7 +37,7 @@ RismForge 是一套"AI 驱动的社会心智后训练工厂"。输入一个通�
 | `src/inference_bridge` | 调外部强模型的桥接与成本记录 |
 | `src/compute` | 远端计算层：经 SSH 在 GPU 主机上起作业、vLLM 服务、ROLL 部署 |
 | `src/factory` | 组合根：把以上全部装起来，`factory` 命令行 |
-| `cli/` | TypeScript 审核命令行 `rismforge`：review、approve、reject、confirm、status |
+| `cli/` | TypeScript 审核命令行 `rise`：review、approve、reject、confirm、status |
 | `third_party/ROLL4ZenGen` | 训练框架 ROLL 的 submodule，`--executor roll` 时部署到远端 |
 | `docs/design/` | 权威系统设计文档集，从 `docs/design/README.md` 读起 |
 
@@ -70,28 +70,28 @@ cd cli && npm install && npm run build && cd ..
 ```bash
 # 1. 建一棵控制面仓库：默认资产与配置，外加一条 pending 训练指令 run-001 和它的数据集清单
 uv run python -c "import sys; sys.path[:0] = ['src', 'tests']; \
-from factory_fixtures import closed_loop_repo; closed_loop_repo('/tmp/rismforge-demo')"
+from factory_fixtures import closed_loop_repo; closed_loop_repo('/tmp/rise-demo')"
 
 # 2. 跑三轮调和：派发训练，产出候选，补诊断，停在待审
-for i in 1 2 3; do uv run python scripts/run_factory_dev.py reconcile /tmp/rismforge-demo --once; done
+for i in 1 2 3; do uv run python scripts/run_factory_dev.py reconcile /tmp/rise-demo --once; done
 #   dispatch_directive run-001
 #   request_diagnostic cand-run-001
 #   await_review cand-run-001
 
 # 3. 人工审核（在控制面仓库根目录里运行）
-cd /tmp/rismforge-demo
+cd /tmp/rise-demo
 node /path/to/Rise/cli/dist/index.js status
 node /path/to/Rise/cli/dist/index.js review cand-run-001
 node /path/to/Rise/cli/dist/index.js approve cand-run-001
 cd /path/to/Rise
 
 # 4. 再调和一轮：候选晋级
-uv run python scripts/run_factory_dev.py reconcile /tmp/rismforge-demo --once
+uv run python scripts/run_factory_dev.py reconcile /tmp/rise-demo --once
 #   promote_candidate cand-run-001
-ls /tmp/rismforge-demo/control-plane/models/      # zengen-v1.yaml
+ls /tmp/rise-demo/control-plane/models/      # zengen-v1.yaml
 ```
 
-`git -C /tmp/rismforge-demo log --oneline` 能看到每一步写进树的提交。
+`git -C /tmp/rise-demo log --oneline` 能看到每一步写进树的提交。
 
 `tests/factory_fixtures.py` 里的 `closed_loop_repo` 是测试夹具，用它只是为了省掉手写指令。指令有二十多个训练配置字段，目前没有子命令生成它。自己的仓库可以先跑 `factory install-defaults <repo>` 写默认资产，再手写 `control-plane/runs/<run-id>/directive.yaml`。
 
@@ -125,7 +125,7 @@ ls /tmp/rismforge-demo/control-plane/models/      # zengen-v1.yaml
 真实后端都要远端 GPU 主机，主机经 SSH 访问。要准备的有：
 
 - **端点配置**：在控制面仓库里写 `control-plane/compute/endpoints.yaml`，给出工作目录、基座模型路径、留出集路径与预检阈值。远端路径没有合理默认值，`install-defaults` 不写它。
-- **主机映射**：端点 id 到 ssh 别名的映射写在仓库外的 YAML 里，路径由 `RISMFORGE_COMPUTE_HOSTS` 指定。主机、用户与密钥都放在 `~/.ssh/config`，地址不进 git。
+- **主机映射**：端点 id 到 ssh 别名的映射写在仓库外的 YAML 里，路径由 `RISE_COMPUTE_HOSTS` 指定。主机、用户与密钥都放在 `~/.ssh/config`，地址不进 git。
 - **ROLL**：`--executor roll` 第一次预检时，从本仓库的 submodule 把钉住版本的 ROLL 部署到远端，并建好训练容器，不需要人手放代码。
 
 `--executor roll` 不能与 `--enable` 同用，也不能与 `--interact` 同用；一次训练会占住调和循环数小时。
@@ -134,8 +134,8 @@ ls /tmp/rismforge-demo/control-plane/models/      # zengen-v1.yaml
 
 Actio 的记忆按"模拟世界"组织：部署时一个情境一个世界，训练时每条 rollout 一个平行世界，人格是世界里的主体。
 
-- **替身**：不设 `RISMFORGE_MEMORY_CONFIG` 时用确定性替身，部署记忆落在控制面仓库的 `.git/rismforge-memory` 下。
-- **Starling**：生产实现，要先装 `--extra memory`。然后写一份仓库外、权限 0600 的记忆配置，用 `RISMFORGE_MEMORY_CONFIG` 指向它：
+- **替身**：不设 `RISE_MEMORY_CONFIG` 时用确定性替身，部署记忆落在控制面仓库的 `.git/rise-memory` 下。
+- **Starling**：生产实现，要先装 `--extra memory`。然后写一份仓库外、权限 0600 的记忆配置，用 `RISE_MEMORY_CONFIG` 指向它：
 
 ```yaml
 root: /var/lib/rise-memory            # 绝对路径，在仓库之外
@@ -156,8 +156,8 @@ max_retries: 0
 |---|---|---|
 | 后端选择、模型名、提示模板、调度与训练默认值 | 控制面仓库 `control-plane/config/` | 进 |
 | 远端端点的路径与阈值 | 控制面仓库 `control-plane/compute/endpoints.yaml` | 进 |
-| 端点 id 到 ssh 别名的映射 | `RISMFORGE_COMPUTE_HOSTS` 指向的本机文件 | 不进 |
-| 记忆配置 | `RISMFORGE_MEMORY_CONFIG` 指向的本机文件，权限 0600 | 不进 |
+| 端点 id 到 ssh 别名的映射 | `RISE_COMPUTE_HOSTS` 指向的本机文件 | 不进 |
+| 记忆配置 | `RISE_MEMORY_CONFIG` 指向的本机文件，权限 0600 | 不进 |
 | API 密钥、SSH 口令 | 环境变量 | 绝不进 |
 
 树里出现凭证值字段时，加载器拒绝加载；日志写出前会先脱敏。
@@ -171,7 +171,7 @@ cd cli && npm test
 ```
 
 - `slow` 标记的用例会真起子进程或多段作业。
-- `memory_live` 标记的用例连真实抽取与嵌入端点，只在设了 `RISMFORGE_MEMORY_LIVE=1` 与真实记忆配置时才跑。
+- `memory_live` 标记的用例连真实抽取与嵌入端点，只在设了 `RISE_MEMORY_LIVE=1` 与真实记忆配置时才跑。
 
 ## 文档
 

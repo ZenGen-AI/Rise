@@ -1,7 +1,7 @@
 [project]
-name = "rismforge-controlplane"
+name = "rise-controlplane"
 version = "0.1.0"
-description = "RismForge ControlPlane core and factory simulator stubs"
+description = "Rise ControlPlane core and factory simulator stubs"
 requires-python = ">=3.11"
 dependencies = [
     "pyyaml>=6.0",
@@ -29,5 +29,5 @@ pythonpath = ["src"]
 testpaths = ["tests"]
 markers = [
     "slow: 真起子进程或多段作业的测试,用 -m 'not slow' 跳过",
-    "memory_live: 连真抽取与真嵌入端点的用例,只在设了 RISMFORGE_MEMORY_LIVE=1 时跑,不进 CI",
+    "memory_live: 连真抽取与真嵌入端点的用例,只在设了 RISE_MEMORY_LIVE=1 时跑,不进 CI",
 ]

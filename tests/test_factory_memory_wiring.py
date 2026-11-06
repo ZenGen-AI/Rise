@@ -336,7 +336,7 @@ def _touch(root, *rels):
 
 def _stand_in_root(store):
     from controlplane.lock import git_dir
-    return git_dir(store.repo_root) / "rismforge-memory"
+    return git_dir(store.repo_root) / "rise-memory"
 
 
 _LOST_TAG_HINT = ("a deploy-deploy-* snapshot listed here may instead be a new snapshot that lost its .world tag: "
