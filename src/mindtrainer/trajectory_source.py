@@ -107,6 +107,12 @@ ADMISSION_WAIT_S = 65.0
 ADMISSION_FIRST_BACKOFF_S = 0.5
 ADMISSION_MAX_BACKOFF_S = 8.0
 
+# 瞬态失败的整条重跑之间的退避:限流(429)或 5xx 持续时,立即重跑会在几秒内连续撞上同一道限流。第 k 次重跑前
+# 等 RETRY_FIRST_BACKOFF_S * 2**(k-1) 秒、单次至多 RETRY_MAX_BACKOFF_S;最后一次失败后不等,确定性失败不等。
+# 缺省 max_retries_per_episode=2 时一条 rollout 最多多等 2 + 4 = 6 秒。与上面的准入退避互不相干,各算各的。
+RETRY_FIRST_BACKOFF_S = 2.0
+RETRY_MAX_BACKOFF_S = 16.0
+
 
 def _check_admission_wait(value: object) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
@@ -186,7 +192,8 @@ class InteractTrajectorySource:
     - T1 瞬态(timeout、role_backend_timeout、role_backend_unavailable、role_memory_unavailable、persistence_failed、
       传输层 UNAVAILABLE;创建被拒时同样按 reason 判,上面这些原因的拒绝也重跑;训练位的
       RoleMemoryUnavailableError 记为 role_memory_unavailable、detail 只写类名)原样重跑,
-      上限 max_retries_per_episode,每次失败记入 metadata["failed_attempts"]。进入 policy_for_rollout 时抛的
+      上限 max_retries_per_episode,每次失败记入 metadata["failed_attempts"];两次尝试之间指数退避(见 RETRY_FIRST_BACKOFF_S),
+      最后一次失败后不等。进入 policy_for_rollout 时抛的
       RoleMemoryUnavailableError(同名 rollout 世界还被服务端端口占着)同样记成 role_memory_unavailable 重跑;
       其余进入期异常不包装,原样上抛。
     - 创建被拒且原因是 role_backend_unavailable(同 id 的旧会话还在收尾,或名额满)时,先在同一次尝试里
@@ -299,6 +306,7 @@ class InteractTrajectorySource:
                         attempts=attempt,
                         failed_attempts=failed_attempts,
                     ) from failure
+                self._sleep(min(RETRY_FIRST_BACKOFF_S * 2 ** (attempt - 1), RETRY_MAX_BACKOFF_S))
         raise AssertionError("unreachable: the loop always returns or raises")
 
     def _attempt(self, scenario, personas, episode_id: str) -> Episode:

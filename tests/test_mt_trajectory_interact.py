@@ -12,6 +12,7 @@ from memory_fixtures import unresolved_memory
 from mindtrainer.training_config import (
     InvalidTrainingConfigError, RewardConfig, TrainingConfig,
 )
+import mindtrainer.trajectory_source as trajectory_source
 from mindtrainer.trajectory_source import (
     PER_TURN_DEADLINE_S, InteractTrajectorySource, RolloutFailedError, logical_episode_id,
 )
@@ -102,6 +103,23 @@ def store(tmp_path):
     for pid in ("pa", "pb"):
         write_persona(s, _persona(pid))
     return s
+
+
+_REAL_RETRY_BACKOFF = (trajectory_source.RETRY_FIRST_BACKOFF_S, trajectory_source.RETRY_MAX_BACKOFF_S)
+
+
+@pytest.fixture(autouse=True)
+def _instant_retry_backoff(monkeypatch):
+    """按条重跑之间的退避在本文件里默认归零:各个瞬态重跑用例不必真等 2 秒,真服务端那两条也能在重跑时撞上准入拒绝。
+    要看退避本身的用例请求 real_retry_backoff。"""
+    monkeypatch.setattr(trajectory_source, "RETRY_FIRST_BACKOFF_S", 0.0)
+
+
+@pytest.fixture
+def real_retry_backoff(monkeypatch):
+    first, cap = _REAL_RETRY_BACKOFF
+    monkeypatch.setattr(trajectory_source, "RETRY_FIRST_BACKOFF_S", first)
+    monkeypatch.setattr(trajectory_source, "RETRY_MAX_BACKOFF_S", cap)
 
 
 @pytest.fixture
@@ -641,6 +659,47 @@ def test_other_create_rejections_are_not_backed_off(store):
     with pytest.raises(RolloutFailedError):
         _backoff_source(store, factory, clock).collect()
     assert clock.sleeps == [] and len(factory.clients) == 1
+
+
+# ====================== 瞬态失败的按条重跑之间指数退避 ======================
+
+def test_the_retry_backoff_constants(real_retry_backoff):
+    assert (trajectory_source.RETRY_FIRST_BACKOFF_S, trajectory_source.RETRY_MAX_BACKOFF_S) == (2.0, 16.0)
+
+
+def test_transient_retries_back_off_exponentially_between_attempts(store, real_retry_backoff):
+    clock = _FakeClock()
+    factory = _FakeFactory({"end_reason": "timeout"}, {"end_reason": "timeout"})   # rollout 0 失败两次,第三次成功
+    batch = _backoff_source(store, factory, clock).collect()
+    assert len(batch.episodes) == 2
+    assert [a["attempt"] for a in batch.metadata["failed_attempts"]] == [1, 2]
+    assert clock.sleeps == [2.0, 4.0]                                            # 第 k 次重跑前等 2.0 * 2**(k-1)
+
+
+def test_the_last_failed_attempt_is_not_followed_by_a_wait(store, real_retry_backoff):
+    clock = _FakeClock()
+    factory = _FakeFactory(*[{"end_reason": "timeout"}] * 3)
+    with pytest.raises(RolloutFailedError) as exc:
+        _backoff_source(store, factory, clock).collect()
+    assert (exc.value.reason, exc.value.attempts) == ("timeout", 3)
+    assert clock.sleeps == [2.0, 4.0]                                            # 三次尝试之间两次等待,末次失败后不等
+
+
+def test_a_retry_backoff_is_capped(store, real_retry_backoff):
+    clock = _FakeClock()
+    factory = _FakeFactory(*[{"end_reason": "timeout"}] * 6)
+    with pytest.raises(RolloutFailedError):
+        _backoff_source(store, factory, clock, cfg={"max_retries_per_episode": 5}).collect()
+    assert clock.sleeps == [2.0, 4.0, 8.0, 16.0, 16.0]
+
+
+def test_a_deterministic_failure_is_raised_without_waiting(store, real_retry_backoff):
+    clock = _FakeClock()
+    factory = _FakeFactory({"end_reason": "role_backend_rejected"})
+    with pytest.raises(RolloutFailedError) as exc:
+        _backoff_source(store, factory, clock).collect()
+    assert (exc.value.reason, exc.value.attempts) == ("role_backend_rejected", 1)
+    assert clock.sleeps == []
 
 
 def test_an_admission_budget_that_is_not_a_finite_non_negative_number_is_refused(store):
