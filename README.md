@@ -6,6 +6,20 @@
 
 > 现状：编排、可追溯与路由已经端到端跑通。训练默认是 mock 执行器，诊断默认是 mock 评估器，所以默认入口证明的是"闭环会转"，不是"模型变强了"。真实的 ROLL LoRA SFT、vLLM 服务与 SoMEval 评测要用开关显式打开（见下文"真实后端"）。
 
+## 整体架构
+
+![Rise 系统架构](docs/design/diagrams/00-architecture.svg)
+
+图分四层：
+- **控制层**：放 RecipeStore、TrainScheduler、TrainPlanner 与外部推理桥接，负责沉淀配方、规划下一轮。规划可以经桥接交给更强的外部模型。
+- **协调层**：ControlPlane 管产物树、状态机与调和循环，配三道人工审核门。
+- **计算层**：MindTrainer 改权重；SocialSimulator 做情境仿真、实时环境服务与诊断评测；MindAgent 让部署态智能体自进化技能与记忆。
+- **共享基础设施**：每个角色位都是一个 Actio 智能体，记忆由 Starling 提供。真实训练与推理经远端计算层 compute 下发到 GPU 主机上的 ROLL 与 vLLM。
+
+子系统之间不直接调用，只经 ControlPlane 读写产物。例外只有两条橙色的受限直连，都连到 SocialSimulator：① 来自 MindTrainer，承载 InteractTrain 的 rollout；② 来自 MindAgent，承载部署经验采集。
+
+图的源码在 `docs/design/diagrams/fig_00-architecture.py`，各子系统的细节见 `docs/design/00-overview.md` 第 3 章。
+
 ## 工作原理
 
 1. 所有协作数据都是 git 树里的 YAML 产物（"信封"）。子系统之间不直接调用，只读写产物。
