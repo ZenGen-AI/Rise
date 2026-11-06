@@ -9,6 +9,13 @@ from factory.errors import FactoryConfigError
 from factory.wire import FactoryOptions, assemble
 
 
+@pytest.fixture(autouse=True)
+def _instant_retry_backoff(monkeypatch):
+    """按条重跑之间的退避在本文件里归零:这里只验重跑与延后的走向,不验等多久(退避本身在 test_mt_trajectory_interact 里验)。"""
+    import mindtrainer.trajectory_source as trajectory_source
+    monkeypatch.setattr(trajectory_source, "RETRY_FIRST_BACKOFF_S", 0.0)
+
+
 @pytest.fixture
 def repo(tmp_path):
     s = GitStore(str(tmp_path / "cp"))
