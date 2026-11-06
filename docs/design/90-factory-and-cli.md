@@ -817,7 +817,7 @@ factory 是第九个工作包,前八个全部落地后才施工。前置关系:1
 | 轮次中途瞬态异常或被杀 | T1 | 轮次留在 `pending`,守护进程退出;重启后的 tick 复用已落盘的 episode 续上(R19) | 已落盘的 episode [已落地] |
 | 派发器或处理器抛 `DeferredError` | 资源暂不可用 | 不写树,按退避重试;连续延后超过上限抛 `DeferredExhaustedError` 退出 | 一行结构化日志 [已落地] |
 | interact 指令起 vLLM 服务:租约被占 `ComputeBusyError`,或起服务失败 `ServeStartupError` | 资源暂不可用 | 同上 | 同上 [已落地] |
-| interact 指令里真推理的 rollout 失败:对手 API 或 vLLM 服务连不上、角色位后端出错、重试用尽的超时、落盘失败(`invalid_session` 除外,它仍判 T2) | 资源暂不可用 | 策略上下文译成延后类:不写树,按退避重试,进程不退出;每次重派耗一次 `resume_attempts`,到上限升级为 T3。前提:`max_resume_attempts`(默认 3)要小于 `DeferralBook.max_consecutive`(20);不小于时先撞上连续延后上限,守护进程因 `DeferredExhaustedError` 带原因退出,指令仍是 `pending`。配置校验目前不检查这个关系 | 一行结构化日志;终局时指令 `failure.category = T3` [已落地] |
+| interact 指令里真推理的 rollout 失败:对手 API 或 vLLM 服务连不上、角色位后端出错、重试用尽的超时、落盘失败(`invalid_session` 除外,它仍判 T2) | 资源暂不可用 | 策略上下文译成延后类:不写树,按退避重试,进程不退出;每次重派耗一次 `resume_attempts`,到上限升级为 T3。interact 的配置校验要求 `max_resume_attempts`(默认 3)小于守护进程的连续延后上限 `MAX_CONSECUTIVE_DEFERRALS`(20,`DeferralBook` 的缺省值),所以一直失败的 run 先到续训上限、判 T3,不会先撞上 `DeferredExhaustedError` 让守护进程退出 | 一行结构化日志;终局时指令 `failure.category = T3` [已落地] |
 | 派发器或处理器抛其他瞬态异常 | T1 | 进程退出,外部监督者重启 | 树里已提交的部分 |
 | 门控写证据不在场或迁移非法 | 用法错误 | 命令抛错,不写文件、不提交 | 无 [已落地] |
 

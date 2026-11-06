@@ -7,6 +7,7 @@ import json
 import math
 from dataclasses import dataclass, field
 
+from controlplane.daemon import MAX_CONSECUTIVE_DEFERRALS
 from controlplane.envelope import SHA256_HEX, BigRef, Envelope, InvalidBigRefError
 from simulator.datamodel import OPPONENT_DRIVERS, RoleBinding
 
@@ -369,6 +370,13 @@ def _validate_interact(cfg: TrainingConfig) -> str | None:
     # 先于情境检查:宽口径的占位探针保留 memory,所以构造期与派发期对旧配置给出同一原因
     if cfg.memory is None:
         return MISSING_MEMORY_REASON
+    if cfg.max_resume_attempts >= MAX_CONSECUTIVE_DEFERRALS:
+        # 真推理的 rollout 失败走延后通道,每次重派耗一次续训次数;续训次数不小于守护进程的连续延后上限时,
+        # 一直失败的 run 先撞上 DeferredExhaustedError、守护进程退出,到不了 T3。batch 不走延后通道,不受此限
+        return (
+            f"max_resume_attempts must be < {MAX_CONSECUTIVE_DEFERRALS} in interact mode "
+            f"(the daemon's consecutive-deferral limit), got {cfg.max_resume_attempts}"
+        )
     if not cfg.scenario_ids or len(set(cfg.scenario_ids)) != len(cfg.scenario_ids):
         return "scenario_ids must be non-empty and unique"
     if cfg.groups_per_step > len(cfg.scenario_ids):

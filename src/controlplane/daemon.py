@@ -55,6 +55,10 @@ _log = logging.getLogger("controlplane.daemon")
 
 ActionKey = tuple[str, str]  # (动作种类, 目标 id)
 
+# 同一个动作连续延后的上限(DeferralBook 的缺省值)。mindtrainer 的 interact 配置校验拿它卡 max_resume_attempts:
+# 续训次数不小于它,一直失败的 run 先撞上 DeferredExhaustedError、守护进程退出,到不了 T3。
+MAX_CONSECUTIVE_DEFERRALS = 20
+
 
 class DeferredExhaustedError(Exception):
     """同一个动作连续延后达到上限:瞬态失败拖成了常态,该人来看。
@@ -76,7 +80,7 @@ class DeferralBook:
         clock: Callable[[], float] = time.monotonic,
         default_backoff_s: float = 30.0,
         max_backoff_s: float = 900.0,
-        max_consecutive: int = 20,
+        max_consecutive: int = MAX_CONSECUTIVE_DEFERRALS,
     ) -> None:
         self._clock = clock
         self._default = default_backoff_s

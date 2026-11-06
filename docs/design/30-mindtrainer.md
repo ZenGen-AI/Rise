@@ -238,6 +238,7 @@ MindTrainer 分两层:入口与编排一层决定"从哪跑、跑不跑",模式�
 | interact 角色位 | 训练位必须是 `self_play` 且不带 `model_ref`;非训练位不能是 `self_play`,必须带 `model_ref` |
 | interact 人格 [已落地] | `bindings` 里 `persona_id` 不得重复,重复判 T2。一个人格在世界里是一个主体,两个位共用主体就共用记忆与事件 key |
 | interact 起点摘要 [已落地] | `memory.digests` 的键必须恰好是 `scenario_ids` |
+| interact 续训次数 [已落地] | `max_resume_attempts` 必须小于守护进程的连续延后上限(`MAX_CONSECUTIVE_DEFERRALS`,20);batch 不受此限 |
 | OPD | `opd_coefficient` 是有限数且不小于 0 |
 
 | 产物类型 | 路径 | 状态机种类 | 写方 | 状态 |
@@ -806,7 +807,7 @@ interact 的生成路多一条「生成、写树、回写、复校」的链路 [
 | `bindings` 里人格重复 [已落地] | T2 | `validate_training_config` 给出原因,指令判 `failed`,不写训练记录 | 指令 `payload["failure"]` |
 | 创建会话被拒,终止原因在瞬态集合里(准入满额,或逻辑 episode id 撞上活动会话,都是 `role_backend_unavailable`) [已落地] | T1 | 准入满额先在同一次尝试里退避重建(总等待 `ADMISSION_WAIT_S` 65 秒,不计入重试次数),仍被拒再按终止原因查瞬态集合、按条重跑;`invalid_session` 仍不重跑 | `curve_summary["failed_rollout_attempts"]` |
 | interact 的 `role_backend_failure` 等其余原因(含对手 API 的回复形状不对) | T1 或 T2,协议上不区分(与 20 篇一致) | 不按条重跑(它不在轨迹源的瞬态集合里),上抛,记录保持 `pending`,由续训上限兜底(经 `--interact` 入口时的去向见下一行) | 同上 |
-| 经 `--interact` 入口时,真推理的 rollout 失败:上几行里上抛的 `RolloutFailedError`(`invalid_session` 与 `role_backend_rejected` 除外),以及训练位策略自己撞上的 `OpponentApiError` [已落地] | 延后 | 策略上下文把它们译成 `RolloutDeferredError`(`DeferredError` 的子类):指令保持 `pending`,守护进程按退避重试而不退出;原因只写异常类名与 reason 码,不带异常文字(文字里可能有远端地址)。每次重派耗一次 `resume_attempts`,到 `max_resume_attempts` 由 `decide_resume` 升级为 T3。这条结论有前提:`max_resume_attempts`(默认 3)要小于 `DeferralBook` 的连续延后上限 `max_consecutive`(默认 20,`src/controlplane/daemon.py`)。同一条指令最多连续延后 `max_resume_attempts + 1` 次就升 T3,所以满足前提时一直失败的 run 最终是 T3,不会无限退避;配置成不小于 20 时,先撞上连续延后上限,守护进程因 `DeferredExhaustedError` 带原因退出,指令仍是 `pending`。配置校验目前不检查这个关系。`invalid_session` 与 `role_backend_rejected` 不在此列,仍是上面的 T2。训练位策略自己抛的 `OpponentRejectedError` 也在此列而不是 T2:训练位是本 run 自己起的 vLLM,4xx 多半是服务配置坏了,但这和起服务时的瞬态失败区分不开,先按延后处理 | 守护进程结构化日志;终局时指令 `failure.category = T3` |
+| 经 `--interact` 入口时,真推理的 rollout 失败:上几行里上抛的 `RolloutFailedError`(`invalid_session` 与 `role_backend_rejected` 除外),以及训练位策略自己撞上的 `OpponentApiError` [已落地] | 延后 | 策略上下文把它们译成 `RolloutDeferredError`(`DeferredError` 的子类):指令保持 `pending`,守护进程按退避重试而不退出;原因只写异常类名与 reason 码,不带异常文字(文字里可能有远端地址)。每次重派耗一次 `resume_attempts`,到 `max_resume_attempts` 由 `decide_resume` 升级为 T3。这条结论靠一条配置校验兜住:interact 下 `max_resume_attempts`(默认 3)必须小于守护进程的连续延后上限 `MAX_CONSECUTIVE_DEFERRALS`(20,`DeferralBook` 的缺省值,`src/controlplane/daemon.py`),不小于就在构造期与派发期被拒,信息形如 `max_resume_attempts must be < 20 in interact mode (the daemon's consecutive-deferral limit), got 20`。同一条指令最多连续延后 `max_resume_attempts + 1` 次就升 T3,所以一直失败的 run 最终是 T3,不会无限退避,也不会先撞上连续延后上限让守护进程因 `DeferredExhaustedError` 退出。batch 不走延后通道,不受这条限制。`invalid_session` 与 `role_backend_rejected` 不在此列,仍是上面的 T2。训练位策略自己抛的 `OpponentRejectedError` 也在此列而不是 T2:训练位是本 run 自己起的 vLLM,4xx 多半是服务配置坏了,但这和起服务时的瞬态失败区分不开,先按延后处理 | 守护进程结构化日志;终局时指令 `failure.category = T3` |
 
 T1 的上抛异常会让 `run_daemon` 退出,需要外部监督者重启。重启后同一条指令再次派发,`resume_attempts` 上限保证它最终升级为 T3,不会无限空转。`DeferredError` 的子类不在此列:守护进程接住它们,进程不退出;同一动作连续延后超过上限才带原因退出(CP-14)。经 `--interact` 入口的真推理 rollout 失败属于这一类例外:策略上下文已把它译成延后类,见上表。
 

@@ -136,9 +136,10 @@ class RolloutDeferredError(DeferredError):
     指令保持 pending,守护进程按退避重试,不被它带走。
 
     重试有界:training_run 此时仍是 pending,每次重派 `run_training` 先把 resume_attempts 加一并落盘,
-    到 `max_resume_attempts` 由 `decide_resume` 升级为 NeedsHumanError,派发器判 T3。所以只要 `max_resume_attempts`
-    小于守护进程的连续延后上限(`DeferralBook.max_consecutive`,默认 20),一直失败的 run 最终是 T3;不小于时先撞上
-    `DeferredExhaustedError`,守护进程带原因退出。reason 只写原异常的类名与 reason 码,不带它的文字(文字里可能有远端地址)。"""
+    到 `max_resume_attempts` 由 `decide_resume` 升级为 NeedsHumanError,派发器判 T3。interact 的配置校验要求
+    `max_resume_attempts` 小于守护进程的连续延后上限(`controlplane.daemon.MAX_CONSECUTIVE_DEFERRALS`,20),所以
+    一直失败的 run 先到续训上限,最终判 T3,不会先撞上 `DeferredExhaustedError` 让守护进程退出。
+    reason 只写原异常的类名与 reason 码,不带它的文字(文字里可能有远端地址)。"""
 
 
 def _rollout_deferral(exc: RolloutFailedError | OpponentApiError) -> RolloutDeferredError:

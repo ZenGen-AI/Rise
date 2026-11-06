@@ -115,6 +115,11 @@ INVALID = [
     ("opd_inf", lambda: _interact(opd_coefficient=float("inf")), "opd_coefficient must be"),
     ("negative_retries", lambda: _interact(max_retries_per_episode=-1), "max_retries_per_episode must be >= 0"),
     ("negative_resume_attempts", lambda: _interact(max_resume_attempts=-1), "max_resume_attempts must be >= 0"),
+    # interact 下续训次数不得不小于守护进程的连续延后上限:否则一直失败的 run 先撞上 DeferredExhaustedError,到不了 T3
+    ("resume_attempts_at_the_deferral_limit", lambda: _interact(max_resume_attempts=20),
+     "max_resume_attempts must be < 20 in interact mode"),
+    ("resume_attempts_above_the_deferral_limit", lambda: _interact(max_resume_attempts=500),
+     "max_resume_attempts must be < 20 in interact mode"),
     ("unknown_stage", lambda: _interact(stage_manifest_refs={"sftt": "x"}), "unknown stage"),
     ("sft_without_manifest", lambda: _interact(sft_steps=2, stage_manifest_refs={}), "stage_manifest_refs['sft']"),
     ("batch_grpo_without_manifest", lambda: _batch(stage_manifest_refs={"sft": "m"}), "stage_manifest_refs['grpo_opd']"),
@@ -169,6 +174,44 @@ def test_invalid_config_is_rejected_with_the_specific_reason(build, needle):
     reason = validate_training_config(build())
     assert reason is not None, "应当被拒绝"
     assert needle in reason, reason
+
+
+def test_interact_accepts_max_resume_attempts_just_below_the_daemon_deferral_limit():
+    assert validate_training_config(_interact(max_resume_attempts=19)) is None
+    assert validate_training_config(_interact(max_resume_attempts=0)) is None
+
+
+def test_the_resume_attempts_refusal_names_the_field_the_limit_and_the_value():
+    reason = validate_training_config(_interact(max_resume_attempts=20))
+    assert reason == ("max_resume_attempts must be < 20 in interact mode "
+                      "(the daemon's consecutive-deferral limit), got 20")
+    with pytest.raises(InvalidTrainingConfigError, match="max_resume_attempts"):
+        ensure_valid_config(_interact(max_resume_attempts=20))
+
+
+def test_batch_mode_has_no_deferral_channel_so_max_resume_attempts_is_not_capped():
+    assert validate_training_config(_batch(max_resume_attempts=20)) is None
+    assert validate_training_config(_batch(max_resume_attempts=500)) is None
+
+
+def test_the_pending_interact_check_applies_the_same_cap():
+    """生成路的指令在构造期走宽口径,同样要拦:否则要等到派发期才发现。"""
+    reason = validate_pending_interact(_pending(max_resume_attempts=20))
+    assert reason is not None and "max_resume_attempts must be < 20 in interact mode" in reason
+    assert validate_pending_interact(_pending(max_resume_attempts=19)) is None
+
+
+def test_the_cap_is_the_daemons_own_default_consecutive_deferral_limit():
+    """上限取自 controlplane.daemon 的同一个常量,不在 mindtrainer 里另抄一份(mindtrainer 不能导入 factory,
+    但可以导入 controlplane)。守护进程默认的退避表用的也是它。"""
+    import inspect
+
+    from controlplane.daemon import MAX_CONSECUTIVE_DEFERRALS, DeferralBook
+
+    assert MAX_CONSECUTIVE_DEFERRALS == 20
+    assert inspect.signature(DeferralBook).parameters["max_consecutive"].default == MAX_CONSECUTIVE_DEFERRALS
+    assert validate_training_config(_interact(max_resume_attempts=MAX_CONSECUTIVE_DEFERRALS - 1)) is None
+    assert validate_training_config(_interact(max_resume_attempts=MAX_CONSECUTIVE_DEFERRALS)) is not None
 
 
 def test_a_persona_bound_to_two_slots_is_refused():
