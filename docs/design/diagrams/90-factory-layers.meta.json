@@ -1,5 +1,5 @@
 {
  "title": "依赖方向与分层守卫",
  "desc": "factory 在依赖图最右端,可以导入任何包,任何包都不导入它。红色虚线是守卫测试禁止的导入边。",
- "describe": "**节点**\n\n- factory:组合根 · 叶子\n- controlplane:协调层核心\n- simulator:仿真 · 实时服务\n- mindtrainer:训练 · 派发器\n- diagnostic:诊断评测\n- 闭环新包:recipestore · trainplanner / trainscheduler · actio / mindagent · inference_bridge\n\n**连线**\n\n- simulator → controlplane:导入\n- mindtrainer → controlplane:导入\n- diagnostic → controlplane:导入\n- mindtrainer → simulator:导入\n- factory → mindtrainer:导入任何包\n- factory → simulator\n- factory → diagnostic\n- factory → 闭环新包\n- mindtrainer ↔ diagnostic:互不导入(虚线)\n- controlplane → mindtrainer:禁止(虚线)\n- controlplane → 闭环新包:禁止(虚线)"
+ "describe": "**节点**\n\n- factory:组合根 · 叶子\n- controlplane:协调层核心\n- simulator:仿真 · 实时服务\n- mindtrainer:训练 · 派发器\n- diagnostic:诊断评测\n- 闭环新包:recipestore · trainplanner / trainscheduler · simple_actio / mindagent · inference_bridge\n\n**连线**\n\n- simulator → controlplane:导入\n- mindtrainer → controlplane:导入\n- diagnostic → controlplane:导入\n- mindtrainer → simulator:导入\n- factory → mindtrainer:导入任何包\n- factory → simulator\n- factory → diagnostic\n- factory → 闭环新包\n- mindtrainer ↔ diagnostic:互不导入(虚线)\n- controlplane → mindtrainer:禁止(虚线)\n- controlplane → 闭环新包:禁止(虚线)"
 }

@@ -155,7 +155,7 @@ def chat_messages(
     只放话语,不放内心独白与激活轨迹(那是评估材料,不是对手该看见的)。
     历史为空、或第一条就是自己的发言时,先补一条开场的 user:有的聊天模板要求 user 轮打头。
 
-    guidance 非空时(Actio 给的技能、经验与记忆要点,每条一行),并入同一条 system 文本的末尾,
+    guidance 非空时(SimpleActio 给的技能、经验与记忆要点,每条一行),并入同一条 system 文本的末尾,
     前面加「当前要点：」(全角冒号);仍只有一条 system。空时不碰 system 文本,请求体与不带指导语时逐字节相同。"""
     role = next((r.description for r in scenario.role_slots if r.slot_id == speaker_slot), "")
     lines = [f"你在一段社会情境对话里扮演角色位「{speaker_slot}」" + (f"({role})。" if role else "。")]

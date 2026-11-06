@@ -2,7 +2,7 @@
 
 状态:已施工并合并(2026-10-26)。本稿第三版已并入 `docs/design/` 五篇,施工计划是 `docs/superpowers/plans/2026-10-25-interact-train-wiring.md`,补齐计划是 `docs/superpowers/plans/2026-10-26-interact-followups.md`。现行口径以 `docs/design/` 为准,本稿只作设计记录,不再更新。日期:2026-10-25 定稿。
 前置设计:`2026-10-03-mindtrainer-design.md`(InteractTrain 轨迹源)、`2026-10-09-closed-loop-integration-design.md`(闭环接线)、`2026-10-15-real-backends-design.md`(远端计算层、vLLM 服务)。
-配套设计:`2026-10-25-actio-starling-memory-design.md`(智能体协议与记忆选型)。本稿不依赖它,两者可以各自独立落地。
+配套设计:`2026-10-25-simple-actio-starling-memory-design.md`(智能体协议与记忆选型)。本稿不依赖它,两者可以各自独立落地。
 权威文档集是 `docs/design/`。本稿审定后先并入其中的总览、SocialSimulator、MindTrainer、TrainScheduler、Factory 五篇,再写施工计划。
 
 ## 0. 这份文档做什么

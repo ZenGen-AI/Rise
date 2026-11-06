@@ -18,7 +18,7 @@ TURNS = [f"pb：第{i}轮,我担心预算超支,人手也不够" for i in range(
 
 @pytest.fixture
 def live_port(tmp_path):
-    from actio.memory_starling import StarlingEndpoints, StarlingMemory
+    from simple_actio.memory_starling import StarlingEndpoints, StarlingMemory
     from factory.memory_config import check_api_key, read_memory_config
     cfg = read_memory_config(env=os.environ, repo_root=Path(__file__).resolve().parents[1])
     assert cfg is not None, "RISE_MEMORY_CONFIG must point at a real config"
@@ -39,7 +39,7 @@ def _timed(took, name, call):
 
 
 def test_ten_turns_stay_within_the_per_call_budget(live_port, capsys):
-    from actio.memory_port import MemoryEvent
+    from simple_actio.memory_port import MemoryEvent
     port, limit = live_port
     took = {"recall": [], "remember": [], "embed_pending": []}
     embedded = 0
@@ -59,7 +59,7 @@ def test_ten_turns_stay_within_the_per_call_budget(live_port, capsys):
 
 
 def test_recall_brings_back_the_related_sentence(live_port):
-    from actio.memory_port import MemoryEvent
+    from simple_actio.memory_port import MemoryEvent
     port, _ = live_port
     first = port.remember(MemoryEvent("q#0", "pb：我负责鉴权模块", "pb"))
     second = port.remember(MemoryEvent("q#1", "pb：明天下雨", "pb"))

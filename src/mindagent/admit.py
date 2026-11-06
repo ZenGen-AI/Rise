@@ -38,9 +38,9 @@ from collections.abc import Callable
 from contextlib import ExitStack
 from datetime import datetime, timezone
 
-from actio.errors import ActioDataError
-from actio.memory_port import PERSONA_ID_PATTERN, DeploymentMemoryStore, MemoryEventConflict, MemoryFailureError
-from actio.skills import Skill
+from simple_actio.errors import SimpleActioDataError
+from simple_actio.memory_port import PERSONA_ID_PATTERN, DeploymentMemoryStore, MemoryEventConflict, MemoryFailureError
+from simple_actio.skills import Skill
 from controlplane.deferred import DeferredError
 from controlplane.envelope import Envelope, OwnerRef
 from controlplane.gitstore import GitStore
@@ -102,7 +102,7 @@ def _entries(proposal_id: str, increments: object) -> list[tuple[str, str, dict]
                 out.append(("memory", f"{proposal_id}#{k}", _memory_definition(k, definition)))
             else:
                 raise ValueError(f"increment {k}: unknown kind {kind!r}")
-        except ActioDataError as exc:
+        except SimpleActioDataError as exc:
             raise ValueError(f"increment {k}: {exc}") from None
     return out
 
@@ -208,12 +208,12 @@ def make_admit_proposal_handler(
                     transient = outcome.failed and outcome.category in TRANSIENT_EXTRACTION_CATEGORIES
                     if outcome.failed and not statements and not transient:
                         memory_store.abandon_event(sid, key)
-                except (MemoryFailureError, OSError, ActioDataError) as exc:
+                except (MemoryFailureError, OSError, SimpleActioDataError) as exc:
                     # 不改提案、不放弃事件:留在 approved,下一 tick 重入同 key 补收据(只报类名)。
-                    # ActioDataError:库拒收这条事件(替身要求 interlocutor 非空),登记之前就拒,库没动;
+                    # SimpleActioDataError:库拒收这条事件(替身要求 interlocutor 非空),登记之前就拒,库没动;
                     # 不接的话它从处理器漏出去打崩守护进程。冲突后 abandon_event 也抛(同 key 已提交)时落在这里
                     why = f"remember {key}: {type(exc).__name__}"
-                    if isinstance(exc, ActioDataError) and d["interlocutor"] == "":
+                    if isinstance(exc, SimpleActioDataError) and d["interlocutor"] == "":
                         # 终审 M-6:点明原因,否则人看不出提案为什么一直停在 approved(仍不带正文)
                         why += " (the stand-in library cannot store a general fact: interlocutor is empty)"
                     fail_once(store, run_id, task_id=task_id,

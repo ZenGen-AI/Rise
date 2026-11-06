@@ -124,7 +124,7 @@
   - `inference_bridge`:只取 `BridgeError`(`plan_handler` 按 R18 升级它);
   - `mindtrainer.data_spec`(`DataSpec`、`parse_data_spec`、`InvalidDataSpecError`、`required_stages`、`check_data_spec_against_config`、`manifest_data_run`),以及 `mindtrainer.training_config`(`TrainingConfig`、`validate_training_config`、`load_config_from_directive`、`InvalidTrainingConfigError`;构造与校验指令要用它,这一条也请协调方在设计依赖图里一并列上)。
   - 标准库只用 `__future__`、`collections`、`copy`、`dataclasses`、`math`、`re`。
-  - **不导入** `mindtrainer` 的其他任何模块(`dispatch`、`orchestrator`、`executor`、`data_producer`……),**不导入** `diagnostic`、`simulator`、`actio`、`mindagent`、`factory`。
+  - **不导入** `mindtrainer` 的其他任何模块(`dispatch`、`orchestrator`、`executor`、`data_producer`……),**不导入** `diagnostic`、`simulator`、`simple_actio`、`mindagent`、`factory`。
   - 反方向:`controlplane`、`recipestore`、`trainplanner`、`mindtrainer`、`inference_bridge` 都不导入 `trainscheduler`。
   - 以上每一条都由任务 67 的 `tests/test_ts_boundaries.py` 扫 `src/trainscheduler/*.py` 的导入语句钉住(含"`mindtrainer` 下恰好用到 `training_config` 与 `data_spec` 两个模块")。测试文件不受此限,可以导入 `mindtrainer.dispatch`、`mindtrainer.data_producer` 等。
 - **不引入新第三方依赖**;`pyproject.toml` 只改 wheel 包列表这一行。
@@ -3923,7 +3923,7 @@ git commit -m "feat: trainscheduler recipe nomination (evidence, gain, min_gain 
 - **证明默认配置真能跑通一轮 batch**:装好两份默认配置与默认模板 → 罐头后端回答 `new batch` → 处理器写出 `awaiting_confirmation` 的 `run-002` → `reconcile_once(store)`(不注入处理器)对它不产生任何动作 → 用写状态模拟命令行 `confirm` → `reconcile_once` 带计划 2 的派发器与 `TemplateDataProducer` → 指令 `executed`,两个阶段的清单在 `run-002` 下合成出来,候选 `pending_review`,`train_curve_summary.degenerate_groups_total == 0`,候选的 `base_checkpoint_ref` 是 `run-001` 晋级模型的 checkpoint。
 - **证明 clone 复用清单**:接着用写状态模拟审核门①与晋级、写一份 `mock` 诊断(tom 从 0.40 涨到 0.48)→ 提名处理器(`accept_mock_evidence=True`、`repo_commit="0385004"`)写出候选,候选的 `stage_manifests.sft.manifest_hash` 等于树里清单的哈希 → 模拟审核门③ → 计划 3 的 `handle_admit_recipe` 收录 → 第二次规划回答 `clone recipe-run-002` → `run-003` 的指令 `recipe_ref == "recipe-run-002"`、没有 `data_spec`、清单 id 是 `dsm-run-002-sft`、基座是 `run-002` 的 checkpoint → 确认 → 训练出候选,且 `run-003` 下**没有**合成任何清单。
 - 人工步骤一律用写状态模拟,与既有 `tests/test_e2e_loop.py` 同一手法;规划动作直接调用处理器,不经计划 8 的 `reconcile`(那是计划 9 端到端的事)。
-- **边界测试**用 `ast` 扫 `src/trainscheduler/*.py` 的全部 `import` / `from ... import` 语句,钉住 Global Constraints"依赖方向"一条的每一项:顶层包只能是允许的项目内包与六个标准库模块;`mindtrainer` 下只能是 `training_config` 与 `data_spec` 两个模块,且两个都真的在用(声明与实际一致);`diagnostic`、`simulator`、`actio`、`mindagent`、`factory` 一个都不能出现;上游五个包不反向导入;`recipestore` 只经 `recipes_port`;每个模块的 `__future__` 头。它们写完就是通过的;第 4 步做六次变异检查,证明测试真能抓住违规。
+- **边界测试**用 `ast` 扫 `src/trainscheduler/*.py` 的全部 `import` / `from ... import` 语句,钉住 Global Constraints"依赖方向"一条的每一项:顶层包只能是允许的项目内包与六个标准库模块;`mindtrainer` 下只能是 `training_config` 与 `data_spec` 两个模块,且两个都真的在用(声明与实际一致);`diagnostic`、`simulator`、`simple_actio`、`mindagent`、`factory` 一个都不能出现;上游五个包不反向导入;`recipestore` 只经 `recipes_port`;每个模块的 `__future__` 头。它们写完就是通过的;第 4 步做六次变异检查,证明测试真能抓住违规。
 
 - [ ] **Step 1: 前置检查**
 
@@ -4048,7 +4048,7 @@ def test_promote_nominate_admit_then_clone_reuses_the_manifests(store):
 
 trainscheduler 允许导入的项目内模块(设计 §11):controlplane、recipestore(只经 recipes_port)、trainplanner、
 inference_bridge(只取 BridgeError)、mindtrainer.training_config 与 mindtrainer.data_spec。
-不导入 mindtrainer 的其他模块,不导入 diagnostic、simulator、actio、mindagent、factory。
+不导入 mindtrainer 的其他模块,不导入 diagnostic、simulator、simple_actio、mindagent、factory。
 反方向:controlplane、recipestore、trainplanner、mindtrainer、inference_bridge 都不导入 trainscheduler。
 """
 import ast
@@ -4059,7 +4059,7 @@ PROJECT_ALLOWED = {"trainscheduler", "controlplane", "recipestore", "trainplanne
 STDLIB_ALLOWED = {"__future__", "collections", "copy", "dataclasses", "math", "re"}
 # mindtrainer 只允许这两个模块:不能把编排器、执行器、派发器拉进调度器
 ALLOWED_MINDTRAINER = {"mindtrainer.training_config", "mindtrainer.data_spec"}
-FORBIDDEN = {"diagnostic", "simulator", "actio", "mindagent", "factory"}
+FORBIDDEN = {"diagnostic", "simulator", "simple_actio", "mindagent", "factory"}
 
 
 def _imports(path: Path) -> set[str]:

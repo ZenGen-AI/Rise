@@ -1,0 +1,3378 @@
+# SimpleActio 包与激活轨迹协议改动 Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** 打通激活轨迹(R12):客户端在 `SubmitTurn` 里带上结构化的激活轨迹,服务端经驱动器与客户端驱动后端把它交给 runner,runner 写进该轮的 `TurnRecord`,落盘的 episode 里客户端轮次带轨迹、对手轮次没有。同时新建顶层包 `simple_actio`:技能(触发谓词 + 响应策略 + 层级 + 版本)与路由、显式记忆与快照检索、推理经验与三级回退、`SimpleActioInstance`。实例的 `respond` 返回三元组,能被 runner 直接当后端用,也能被 MindAgent 的客户端循环直接调用。
+
+**Architecture:** 协议只加一个可选字段 `SubmitTurn.activation_trace = 3`(`google.protobuf.Struct`),用 `scripts/gen_realtime_proto.sh` 重新生成并入库。runner 用一个小函数 `_unpack_reply` 同时接受二元组与三元组,既有二元组后端与既有测试一行不改。`simple_actio` 只依赖 `simulator.datamodel` 与标准库:信号是注册表里的纯函数,触发条件是五个算子的小型谓词语言,路由、快照、检索、三级回退都是纯函数;`SimpleActioInstance` 把选中的技能策略、经验的当前一级与命中的记忆渲染成指导语列表,交给带指导语的后端协议 `respond_guided`,普通后端经 `IgnoreGuidance` 适配器包装。轨迹模式里不放任何数字,所以经 Struct 往返后逐字段、逐类型相等。
+
+**Tech Stack:** Python 3.11+ / uv / pytest / grpcio 1.84.0 / grpcio-tools 1.84.0 / protobuf 7.36.2(运行时);**无新增第三方依赖**。
+
+**Spec:**
+- `docs/superpowers/specs/2026-10-09-closed-loop-integration-design.md` §8.1(SimpleActio)、§8.2(协议改动)、§11(接口契约与依赖方向)、§14 第 2 条(协议重新生成)
+- `docs/superpowers/specs/2026-09-24-rise-subsystem-design.md` 补充 A(SimpleActio 模块详细设计)、§2.6.3(激活轨迹是协议层强制项,须区分"没有轨迹"与"轨迹为空")
+- 前置:无(设计 §12:本计划不依赖计划 1)。撰写时的基线是 `main` 的 `0385004`,全量 **820 通过**、无警告。按 §12 顺序执行时计划 1 至 5 已先落地,起点通过数更高:本计划只保证**增量**,起点 B 与提交号 `BASE` 由任务 70 Step 1 实测
+
+**依赖已有产出的名字**
+
+| 来源 | 名字 |
+|---|---|
+| `simulator.datamodel` | `Persona`、`Scenario`、`RoleSlot`、`RoleBinding`、`RoleAssignment`、`TurnRecord`(`activation_trace: dict \| None` 已存在)、`Episode` |
+| `simulator.runner` | `run_episode`(任务 71 改其内部,签名不变) |
+| `simulator.backends` | `ModelBackend`、`ScriptedBackend`(只在测试里用;`simple_actio` 不导入) |
+| `simulator.realtime.backend` | `ClientDrivenBackend.submit`(任务 72 加 keyword-only 参数) |
+| `simulator.realtime.driver` | `SessionDriver.submit_turn`(任务 72 加 keyword-only 参数) |
+| `simulator.realtime.servicer` | `EnvironmentServicer.Interact`(任务 72 改 `submit_turn` 分支);`_drain_ready_events` 的抹除规则不改 |
+| `simulator.realtime.client` | `EnvironmentServiceClient.submit_turn`(任务 72 加 keyword-only 参数)、`turns`、`drain_until_end` |
+| `simulator.realtime.codec` | `turn_record_to_proto` / `turn_record_from_proto`(不改;已用 `SetInParent()` 保留空轨迹的 presence,用 `MessageToDict` 转回纯 dict) |
+| `simulator.realtime.server` | `create_server`(只在测试里用真实 loopback 服务端) |
+| `simulator.store_adapter` | `write_scenario`、`read_scenario`、`write_episode`、`read_episode`(只在端到端测试里用) |
+| `controlplane.gitstore` | `GitStore`(只在端到端测试里用;`simple_actio` 不导入) |
+
+**设计 §8.1、§8.2 的各子项,本计划怎么处理**
+
+| 条目 | 处理 |
+|---|---|
+| `SubmitTurn` 加 `optional google.protobuf.Struct activation_trace = 3` | **做**(任务 70) |
+| 用 `scripts/gen_realtime_proto.sh` 重新生成三个生成文件并入库 | **做**(任务 70)。实测只有 `_pb2.py` 与 `_pb2.pyi` 变化,`_pb2_grpc.py` 逐字节不变(见下"已核实的事实") |
+| 客户端 `submit_turn(..., *, activation_trace=None)`,经驱动器、客户端驱动后端带到 runner | **做**(任务 72) |
+| runner 接受二元组或三元组 | **做**(任务 71) |
+| 回显客户端自己那一轮时保留轨迹;对手轮次仍被抹掉 | **做**:规则在现有 `_drain_ready_events` 里本来就是这样,不改代码,写测试锁住(任务 72、77) |
+| 技能、路由、冲突写进轨迹 | **做**(任务 74、76) |
+| 信号注册表与三个内置信号 | **做**(任务 73) |
+| 记忆:主体与关键词词面重叠检索、按时间点取快照 | **做**(任务 75) |
+| 推理经验:数据模型与三级回退的纯函数 | **做**(任务 75) |
+| `respond_guided` 协议与普通后端适配器;回显指导语的罐头后端 | **做**(任务 76) |
+| 激活轨迹模式 | **做,但改了草图**(任务 76;见"对外契约"与 Ruling 2、3、4) |
+| 技能库与记忆库的产物读写、`library_state` | 不做:路径函数属计划 1,读写属计划 7。本计划只给出 `to_dict` / `from_dict` 的精确字典形状 |
+| `mindtrainer` 的 `InteractTrajectorySource` 接 SimpleActio 实例 | 不做:它解包二元组(`utterance, thought = policy.respond(...)`),见"已知限制" |
+
+**已核实的事实(实现者不要再猜)**
+
+以下全部在一份临时拷贝里真实跑过:
+
+- **重新生成不会带来新字段之外的差异。** 在未改 `.proto` 的情况下,按 `scripts/gen_realtime_proto.sh` 的同一条 `grpc_tools.protoc` 命令把生成物输出到一个临时目录,与入库的三个文件逐一 `diff`:三个文件**全部逐字节相同**。生成物头部写的是 `# Protobuf Python Version: 7.35.1`、`ValidateProtobufRuntimeVersion(..., 7, 35, 1, ...)`,`_pb2_grpc.py` 写的是 `GRPC_GENERATED_VERSION = '1.84.0'`——它们来自 `grpcio-tools 1.84.0` 自带的 protoc,与运行时 `protobuf 7.36.2` 无关,重新生成后不变。`uv.lock` 锁定 `grpcio-tools 1.84.0`、`grpcio 1.84.0`、`protobuf 7.36.2`,所以用 `uv run --extra dev` 重新生成是可复现的。
+- **加了字段后的差异只在新字段。** `realtime_env_pb2.py`:序列化描述符那一行(1 行)与其后 12 行 `_serialized_start/_serialized_end` 偏移量(`_SUBMITTURN` 起往后各消息的偏移整体后移);`realtime_env_pb2.pyi`:`SubmitTurn` 的 `__slots__`、新增 `ACTIVATION_TRACE_FIELD_NUMBER`、`activation_trace: _struct_pb2.Struct` 与 `__init__` 签名;`realtime_env_pb2_grpc.py`:无差异。`git diff --stat` 为 3 个文件 `20 insertions(+), 15 deletions(-)`。
+- **Struct 把数字存成 double。** `Struct.update({"a": 3, "c": {"d": 7}})` 经 `MessageToDict` 取回是 `{"a": 3.0, "c": {"d": 7.0}}`,类型是 `float`;`2**60` 回来是 `1.152921504606847e+18`。`None`、`bool`、`str`、空 `list`、空 `dict` 原样往返。Struct 的键必须是字符串(`update({1: "x"})` 抛 `TypeError`)。
+- **`update({})` 不置位 presence。** 所以带空轨迹时必须先 `SetInParent()`,`codec.turn_record_to_proto` 已经这么做;本计划的客户端一侧照做。
+- **对手轮次的抹除规则已经存在。** `servicer._drain_ready_events` 只对 `speaker_slot != driver.client_driven_slot` 的轮次做 `replace(turn, inner_thought=None, activation_trace=None)`,客户端自己的轮次原样回显;`run_episode` 给后端的 `history` 同一条规则。服务端落盘的 episode 来自驱动器自己的完整记录,不受抹除影响。
+- **服务端对手后端返回三元组也能通。** `TimeoutBackend.respond` 原样返回内层后端的返回值,不解包,所以任务 71 之后服务端的对手后端也能返回三元组(任务 72 的测试用到)。
+- **`ClientDrivenBackend.respond` 的既有测试断言二元组**(`assert result["value"] == ("late arrival", None)`),所以不带轨迹时它必须继续返回二元组。
+- **`tests/test_mt_packaging.py`** 比对 `src/` 下带 `__init__.py` 的目录与 `pyproject.toml` 的 wheel 包列表,新增 `src/simple_actio` 必须同时加进列表,否则两条测试之一失败。
+
+## 本计划的裁决
+
+设计 R1 至 R21 不动(R19 至 R21 是本计划落盘之后补的,与 SimpleActio 无交集)。下面是设计没规定、或与现有代码有出入的细节:
+
+1. **Ruling: 直接用 `scripts/gen_realtime_proto.sh` 原地重新生成,不改脚本、不手改生成物、不升级 `grpcio-tools`** —— 任务 70 的风险验证实测:不改 `.proto` 时重新生成与入库文件逐字节相同,改了之后差异只在新字段(`_pb2_grpc.py` 不变)。版本头与运行时版本检查由 `grpcio-tools 1.84.0` 自带的 protoc 决定,与入库时相同 —— 判错的代价:若实施者本机的 `grpcio-tools` 版本不是 1.84.0,版本头会变;任务 70 的 Step 1 先跑一遍"不改 `.proto` 的重新生成并 diff",不为空就停下,不往下做。
+2. **Ruling: 激活轨迹模式里没有任何数字字段;设计 §8.1 草图里的 `library_version: {"skill": n, "memory": m}` 改成两个字符串 `{"skill": "<str>", "memory": "<str>"}`。`instantiate` 仍接受整数,在入口处规范成十进制字符串(`3 → "3"`)** —— protobuf Struct 只有 double,整数经 gRPC 往返后变浮点数(已实测),放数字就要求每个消费方都做规范化,漏一处就出现 `3 != 3.0` 之外的 `"3" vs 3.0` 类问题;字符串还顺带允许库版本用非数字的标识(如 `lib-2026-10-09`) —— 判错的代价:计划 7(收录处理器)写 `library_state.yaml` 时若把库版本存成整数,比对轨迹时要先 `str()`;本计划的 `normalize_library_version` 就是那一处规范化,计划 7 应复用它。
+3. **Ruling: 轨迹在草图之外加三个键:`schema`(固定 `"simple_actio.trace.v1"`)、`signals`(此刻为真的已注册信号名;计划 7 的分析器按自己的规则重新求值,不读它)、`conflict`(多于一个候选时为 `{"skills": candidates, "rule": "priority_desc,version_desc,id_asc"}`,否则 `null`);`experience` 从草图的 `id | None` 改成 `{"id", "tier"} | null`** —— 设计要求"冲突与最终选择都写进激活轨迹",`candidates` 加 `selected` 能推出冲突但推不出按什么规则裁决;经验分析器(设计 §8.3)要统计"对方最后一句触发了该信号",`signals` 让它不必重放信号函数;三级回退落在哪一级是推理经验唯一有信息量的输出 —— 判错的代价:模式多三个键,计划 7 读轨迹时用 `validate_trace` 一次校验,不必自己判断键是否存在。
+4. **Ruling: 轨迹的 `candidates` 按路由次序排列,`selected` 恒等于 `candidates[0]`(没有候选时为 `null`),`validate_trace` 强制这一点** —— 让"选中的是哪一个"与"为什么是它"在数据上自洽,消费方不必再排序 —— 判错的代价:若将来路由要引入"命中但不选"(例如冷却),要先升 `schema` 版本。
+5. **Ruling: 协议层不对轨迹做数字规范化,`MessageToDict` 取回什么就存什么** —— 规范化(`3.0 → 3`)会把真正的浮点数 `1.0` 也改成整数,任何启发式都有误伤;改由模式保证没有数字 —— 判错的代价:非 SimpleActio 的客户端若带数字轨迹,落盘的是浮点数。任务 72 有一条测试钉住这个行为。
+6. **Ruling: runner 接受 `tuple` 或 `list`、长度 2 或 3 的返回值;其余一律抛 `TypeError`(信息含 `2- or 3-tuple`);第三项必须是 `dict` 或 `None`;存进 `TurnRecord` 的是深拷贝** —— 改动前的解包对 `list` 也成立,保持兼容;深拷贝与 runner 现有的"history 用副本"同一条理由:后端事后改自己的字典不能污染 episode —— 判错的代价:返回值不合规的后端从原来的 `ValueError`(解包失败)变成 `TypeError`;仓库里没有代码依赖前者(已 grep)。
+7. **Ruling: `ClientDrivenBackend` 不带轨迹时仍返回二元组,带轨迹时返回三元组** —— 既有测试断言二元组(`test_realtime_backend.py`),不改它们 —— 判错的代价:无。
+8. **Ruling: 信号签名是 `(history, speaker_slot) -> bool`,注册表 `SignalRegistry` 是实例(没有全局可变状态),`default_registry()` 每次新建一个** —— 并发会话不能共享可变状态(§2.6.4);技能库与信号词典可以按实例替换 —— 判错的代价:要全局追加信号的调用方得把注册表传进 `instantiate(..., registry=...)`。
+9. **Ruling: 三个内置信号的定义(词典是拟的,无数据支持):`emotion_high` = 对方最后一句含情绪词典任一词(不区分大小写的子串匹配)或含两个及以上感叹号(半角或全角);`no_new_information` = 对方至少说过两句,且最后一句的词面全都在它此前说过的话里出现过(空话也算);`first_turn` = 说话者此前一句都没说过** —— 设计只给了名字。三个都只看 `history` 与 `speaker_slot`,是纯函数 —— 判错的代价:阈值与词典都可替换(`make_emotion_high(lexicon)`、自定义注册表),不影响接口。
+10. **Ruling: 词面切分只有一处(`simple_actio.text.tokens`):ASCII 词按小写整词;连续汉字按相邻二字切分,单字汉字串保留单字** —— 不引入分词依赖;二字切分对中文的词面重叠足够做 V1 检索与"无新信息"判断 —— 判错的代价:语义近义词检不到,V1 已知。
+11. **Ruling: 路由排序键是 `(-priority, -version, id)`;`Skill.priority` 是整数、默认 0,越大越优先** —— 设计写"按优先级,再按版本号较新者,再按 id",但没定义优先级的类型与方向 —— 判错的代价:无。
+12. **Ruling: 技能的"响应策略"是 `policy: {"instructions": [str, ...]}`(非空,每条非空)** —— 设计只说"结构化指令";V1 唯一的用途是渲染成指导语,结构化成一个对象留出以后加键的余地,而不是直接一个字符串列表 —— 判错的代价:计划 7 的提案生成器产出技能时要写这个形状(见"对外契约")。
+13. **Ruling: 记忆的时间戳格式固定为 `YYYY-MM-DDTHH:MM:SSZ`(UTC、秒精度),快照按字符串比较** —— 与仓库现有产物的 `created_at` 同格式;固定格式下字符串序即时间序,不需要解析时间 —— 判错的代价:带时区偏移或毫秒的时间戳会被 `from_dict` 拒绝。
+14. **Ruling: 记忆检索的查询词是"对方最后一句话";`limit` 默认 3;排序 `(重叠数降序, 置信度降序, id)`;重叠数为 0 的不返回** —— 设计原只说"按主体与关键词的词面重叠检索",本计划的 `overlap` 把主体、内容与关键词合起来打分(多算了"内容",设计 §8.2 已同步);`retrieve` 另接受 `subjects` 过滤,但 V1 的 `SimpleActioInstance` 不传(主体与 persona id 的对应关系还没有约定) —— 判错的代价:与当前话题无关的高置信记忆不会被检出。
+15. **Ruling: 推理经验的三级是 `primary`、`secondary`(各带一个触发条件 `when`)与 `fallback`(`when` 必须为 `null`,无条件);一条经验整体还有 `applies_when`;多条适用时取 `(版本降序, id)` 第一条** —— 设计只说"三级回退激活:主策略→次策略→保底策略" —— 判错的代价:无。
+16. **Ruling: 指导语的顺序固定为"选中技能的策略 → 推理经验当前一级 → 命中的记忆",每行带来源前缀 `[skill:<id>]`、`[experience:<id>/<tier>]`、`[memory:<id>] <subject>: <content>`** —— 罐头后端回显指导语就能断言"技能确实改变了输出";前缀让人工看 episode 时知道哪句话受了哪条技能影响 —— 判错的代价:真实模型后端的提示模板里会出现这些前缀;要去掉只改 `render_guidance` 一处。
+17. **Ruling: `instantiate` 在设计签名之外加三个 keyword-only 参数 `experiences=()`、`registry=None`、`memory_limit=3`;`profile` 只深拷贝保存,V1 不参与路由与指导语** —— 设计签名不含推理经验与信号注册表,但两者都是实例必须绑定的东西 —— 判错的代价:无(新增参数都有默认值,设计签名的调用照样成立)。
+18. **Ruling: `GuidedBackend.respond_guided` 只能返回二元组,返回三元组时 `SimpleActioInstance.respond` 抛 `TypeError`** —— 轨迹只能由 SimpleActio 产生,后端不得冒充 —— 判错的代价:无。
+19. **Ruling: `simple_actio` 的数据类全部 `frozen=True`,字段值的校验全部放在 `__post_init__` 里,直接构造与 `from_dict` 走同一套;`from_dict` 只查键(未知键、缺键)并把 YAML 的 `list` 换成 `tuple`。类型不对抛 `SimpleActioDataError` 并指出字段;整数字段拒绝 `bool` 与浮点数;字符串序列字段只接受 `tuple`(拒绝 `str`,否则一个字符串会被逐字当成多条指导语);`MemoryEntry.confidence` 接受整数并规范成 `float`。所以 `check_library` 与 `instantiate` 对条目只需查 `isinstance`:不合格的条目构造不出来** —— 技能库与记忆库是审核过的产物,宽松解析会让坏数据悄悄进库 —— 判错的代价:手写的 YAML 多一个键就被拒;报错信息会指出是哪个键。
+20. **Ruling: 回显规则不改代码** —— 现有 `_drain_ready_events` 已经"对手抹掉、自己原样",正好是设计要求的规则;本计划只用测试锁住它(任务 72 的 `test_opponent_traces_are_stored_but_never_sent_to_the_client`、任务 77 的端到端) —— 判错的代价:无。
+
+## 对外契约:激活轨迹的精确模式
+
+`simple_actio.trace.build_trace(...)` 产出、`simple_actio.trace.validate_trace(trace)` 校验。计划 7 的经验分析器读落盘 episode 时,对每个 `activation_trace is not None` 的轮次调用 `validate_trace`。
+
+```python
+{
+    "schema": "simple_actio.trace.v1",                 # 固定字符串
+    "signals": ["emotion_high", "first_turn"],  # 此刻为真的已注册信号名,按名字升序;可为空列表
+    "candidates": ["skill-calm", "skill-firm"], # 命中的技能 id,按路由次序 (-priority, -version, id);可为空列表
+    "selected": "skill-calm",                   # == candidates[0];candidates 为空时为 None
+    "conflict": {                               # len(candidates) > 1 时为字典,否则为 None
+        "skills": ["skill-calm", "skill-firm"], # == candidates
+        "rule": "priority_desc,version_desc,id_asc",
+    },
+    "memory_hits": ["mem-temper"],              # 检索到的记忆 id,按检索排序;可为空列表
+    "experience": {"id": "exp-x", "tier": "primary"},  # 或 None;tier ∈ primary | secondary | fallback
+    "library_version": {"skill": "4", "memory": "mem-lib-1"},  # 两个非空字符串
+}
+```
+
+- 键集合恰好是上面八个,不多不少。`validate_trace` 还强制:三个列表都不得有重复项;`signals` 严格升序;`candidates` 每项以 `skill-` 开头、`memory_hits` 每项以 `mem-` 开头(与"对外契约:技能、记忆、推理经验的字典形状"里的 id 前缀规则一致)。叶子只有 `str`、`None`、`bool`(目前没有 `bool` 叶子,预留),**没有数字**。所以经过 `SubmitTurn` → 服务端 → `TurnUpdate` 回显 → 落盘 YAML 的往返后,轨迹与客户端提交时 `==` 相等且每个键的类型相同(任务 72、77 的测试)。
+- "没有轨迹"是 `TurnRecord.activation_trace is None`(裸模型、对手轮次、对手的回显);SimpleActio 实例的每一轮都有完整轨迹,即使一个技能都没命中(此时 `candidates == []`、`selected is None`)。
+- 常量:`simple_actio.trace.TRACE_SCHEMA == "simple_actio.trace.v1"`,`simple_actio.trace.TIE_BREAK_RULE == "priority_desc,version_desc,id_asc"`,`simple_actio.trace.TRACE_KEYS` 是八个键名的元组。
+- "被选中的技能针对哪些信号":`simple_actio.triggers.referenced_signals(skill.trigger)`,返回出现在偶数层 `not` 之下的 `{"signal": name}` 的名字集合。
+
+## 对外契约:技能、记忆、推理经验的字典形状
+
+三者的 `to_dict()` 产出下面的形状(键顺序即下列顺序),`from_dict()` 严格接受它(可选键见注释)。
+
+**id 前缀规则(设计 §11 契约)**:技能 id 必须以 `skill-` 开头,记忆 id 必须以 `mem-` 开头,且前缀之后还要有内容(`"skill-"`、`"mem-"` 本身不合法;大小写敏感)。`Skill.from_dict`、`MemoryEntry.from_dict` 与两个类的直接构造(`__post_init__`)都检查,不合规抛 `SimpleActioDataError`,信息形如 `skill.id: must start with 'skill-' followed by a name, got 'calm'` / `memory.id: must start with 'mem-' followed by a name, got 'budget'`。原因:计划 1 的 `skill_file(skill_id)`、`memory_file(mem_id)` 直接用 id 作文件名,不带前缀的 id 会落到设计 §4.1 的 `skill_library/skill-<id>.yaml`、`memory_library/mem-<id>.yaml` 之外。推理经验的 id 不受此约束(它没有库路径)。常量:`simple_actio.skills.SKILL_ID_PREFIX == "skill-"`,`simple_actio.memory.MEMORY_ID_PREFIX == "mem-"`。计划 7 把它们原样作为 `skill`、`memory` 产物的 `payload`,以及提案里 `increments[].definition` 的内容。
+
+```python
+# Skill.to_dict()
+{
+    "id": "skill-calm",             # 以 "skill-" 开头、前缀后非空
+    "version": 2,                   # int >= 1(拒绝 bool 与浮点数)
+    "level": "macro",               # "macro" | "micro"
+    "priority": 5,                  # int,from_dict 时可省略,默认 0
+    "trigger": {"all": [{"signal": "emotion_high"}, {"not": {"signal": "first_turn"}}]},
+    "policy": {"instructions": ["先回应对方的情绪", "再谈事情本身"]},  # 非空列表,每条非空
+    "description": "情绪优先",       # 字符串,from_dict 时可省略,默认 ""
+}
+
+# MemoryEntry.to_dict()
+{
+    "id": "mem-budget",             # 以 "mem-" 开头、前缀后非空
+    "version": 2,                   # int >= 1;同一 id 可有多个版本
+    "subject": "pb",                # 非空字符串
+    "content": "对方担心预算超支",    # 非空字符串
+    "keywords": ["预算", "成本"],    # 字符串列表,from_dict 时可省略,默认 []
+    "timestamp": "2026-10-01T00:00:00Z",  # 严格 YYYY-MM-DDTHH:MM:SSZ
+    "source_episode": "ep-sess-1",  # 非空字符串或 None,from_dict 时可省略,默认 None
+    "confidence": 0.8,              # [0, 1] 的数;整数会被转成 float
+}
+
+# ReasoningExperience.to_dict()
+{
+    "id": "exp-deescalate",
+    "version": 1,
+    "pattern": "情绪高时先降温",
+    "applies_when": {"turn_at_least": 1},  # 触发条件
+    "tiers": {
+        "primary":   {"when": {"signal": "emotion_high"}, "instructions": ["先共情"]},
+        "secondary": {"when": {"signal": "no_new_information"}, "instructions": ["换个角度提问"]},
+        "fallback":  {"when": None, "instructions": ["复述对方的要点"]},   # when 必须为 None
+    },
+}
+```
+
+**触发条件(谓词语言)**:每个节点是恰好一个键的字典——`{"signal": "<已注册信号名>"}`、`{"all": [<节点>, ...]}`(非空)、`{"any": [<节点>, ...]}`(非空)、`{"not": <节点>}`、`{"turn_at_least": <非负 int>}`(`len(history) >= n`)。`from_dict` 只查结构;信号名是否已注册由 `instantiate` 按实例的注册表检查。
+
+**其他对外名字(计划 7 依赖)**
+
+| 模块 | 名字 |
+|---|---|
+| `simple_actio.errors` | `SimpleActioDataError(ValueError)`:本包所有数据错误的基类 |
+| `simple_actio.signals` | `Signal = Callable[[list[TurnRecord], str], bool]`、`SignalRegistry`(`register`、`get`、`names`、`fired`、`in`)、`default_registry(*, emotion_lexicon=...)`、`DEFAULT_EMOTION_LEXICON`、`make_emotion_high`、`no_new_information`、`first_turn` |
+| `simple_actio.triggers` | `InvalidTriggerError(SimpleActioDataError)`、`validate_trigger(trigger, registry=None)`、`evaluate_trigger(trigger, history, speaker_slot, registry)`、`referenced_signals(trigger)` |
+| `simple_actio.skills` | `SKILL_ID_PREFIX`、`Skill`、`RouteResult(candidates, selected, signals, conflict)`、`route_order(skill)`、`check_library(skills, registry)`、`route(skills, history, speaker_slot, registry)` |
+| `simple_actio.memory` | `MEMORY_ID_PREFIX`、`MemoryEntry`、`snapshot(entries, at=None)`、`overlap(entry, query)`、`retrieve(entries, query, *, subjects=None, at=None, limit=3)` |
+| `simple_actio.experience` | `ReasoningExperience`、`Tier`、`ExperienceActivation(experience_id, tier, instructions)`、`select_tier(...)`、`activate(...)` |
+| `simple_actio.trace` | `TRACE_SCHEMA`、`TIE_BREAK_RULE`、`TRACE_KEYS`、`build_trace(...)`、`validate_trace(trace)`、`normalize_library_version(lv)` |
+| `simple_actio.instance` | `instantiate(model_backend, *, skills, memories, library_version, profile, experiences=(), registry=None, memory_limit=3) -> SimpleActioInstance`、`SimpleActioInstance.respond(persona, scenario, history, speaker_slot) -> (utterance, inner_thought, trace)`、`SimpleActioInstance.decide(history, speaker_slot) -> (RouteResult, ExperienceActivation \| None, list[MemoryEntry])`、`GuidedBackend`、`PlainBackend`、`IgnoreGuidance`、`as_guided`、`render_guidance` |
+| `simulator.realtime.client` | `EnvironmentServiceClient.submit_turn(utterance, inner_thought=None, *, activation_trace=None)` |
+
+## Global Constraints
+
+每个任务的要求都隐含包含本节。
+
+- **`simple_actio` 只依赖 `simulator.datamodel` 与标准库**(设计 §11)。不导入 `controlplane`、`simulator.backends`、`simulator.realtime` 或任何第三方包。任务 76 有一条测试用 `ast` 扫描 `src/simple_actio/*.py` 的全部导入并强制这一点。
+- **既有测试一行不改,全部通过。** 既有二元组后端不受影响;`ClientDrivenBackend` 不带轨迹时仍返回二元组。
+- **新参数全部 keyword-only**:`EnvironmentServiceClient.submit_turn`、`SessionDriver.submit_turn`、`ClientDrivenBackend.submit` 的 `activation_trace`;`instantiate` 除 `model_backend` 外全部参数。有测试保证位置传入抛 `TypeError`。
+- **回显规则不变**:服务端回显客户端自己那一轮时保留轨迹;对手轮次的 `inner_thought` 与 `activation_trace` 仍被抹掉。
+- **激活轨迹模式里不放数字**(见"对外契约")。
+- **脱离真实环境可测**:不需要 GPU、外部网络、真实模型。gRPC 测试用真实 loopback 服务端(`127.0.0.1`,`port=0`);落盘测试用 `tmp_path` 隔离的 `GitStore`。
+- **生成物只由脚本产生**:`realtime_env_pb2.py`、`realtime_env_pb2.pyi`、`realtime_env_pb2_grpc.py` 只能由 `scripts/gen_realtime_proto.sh` 写,不手改。
+- `src/` 下每个源文件以 `from __future__ import annotations` 开头(模块 docstring 之后的第一条语句也算);生成的 `_pb2*.py` 除外(既有约定)。
+- **无新增第三方依赖;凭证绝不进 git 树。**
+- **新增顶层包要加进 `pyproject.toml` 的 wheel 包列表**(`tests/test_mt_packaging.py` 强制检查):本计划新增 `src/simple_actio`,任务 73 改列表。
+- **`git add` 逐个文件**,不要 `git add .` / `-A`;**不要碰** `cli/package.json`、`cli/package-lock.json`。
+- **提交信息不加 `Co-Authored-By` 行**(用户明确要求)。
+- **测试命令**一律是 `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error`(下文简写为"全量命令";单文件时在其后加文件路径)。
+- **测试基线**:起点 B 由任务 70 Step 1 实测(不一定是 820)。各任务的增量依次为 **+5、+10、+11、+38、+39、+50、+30、+2**(任务 70 至 77),任务 78 为 +0,共 **+185**;各任务结束后应为 B+5 → B+15 → B+26 → B+64 → B+103 → B+153 → B+183 → B+185 → B+185,不得出现警告。(撰写时以 820 为起点实测为 825 → 835 → 846 → 884 → 923 → 973 → 1003 → 1005 → 1005,仅供参考。)
+
+## File Structure
+
+| 文件 | 动作 | 任务 | 职责 |
+|---|---|---|---|
+| `src/simulator/realtime/proto/realtime_env.proto` | 修改(+3 行) | 70 | `SubmitTurn.activation_trace = 3` |
+| `src/simulator/realtime/proto/realtime_env_pb2.py` | 重新生成 | 70 | 生成物 |
+| `src/simulator/realtime/proto/realtime_env_pb2.pyi` | 重新生成 | 70 | 生成物 |
+| `src/simulator/realtime/proto/realtime_env_pb2_grpc.py` | 重新生成(内容不变) | 70 | 生成物;实测重新生成后逐字节相同,不进提交 |
+| `tests/test_realtime_proto_submit_trace.py` | 新建(5 个用例) | 70 | 新字段的序列化往返 |
+| `src/simulator/runner.py` | 修改(+19 −3 行) | 71 | `_unpack_reply`:二元组或三元组 |
+| `tests/test_runner_activation_trace.py` | 新建(10 个用例) | 71 | runner 的三元组 |
+| `src/simulator/realtime/backend.py` | 修改 | 72 | `ClientDrivenBackend.submit(..., *, activation_trace=None)` |
+| `src/simulator/realtime/driver.py` | 修改 | 72 | `SessionDriver.submit_turn(..., *, activation_trace=None)` |
+| `src/simulator/realtime/servicer.py` | 修改 | 72 | `submit_turn` 分支解出轨迹 |
+| `src/simulator/realtime/client.py` | 修改 | 72 | `submit_turn(..., *, activation_trace=None)` |
+| `tests/test_realtime_activation_trace.py` | 新建(11 个用例) | 72 | 后端、驱动器、真实 loopback 往返、回显规则 |
+| `pyproject.toml` | 修改(1 行) | 73 | wheel 包列表加 `src/simple_actio` |
+| `src/simple_actio/__init__.py` | 新建 | 73 | 包说明 |
+| `src/simple_actio/errors.py` | 新建 | 73 | `SimpleActioDataError` |
+| `src/simple_actio/text.py` | 新建 | 73 | 词面切分 `tokens` |
+| `src/simple_actio/signals.py` | 新建 | 73 | 信号注册表与三个内置信号 |
+| `src/simple_actio/triggers.py` | 新建 | 73 | 谓词语言:校验、求值、`referenced_signals` |
+| `tests/test_simple_actio_signals.py` | 新建(38 个用例) | 73 | |
+| `src/simple_actio/_check.py` | 新建 | 74 | `from_dict` 共用的字段校验 |
+| `src/simple_actio/skills.py` | 新建 | 74 | `Skill`、`route` |
+| `tests/test_simple_actio_skills.py` | 新建(39 个用例) | 74 | |
+| `src/simple_actio/memory.py` | 新建 | 75 | `MemoryEntry`、`snapshot`、`retrieve` |
+| `src/simple_actio/experience.py` | 新建 | 75 | `ReasoningExperience`、三级回退 |
+| `tests/test_simple_actio_memory_experience.py` | 新建(50 个用例) | 75 | |
+| `src/simple_actio/trace.py` | 新建 | 76 | 轨迹模式 |
+| `src/simple_actio/instance.py` | 新建 | 76 | `instantiate`、`SimpleActioInstance`、`respond_guided` 协议与适配器 |
+| `tests/test_simple_actio_instance.py` | 新建(30 个用例) | 76 | 含依赖边界与 `__future__` 的静态检查 |
+| `tests/test_simple_actio_realtime_e2e.py` | 新建(2 个用例) | 77 | SimpleActio 作客户端经真实 loopback 服务端跑会话并落盘 |
+
+**打包说明:** `pyproject.toml` 只改 wheel 包列表一行。`scripts/gen_realtime_proto.sh` 不改。
+
+---
+### Task 70: 协议重新生成的风险验证与 `SubmitTurn.activation_trace`
+
+**Files:**
+- Modify: `src/simulator/realtime/proto/realtime_env.proto`(+3 行)
+- Regenerate: `src/simulator/realtime/proto/realtime_env_pb2.py`、`realtime_env_pb2.pyi`(`realtime_env_pb2_grpc.py` 重新生成后不变)
+- Test: `tests/test_realtime_proto_submit_trace.py`
+
+**Interfaces:**
+- Consumes: `scripts/gen_realtime_proto.sh`(不改);`google.protobuf.json_format.MessageToDict`。
+- Produces(任务 72 依赖):`pb2.SubmitTurn.activation_trace`(`google.protobuf.Struct`,`optional`,字段号 3,`HasField("activation_trace")` 可判 presence)。
+
+**设计要点:**
+- **先验证再改。** 设计 §14 第 2 条要求先确认"重新生成后差异只在新字段"。Step 1 不改 `.proto`,把生成物输出到仓库外的一个临时目录,与入库文件 diff。本计划撰写时实测三份 diff 全空(见"已核实的事实"),所以 Step 4 直接用脚本原地生成(Ruling 1)。Step 1 若在实施者机器上 diff 不为空,说明本机 `grpcio-tools` 与入库时不同:**停下,不往下做**,把 diff 报告给用户。
+- **字段用 `optional`**,与 `TurnRecordProto.activation_trace = 5` 同一写法,`HasField` 才能区分"没有轨迹"与"轨迹为空"(§2.6.3)。
+- **Struct 的坑在这里钉住**:`test_struct_turns_integers_into_floats` 断言整数 3 回来是 `3.0`。这条测试不是要求的行为,而是 Ruling 2、5 的依据;若将来 protobuf 改了这一点,测试会提醒去掉这条约束。
+
+- [ ] **Step 1: 记下起点,再做风险验证——不改 `.proto`,重新生成到临时目录并与入库文件比较**
+
+先记下本计划开始前的提交号与全量通过数,两个值都写进执行记录;任务 78 用 `BASE` 取改动范围,各任务的"全量回归"按 B 加增量核对:
+
+```bash
+BASE=$(git rev-parse HEAD); echo "BASE=$BASE"
+PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error | tail -1
+```
+
+Expected:第二条输出 `<B> passed`,无警告;把 `<B>` 记为 B(撰写时在 `0385004` 上为 820;计划 1 至 5 已落地时会更高)。有失败或警告就停下,先修基线。
+
+然后:
+
+```bash
+REGEN_DIR="$(mktemp -d "${TMPDIR:-$HOME}/rise-regen.XXXXXX")"
+uv run --extra dev python -m grpc_tools.protoc -I src \
+  --python_out="$REGEN_DIR" --grpc_python_out="$REGEN_DIR" --pyi_out="$REGEN_DIR" \
+  src/simulator/realtime/proto/realtime_env.proto
+for f in realtime_env_pb2.py realtime_env_pb2.pyi realtime_env_pb2_grpc.py; do
+  echo "== $f"; diff "src/simulator/realtime/proto/$f" "$REGEN_DIR/simulator/realtime/proto/$f"
+done
+rm -rf "$REGEN_DIR"
+uv pip list 2>/dev/null | grep -E '^(grpcio|grpcio-tools|protobuf) '
+```
+
+Expected(本计划撰写时的真实输出):三个 `== ...` 标题下都没有任何 diff 行;版本为
+
+```
+grpcio                    1.84.0
+grpcio-tools              1.84.0
+protobuf                  7.36.2
+```
+
+任一 diff 不为空:停下,不要往下做。
+
+- [ ] **Step 2: 写失败测试**
+
+新建 `tests/test_realtime_proto_submit_trace.py`:
+
+```python
+from google.protobuf.json_format import MessageToDict
+
+from simulator.realtime.proto import realtime_env_pb2 as pb2
+
+
+def test_submit_turn_without_a_trace_has_no_presence():
+    back = pb2.SubmitTurn.FromString(pb2.SubmitTurn(utterance="hi").SerializeToString())
+    assert back.utterance == "hi"
+    assert back.HasField("activation_trace") is False
+
+
+def test_submit_turn_carries_an_explicitly_empty_trace():
+    msg = pb2.SubmitTurn(utterance="hi")
+    msg.activation_trace.SetInParent()
+    back = pb2.SubmitTurn.FromString(msg.SerializeToString())
+    assert back.HasField("activation_trace") is True
+    assert MessageToDict(back.activation_trace) == {}
+
+
+def test_submit_turn_trace_round_trips_strings_lists_bools_and_nulls():
+    trace = {"selected": "skill-a", "candidates": ["skill-a", "skill-b"], "conflict": True,
+             "experience": None, "library_version": {"skill": "3", "memory": "1"}}
+    msg = pb2.SubmitTurn(utterance="hi")
+    msg.activation_trace.update(trace)
+    back = pb2.SubmitTurn.FromString(msg.SerializeToString())
+    assert MessageToDict(back.activation_trace) == trace
+
+
+def test_struct_turns_integers_into_floats():
+    # 本计划的"坑"被钉住:Struct 只有 double,整数 3 回来是 3.0。
+    # 激活轨迹的模式因此不含任何数字字段(见计划"对外契约")。
+    msg = pb2.SubmitTurn(utterance="hi")
+    msg.activation_trace.update({"n": 3})
+    back = MessageToDict(pb2.SubmitTurn.FromString(msg.SerializeToString()).activation_trace)
+    assert back == {"n": 3.0}
+    assert isinstance(back["n"], float)
+
+
+def test_the_field_number_is_three():
+    assert pb2.SubmitTurn.ACTIVATION_TRACE_FIELD_NUMBER == 3
+```
+
+- [ ] **Step 3: 运行,确认失败**
+
+Run: 全量命令 + `tests/test_realtime_proto_submit_trace.py`
+Expected: `5 failed`。失败信息依次为 `AttributeError: activation_trace`(3 次)、`ValueError: Protocol message SubmitTurn has no "activation_trace" field.`、`AttributeError: 'google._upb._message.MessageMeta' object has no attribute 'ACTIVATION_TRACE_FIELD_NUMBER'`。
+
+- [ ] **Step 4: 改 `.proto` 并用脚本重新生成**
+
+把 `src/simulator/realtime/proto/realtime_env.proto` 里的 `SubmitTurn` 按下面改(+3 行):
+
+```diff
+--- a/src/simulator/realtime/proto/realtime_env.proto
++++ b/src/simulator/realtime/proto/realtime_env.proto
+@@ -59,9 +59,12 @@ message SessionReady {
+ }
+ 
+ // 客户端 → 服务端:为 client_driven_slot 当前这一轮提交话语。
++// activation_trace:客户端角色由完整 SimpleActio 实例扮演时携带的激活轨迹(§2.6.3);
++// 裸模型不设置(HasField=false),以区分"没有轨迹"与"轨迹为空"。
+ message SubmitTurn {
+   string utterance = 1;
+   optional string inner_thought = 2;
++  optional google.protobuf.Struct activation_trace = 3;
+ }
+ 
+ // 服务端 → 客户端:某一轮完成,立即推送(§2.6.2 硬约束,不攒批)。
+```
+
+然后:
+
+```bash
+bash scripts/gen_realtime_proto.sh
+git diff --stat -- src/simulator/realtime/proto
+```
+
+Expected:
+
+```
+generated: src/simulator/realtime/proto/realtime_env_pb2*.py
+ src/simulator/realtime/proto/realtime_env.proto   |  3 +++
+ src/simulator/realtime/proto/realtime_env_pb2.py  | 26 +++++++++++------------
+ src/simulator/realtime/proto/realtime_env_pb2.pyi |  6 ++++--
+ 3 files changed, 20 insertions(+), 15 deletions(-)
+```
+
+(命令限定了路径,工作区里原本就有改动的 `cli/package*.json` 不会混进来,也不要碰它们。)`realtime_env_pb2_grpc.py` 不在列表里:重新生成后它逐字节不变。`.pyi` 的差异应恰好是:
+
+```diff
+--- a/src/simulator/realtime/proto/realtime_env_pb2.pyi
++++ b/src/simulator/realtime/proto/realtime_env_pb2.pyi
+@@ -87,12 +87,14 @@ class SessionReady(_message.Message):
+     def __init__(self, session_id: _Optional[str] = ...) -> None: ...
+ 
+ class SubmitTurn(_message.Message):
+-    __slots__ = ("utterance", "inner_thought")
++    __slots__ = ("utterance", "inner_thought", "activation_trace")
+     UTTERANCE_FIELD_NUMBER: _ClassVar[int]
+     INNER_THOUGHT_FIELD_NUMBER: _ClassVar[int]
++    ACTIVATION_TRACE_FIELD_NUMBER: _ClassVar[int]
+     utterance: str
+     inner_thought: str
+-    def __init__(self, utterance: _Optional[str] = ..., inner_thought: _Optional[str] = ...) -> None: ...
++    activation_trace: _struct_pb2.Struct
++    def __init__(self, utterance: _Optional[str] = ..., inner_thought: _Optional[str] = ..., activation_trace: _Optional[_Union[_struct_pb2.Struct, _Mapping]] = ...) -> None: ...
+ 
+ class TurnUpdate(_message.Message):
+     __slots__ = ("turn",)
+```
+
+`_pb2.py` 的差异应只有序列化描述符那一行与 `_SUBMITTURN` 起往后 12 行 `_serialized_start/_serialized_end` 偏移量;头部的 `# Protobuf Python Version: 7.35.1` 与 `ValidateProtobufRuntimeVersion(..., 7, 35, 1, ...)` 不变。用 `git diff src/simulator/realtime/proto/realtime_env_pb2.py | grep '^[-+]' | grep -v '^[-+][-+]' | cut -c1-60` 核对。
+
+- [ ] **Step 5: 运行,确认通过**
+
+Run: 全量命令 + `tests/test_realtime_proto_submit_trace.py`
+Expected: `5 passed`。
+
+- [ ] **Step 6: 全量回归**
+
+Run: 全量命令
+Expected: `B+5` passed(本任务增量 +5;以 820 为起点实测为 825),无警告。
+
+- [ ] **Step 7: 提交**
+
+```bash
+git add src/simulator/realtime/proto/realtime_env.proto
+git add src/simulator/realtime/proto/realtime_env_pb2.py
+git add src/simulator/realtime/proto/realtime_env_pb2.pyi
+git add tests/test_realtime_proto_submit_trace.py
+git commit -m "feat: SubmitTurn carries an optional activation_trace Struct (regenerated pb2; only the new field differs)"
+```
+
+---
+
+### Task 71: runner 接受三元组
+
+**Files:**
+- Modify: `src/simulator/runner.py`(99 → 115 行;+19 −3)
+- Test: `tests/test_runner_activation_trace.py`
+
+**Interfaces:**
+- Consumes: `simulator.datamodel.TurnRecord`(`activation_trace: dict | None`)。
+- Produces(任务 72、76、77 依赖):`run_episode` 的后端可以返回 `(utterance, inner_thought)` 或 `(utterance, inner_thought, activation_trace)`;三元组的第三项(深拷贝)写进该轮 `TurnRecord.activation_trace`。签名不变。
+
+**设计要点:**
+- **只动解包这一处。** 新增的 `_unpack_reply` 接受长度 2 或 3 的 `tuple`/`list`,第三项必须是 `dict` 或 `None`(Ruling 6)。二元组的轨迹是 `None`,与改动前写死的 `None` 相同,所以既有测试(含 `test_run_episode_records_activation_trace_none_for_bare_models`)不改照过。
+- **`None` 与 `{}` 不同。** 三元组第三项为 `None` 表示"这一轮没有轨迹",`{}` 表示"有轨迹但为空",两者原样保留(§2.6.3)。
+- **存的是副本。** 后端返回后再改自己的字典,不影响 episode。
+- **history 的抹除规则不变。** 后端看得到自己轮次的轨迹(深拷贝),看不到对手的(`replace(..., activation_trace=None)`)。有测试从两侧验证。
+
+- [ ] **Step 1: 写失败测试**
+
+新建 `tests/test_runner_activation_trace.py`:
+
+```python
+import pytest
+
+from simulator.backends import ScriptedBackend
+from simulator.datamodel import Persona, RoleAssignment, RoleBinding, RoleSlot, Scenario
+from simulator.runner import run_episode
+
+
+def _scenario():
+    return Scenario("s1", "bg", [RoleSlot("a", "a"), RoleSlot("b", "b")], "c", ["n"], "training")
+
+
+def _assignment(max_turns=4):
+    return RoleAssignment(
+        "s1", [RoleBinding("a", "pa", "self_play"), RoleBinding("b", "pb", "frozen_reference")],
+        max_turns,
+    )
+
+
+def _personas():
+    return {pid: Persona(pid, ["t"], "m", "s", ["v"]) for pid in ("pa", "pb")}
+
+
+class TracingBackend:
+    """返回三元组的后端:第三项是该轮的激活轨迹。记录自己看到的 history。"""
+
+    def __init__(self, traces):
+        self._traces = list(traces)
+        self.seen = []
+
+    def respond(self, persona, scenario, history, speaker_slot):
+        self.seen.append(history)
+        k = len(self.seen) - 1
+        return f"{speaker_slot}{k}", f"think{k}", self._traces[k]
+
+
+def test_a_triple_writes_its_third_item_into_the_turn():
+    traced = TracingBackend([{"selected": "skill-1"}, {"selected": None}])
+    ep = run_episode(
+        _scenario(), _assignment(), _personas(),
+        {"a": traced, "b": ScriptedBackend({"b": ["b0", "b1"]})}, "ep-1",
+    )
+    assert [t.activation_trace for t in ep.turns] == [{"selected": "skill-1"}, None, {"selected": None}, None]
+    assert [t.utterance for t in ep.turns] == ["a0", "b0", "a1", "b1"]
+    assert ep.turns[0].inner_thought == "think0"
+
+
+def test_a_triple_with_none_means_no_trace_and_an_empty_dict_is_kept():
+    traced = TracingBackend([None, {}])
+    ep = run_episode(
+        _scenario(), _assignment(), _personas(),
+        {"a": traced, "b": ScriptedBackend({"b": ["b0", "b1"]})}, "ep-1",
+    )
+    assert ep.turns[0].activation_trace is None
+    assert ep.turns[2].activation_trace == {}
+
+
+def test_pairs_still_give_no_trace():
+    ep = run_episode(
+        _scenario(), _assignment(), _personas(),
+        {"a": ScriptedBackend({"a": ["a0", "a1"]}), "b": ScriptedBackend({"b": ["b0", "b1"]})},
+        "ep-1",
+    )
+    assert all(t.activation_trace is None for t in ep.turns)
+
+
+def test_the_stored_trace_is_a_copy_of_what_the_backend_returned():
+    trace = {"candidates": ["skill-1"]}
+    traced = TracingBackend([trace, {"candidates": []}])
+    ep = run_episode(
+        _scenario(), _assignment(), _personas(),
+        {"a": traced, "b": ScriptedBackend({"b": ["b0", "b1"]})}, "ep-1",
+    )
+    trace["candidates"].append("mutated")
+    assert ep.turns[0].activation_trace == {"candidates": ["skill-1"]}
+
+
+def test_a_backend_sees_its_own_trace_but_not_the_opponents():
+    mine = TracingBackend([{"me": "0"}, {"me": "1"}])
+    theirs = TracingBackend([{"them": "0"}, {"them": "1"}])
+    run_episode(_scenario(), _assignment(), _personas(), {"a": mine, "b": theirs}, "ep-1")
+    # a 的第二次调用:history = [a0(自己), b0(对手)]
+    own, opp = mine.seen[1]
+    assert own.activation_trace == {"me": "0"}
+    assert opp.activation_trace is None and opp.inner_thought is None
+    # b 的第二次调用:history = [a0(对手), b0(自己), a1(对手)]
+    assert [t.activation_trace for t in theirs.seen[1]] == [None, {"them": "0"}, None]
+
+
+@pytest.mark.parametrize("reply", [("only",), ("u", None, None, None), "u", None])
+def test_a_reply_that_is_not_a_pair_or_triple_is_rejected(reply):
+    class Bad:
+        def respond(self, persona, scenario, history, speaker_slot):
+            return reply
+
+    with pytest.raises(TypeError, match="2- or 3-tuple"):
+        run_episode(_scenario(), _assignment(), _personas(),
+                    {"a": Bad(), "b": ScriptedBackend({"b": ["b0"]})}, "ep-1")
+
+
+def test_a_trace_that_is_not_a_dict_is_rejected():
+    class Bad:
+        def respond(self, persona, scenario, history, speaker_slot):
+            return "u", None, ["not", "a", "dict"]
+
+    with pytest.raises(TypeError, match="activation_trace"):
+        run_episode(_scenario(), _assignment(), _personas(),
+                    {"a": Bad(), "b": ScriptedBackend({"b": ["b0"]})}, "ep-1")
+```
+
+- [ ] **Step 2: 运行,确认失败**
+
+Run: 全量命令 + `tests/test_runner_activation_trace.py`
+Expected: `9 failed, 1 passed`(`test_pairs_still_give_no_trace` 已经成立)。失败信息为 `ValueError: too many values to unpack (expected 2, got 3)`(5 次)、`ValueError: not enough values to unpack (expected 2, got 1)` 等,以及参数化用例里 `Regex pattern did not match. Expected regex: '2- or 3-tuple'`。
+
+- [ ] **Step 3: 写实现**
+
+把下面的差异应用到 `src/simulator/runner.py`:
+
+```diff
+--- a/src/simulator/runner.py
++++ b/src/simulator/runner.py
+@@ -18,6 +18,22 @@ class RoleSlotMismatchError(ValueError):
+     """RoleAssignment 引用了 Scenario 中不存在的角色位。"""
+ 
+ 
++def _unpack_reply(reply: object, speaker_slot: str) -> tuple[str, str | None, dict | None]:
++    """后端返回 (utterance, inner_thought) 或 (utterance, inner_thought, activation_trace)。
++    三元组的第三项是该轮的激活轨迹(None 表示"没有轨迹",{} 表示"轨迹为空",
++    §2.6.3 要求区分);存进 TurnRecord 的是深拷贝,后端事后改它不影响 Episode。"""
++    if not isinstance(reply, (tuple, list)) or len(reply) not in (2, 3):
++        raise TypeError(
++            f"backend for slot {speaker_slot!r} must return a 2- or 3-tuple, got {reply!r}"
++        )
++    trace = reply[2] if len(reply) == 3 else None
++    if trace is not None and not isinstance(trace, dict):
++        raise TypeError(
++            f"backend for slot {speaker_slot!r} returned a non-dict activation_trace: {trace!r}"
++        )
++    return reply[0], reply[1], deepcopy(trace)
++
++
+ def run_episode(
+     scenario: Scenario,
+     assignment: RoleAssignment,
+@@ -69,8 +85,8 @@ def run_episode(
+             else replace(t, inner_thought=None, activation_trace=None)
+             for t in turns
+         ]
+-        utterance, inner_thought = backend.respond(
+-            persona, scenario, history, binding.slot_id
++        utterance, inner_thought, activation_trace = _unpack_reply(
++            backend.respond(persona, scenario, history, binding.slot_id), binding.slot_id
+         )
+         turns.append(
+             TurnRecord(
+@@ -78,7 +94,7 @@ def run_episode(
+                 speaker_slot=binding.slot_id,
+                 utterance=utterance,
+                 inner_thought=inner_thought,
+-                activation_trace=None,  # V1 裸模型：无激活轨迹（§2.6.3）
++                activation_trace=activation_trace,  # 裸模型的二元组为 None(§2.6.3)
+             )
+         )
+         if on_turn is not None:
+```
+
+- [ ] **Step 4: 运行,确认通过**
+
+Run: 全量命令 + `tests/test_runner_activation_trace.py`
+Expected: `10 passed`。
+
+- [ ] **Step 5: 全量回归**
+
+Run: 全量命令
+Expected: `B+15` passed(本任务增量 +10;以 820 为起点实测为 835),无警告。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add src/simulator/runner.py
+git add tests/test_runner_activation_trace.py
+git commit -m "feat: run_episode accepts a 3-tuple from a backend and records its activation_trace (pairs unchanged)"
+```
+
+---
+
+### Task 72: 轨迹经客户端、servicer、驱动器、客户端驱动后端带到 runner
+
+**Files:**
+- Modify: `src/simulator/realtime/backend.py`(62 → 73 行)、`src/simulator/realtime/driver.py`(162 → 168 行)、`src/simulator/realtime/servicer.py`(339 → 344 行)、`src/simulator/realtime/client.py`(242 → 256 行)
+- Test: `tests/test_realtime_activation_trace.py`
+
+**Interfaces:**
+- Consumes: 任务 70 的 `pb2.SubmitTurn.activation_trace`;任务 71 的三元组。
+- Produces(任务 77 与计划 7 依赖):
+  - `EnvironmentServiceClient.submit_turn(utterance, inner_thought=None, *, activation_trace=None) -> list[TurnRecord]`
+  - `SessionDriver.submit_turn(utterance, inner_thought, *, activation_trace=None) -> None`
+  - `ClientDrivenBackend.submit(utterance, inner_thought, *, activation_trace=None) -> None`;`respond` 不带轨迹时返回二元组,带轨迹时返回三元组(Ruling 7)
+
+**设计要点:**
+- **客户端**:`activation_trace is not None` 时先 `SetInParent()` 再 `update(...)`,这样 `{}` 也会置位 presence。
+- **servicer**:`HasField("activation_trace")` 为真才 `MessageToDict(...)`,否则传 `None`。不做数字规范化(Ruling 5)。
+- **回显规则不改代码**(Ruling 20)。`_drain_ready_events` 已经只抹对手轮次;测试 `test_opponent_traces_are_stored_but_never_sent_to_the_client` 用一个返回三元组的服务端对手后端证明:对手的轨迹落了盘,但客户端收到的对手轮次里 `activation_trace` 与 `inner_thought` 都是 `None`。
+- **往返逐字段相等**:`TRACE` 常量覆盖字符串、列表、嵌套字典、`None`、`bool`,断言值与类型都相同。`test_integers_in_a_trace_come_back_as_floats` 把"整数变浮点"钉在真实 gRPC 链路上。
+- **`test_client_trace_is_keyword_only`** 在建好的会话上位置传入第三个参数,先抛 `TypeError`(还没发送任何消息),再 `abort()` 放弃会话。
+
+- [ ] **Step 1: 写失败测试**
+
+新建 `tests/test_realtime_activation_trace.py`:
+
+```python
+import grpc
+import pytest
+
+from simulator.backends import ScriptedBackend
+from simulator.datamodel import Persona, RoleAssignment, RoleBinding, RoleSlot, Scenario
+from simulator.realtime.backend import ClientDrivenBackend
+from simulator.realtime.client import EnvironmentServiceClient
+from simulator.realtime.driver import SessionDriver
+from simulator.realtime.proto import realtime_env_pb2_grpc as pb2_grpc
+from simulator.realtime.server import create_server
+
+TRACE = {
+    "candidates": ["skill-a", "skill-b"], "selected": "skill-a",
+    "conflict": {"skills": ["skill-a", "skill-b"], "rule": "priority>version>id"},
+    "memory_hits": [], "experience": None,
+    "library_version": {"skill": "lib-3", "memory": "lib-1"},
+}
+
+
+def _scenario():
+    return Scenario("s1", "bg", [RoleSlot("a", "a"), RoleSlot("b", "b")], "c", ["n"], "training")
+
+
+def _assignment(max_turns=4):
+    return RoleAssignment(
+        "s1", [RoleBinding("a", "pa", "self_play"), RoleBinding("b", "pb", "frozen_reference")],
+        max_turns,
+    )
+
+
+def _personas():
+    return {pid: Persona(pid, ["t"], "m", "s", ["v"]) for pid in ("pa", "pb")}
+
+
+class TracingOpponent:
+    """服务端的对手后端,返回三元组:它的轨迹会落盘,但不得下行给客户端。"""
+
+    def __init__(self):
+        self._k = 0
+
+    def respond(self, persona, scenario, history, speaker_slot):
+        self._k += 1
+        return f"b{self._k}", f"secret{self._k}", {"selected": f"opp-{self._k}"}
+
+
+# ---------------- ClientDrivenBackend ----------------
+
+def test_backend_without_a_trace_still_returns_a_pair():
+    backend = ClientDrivenBackend("a", 1.0)
+    backend.submit("hi", None)
+    assert backend.respond(_personas()["pa"], _scenario(), [], "a") == ("hi", None)
+
+
+def test_backend_with_a_trace_returns_a_triple():
+    backend = ClientDrivenBackend("a", 1.0)
+    backend.submit("hi", "t", activation_trace={"selected": None})
+    assert backend.respond(_personas()["pa"], _scenario(), [], "a") == ("hi", "t", {"selected": None})
+
+
+def test_backend_trace_is_keyword_only():
+    backend = ClientDrivenBackend("a", 1.0)
+    with pytest.raises(TypeError):
+        backend.submit("hi", None, {"x": "y"})
+
+
+# ---------------- SessionDriver ----------------
+
+def test_driver_trace_is_keyword_only():
+    driver = SessionDriver(
+        _scenario(), _assignment(2), _personas(),
+        server_backends={"b": ScriptedBackend({"b": ["b1"]})},
+        client_driven_slot="a", episode_id="ep-1", turn_timeout_s=2.0,
+    )
+    with pytest.raises(TypeError):
+        driver.submit_turn("a1", None, {"x": "y"})  # 不启动驱动器:参数检查在入队之前
+
+
+def test_driver_carries_the_trace_into_the_turn_event_and_the_episode():
+    driver = SessionDriver(
+        _scenario(), _assignment(2), _personas(),
+        server_backends={"b": ScriptedBackend({"b": ["b1"]})},
+        client_driven_slot="a", episode_id="ep-1", turn_timeout_s=2.0,
+    )
+    driver.start()
+    driver.submit_turn("a1", None, activation_trace={"selected": "skill-a"})
+    first = driver.poll_event(timeout_s=2.0)
+    assert first.kind == "turn" and first.payload.activation_trace == {"selected": "skill-a"}
+    second = driver.poll_event(timeout_s=2.0)
+    closed = driver.poll_event(timeout_s=2.0)
+    assert second.payload.activation_trace is None
+    assert closed.kind == "closed"
+    assert [t.activation_trace for t in closed.payload.turns] == [{"selected": "skill-a"}, None]
+
+
+# ---------------- 真实 loopback gRPC ----------------
+
+@pytest.fixture
+def live():
+    made = []
+
+    def start(opponent="scripted"):
+        closed = []
+
+        def factory(scenario, assignment, personas, client_slot):
+            if opponent == "tracing":
+                return {s: TracingOpponent() for s in assignment.slot_ids() - {client_slot}}
+            return {s: ScriptedBackend({s: ["b1", "b2", "b3"]}) for s in assignment.slot_ids() - {client_slot}}
+
+        server = create_server(factory, port=0, turn_timeout_s=2.0, on_session_closed=closed.append)
+        server.start()
+        channel = grpc.insecure_channel(f"127.0.0.1:{server.bound_port}")
+        made.append((server, channel))
+        client = EnvironmentServiceClient(pb2_grpc.EnvironmentServiceStub(channel))
+        client.create_session(
+            scenario_id="s1", role_assignment=_assignment(4), personas=_personas(),
+            purpose="training", client_driven_slot="a",
+        )
+        return client, closed
+
+    yield start
+    for server, channel in made:
+        channel.close()
+        server.stop(0)
+
+
+def _wait(closed):
+    import time
+    deadline = time.monotonic() + 3.0
+    while not closed and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert closed, "on_session_closed was not called"
+    return closed[0]
+
+
+def test_trace_survives_a_real_round_trip_field_by_field(live):
+    client, closed = live()
+    client.submit_turn("a1", "think", activation_trace=TRACE)
+    client.submit_turn("a2")
+    client.drain_until_end()
+    echoed = client.turns[0].activation_trace
+    assert echoed == TRACE
+    for key, value in TRACE.items():
+        assert echoed[key] == value and type(echoed[key]) is type(value)
+    stored = _wait(closed)
+    assert stored.turns[0].activation_trace == TRACE
+    assert stored.turns[2].activation_trace is None  # 第二轮没带轨迹 → None
+
+
+def test_an_explicitly_empty_trace_stays_distinct_from_none(live):
+    client, closed = live()
+    client.submit_turn("a1", activation_trace={})
+    client.submit_turn("a2")
+    client.drain_until_end()
+    assert client.turns[0].activation_trace == {}
+    assert client.turns[2].activation_trace is None
+    stored = _wait(closed)
+    assert stored.turns[0].activation_trace == {}
+
+
+def test_without_a_trace_nothing_changes(live):
+    client, closed = live()
+    client.submit_turn("a1")
+    client.submit_turn("a2")
+    episode = client.drain_until_end()
+    assert all(t.activation_trace is None for t in episode.turns)
+    assert all(t.activation_trace is None for t in _wait(closed).turns)
+
+
+def test_opponent_traces_are_stored_but_never_sent_to_the_client(live):
+    client, closed = live(opponent="tracing")
+    client.submit_turn("a1", activation_trace={"selected": "mine"})
+    client.submit_turn("a2", activation_trace={"selected": "mine-2"})
+    client.drain_until_end()
+    seen = client.turns
+    assert [t.activation_trace for t in seen] == [
+        {"selected": "mine"}, None, {"selected": "mine-2"}, None,
+    ]
+    assert seen[1].inner_thought is None
+    stored = _wait(closed)
+    assert [t.activation_trace for t in stored.turns] == [
+        {"selected": "mine"}, {"selected": "opp-1"}, {"selected": "mine-2"}, {"selected": "opp-2"},
+    ]
+
+
+def test_integers_in_a_trace_come_back_as_floats(live):
+    # 坑的回归钉:协议层不做数字规范化。激活轨迹的模式因此不含数字(见对外契约)。
+    client, _ = live()
+    client.submit_turn("a1", activation_trace={"n": 3})
+    client.submit_turn("a2")
+    client.drain_until_end()
+    assert client.turns[0].activation_trace == {"n": 3.0}
+    assert type(client.turns[0].activation_trace["n"]) is float
+
+
+def test_client_trace_is_keyword_only(live):
+    client, _ = live()
+    with pytest.raises(TypeError):
+        client.submit_turn("a1", None, {"x": "y"})
+    client.abort()
+```
+
+- [ ] **Step 2: 运行,确认失败**
+
+Run: 全量命令 + `tests/test_realtime_activation_trace.py`
+Expected: `6 failed, 5 passed`。失败信息为 `TypeError: EnvironmentServiceClient.submit_turn() got an unexpected keyword argument 'activation_trace'`(4 次)、`TypeError: SessionDriver.submit_turn() got an unexpected keyword argument 'activation_trace'`、`TypeError: ClientDrivenBackend.submit() got an unexpected keyword argument 'activation_trace'`。已经通过的 5 条是三条 keyword-only 检查(后端、驱动器、客户端;改动前多传一个位置参数本来就抛 `TypeError`)、"不带轨迹仍是二元组"与"不带轨迹什么都不变"。
+
+- [ ] **Step 3: 写实现**
+
+把下面的差异应用到四个文件(共 +48 −12 行):
+
+```diff
+--- a/src/simulator/realtime/backend.py
++++ b/src/simulator/realtime/backend.py
+@@ -29,11 +29,22 @@ class ClientDrivenBackend:
+     def __init__(self, slot_id: str, timeout_s: float) -> None:
+         self.slot_id = slot_id
+         self._timeout_s = timeout_s
+-        self._inbox: "queue.Queue[tuple[str, str | None] | object]" = queue.Queue()
++        self._inbox: "queue.Queue[tuple | object]" = queue.Queue()
+ 
+-    def submit(self, utterance: str, inner_thought: str | None) -> None:
+-        """由 gRPC 主循环线程调用：把客户端刚提交的话语放进队列。"""
+-        self._inbox.put((utterance, inner_thought))
++    def submit(
++        self,
++        utterance: str,
++        inner_thought: str | None,
++        *,
++        activation_trace: dict | None = None,
++    ) -> None:
++        """由 gRPC 主循环线程调用：把客户端刚提交的话语放进队列。
++        带激活轨迹时排进去的是三元组,respond() 原样返回给 run_episode,
++        由它写进该轮的 TurnRecord;不带时仍是二元组,行为与改动前相同。"""
++        if activation_trace is None:
++            self._inbox.put((utterance, inner_thought))
++        else:
++            self._inbox.put((utterance, inner_thought, activation_trace))
+ 
+     def request_end(self) -> None:
+         """唤醒可能正阻塞的 respond()，但不作为真实话语处理——respond() 收到
+@@ -46,7 +57,7 @@ class ClientDrivenBackend:
+         scenario: Scenario,
+         history: list[TurnRecord],
+         speaker_slot: str,
+-    ) -> tuple[str, str | None]:
++    ) -> tuple[str, str | None] | tuple[str, str | None, dict]:
+         """由 run_episode 的后台驱动线程调用：阻塞直到 submit()/request_end()
+         到来或超时。"""
+         try:
+```
+
+```diff
+--- a/src/simulator/realtime/driver.py
++++ b/src/simulator/realtime/driver.py
+@@ -61,8 +61,14 @@ class SessionDriver:
+         self._thread = threading.Thread(target=self._run, daemon=True)
+         self._thread.start()
+ 
+-    def submit_turn(self, utterance: str, inner_thought: str | None) -> None:
+-        self._client_backend.submit(utterance, inner_thought)
++    def submit_turn(
++        self,
++        utterance: str,
++        inner_thought: str | None,
++        *,
++        activation_trace: dict | None = None,
++    ) -> None:
++        self._client_backend.submit(utterance, inner_thought, activation_trace=activation_trace)
+ 
+     def request_end(self, reason: str) -> None:
+         """客户端主动、优雅地结束会话（收到 EndSession 消息）：唤醒可能正
+```
+
+```diff
+--- a/src/simulator/realtime/servicer.py
++++ b/src/simulator/realtime/servicer.py
+@@ -9,6 +9,7 @@ from dataclasses import replace
+ from typing import Callable
+ 
+ import grpc
++from google.protobuf.json_format import MessageToDict
+ 
+ from simulator.datamodel import Persona, RoleAssignment, Scenario, RoleSlot
+ from simulator.backends import ModelBackend
+@@ -169,10 +170,14 @@ class EnvironmentServicer(pb2_grpc.EnvironmentServiceServicer):
+                         yield self._invalid_session(f"{kind} received before create_session")
+                         return
+                     elif kind == "submit_turn":
++                        submit = msg.submit_turn
+                         driver.submit_turn(
+-                            msg.submit_turn.utterance,
+-                            msg.submit_turn.inner_thought
+-                            if msg.submit_turn.HasField("inner_thought") else None,
++                            submit.utterance,
++                            submit.inner_thought if submit.HasField("inner_thought") else None,
++                            # HasField 区分"没有轨迹"(None)与"轨迹为空"({}),§2.6.3。
++                            # MessageToDict 把 Struct 转成纯 dict/list,落盘可 yaml 序列化。
++                            activation_trace=MessageToDict(submit.activation_trace)
++                            if submit.HasField("activation_trace") else None,
+                         )
+                     elif kind == "end_session":
+                         driver.request_end("client_terminated")
+```
+
+```diff
+--- a/src/simulator/realtime/client.py
++++ b/src/simulator/realtime/client.py
+@@ -124,16 +124,30 @@ class EnvironmentServiceClient:
+         self._opening_turns = self._await_client_turn()
+         return self._session_id
+ 
+-    def submit_turn(self, utterance: str, inner_thought: str | None = None) -> list[TurnRecord]:
++    def submit_turn(
++        self,
++        utterance: str,
++        inner_thought: str | None = None,
++        *,
++        activation_trace: dict | None = None,
++    ) -> list[TurnRecord]:
+         """提交客户端这一轮，返回随后直到"再次轮到客户端"之前收到的全部对方
+         轮次（可能为空）。返回值**不含**客户端自己那一轮的回显。会话在此期间
+         结束则返回结束前收到的轮次，此后 closed 为 True。会话已结束时再调用
+-        抛 RuntimeError。不假定角色数量或客户端位置。"""
++        抛 RuntimeError。不假定角色数量或客户端位置。
++
++        activation_trace:客户端角色由完整 SimpleActio 实例扮演时的激活轨迹,服务端写进
++        该轮的 TurnRecord 并在回显里带回。None 表示不带(裸模型);{} 是"轨迹为空",
++        两者在协议上可区分。经 protobuf Struct 传输,数字一律变成浮点数。"""
+         if self._closed:
+             raise RuntimeError("session already ended; check client.closed before submitting")
+         submit = pb2.SubmitTurn(utterance=utterance)
+         if inner_thought is not None:
+             submit.inner_thought = inner_thought
++        if activation_trace is not None:
++            # SetInParent():update({}) 不会置位 presence,显式空轨迹会被误当成"未设置"
++            submit.activation_trace.SetInParent()
++            submit.activation_trace.update(activation_trace)
+         self._send_q.put(pb2.ClientMessage(submit_turn=submit))
+         # 服务端会把客户端自己的这一轮也作为 TurnUpdate 回显——先吞掉它，
+         # 否则轮次计数会错位，后面的"轮到谁"判断就不成立。回显必须正是
+```
+
+- [ ] **Step 4: 运行,确认通过**
+
+Run: 全量命令 + `tests/test_realtime_activation_trace.py`
+Expected: `11 passed`。
+
+- [ ] **Step 5: 全量回归**
+
+Run: 全量命令
+Expected: `B+26` passed(本任务增量 +11;以 820 为起点实测为 846),无警告。`git diff --stat -- src/simulator/realtime` 应为(限定路径,`cli/package*.json` 不会混进来):
+
+```
+ src/simulator/realtime/backend.py  | 21 ++++++++++++++++-----
+ src/simulator/realtime/client.py   | 18 ++++++++++++++++--
+ src/simulator/realtime/driver.py   | 10 ++++++++--
+ src/simulator/realtime/servicer.py | 11 ++++++++---
+ 4 files changed, 48 insertions(+), 12 deletions(-)
+```
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add src/simulator/realtime/backend.py
+git add src/simulator/realtime/driver.py
+git add src/simulator/realtime/servicer.py
+git add src/simulator/realtime/client.py
+git add tests/test_realtime_activation_trace.py
+git commit -m "feat: submit_turn carries an activation_trace through the servicer and driver to the runner (opponent traces still stripped)"
+```
+
+---
+
+### Task 73: `simple_actio` 包骨架、信号注册表与触发谓词语言
+
+**Files:**
+- Modify: `pyproject.toml`(1 行)
+- Create: `src/simple_actio/__init__.py`、`src/simple_actio/errors.py`、`src/simple_actio/text.py`、`src/simple_actio/signals.py`、`src/simple_actio/triggers.py`
+- Test: `tests/test_simple_actio_signals.py`
+
+**Interfaces:**
+- Consumes: `simulator.datamodel.TurnRecord`。
+- Produces(任务 74–77 与计划 7 依赖):`SimpleActioDataError`;`tokens(text)`;`Signal`、`SignalRegistry`、`default_registry`、`DEFAULT_EMOTION_LEXICON`、`make_emotion_high`、`no_new_information`、`first_turn`;`InvalidTriggerError`、`validate_trigger`、`evaluate_trigger`、`referenced_signals`。
+
+**设计要点:**
+- **信号是纯函数,注册表是实例**(Ruling 8)。`register` 拒绝重名、不合 `^[a-z][a-z0-9_]*$` 的名字(用 `fullmatch`,末尾带换行的名字也拒绝)和不可调用对象;`fired` 按名字排序返回此刻为真的信号,轨迹的 `signals` 就是它。
+- **三个内置信号的定义见 Ruling 9**;词典 `DEFAULT_EMOTION_LEXICON` 可经 `default_registry(emotion_lexicon=...)` 或 `make_emotion_high(...)` 替换。
+- **谓词语言**:每个节点恰好一个键;`all`/`any` 要非空列表;`turn_at_least` 只接受非负 `int`(拒绝 `bool` 与 `1.0`);嵌套不超过 `MAX_TRIGGER_DEPTH = 32` 层,超出抛 `InvalidTriggerError`(嵌套极深或 YAML 锚点造出的自引用结构因此是确定性的数据错误,不是 `RecursionError`;求值只对已校验的条件做,不会更深)。`validate_trigger` 只查结构,给了注册表时再查信号名;报错信息带路径(如 `trigger.all[1].not`)。`evaluate_trigger` 假定已校验。
+- **`referenced_signals`** 给计划 7 的经验分析器用:出现在偶数层 `not` 下的信号才算技能"针对"的信号。
+- **打包**:新增顶层包,`pyproject.toml` 的 wheel 列表同时加 `src/simple_actio`,否则 `test_mt_packaging` 失败。只追加,不重写整行(前面的计划已往列表里加过别的包)。
+- `src/simple_actio/__init__.py` 也以 `from __future__ import annotations` 开头(docstring 之后);任务 76 有静态测试对全包强制这一点。
+
+- [ ] **Step 1: 写失败测试**
+
+新建 `tests/test_simple_actio_signals.py`:
+
+```python
+import pytest
+
+from simple_actio.signals import (
+    DEFAULT_EMOTION_LEXICON, SignalRegistry, default_registry, first_turn,
+    make_emotion_high, no_new_information,
+)
+from simple_actio.text import tokens
+from simple_actio.triggers import (
+    InvalidTriggerError, evaluate_trigger, referenced_signals, validate_trigger,
+)
+from simulator.datamodel import TurnRecord
+
+
+def _h(*pairs):
+    return [TurnRecord(i, slot, text) for i, (slot, text) in enumerate(pairs)]
+
+
+# ---------------- 词面切分 ----------------
+
+def test_tokens_split_ascii_words_and_cjk_bigrams():
+    assert tokens("Hello, World!") == {"hello", "world"}
+    assert tokens("我很生气") == {"我很", "很生", "生气"}
+    assert tokens("好") == {"好"}
+    assert tokens("") == frozenset()
+    assert tokens("预算 budget 2026") == {"预算", "budget", "2026"}
+
+
+# ---------------- 内置信号 ----------------
+
+def test_emotion_high_looks_at_the_opponents_last_line_only():
+    assert make_emotion_high()(_h(("b", "我真的很生气")), "a") is True
+    assert make_emotion_high()(_h(("b", "我真的很生气"), ("b", "好吧")), "a") is False
+    assert make_emotion_high()(_h(("a", "我真的很生气")), "a") is False  # 自己说的不算
+    assert make_emotion_high()([], "a") is False
+
+
+def test_emotion_high_counts_two_exclamation_marks_and_ignores_case():
+    assert make_emotion_high()(_h(("b", "不行!!")), "a") is True
+    assert make_emotion_high()(_h(("b", "不行！！")), "a") is True
+    assert make_emotion_high()(_h(("b", "不行!")), "a") is False
+    assert make_emotion_high()(_h(("b", "I am ANGRY")), "a") is True
+
+
+def test_emotion_lexicon_is_replaceable_and_must_be_non_empty():
+    custom = make_emotion_high(["吃醋"])
+    assert custom(_h(("b", "你是不是吃醋了")), "a") is True
+    assert custom(_h(("b", "我很生气")), "a") is False
+    with pytest.raises(ValueError):
+        make_emotion_high([])
+    with pytest.raises(ValueError):
+        make_emotion_high([""])
+    assert "生气" in DEFAULT_EMOTION_LEXICON
+
+
+def test_no_new_information_needs_two_opponent_lines_and_no_new_tokens():
+    assert no_new_information(_h(("b", "预算不够")), "a") is False
+    assert no_new_information(_h(("b", "预算不够"), ("a", "怎么办"), ("b", "预算不够")), "a") is True
+    assert no_new_information(_h(("b", "预算不够"), ("b", "人手也不够")), "a") is False
+    assert no_new_information(_h(("b", "预算不够"), ("b", "……")), "a") is True  # 空话也算
+
+
+def test_first_turn_is_about_the_speaker_not_the_conversation():
+    assert first_turn([], "a") is True
+    assert first_turn(_h(("b", "你好")), "a") is True
+    assert first_turn(_h(("a", "你好"), ("b", "嗯")), "a") is False
+
+
+# ---------------- 注册表 ----------------
+
+def test_default_registry_has_the_three_builtins_sorted():
+    assert default_registry().names() == ["emotion_high", "first_turn", "no_new_information"]
+
+
+def test_registries_are_independent():
+    a, b = default_registry(), default_registry()
+    a.register("always", lambda h, s: True)
+    assert "always" in a and "always" not in b
+
+
+def test_register_rejects_duplicates_bad_names_and_non_callables():
+    reg = SignalRegistry()
+    reg.register("x", lambda h, s: True)
+    with pytest.raises(ValueError, match="already registered"):
+        reg.register("x", lambda h, s: True)
+    with pytest.raises(ValueError):
+        reg.register("Bad-Name", lambda h, s: True)
+    with pytest.raises(ValueError):
+        reg.register("trailing\n", lambda h, s: True)  # fullmatch:末尾换行也不行
+    with pytest.raises(TypeError):
+        reg.register("y", "not callable")
+    with pytest.raises(KeyError, match="unknown signal"):
+        reg.get("nope")
+
+
+def test_fired_lists_true_signals_by_name():
+    reg = default_registry()
+    assert reg.fired(_h(("b", "我很生气")), "a") == ["emotion_high", "first_turn"]
+
+
+# ---------------- 谓词语言 ----------------
+
+@pytest.mark.parametrize("trigger, expected", [
+    ({"signal": "emotion_high"}, True),
+    ({"signal": "first_turn"}, True),
+    ({"all": [{"signal": "emotion_high"}, {"signal": "first_turn"}]}, True),
+    ({"all": [{"signal": "emotion_high"}, {"signal": "no_new_information"}]}, False),
+    ({"any": [{"signal": "no_new_information"}, {"signal": "emotion_high"}]}, True),
+    ({"not": {"signal": "emotion_high"}}, False),
+    ({"turn_at_least": 1}, True),
+    ({"turn_at_least": 2}, False),
+    ({"turn_at_least": 0}, True),
+])
+def test_evaluate(trigger, expected):
+    reg = default_registry()
+    validate_trigger(trigger, reg)
+    assert evaluate_trigger(trigger, _h(("b", "我很生气")), "a", reg) is expected
+
+
+@pytest.mark.parametrize("bad", [
+    {}, {"signal": "a", "all": []}, {"xor": []}, "signal", None,
+    {"signal": ""}, {"signal": 3},
+    {"all": []}, {"any": {"signal": "a"}}, {"all": [{"oops": 1}]},
+    {"not": []}, {"turn_at_least": -1}, {"turn_at_least": 1.0}, {"turn_at_least": True},
+])
+def test_validate_rejects_malformed_triggers(bad):
+    with pytest.raises(InvalidTriggerError):
+        validate_trigger(bad)
+
+
+def test_validate_with_a_registry_rejects_unknown_signals():
+    validate_trigger({"signal": "custom"})  # 没给注册表:只查结构
+    with pytest.raises(InvalidTriggerError, match="unknown signal 'custom'"):
+        validate_trigger({"any": [{"signal": "custom"}]}, default_registry())
+
+
+def test_the_error_names_where_the_problem_is():
+    with pytest.raises(InvalidTriggerError, match=r"trigger\.all\[1\]\.not"):
+        validate_trigger({"all": [{"signal": "a"}, {"not": {"bad": 1}}]})
+
+
+def _nested_not(depth):
+    node = {"signal": "first_turn"}
+    for _ in range(depth - 1):
+        node = {"not": node}
+    return node
+
+
+def test_nesting_up_to_the_depth_limit_is_accepted_and_beyond_it_is_rejected():
+    from simple_actio.triggers import MAX_TRIGGER_DEPTH
+    assert MAX_TRIGGER_DEPTH == 32
+    validate_trigger(_nested_not(32), default_registry())
+    with pytest.raises(InvalidTriggerError, match="nested deeper than 32 levels"):
+        validate_trigger(_nested_not(33))
+    with pytest.raises(InvalidTriggerError, match="nested deeper than 32 levels"):
+        validate_trigger(_nested_not(5000))  # 远超解释器递归上限,仍是确定性的 InvalidTriggerError
+
+
+def test_a_self_referencing_trigger_is_rejected_not_a_recursion_error():
+    loop = {"any": []}
+    loop["any"].append(loop)  # YAML 锚点 &a / *a 可以造出这种结构
+    with pytest.raises(InvalidTriggerError, match="nested deeper"):
+        validate_trigger(loop)
+
+
+def test_referenced_signals_skips_negated_ones():
+    trig = {"all": [{"signal": "emotion_high"}, {"not": {"signal": "first_turn"}},
+                    {"not": {"not": {"signal": "no_new_information"}}}, {"turn_at_least": 2}]}
+    assert referenced_signals(trig) == {"emotion_high", "no_new_information"}
+```
+
+- [ ] **Step 2: 运行,确认失败**
+
+Run: 全量命令 + `tests/test_simple_actio_signals.py`
+Expected: 收集阶段报错 `ModuleNotFoundError: No module named 'simple_actio'`,`1 error`。
+
+- [ ] **Step 3: 写实现**
+
+把 `src/simple_actio` 登记进 `pyproject.toml` 的 wheel 包列表。**不要照抄任何一行完整的 `packages = [...]`**:按 §12 顺序,前面的计划已追加过 `src/inference_bridge`、`src/recipestore`、`src/trainplanner`、`src/trainscheduler`,以执行时的实际列表为准。用下面的脚本读出现有列表,已含 `"src/simple_actio"` 就不动,否则在末尾追加:
+
+```bash
+uv run python - <<'PY'
+import re
+from pathlib import Path
+
+p = Path("pyproject.toml")
+s = p.read_text(encoding="utf-8")
+m = re.search(r'^packages = \[(.*)\]$', s, re.M)
+assert m, "wheel packages line not found"
+items = [x.strip() for x in m.group(1).split(",") if x.strip()]
+if '"src/simple_actio"' in items:
+    print("already listed")
+else:
+    items.append('"src/simple_actio"')
+    s = s[: m.start()] + "packages = [" + ", ".join(items) + "]" + s[m.end():]
+    p.write_text(s, encoding="utf-8")
+print(re.search(r'^packages = .*$', s, re.M).group(0))
+PY
+```
+
+Expected:打印出的列表保留执行前的全部项,末尾是 `"src/simple_actio"`。计划 1 至 5 都已落地时形如 `packages = ["src/controlplane", "src/simulator", "src/diagnostic", "src/mindtrainer", "src/inference_bridge", ..., "src/simple_actio"]`(中间各项的顺序以前面各计划实际追加的为准);在撰写时的基线 `0385004` 上是 `packages = ["src/controlplane", "src/simulator", "src/diagnostic", "src/mindtrainer", "src/simple_actio"]`。重复运行不会重复追加:第二次运行先打印 `already listed`,再打印同一行 `packages = [...]`。
+
+新建 `src/simple_actio/__init__.py`:
+
+```python
+"""SimpleActio:带技能库、记忆库与推理经验的智能体实例执行引擎。
+
+只依赖 simulator.datamodel(闭环集成设计 §8.1、§11)。不导入 controlplane、
+simulator.backends 或任何传输层;读写技能库与记忆库产物是调用方(MindAgent)的事。
+"""
+from __future__ import annotations
+```
+
+新建 `src/simple_actio/errors.py`:
+
+```python
+"""simple_actio 的唯一错误基类。"""
+from __future__ import annotations
+
+
+class SimpleActioDataError(ValueError):
+    """技能、记忆、推理经验、触发条件或激活轨迹的结构不合法。"""
+```
+
+新建 `src/simple_actio/text.py`:
+
+```python
+"""词面切分:触发信号与记忆检索共用的唯一一处分词规则。"""
+from __future__ import annotations
+
+import re
+
+_ASCII_WORD = re.compile(r"[A-Za-z0-9_]+")
+_CJK_RUN = re.compile(r"[㐀-䶿一-鿿豈-﫿]+")
+
+
+def tokens(text: str) -> frozenset[str]:
+    """把文本切成词面集合:ASCII 词按小写整词;连续汉字按相邻二字切分,
+    只有一个字的汉字串保留单字。标点与空白丢弃。纯函数,同输入同输出。"""
+    out: set[str] = {w.lower() for w in _ASCII_WORD.findall(text)}
+    for run in _CJK_RUN.findall(text):
+        if len(run) == 1:
+            out.add(run)
+        else:
+            out.update(run[i:i + 2] for i in range(len(run) - 1))
+    return frozenset(out)
+```
+
+新建 `src/simple_actio/signals.py`:
+
+```python
+"""对话信号:注册的纯函数,触发条件谓词语言里 {"signal": name} 的取值来源。
+
+信号的签名是 (history, speaker_slot) -> bool:history 是"轮到 speaker_slot
+说话时它能看到的历史"(runner 传给后端的那份),speaker_slot 是即将说话的角色位。
+V1 内置三个信号,词典是闭环集成设计 §8.1 拟的默认值,没有数据支持,可替换。
+"""
+from __future__ import annotations
+
+import re
+from typing import Callable
+
+from simple_actio.text import tokens
+from simulator.datamodel import TurnRecord
+
+Signal = Callable[[list[TurnRecord], str], bool]
+
+_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
+
+DEFAULT_EMOTION_LEXICON: tuple[str, ...] = (
+    "生气", "愤怒", "气死", "受够", "太过分", "崩溃", "伤心", "难过", "失望", "害怕", "焦虑",
+    "angry", "furious", "upset", "hate", "scared",
+)
+
+
+def _opponent_turns(history: list[TurnRecord], speaker_slot: str) -> list[TurnRecord]:
+    return [t for t in history if t.speaker_slot != speaker_slot]
+
+
+def make_emotion_high(lexicon: tuple[str, ...] | list[str] = DEFAULT_EMOTION_LEXICON) -> Signal:
+    """对方最后一句含词典里任一词(不区分大小写的子串匹配),或含两个及以上感叹号。"""
+    words = tuple(w.lower() for w in lexicon)
+    if not words or any(not w for w in words):
+        raise ValueError("emotion lexicon must be a non-empty list of non-empty strings")
+
+    def emotion_high(history: list[TurnRecord], speaker_slot: str) -> bool:
+        opp = _opponent_turns(history, speaker_slot)
+        if not opp:
+            return False
+        text = opp[-1].utterance.lower()
+        if text.count("!") + text.count("！") >= 2:
+            return True
+        return any(w in text for w in words)
+
+    return emotion_high
+
+
+def no_new_information(history: list[TurnRecord], speaker_slot: str) -> bool:
+    """对方至少说过两句,且最后一句的词面全都在它此前说过的话里出现过(空话也算)。"""
+    opp = _opponent_turns(history, speaker_slot)
+    if len(opp) < 2:
+        return False
+    last = tokens(opp[-1].utterance)
+    earlier: set[str] = set()
+    for t in opp[:-1]:
+        earlier |= tokens(t.utterance)
+    return last <= earlier
+
+
+def first_turn(history: list[TurnRecord], speaker_slot: str) -> bool:
+    """speaker_slot 此前一句都没说过(不论对方是否已开场)。"""
+    return all(t.speaker_slot != speaker_slot for t in history)
+
+
+class SignalRegistry:
+    """信号名 → 纯函数。每个实例独立,注册不影响其他实例(没有全局可变状态)。"""
+
+    def __init__(self) -> None:
+        self._signals: dict[str, Signal] = {}
+
+    def register(self, name: str, fn: Signal) -> None:
+        if not isinstance(name, str) or not _NAME.fullmatch(name):
+            raise ValueError(f"signal name must match {_NAME.pattern}, got {name!r}")
+        if name in self._signals:
+            raise ValueError(f"signal {name!r} is already registered")
+        if not callable(fn):
+            raise TypeError(f"signal {name!r} must be callable")
+        self._signals[name] = fn
+
+    def __contains__(self, name: object) -> bool:
+        return name in self._signals
+
+    def get(self, name: str) -> Signal:
+        try:
+            return self._signals[name]
+        except KeyError:
+            raise KeyError(f"unknown signal {name!r}; registered: {self.names()}") from None
+
+    def names(self) -> list[str]:
+        return sorted(self._signals)
+
+    def fired(self, history: list[TurnRecord], speaker_slot: str) -> list[str]:
+        """全部已注册信号里此刻为真的那些,按名字排序。"""
+        return [n for n in self.names() if self._signals[n](history, speaker_slot)]
+
+
+def default_registry(
+    *, emotion_lexicon: tuple[str, ...] | list[str] = DEFAULT_EMOTION_LEXICON,
+) -> SignalRegistry:
+    """新建一个带三个内置信号的注册表;词典可替换。"""
+    reg = SignalRegistry()
+    reg.register("emotion_high", make_emotion_high(emotion_lexicon))
+    reg.register("first_turn", first_turn)
+    reg.register("no_new_information", no_new_information)
+    return reg
+```
+
+新建 `src/simple_actio/triggers.py`:
+
+```python
+"""触发条件的小型谓词语言(闭环集成设计 §8.1)。
+
+    {"signal": name}          已注册信号为真
+    {"all": [t, ...]}         全部为真(非空列表)
+    {"any": [t, ...]}         任一为真(非空列表)
+    {"not": t}                取反
+    {"turn_at_least": n}      len(history) >= n,n 是非负整数(不接受 bool 与浮点数)
+
+每个节点是恰好一个键的字典;嵌套不超过 MAX_TRIGGER_DEPTH 层(自引用结构也因此被拒,
+抛 InvalidTriggerError 而不是 RecursionError)。校验与求值都是纯函数。
+"""
+from __future__ import annotations
+
+from simple_actio.errors import SimpleActioDataError
+from simple_actio.signals import SignalRegistry
+from simulator.datamodel import TurnRecord
+
+_OPS = ("signal", "all", "any", "not", "turn_at_least")
+MAX_TRIGGER_DEPTH = 32
+
+
+class InvalidTriggerError(SimpleActioDataError):
+    """触发条件结构不合法,或引用了注册表里没有的信号。"""
+
+
+def validate_trigger(trigger: object, registry: SignalRegistry | None = None) -> None:
+    """结构不合法抛 InvalidTriggerError。给了 registry 时还检查信号名都已注册。"""
+    _validate(trigger, registry, "trigger", 1)
+
+
+def _validate(node: object, registry: SignalRegistry | None, where: str, depth: int) -> None:
+    if depth > MAX_TRIGGER_DEPTH:
+        raise InvalidTriggerError(f"{where}: nested deeper than {MAX_TRIGGER_DEPTH} levels")
+    if not isinstance(node, dict) or len(node) != 1:
+        raise InvalidTriggerError(f"{where}: expected a dict with exactly one key, got {node!r}")
+    (op, arg), = node.items()
+    if op not in _OPS:
+        raise InvalidTriggerError(f"{where}: unknown operator {op!r}; expected one of {list(_OPS)}")
+    if op == "signal":
+        if not isinstance(arg, str) or not arg:
+            raise InvalidTriggerError(f"{where}.signal: expected a non-empty string, got {arg!r}")
+        if registry is not None and arg not in registry:
+            raise InvalidTriggerError(
+                f"{where}.signal: unknown signal {arg!r}; registered: {registry.names()}"
+            )
+    elif op in ("all", "any"):
+        if not isinstance(arg, list) or not arg:
+            raise InvalidTriggerError(f"{where}.{op}: expected a non-empty list, got {arg!r}")
+        for i, child in enumerate(arg):
+            _validate(child, registry, f"{where}.{op}[{i}]", depth + 1)
+    elif op == "not":
+        _validate(arg, registry, f"{where}.not", depth + 1)
+    else:  # turn_at_least
+        if isinstance(arg, bool) or not isinstance(arg, int) or arg < 0:
+            raise InvalidTriggerError(
+                f"{where}.turn_at_least: expected a non-negative int, got {arg!r}"
+            )
+
+
+def evaluate_trigger(
+    trigger: dict, history: list[TurnRecord], speaker_slot: str, registry: SignalRegistry,
+) -> bool:
+    """对已校验过的触发条件求值。未注册的信号抛 KeyError(调用方应先校验)。"""
+    (op, arg), = trigger.items()
+    if op == "signal":
+        return bool(registry.get(arg)(history, speaker_slot))
+    if op == "all":
+        return all(evaluate_trigger(c, history, speaker_slot, registry) for c in arg)
+    if op == "any":
+        return any(evaluate_trigger(c, history, speaker_slot, registry) for c in arg)
+    if op == "not":
+        return not evaluate_trigger(arg, history, speaker_slot, registry)
+    if op == "turn_at_least":
+        return len(history) >= arg
+    raise InvalidTriggerError(f"unknown operator {op!r}")
+
+
+def referenced_signals(trigger: dict) -> frozenset[str]:
+    """触发条件"针对"的信号:出现在偶数层 not 之下的 {"signal": name}。
+    MindAgent 的经验分析器据此判断"被选中的技能是否针对某个信号"。"""
+    return frozenset(_refs(trigger, negated=False))
+
+
+def _refs(node: dict, *, negated: bool) -> set[str]:
+    (op, arg), = node.items()
+    if op == "signal":
+        return set() if negated else {arg}
+    if op in ("all", "any"):
+        out: set[str] = set()
+        for c in arg:
+            out |= _refs(c, negated=negated)
+        return out
+    if op == "not":
+        return _refs(arg, negated=not negated)
+    return set()
+```
+
+- [ ] **Step 4: 运行,确认通过**
+
+Run: 全量命令 + `tests/test_simple_actio_signals.py tests/test_mt_packaging.py`
+Expected: `40 passed`(`uv` 会先重新构建并安装本项目,输出 `Built rise-controlplane ...`,属正常)。
+
+- [ ] **Step 5: 全量回归**
+
+Run: 全量命令
+Expected: `B+64` passed(本任务增量 +38;以 820 为起点实测为 884),无警告。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add pyproject.toml
+git add src/simple_actio/__init__.py
+git add src/simple_actio/errors.py
+git add src/simple_actio/text.py
+git add src/simple_actio/signals.py
+git add src/simple_actio/triggers.py
+git add tests/test_simple_actio_signals.py
+git commit -m "feat: simple_actio package with a signal registry (emotion_high, no_new_information, first_turn) and the trigger predicate language"
+```
+
+---
+
+### Task 74: 技能与路由
+
+**Files:**
+- Create: `src/simple_actio/_check.py`、`src/simple_actio/skills.py`
+- Test: `tests/test_simple_actio_skills.py`
+
+**Interfaces:**
+- Consumes: 任务 73 的 `validate_trigger`、`evaluate_trigger`、`SignalRegistry`、`SimpleActioDataError`。
+- Produces(任务 76 与计划 7 依赖):`Skill`(`to_dict`/`from_dict`,形状见"对外契约")、`SKILL_ID_PREFIX`、`LEVELS`、`RouteResult`、`route_order`、`check_library`、`route`。
+
+**设计要点:**
+- **`Skill` 是冻结数据类**;`policy_instructions` 是元组,`to_dict` 输出 `{"policy": {"instructions": [...]}}`(Ruling 12)。`to_dict` 深拷贝 `trigger`,调用方改返回值不影响技能。
+- **id 必须以 `skill-` 开头**(设计 §11 契约,见"对外契约"):`from_dict` 与直接构造(`__post_init__`)都经 `_check.prefixed_id` 检查,任务 75 的记忆复用同一个函数。
+- **校验在 `__post_init__` 里**(Ruling 19):`level` 不是 `macro`/`micro`、`version` 不是 `>= 1` 的 `int`、`priority` 不是 `int`、触发条件不合法、`policy_instructions` 不是非空的字符串 `tuple`、`description` 不是字符串,直接构造与 `from_dict` 都抛 `SimpleActioDataError` 并带技能 id 与字段名。`from_dict` 只查键(缺键、未知键)并把 `policy.instructions` 的 `list` 换成 `tuple`。任务 77 的夹具走的正是直接构造(`test_direct_construction_validates_every_field` 有 12 个反例)。
+- **路由是纯函数**:命中的技能按 `route_order = (-priority, -version, id)` 排序(Ruling 11),第一个即选中。`RouteResult.conflict` 由候选数推出。结果与输入顺序无关(有测试)。
+- **`check_library`** 是"一组技能能否一起加载":都是 `Skill`(字段已由构造校验)、id 不重复、信号名都已注册。`instantiate` 调它。
+- `_check.py` 收拢 `__post_init__` 与 `from_dict` 共用的字段校验(含 `text_tuple`、`unit_interval`、`prefixed_id`),任务 75 复用。
+
+- [ ] **Step 1: 写失败测试**
+
+新建 `tests/test_simple_actio_skills.py`:
+
+```python
+import pytest
+import yaml
+
+from simple_actio.errors import SimpleActioDataError
+from simple_actio.signals import default_registry
+from simple_actio.skills import Skill, check_library, route, route_order
+from simulator.datamodel import TurnRecord
+
+
+def _skill(sid, *, trigger=None, priority=0, version=1, level="micro"):
+    return Skill(
+        id=sid, version=version, level=level,
+        trigger=trigger if trigger is not None else {"signal": "emotion_high"},
+        policy_instructions=(f"do {sid}",), priority=priority,
+    )
+
+
+def _angry():
+    return [TurnRecord(0, "b", "我很生气")]
+
+
+SKILL_DICT = {
+    "id": "skill-calm", "version": 2, "level": "macro", "priority": 5,
+    "trigger": {"all": [{"signal": "emotion_high"}, {"not": {"signal": "first_turn"}}]},
+    "policy": {"instructions": ["先回应对方的情绪", "再谈事情本身"]},
+    "description": "情绪优先",
+}
+
+
+def test_to_dict_from_dict_round_trip_and_exact_shape():
+    s = Skill.from_dict(SKILL_DICT)
+    assert s.policy_instructions == ("先回应对方的情绪", "再谈事情本身")
+    assert s.to_dict() == SKILL_DICT
+    assert list(s.to_dict()) == ["id", "version", "level", "priority", "trigger", "policy", "description"]
+    assert Skill.from_dict(yaml.safe_load(yaml.safe_dump(s.to_dict()))) == s
+
+
+def test_priority_and_description_default():
+    d = {k: v for k, v in SKILL_DICT.items() if k not in ("priority", "description")}
+    s = Skill.from_dict(d)
+    assert (s.priority, s.description) == (0, "")
+
+
+def test_to_dict_does_not_share_the_trigger():
+    s = Skill.from_dict(SKILL_DICT)
+    s.to_dict()["trigger"]["all"].clear()
+    assert s.trigger == SKILL_DICT["trigger"]
+
+
+@pytest.mark.parametrize("patch", [
+    {"id": ""}, {"version": 0}, {"version": 1.0}, {"version": True}, {"level": "meso"},
+    {"trigger": {"bad": 1}}, {"policy": {"instructions": []}}, {"policy": {"instructions": [""]}},
+    {"policy": {}}, {"priority": "high"}, {"extra": 1},
+])
+def test_from_dict_rejects_bad_fields(patch):
+    with pytest.raises(SimpleActioDataError):
+        Skill.from_dict({**SKILL_DICT, **patch})
+
+
+GOOD_SKILL = dict(id="skill-ok", version=1, level="micro", trigger={"signal": "emotion_high"},
+                  policy_instructions=("do it",))
+
+
+@pytest.mark.parametrize("patch, field", [
+    ({"version": "2"}, "version"), ({"version": 0}, "version"), ({"version": True}, "version"),
+    ({"level": "meso"}, "level"), ({"trigger": {"bad": 1}}, "trigger"),
+    ({"policy_instructions": "先共情"}, "policy.instructions"),   # 字符串会被逐字渲染,必须拒绝
+    ({"policy_instructions": ["先共情"]}, "policy.instructions"),  # list 不行,要 tuple
+    ({"policy_instructions": ()}, "policy.instructions"), ({"policy_instructions": ("",)}, "policy.instructions"),
+    ({"priority": "high"}, "priority"), ({"priority": 1.5}, "priority"), ({"description": None}, "description"),
+])
+def test_direct_construction_validates_every_field(patch, field):
+    with pytest.raises(SimpleActioDataError, match=field.replace(".", r"\.")):
+        Skill(**{**GOOD_SKILL, **patch})
+
+
+def test_direct_construction_accepts_a_valid_skill():
+    assert Skill(**GOOD_SKILL).to_dict()["policy"] == {"instructions": ["do it"]}
+
+
+@pytest.mark.parametrize("bad_id", ["calm", "skill-", "Skill-calm", "mem-calm", "skills-calm"])
+def test_skill_id_must_start_with_the_skill_prefix(bad_id):
+    with pytest.raises(SimpleActioDataError, match=r"skill\.id: must start with 'skill-'"):
+        Skill.from_dict({**SKILL_DICT, "id": bad_id})
+    with pytest.raises(SimpleActioDataError, match=r"skill\.id: must start with 'skill-'"):
+        _skill(bad_id)
+
+
+def test_a_skill_prefixed_id_is_accepted():
+    assert Skill.from_dict({**SKILL_DICT, "id": "skill-x"}).id == "skill-x"
+    assert _skill("skill-x").id == "skill-x"
+
+
+def test_from_dict_rejects_missing_keys_and_non_dicts():
+    with pytest.raises(SimpleActioDataError, match="missing keys"):
+        Skill.from_dict({"id": "skill-x"})
+    with pytest.raises(SimpleActioDataError):
+        Skill.from_dict(["not", "a", "dict"])
+
+
+def test_route_order_priority_then_version_then_id():
+    skills = [_skill("skill-b", priority=1, version=1), _skill("skill-a", priority=1, version=1),
+              _skill("skill-c", priority=1, version=3), _skill("skill-d", priority=2, version=1)]
+    assert [s.id for s in sorted(skills, key=route_order)] == ["skill-d", "skill-c", "skill-a", "skill-b"]
+
+
+def test_route_picks_the_first_hit_and_records_the_conflict():
+    skills = [_skill("skill-low", priority=0), _skill("skill-high", priority=9),
+              _skill("skill-never", trigger={"signal": "no_new_information"})]
+    result = route(skills, _angry(), "a", default_registry())
+    assert result.candidates == ("skill-high", "skill-low")
+    assert result.selected.id == "skill-high"
+    assert result.conflict is True
+    assert result.signals == ("emotion_high", "first_turn")
+
+
+def test_route_with_one_hit_has_no_conflict_and_with_none_selects_nothing():
+    reg = default_registry()
+    one = route([_skill("skill-only")], _angry(), "a", reg)
+    assert (one.candidates, one.selected.id, one.conflict) == (("skill-only",), "skill-only", False)
+    none = route([_skill("skill-only")], [TurnRecord(0, "b", "好的")], "a", reg)
+    assert (none.candidates, none.selected, none.conflict) == ((), None, False)
+
+
+def test_route_does_not_depend_on_input_order():
+    reg = default_registry()
+    skills = [_skill("skill-x", version=2), _skill("skill-y", version=2), _skill("skill-z", version=1)]
+    assert route(skills, _angry(), "a", reg) == route(list(reversed(skills)), _angry(), "a", reg)
+
+
+def test_check_library_rejects_duplicates_and_unknown_signals():
+    reg = default_registry()
+    check_library([_skill("skill-a"), _skill("skill-b")], reg)
+    with pytest.raises(SimpleActioDataError, match="duplicate skill id 'skill-a'"):
+        check_library([_skill("skill-a"), _skill("skill-a", version=2)], reg)
+    with pytest.raises(SimpleActioDataError, match="unknown signal"):
+        check_library([_skill("skill-a", trigger={"signal": "custom"})], reg)
+    with pytest.raises(SimpleActioDataError):
+        check_library([SKILL_DICT], reg)
+```
+
+- [ ] **Step 2: 运行,确认失败**
+
+Run: 全量命令 + `tests/test_simple_actio_skills.py`
+Expected: 收集阶段报错 `ModuleNotFoundError: No module named 'simple_actio.skills'`,`1 error`。
+
+- [ ] **Step 3: 写实现**
+
+新建 `src/simple_actio/_check.py`:
+
+```python
+"""数据类 __post_init__ 与 from_dict 共用的字段校验。失败一律抛 SimpleActioDataError,并指明是哪个字段。"""
+from __future__ import annotations
+
+import re
+
+from simple_actio.errors import SimpleActioDataError
+
+TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+
+
+def require_keys(d: object, what: str, required: set[str], optional: set[str] = frozenset()) -> dict:
+    if not isinstance(d, dict):
+        raise SimpleActioDataError(f"{what}: expected a dict, got {type(d).__name__}")
+    missing = sorted(required - d.keys())
+    if missing:
+        raise SimpleActioDataError(f"{what}: missing keys {missing}")
+    extra = sorted(d.keys() - required - optional)
+    if extra:
+        raise SimpleActioDataError(f"{what}: unknown keys {extra}")
+    return d
+
+
+def text(value: object, what: str, *, allow_empty: bool = False) -> str:
+    if not isinstance(value, str) or (not allow_empty and not value):
+        raise SimpleActioDataError(f"{what}: expected a non-empty string, got {value!r}")
+    return value
+
+
+def prefixed_id(value: object, what: str, prefix: str) -> str:
+    """产物 id:非空字符串且以 prefix 开头,且前缀之后还有内容。计划 1 的
+    skill_file(skill_id) / memory_file(mem_id) 直接用 id 作文件名,不带前缀的 id
+    会落到设计 §4.1 的 skill_library/skill-<id>.yaml、memory_library/mem-<id>.yaml 之外。"""
+    v = text(value, what)
+    if not v.startswith(prefix) or len(v) == len(prefix):
+        raise SimpleActioDataError(f"{what}: must start with {prefix!r} followed by a name, got {v!r}")
+    return v
+
+
+def optional_text(value: object, what: str) -> str | None:
+    return None if value is None else text(value, what)
+
+
+def positive_int(value: object, what: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise SimpleActioDataError(f"{what}: expected an int >= 1, got {value!r}")
+    return value
+
+
+def integer(value: object, what: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise SimpleActioDataError(f"{what}: expected an int, got {value!r}")
+    return value
+
+
+def text_tuple(value: object, what: str, *, non_empty: bool) -> tuple[str, ...]:
+    """数据类字段:必须是 tuple(拒绝 str 与 list,字符串会被逐字当成多条),每项非空字符串。"""
+    if not isinstance(value, tuple) or (non_empty and not value):
+        raise SimpleActioDataError(
+            f"{what}: expected a {'non-empty ' if non_empty else ''}tuple of strings, got {value!r}"
+        )
+    for i, v in enumerate(value):
+        text(v, f"{what}[{i}]")
+    return value
+
+
+def unit_interval(value: object, what: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0.0 <= value <= 1.0:
+        raise SimpleActioDataError(f"{what}: expected a number in [0, 1], got {value!r}")
+    return float(value)
+
+
+def timestamp(value: object, what: str) -> str:
+    if not isinstance(value, str) or not TIMESTAMP.match(value):
+        raise SimpleActioDataError(f"{what}: expected 'YYYY-MM-DDTHH:MM:SSZ', got {value!r}")
+    return value
+```
+
+新建 `src/simple_actio/skills.py`:
+
+```python
+"""技能(结构化:触发条件 + 响应策略 + 层级 + 版本)与路由(闭环集成设计 §8.1)。"""
+from __future__ import annotations
+
+from copy import deepcopy
+from dataclasses import dataclass, field
+
+from simple_actio import _check
+from simple_actio.errors import SimpleActioDataError
+from simple_actio.signals import SignalRegistry
+from simple_actio.triggers import InvalidTriggerError, evaluate_trigger, validate_trigger
+from simulator.datamodel import TurnRecord
+
+LEVELS = ("macro", "micro")
+SKILL_ID_PREFIX = "skill-"
+
+
+@dataclass(frozen=True)
+class Skill:
+    """一条技能。policy_instructions 是响应策略:渲染成指导语交给模型后端的指令文本。
+    priority 越大越优先;version 是该技能自己的版本号(>= 1)。"""
+
+    id: str
+    version: int
+    level: str
+    trigger: dict
+    policy_instructions: tuple[str, ...]
+    priority: int = 0
+    description: str = ""
+
+    def __post_init__(self) -> None:
+        """直接构造与 from_dict 走同一套校验:不合格的技能根本构造不出来。"""
+        sid = _check.prefixed_id(self.id, "skill.id", SKILL_ID_PREFIX)
+        _check.positive_int(self.version, f"skill {sid}.version")
+        if self.level not in LEVELS:
+            raise SimpleActioDataError(f"skill {sid}: level must be one of {list(LEVELS)}, got {self.level!r}")
+        try:
+            validate_trigger(self.trigger)
+        except InvalidTriggerError as exc:
+            raise SimpleActioDataError(f"skill {sid}: {exc}") from None
+        _check.text_tuple(self.policy_instructions, f"skill {sid}.policy.instructions", non_empty=True)
+        _check.integer(self.priority, f"skill {sid}.priority")
+        _check.text(self.description, f"skill {sid}.description", allow_empty=True)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "version": self.version,
+            "level": self.level,
+            "priority": self.priority,
+            "trigger": deepcopy(self.trigger),
+            "policy": {"instructions": list(self.policy_instructions)},
+            "description": self.description,
+        }
+
+    @classmethod
+    def from_dict(cls, d: object) -> "Skill":
+        d = _check.require_keys(
+            d, "skill", {"id", "version", "level", "trigger", "policy"}, {"priority", "description"},
+        )
+        sid = _check.prefixed_id(d["id"], "skill.id", SKILL_ID_PREFIX)
+        policy = _check.require_keys(d["policy"], f"skill {sid}.policy", {"instructions"})
+        instructions = policy["instructions"]
+        if not isinstance(instructions, list):
+            raise SimpleActioDataError(f"skill {sid}.policy.instructions: expected a list, got {instructions!r}")
+        # 字段值的校验全在 __post_init__ 里;这里只查键、把 YAML 的 list 换成 tuple
+        return cls(
+            id=sid,
+            version=d["version"],
+            level=d["level"],
+            trigger=deepcopy(d["trigger"]),
+            policy_instructions=tuple(instructions),
+            priority=d.get("priority", 0),
+            description=d.get("description", ""),
+        )
+
+
+@dataclass(frozen=True)
+class RouteResult:
+    """一次路由的结果。candidates 是命中的技能 id,已按路由次序排好(第一个就是 selected);
+    conflict 为真表示命中了不止一个;signals 是此刻为真的已注册信号名(按名字排序)。"""
+
+    candidates: tuple[str, ...]
+    selected: Skill | None
+    signals: tuple[str, ...] = field(default=())
+
+    @property
+    def conflict(self) -> bool:
+        return len(self.candidates) > 1
+
+
+def route_order(skill: Skill) -> tuple:
+    """路由排序键:优先级高者先,再版本号大者先,再按 id 字典序。"""
+    return (-skill.priority, -skill.version, skill.id)
+
+
+def check_library(skills: list[Skill] | tuple[Skill, ...], registry: SignalRegistry) -> None:
+    """一组技能能否一起加载:都是 Skill(字段已由构造校验)、id 不重复、
+    触发条件引用的信号都已注册。"""
+    seen: set[str] = set()
+    for s in skills:
+        if not isinstance(s, Skill):
+            raise SimpleActioDataError(f"expected Skill, got {type(s).__name__}")
+        if s.id in seen:
+            raise SimpleActioDataError(f"duplicate skill id {s.id!r}")
+        seen.add(s.id)
+        try:
+            validate_trigger(s.trigger, registry)
+        except InvalidTriggerError as exc:
+            raise SimpleActioDataError(f"skill {s.id}: {exc}") from None
+
+
+def route(
+    skills: list[Skill] | tuple[Skill, ...],
+    history: list[TurnRecord],
+    speaker_slot: str,
+    registry: SignalRegistry,
+) -> RouteResult:
+    """纯函数:求出所有命中的技能,按 route_order 排序,选第一个。没有命中则 selected 为 None。"""
+    hits = sorted(
+        (s for s in skills if evaluate_trigger(s.trigger, history, speaker_slot, registry)),
+        key=route_order,
+    )
+    return RouteResult(
+        candidates=tuple(s.id for s in hits),
+        selected=hits[0] if hits else None,
+        signals=tuple(registry.fired(history, speaker_slot)),
+    )
+```
+
+- [ ] **Step 4: 运行,确认通过**
+
+Run: 全量命令 + `tests/test_simple_actio_skills.py`
+Expected: `39 passed`。
+
+- [ ] **Step 5: 全量回归**
+
+Run: 全量命令
+Expected: `B+103` passed(本任务增量 +39;以 820 为起点实测为 923),无警告。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add src/simple_actio/_check.py
+git add src/simple_actio/skills.py
+git add tests/test_simple_actio_skills.py
+git commit -m "feat: simple_actio skills (trigger, policy, level, version) and pure routing by priority, version, id"
+```
+
+---
+
+### Task 75: 记忆与推理经验
+
+**Files:**
+- Create: `src/simple_actio/memory.py`、`src/simple_actio/experience.py`
+- Test: `tests/test_simple_actio_memory_experience.py`
+
+**Interfaces:**
+- Consumes: 任务 73 的 `tokens`、触发条件函数;任务 74 的 `_check`。
+- Produces(任务 76 与计划 7 依赖):`MEMORY_ID_PREFIX`、`MemoryEntry`、`snapshot`、`overlap`、`retrieve`;`ReasoningExperience`、`Tier`、`TIERS`、`ExperienceActivation`、`select_tier`、`activate`。
+
+**设计要点:**
+- **记忆 id 必须以 `mem-` 开头**(设计 §11 契约),`from_dict` 与直接构造都检查;推理经验的 id 不受约束。
+- **校验在 `__post_init__` 里**(Ruling 19):`MemoryEntry` 的 `timestamp` 必须是 `YYYY-MM-DDTHH:MM:SSZ`(否则快照的字符串比较会悄悄出错)、`confidence` 在 [0, 1](整数规范成 `float`)、`keywords` 是字符串 `tuple`;`Tier` 与 `ReasoningExperience` 同理,`from_dict` 只查键并把 `list` 换成 `tuple`。
+- **快照**(Ruling 13):先按 `(id, version)` 分组检测数据损坏(同 id 同版本却内容不同,抛错),**再**做 `at` 过滤,所以检测与输入顺序无关、被 `at` 过滤掉的条目也照样检测(`test_snapshot_conflict_detection_does_not_depend_on_input_order` 覆盖 `[v1a, v2, v1b]` 等四种顺序);然后每个 id 取 `timestamp <= at` 的最高版本;`at=None` 不限时刻;结果按 id 排序。
+- **检索**(Ruling 14):先快照,再按 `subjects` 过滤,再按词面重叠(主体、内容、关键词合起来)打分,丢掉 0 分,按 `(重叠降序, 置信度降序, id)` 取前 `limit` 条。
+- **推理经验**(Ruling 15):`applies_when` 决定经验是否适用;`select_tier` 依次试 `primary`、`secondary` 的 `when`,都不成立用 `fallback`。`activate` 在适用的经验里取 `(版本降序, id)` 第一条。`from_dict` 强制 `fallback.when is None`、另外两级的 `when` 不为空。
+
+- [ ] **Step 1: 写失败测试**
+
+新建 `tests/test_simple_actio_memory_experience.py`:
+
+```python
+import pytest
+import yaml
+
+from simple_actio.errors import SimpleActioDataError
+from simple_actio.experience import ReasoningExperience, activate, select_tier
+from simple_actio.memory import MemoryEntry, overlap, retrieve, snapshot
+from simple_actio.signals import default_registry
+from simulator.datamodel import TurnRecord
+
+MEM_DICT = {
+    "id": "mem-budget", "version": 2, "subject": "pb", "content": "对方担心预算超支",
+    "keywords": ["预算", "成本"], "timestamp": "2026-10-01T00:00:00Z",
+    "source_episode": "ep-sess-1", "confidence": 0.8,
+}
+
+
+def _m(mid, version, ts, *, subject="pb", content="预算不够", conf=0.5, keywords=()):
+    return MemoryEntry(mid, version, subject, content, ts, conf, None, tuple(keywords))
+
+
+# ---------------- MemoryEntry ----------------
+
+def test_memory_round_trip_and_exact_shape():
+    m = MemoryEntry.from_dict(MEM_DICT)
+    assert m.to_dict() == MEM_DICT
+    assert list(m.to_dict()) == ["id", "version", "subject", "content", "keywords",
+                                 "timestamp", "source_episode", "confidence"]
+    assert MemoryEntry.from_dict(yaml.safe_load(yaml.safe_dump(m.to_dict()))) == m
+
+
+def test_memory_optional_keys_default_and_integer_confidence_becomes_float():
+    d = {k: v for k, v in MEM_DICT.items() if k not in ("keywords", "source_episode")}
+    m = MemoryEntry.from_dict({**d, "confidence": 1})
+    assert (m.keywords, m.source_episode, m.confidence) == ((), None, 1.0)
+    assert type(m.confidence) is float
+
+
+@pytest.mark.parametrize("patch", [
+    {"confidence": 1.5}, {"confidence": -0.1}, {"confidence": True}, {"confidence": "0.5"},
+    {"timestamp": "2026-10-01"}, {"timestamp": "2026-10-01T00:00:00+08:00"},
+    {"version": 0}, {"subject": ""}, {"keywords": "预算"}, {"source_episode": ""}, {"x": 1},
+])
+def test_memory_from_dict_rejects_bad_fields(patch):
+    with pytest.raises(SimpleActioDataError):
+        MemoryEntry.from_dict({**MEM_DICT, **patch})
+
+
+@pytest.mark.parametrize("bad_id", ["budget", "mem-", "MEM-budget", "skill-budget", "memory-budget"])
+def test_memory_id_must_start_with_the_mem_prefix(bad_id):
+    with pytest.raises(SimpleActioDataError, match=r"memory\.id: must start with 'mem-'"):
+        MemoryEntry.from_dict({**MEM_DICT, "id": bad_id})
+    with pytest.raises(SimpleActioDataError, match=r"memory\.id: must start with 'mem-'"):
+        _m(bad_id, 1, "2026-01-01T00:00:00Z")
+
+
+def test_a_mem_prefixed_id_is_accepted():
+    assert MemoryEntry.from_dict({**MEM_DICT, "id": "mem-x"}).id == "mem-x"
+    assert _m("mem-x", 1, "2026-01-01T00:00:00Z").id == "mem-x"
+
+
+@pytest.mark.parametrize("patch, field", [
+    ({"timestamp": "2026-10-01"}, "timestamp"), ({"timestamp": "2026-10-01T00:00:00+08:00"}, "timestamp"),
+    ({"confidence": 1.5}, "confidence"), ({"confidence": "0.5"}, "confidence"), ({"confidence": True}, "confidence"),
+    ({"version": "1"}, "version"), ({"subject": ""}, "subject"), ({"content": 3}, "content"),
+    ({"source_episode": ""}, "source_episode"), ({"keywords": "预算"}, "keywords"), ({"keywords": ["预算"]}, "keywords"),
+])
+def test_memory_direct_construction_validates_every_field(patch, field):
+    base = dict(id="mem-ok", version=1, subject="pb", content="预算", timestamp="2026-01-01T00:00:00Z",
+                confidence=0.5)
+    with pytest.raises(SimpleActioDataError, match=field):
+        MemoryEntry(**{**base, **patch})
+
+
+def test_memory_direct_construction_normalizes_an_int_confidence():
+    m = MemoryEntry("mem-ok", 1, "pb", "预算", "2026-01-01T00:00:00Z", 1)
+    assert m.confidence == 1.0 and type(m.confidence) is float
+
+
+# ---------------- 快照 ----------------
+
+def test_snapshot_takes_the_latest_version_at_or_before_the_time():
+    entries = [_m("mem-1", 1, "2026-01-01T00:00:00Z"), _m("mem-1", 2, "2026-03-01T00:00:00Z"),
+               _m("mem-2", 1, "2026-02-01T00:00:00Z")]
+    assert [(e.id, e.version) for e in snapshot(entries)] == [("mem-1", 2), ("mem-2", 1)]
+    assert [(e.id, e.version) for e in snapshot(entries, "2026-02-15T00:00:00Z")] == [("mem-1", 1), ("mem-2", 1)]
+    assert [(e.id, e.version) for e in snapshot(entries, "2026-03-01T00:00:00Z")] == [("mem-1", 2), ("mem-2", 1)]
+    assert snapshot(entries, "2025-12-31T23:59:59Z") == []
+
+
+@pytest.mark.parametrize("order", [(0, 1, 2), (0, 2, 1), (2, 0, 1), (1, 2, 0)])
+def test_snapshot_conflict_detection_does_not_depend_on_input_order(order):
+    v1a = _m("mem-1", 1, "2026-01-01T00:00:00Z")
+    v1b = _m("mem-1", 1, "2026-01-01T00:00:00Z", content="别的")
+    v2 = _m("mem-1", 2, "2026-03-01T00:00:00Z")
+    items = [v1a, v1b, v2]
+    with pytest.raises(SimpleActioDataError, match="two different entries for version 1"):
+        snapshot([items[i] for i in order])
+
+
+def test_snapshot_detects_conflicts_among_entries_the_time_filter_drops():
+    late_a = _m("mem-1", 2, "2026-05-01T00:00:00Z")
+    late_b = _m("mem-1", 2, "2026-05-01T00:00:00Z", content="别的")
+    early = _m("mem-1", 1, "2026-01-01T00:00:00Z")
+    with pytest.raises(SimpleActioDataError, match="two different entries for version 2"):
+        snapshot([early, late_a, late_b], "2026-02-01T00:00:00Z")
+
+
+def test_snapshot_rejects_conflicting_duplicates_and_bad_times():
+    same = _m("mem-1", 1, "2026-01-01T00:00:00Z")
+    assert snapshot([same, same]) == [same]
+    with pytest.raises(SimpleActioDataError, match="two different entries"):
+        snapshot([same, _m("mem-1", 1, "2026-01-01T00:00:00Z", content="别的")])
+    with pytest.raises(SimpleActioDataError):
+        snapshot([same], "yesterday")
+    with pytest.raises(SimpleActioDataError):
+        snapshot([MEM_DICT])
+
+
+# ---------------- 检索 ----------------
+
+def test_overlap_counts_shared_tokens_across_subject_content_and_keywords():
+    m = _m("mem-1", 1, "2026-01-01T00:00:00Z", content="担心预算", keywords=["成本"])
+    assert overlap(m, "预算和成本") == 2   # "预算"、"成本"
+    assert overlap(m, "天气") == 0
+
+
+def test_retrieve_ranks_by_overlap_then_confidence_then_id():
+    entries = [
+        _m("mem-a", 1, "2026-01-01T00:00:00Z", content="预算不够", conf=0.2),
+        _m("mem-b", 1, "2026-01-01T00:00:00Z", content="预算不够人手不够", conf=0.1),
+        _m("mem-c", 1, "2026-01-01T00:00:00Z", content="预算不够", conf=0.9),
+        _m("mem-d", 1, "2026-01-01T00:00:00Z", content="天气很好", conf=1.0),
+    ]
+    assert [e.id for e in retrieve(entries, "预算不够人手不够")] == ["mem-b", "mem-c", "mem-a"]
+    assert [e.id for e in retrieve(entries, "预算不够人手不够", limit=1)] == ["mem-b"]
+    assert retrieve(entries, "预算", limit=0) == []
+
+
+def test_retrieve_filters_by_subject_and_time():
+    entries = [_m("mem-1", 1, "2026-01-01T00:00:00Z", subject="pb"),
+               _m("mem-2", 1, "2026-01-01T00:00:00Z", subject="pc"),
+               _m("mem-1", 2, "2026-05-01T00:00:00Z", subject="pb", content="天气")]
+    assert [e.id for e in retrieve(entries, "预算", subjects=["pb"])] == []   # mem-1 最新版本说的是天气
+    assert [(e.id, e.version) for e in retrieve(entries, "预算", subjects=["pb"], at="2026-02-01T00:00:00Z")] == [("mem-1", 1)]
+    assert [e.id for e in retrieve(entries, "预算")] == ["mem-2"]
+    with pytest.raises(SimpleActioDataError):
+        retrieve(entries, "预算", limit=-1)
+
+
+# ---------------- 推理经验 ----------------
+
+EXP_DICT = {
+    "id": "exp-deescalate", "version": 1, "pattern": "情绪高时先降温",
+    "applies_when": {"turn_at_least": 1},
+    "tiers": {
+        "primary": {"when": {"signal": "emotion_high"}, "instructions": ["先共情"]},
+        "secondary": {"when": {"signal": "no_new_information"}, "instructions": ["换个角度提问"]},
+        "fallback": {"when": None, "instructions": ["复述对方的要点"]},
+    },
+}
+
+
+def test_experience_round_trip_and_exact_shape():
+    e = ReasoningExperience.from_dict(EXP_DICT)
+    assert e.to_dict() == EXP_DICT
+    assert ReasoningExperience.from_dict(yaml.safe_load(yaml.safe_dump(e.to_dict()))) == e
+
+
+@pytest.mark.parametrize("path, value", [
+    (("tiers", "fallback", "when"), {"signal": "first_turn"}),
+    (("tiers", "primary", "when"), None),
+    (("tiers", "secondary", "instructions"), []),
+    (("applies_when",), {"bad": 1}),
+    (("version",), 0),
+])
+def test_experience_from_dict_rejects_bad_fields(path, value):
+    import copy
+    d = copy.deepcopy(EXP_DICT)
+    node = d
+    for key in path[:-1]:
+        node = node[key]
+    node[path[-1]] = value
+    with pytest.raises(SimpleActioDataError):
+        ReasoningExperience.from_dict(d)
+
+
+def test_experience_direct_construction_validates_fields():
+    from simple_actio.experience import Tier
+    good = ReasoningExperience.from_dict(EXP_DICT)
+    with pytest.raises(SimpleActioDataError, match="version"):
+        ReasoningExperience(good.id, "1", good.pattern, good.applies_when, good.primary, good.secondary, good.fallback)
+    with pytest.raises(SimpleActioDataError, match="fallback.when must be null"):
+        ReasoningExperience(good.id, 1, good.pattern, good.applies_when, good.primary, good.secondary, good.primary)
+    with pytest.raises(SimpleActioDataError, match="instructions"):
+        Tier(instructions="先共情")
+    with pytest.raises(SimpleActioDataError, match="when"):
+        Tier(instructions=("x",), when={"bad": 1})
+
+
+def test_three_tier_fallback():
+    reg = default_registry()
+    e = ReasoningExperience.from_dict(EXP_DICT)
+    angry = [TurnRecord(0, "b", "我很生气")]
+    stuck = [TurnRecord(0, "b", "预算不够"), TurnRecord(1, "a", "嗯"), TurnRecord(2, "b", "预算不够")]
+    calm = [TurnRecord(0, "b", "你好")]
+    assert (select_tier(e, angry, "a", reg).tier, select_tier(e, angry, "a", reg).instructions) == ("primary", ("先共情",))
+    assert select_tier(e, stuck, "a", reg).tier == "secondary"
+    assert select_tier(e, calm, "a", reg).tier == "fallback"
+
+
+def test_activate_picks_the_newest_applicable_experience_or_none():
+    reg = default_registry()
+    v1 = ReasoningExperience.from_dict(EXP_DICT)
+    v2 = ReasoningExperience.from_dict({**EXP_DICT, "id": "exp-other", "version": 3})
+    calm = [TurnRecord(0, "b", "你好")]
+    assert activate([v1, v2], calm, "a", reg).experience_id == "exp-other"
+    assert activate([v1, v2], [], "a", reg) is None  # applies_when: turn_at_least 1 不成立
+    assert activate([], calm, "a", reg) is None
+```
+
+- [ ] **Step 2: 运行,确认失败**
+
+Run: 全量命令 + `tests/test_simple_actio_memory_experience.py`
+Expected: 收集阶段报错 `ModuleNotFoundError: No module named 'simple_actio.experience'`,`1 error`。
+
+- [ ] **Step 3: 写实现**
+
+新建 `src/simple_actio/memory.py`:
+
+```python
+"""显式记忆:条目、按时间点取快照、按主体与关键词的词面重叠检索(闭环集成设计 §8.1)。"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from simple_actio import _check
+from simple_actio.errors import SimpleActioDataError
+from simple_actio.text import tokens
+
+MEMORY_ID_PREFIX = "mem-"
+
+
+@dataclass(frozen=True)
+class MemoryEntry:
+    """一条记忆。同一 id 可以有多个版本;timestamp 是该版本成立的时刻(UTC,秒精度)。
+    confidence 在 [0, 1];source_episode 是来源 episode 的 id(人工录入时为 None)。"""
+
+    id: str
+    version: int
+    subject: str
+    content: str
+    timestamp: str
+    confidence: float
+    source_episode: str | None = None
+    keywords: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """直接构造与 from_dict 走同一套校验。整数 confidence 规范成 float。"""
+        mid = _check.prefixed_id(self.id, "memory.id", MEMORY_ID_PREFIX)
+        _check.positive_int(self.version, f"memory {mid}.version")
+        _check.text(self.subject, f"memory {mid}.subject")
+        _check.text(self.content, f"memory {mid}.content")
+        _check.timestamp(self.timestamp, f"memory {mid}.timestamp")
+        object.__setattr__(self, "confidence", _check.unit_interval(self.confidence, f"memory {mid}.confidence"))
+        _check.optional_text(self.source_episode, f"memory {mid}.source_episode")
+        _check.text_tuple(self.keywords, f"memory {mid}.keywords", non_empty=False)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "version": self.version,
+            "subject": self.subject,
+            "content": self.content,
+            "keywords": list(self.keywords),
+            "timestamp": self.timestamp,
+            "source_episode": self.source_episode,
+            "confidence": self.confidence,
+        }
+
+    @classmethod
+    def from_dict(cls, d: object) -> "MemoryEntry":
+        d = _check.require_keys(
+            d, "memory",
+            {"id", "version", "subject", "content", "timestamp", "confidence"},
+            {"keywords", "source_episode"},
+        )
+        mid = _check.prefixed_id(d["id"], "memory.id", MEMORY_ID_PREFIX)
+        keywords = d.get("keywords", [])
+        if not isinstance(keywords, list):
+            raise SimpleActioDataError(f"memory {mid}.keywords: expected a list, got {keywords!r}")
+        # 字段值的校验全在 __post_init__ 里;这里只查键、把 YAML 的 list 换成 tuple
+        return cls(
+            id=mid,
+            version=d["version"],
+            subject=d["subject"],
+            content=d["content"],
+            timestamp=d["timestamp"],
+            confidence=d["confidence"],
+            source_episode=d.get("source_episode"),
+            keywords=tuple(keywords),
+        )
+
+
+def snapshot(entries: list[MemoryEntry] | tuple[MemoryEntry, ...], at: str | None = None) -> list[MemoryEntry]:
+    """"某时刻的信念状态":每个 id 取 timestamp <= at 的最高版本(at 为 None 时不限时刻),
+    结果按 id 排序。
+
+    先按 (id, version) 分组检测数据损坏(同一 id 的同一版本出现两次且内容不同),
+    再做 at 过滤:检测与输入顺序无关,被 at 过滤掉的条目也照样检测。"""
+    if at is not None:
+        _check.timestamp(at, "snapshot.at")
+    by_version: dict[tuple[str, int], MemoryEntry] = {}
+    for e in entries:
+        if not isinstance(e, MemoryEntry):
+            raise SimpleActioDataError(f"expected MemoryEntry, got {type(e).__name__}")
+        key = (e.id, e.version)
+        cur = by_version.get(key)
+        if cur is not None and cur != e:
+            raise SimpleActioDataError(f"memory {e.id} has two different entries for version {e.version}")
+        by_version[key] = e
+    best: dict[str, MemoryEntry] = {}
+    for e in by_version.values():
+        if at is not None and e.timestamp > at:  # 固定格式的 UTC 时间戳,字符串序即时间序
+            continue
+        cur = best.get(e.id)
+        if cur is None or e.version > cur.version:
+            best[e.id] = e
+    return [best[k] for k in sorted(best)]
+
+
+def overlap(entry: MemoryEntry, query: str) -> int:
+    """查询与条目(主体、内容、关键词)共有的词面个数。"""
+    words = tokens(entry.subject) | tokens(entry.content)
+    for k in entry.keywords:
+        words |= tokens(k)
+    return len(tokens(query) & words)
+
+
+def retrieve(
+    entries: list[MemoryEntry] | tuple[MemoryEntry, ...],
+    query: str,
+    *,
+    subjects: list[str] | tuple[str, ...] | None = None,
+    at: str | None = None,
+    limit: int = 3,
+) -> list[MemoryEntry]:
+    """先取 at 时刻的快照,再按 subjects 过滤(None 表示不限主体),
+    保留词面重叠 >= 1 的条目,按 (重叠数降序, 置信度降序, id) 排序后取前 limit 条。"""
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
+        raise SimpleActioDataError(f"retrieve.limit: expected a non-negative int, got {limit!r}")
+    pool = snapshot(entries, at)
+    if subjects is not None:
+        allowed = set(subjects)
+        pool = [e for e in pool if e.subject in allowed]
+    scored = [(overlap(e, query), e) for e in pool]
+    hits = sorted((p for p in scored if p[0] >= 1), key=lambda p: (-p[0], -p[1].confidence, p[1].id))
+    return [e for _, e in hits[:limit]]
+```
+
+新建 `src/simple_actio/experience.py`:
+
+```python
+"""推理经验:提炼后的可复用推理模式与三级回退(主策略 → 次策略 → 保底策略)。
+
+V1 只做数据模型与纯函数,不做复杂路由(闭环集成设计 §8.1)。
+"""
+from __future__ import annotations
+
+from copy import deepcopy
+from dataclasses import dataclass
+
+from simple_actio import _check
+from simple_actio.errors import SimpleActioDataError
+from simple_actio.signals import SignalRegistry
+from simple_actio.triggers import InvalidTriggerError, evaluate_trigger, validate_trigger
+from simulator.datamodel import TurnRecord
+
+TIERS = ("primary", "secondary", "fallback")
+
+
+@dataclass(frozen=True)
+class Tier:
+    """回退链上的一级。when 为 None 表示无条件(保底策略必须无条件)。"""
+
+    instructions: tuple[str, ...]
+    when: dict | None = None
+
+    def __post_init__(self) -> None:
+        _check.text_tuple(self.instructions, "tier.instructions", non_empty=True)
+        if self.when is not None:
+            _trigger(self.when, "tier.when")
+
+    def to_dict(self) -> dict:
+        return {"when": deepcopy(self.when), "instructions": list(self.instructions)}
+
+
+@dataclass(frozen=True)
+class ReasoningExperience:
+    id: str
+    version: int
+    pattern: str
+    applies_when: dict
+    primary: Tier
+    secondary: Tier
+    fallback: Tier
+
+    def __post_init__(self) -> None:
+        """直接构造与 from_dict 走同一套校验。"""
+        eid = _check.text(self.id, "experience.id")
+        _check.positive_int(self.version, f"experience {eid}.version")
+        _check.text(self.pattern, f"experience {eid}.pattern")
+        _trigger(self.applies_when, f"experience {eid}.applies_when")
+        for name in TIERS:
+            tier = getattr(self, name)
+            if not isinstance(tier, Tier):
+                raise SimpleActioDataError(f"experience {eid}.tiers.{name}: expected Tier, got {type(tier).__name__}")
+            if name == "fallback" and tier.when is not None:
+                raise SimpleActioDataError(f"experience {eid}.tiers.fallback.when must be null (fallback is unconditional)")
+            if name != "fallback" and tier.when is None:
+                raise SimpleActioDataError(f"experience {eid}.tiers.{name}.when must be a trigger")
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "version": self.version,
+            "pattern": self.pattern,
+            "applies_when": deepcopy(self.applies_when),
+            "tiers": {name: getattr(self, name).to_dict() for name in TIERS},
+        }
+
+    @classmethod
+    def from_dict(cls, d: object) -> "ReasoningExperience":
+        d = _check.require_keys(d, "experience", {"id", "version", "pattern", "applies_when", "tiers"})
+        eid = _check.text(d["id"], "experience.id")
+        tiers = _check.require_keys(d["tiers"], f"experience {eid}.tiers", set(TIERS))
+        parsed = {}
+        for name in TIERS:
+            raw = _check.require_keys(tiers[name], f"experience {eid}.tiers.{name}", {"when", "instructions"})
+            instructions = raw["instructions"]
+            if not isinstance(instructions, list):
+                raise SimpleActioDataError(f"experience {eid}.tiers.{name}.instructions: expected a list, got {instructions!r}")
+            try:
+                parsed[name] = Tier(instructions=tuple(instructions), when=deepcopy(raw["when"]))
+            except SimpleActioDataError as exc:
+                raise SimpleActioDataError(f"experience {eid}.tiers.{name}: {exc}") from None
+        # 其余字段值的校验在 __post_init__ 里
+        return cls(
+            id=eid,
+            version=d["version"],
+            pattern=d["pattern"],
+            applies_when=deepcopy(d["applies_when"]),
+            **parsed,
+        )
+
+
+def _trigger(node: object, what: str) -> None:
+    try:
+        validate_trigger(node)
+    except InvalidTriggerError as exc:
+        raise SimpleActioDataError(f"{what}: {exc}") from None
+
+
+@dataclass(frozen=True)
+class ExperienceActivation:
+    experience_id: str
+    tier: str  # "primary" | "secondary" | "fallback"
+    instructions: tuple[str, ...]
+
+
+def select_tier(
+    exp: ReasoningExperience, history: list[TurnRecord], speaker_slot: str, registry: SignalRegistry,
+) -> ExperienceActivation:
+    """三级回退:主策略条件成立用主策略,否则次策略条件成立用次策略,否则用保底策略。"""
+    for name in ("primary", "secondary"):
+        tier: Tier = getattr(exp, name)
+        if evaluate_trigger(tier.when, history, speaker_slot, registry):
+            return ExperienceActivation(exp.id, name, tier.instructions)
+    return ExperienceActivation(exp.id, "fallback", exp.fallback.instructions)
+
+
+def activate(
+    experiences: list[ReasoningExperience] | tuple[ReasoningExperience, ...],
+    history: list[TurnRecord],
+    speaker_slot: str,
+    registry: SignalRegistry,
+) -> ExperienceActivation | None:
+    """applies_when 成立的经验里取 (版本号降序, id) 排第一的那条,再做三级回退。都不成立返回 None。"""
+    applicable = sorted(
+        (e for e in experiences if evaluate_trigger(e.applies_when, history, speaker_slot, registry)),
+        key=lambda e: (-e.version, e.id),
+    )
+    if not applicable:
+        return None
+    return select_tier(applicable[0], history, speaker_slot, registry)
+```
+
+- [ ] **Step 4: 运行,确认通过**
+
+Run: 全量命令 + `tests/test_simple_actio_memory_experience.py`
+Expected: `50 passed`。
+
+- [ ] **Step 5: 全量回归**
+
+Run: 全量命令
+Expected: `B+153` passed(本任务增量 +50;以 820 为起点实测为 973),无警告。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add src/simple_actio/memory.py
+git add src/simple_actio/experience.py
+git add tests/test_simple_actio_memory_experience.py
+git commit -m "feat: simple_actio explicit memory (point-in-time snapshot, lexical retrieval) and reasoning experience with three-tier fallback"
+```
+
+---
+
+### Task 76: 激活轨迹模式与 `SimpleActioInstance`
+
+**Files:**
+- Create: `src/simple_actio/trace.py`、`src/simple_actio/instance.py`
+- Test: `tests/test_simple_actio_instance.py`
+
+**Interfaces:**
+- Consumes: 任务 73–75 的全部名字;任务 71 的 runner 三元组(测试里用)。
+- Produces(任务 77 与计划 7 依赖):见"对外契约"表中 `simple_actio.trace` 与 `simple_actio.instance` 两行。
+
+**设计要点:**
+- **轨迹模式**(Ruling 2–4):`build_trace` 组装并立即 `validate_trace`;`conflict` 由候选推出;`normalize_library_version` 把整数库版本变成十进制字符串。`test_a_trace_has_no_numbers_anywhere` 遍历全部叶子,断言只有 `str`、`bool`、`None`。
+- **带指导语的后端协议**:`GuidedBackend.respond_guided(persona, scenario, history, speaker_slot, guidance)` 返回二元组(Ruling 18)。`as_guided` 对有 `respond_guided` 的对象原样返回,对只有 `respond` 的套 `IgnoreGuidance`。`simple_actio` 不导入 `simulator.backends`,`PlainBackend` 是按结构重新声明的同形协议。
+- **`respond` 的流程**:`decide`(路由 → 推理经验 → 记忆检索,纯函数)→ `render_guidance`(Ruling 16)→ 把 `history` 的深拷贝和指导语交给后端 → 组装轨迹。返回 `(utterance, inner_thought, trace)`,所以 runner 能直接把实例当后端用(`test_the_instance_runs_as_a_runner_backend`)。
+- **技能确实改变输出**:罐头后端 `EchoGuidance` 把指导语拼进话语;同一条 history,带技能与不带技能的实例输出不同(`test_a_selected_skill_changes_the_output`)。
+- **`instantiate`**(Ruling 17):除后端外全部 keyword-only;校验技能库(`check_library`)、记忆与经验的类型(字段已由各自的 `__post_init__` 校验,所以 `isinstance` 就够)、经验 id 不重复、经验触发条件引用的信号已注册、`memory_limit`、`profile`;`profile` 深拷贝保存。
+- **两条静态测试**:`test_simple_actio_only_imports_itself_simulator_datamodel_and_the_stdlib` 用 `ast` 扫描全部 `import`,只允许 `simple_actio`、`simulator.datamodel`、`__future__`、`copy`、`dataclasses`、`re`、`typing`(及其子模块);`test_every_simple_actio_source_starts_with_future_annotations` 检查每个文件 docstring 之后的第一条语句。
+
+- [ ] **Step 1: 写失败测试**
+
+新建 `tests/test_simple_actio_instance.py`:
+
+```python
+import ast
+from pathlib import Path
+
+import pytest
+
+from simple_actio.errors import SimpleActioDataError
+from simple_actio.experience import ReasoningExperience
+from simple_actio.instance import IgnoreGuidance, as_guided, instantiate, render_guidance
+from simple_actio.memory import MemoryEntry
+from simple_actio.signals import default_registry
+from simple_actio.skills import Skill
+from simple_actio.trace import TIE_BREAK_RULE, TRACE_SCHEMA, build_trace, normalize_library_version, validate_trace
+from simulator.backends import ScriptedBackend
+from simulator.datamodel import Persona, RoleAssignment, RoleBinding, RoleSlot, Scenario, TurnRecord
+from simulator.runner import run_episode
+
+SRC = Path(__file__).resolve().parents[1] / "src" / "simple_actio"
+
+
+class EchoGuidance:
+    """罐头带指导语后端:把指导语原样拼进话语,证明技能确实改变了输出。"""
+
+    def __init__(self):
+        self.calls = []
+
+    def respond_guided(self, persona, scenario, history, speaker_slot, guidance):
+        self.calls.append(list(guidance))
+        return ("|".join(guidance) or "plain", None)
+
+
+def _persona():
+    return Persona("pa", ["t"], "m", "s", ["v"])
+
+
+def _scenario():
+    return Scenario("s1", "bg", [RoleSlot("a", "a"), RoleSlot("b", "b")], "c", ["n"], "training")
+
+
+def _calm_skill(**kw):
+    base = dict(id="skill-calm", version=1, level="micro", trigger={"signal": "emotion_high"},
+                policy_instructions=("先回应对方的情绪",), priority=1)
+    base.update(kw)
+    return Skill(**base)
+
+
+LV = {"skill": "lib-2", "memory": "lib-1"}
+
+
+# ---------------- 轨迹模式 ----------------
+
+def test_build_trace_exact_shape_with_a_conflict():
+    t = build_trace(signals=["emotion_high"], candidates=["skill-a", "skill-b"], selected="skill-a",
+                    memory_hits=["mem-1"], experience=("e1", "primary"), library_version=LV)
+    assert t == {
+        "schema": TRACE_SCHEMA, "signals": ["emotion_high"], "candidates": ["skill-a", "skill-b"],
+        "selected": "skill-a", "conflict": {"skills": ["skill-a", "skill-b"], "rule": TIE_BREAK_RULE},
+        "memory_hits": ["mem-1"], "experience": {"id": "e1", "tier": "primary"},
+        "library_version": {"skill": "lib-2", "memory": "lib-1"},
+    }
+    assert TRACE_SCHEMA == "simple_actio.trace.v1" and TIE_BREAK_RULE == "priority_desc,version_desc,id_asc"
+
+
+def test_build_trace_without_hits():
+    t = build_trace(signals=[], candidates=[], selected=None, memory_hits=[], experience=None,
+                    library_version=LV)
+    assert (t["selected"], t["conflict"], t["experience"]) == (None, None, None)
+
+
+def _walk_leaves(node):
+    if isinstance(node, dict):
+        for v in node.values():
+            yield from _walk_leaves(v)
+    elif isinstance(node, list):
+        for v in node:
+            yield from _walk_leaves(v)
+    else:
+        yield node
+
+
+def test_a_trace_has_no_numbers_anywhere():
+    t = build_trace(signals=["first_turn"], candidates=["skill-a", "skill-b"], selected="skill-a", memory_hits=["mem-m"],
+                    experience=("e", "fallback"), library_version=normalize_library_version({"skill": 3, "memory": 0}))
+    assert all(v is None or type(v) in (str, bool) for v in _walk_leaves(t))
+
+
+@pytest.mark.parametrize("patch", [
+    {"schema": "v0"}, {"selected": "skill-b"}, {"selected": None}, {"conflict": None},
+    {"memory_hits": [3]}, {"experience": {"id": "e", "tier": "fourth"}},
+    {"library_version": {"skill": 3, "memory": "1"}}, {"extra": 1},
+    {"signals": ["first_turn", "emotion_high"]}, {"signals": ["first_turn", "first_turn"]},
+    {"memory_hits": ["m1"]}, {"memory_hits": ["mem-1", "mem-1"]},
+])
+def test_validate_trace_rejects_off_schema(patch):
+    good = build_trace(signals=[], candidates=["skill-a", "skill-b"], selected="skill-a", memory_hits=[],
+                       experience=None, library_version=LV)
+    with pytest.raises(SimpleActioDataError):
+        validate_trace({**good, **patch})
+
+
+def test_validate_trace_requires_prefixed_candidates():
+    good = build_trace(signals=[], candidates=["skill-a"], selected="skill-a", memory_hits=[],
+                       experience=None, library_version=LV)
+    with pytest.raises(SimpleActioDataError, match="must start with 'skill-'"):
+        validate_trace({**good, "candidates": ["a"], "selected": "a"})
+
+
+def test_normalize_library_version():
+    assert normalize_library_version({"skill": 3, "memory": "v1"}) == {"skill": "3", "memory": "v1"}
+    for bad in ({"skill": 1}, {"skill": -1, "memory": 0}, {"skill": True, "memory": 0},
+                {"skill": "", "memory": 0}, {"skill": 1.0, "memory": 0}, [1, 2]):
+        with pytest.raises(SimpleActioDataError):
+            normalize_library_version(bad)
+
+
+# ---------------- 指导语与适配器 ----------------
+
+def test_render_guidance_order_and_format():
+    exp = ReasoningExperience.from_dict({
+        "id": "e1", "version": 1, "pattern": "p", "applies_when": {"turn_at_least": 0},
+        "tiers": {"primary": {"when": {"signal": "emotion_high"}, "instructions": ["共情"]},
+                  "secondary": {"when": {"signal": "first_turn"}, "instructions": ["提问"]},
+                  "fallback": {"when": None, "instructions": ["复述"]}},
+    })
+    from simple_actio.experience import select_tier
+    act = select_tier(exp, [], "a", default_registry())
+    mem = MemoryEntry("mem-1", 1, "pb", "担心预算", "2026-01-01T00:00:00Z", 0.5)
+    assert render_guidance(_calm_skill(), act, [mem]) == [
+        "[skill:skill-calm] 先回应对方的情绪",
+        "[experience:e1/secondary] 提问",
+        "[memory:mem-1] pb: 担心预算",
+    ]
+    assert render_guidance(None, None, []) == []
+
+
+def test_plain_backends_are_wrapped_and_ignore_guidance():
+    plain = ScriptedBackend({"a": ["hello"]})
+    wrapped = as_guided(plain)
+    assert isinstance(wrapped, IgnoreGuidance)
+    assert wrapped.respond_guided(_persona(), _scenario(), [], "a", ["ignored"]) == ("hello", None)
+    echo = EchoGuidance()
+    assert as_guided(echo) is echo
+    with pytest.raises(TypeError):
+        as_guided(object())
+
+
+# ---------------- 实例 ----------------
+
+def test_a_selected_skill_changes_the_output():
+    angry = [TurnRecord(0, "b", "我很生气")]
+    with_skill = instantiate(EchoGuidance(), skills=[_calm_skill()], memories=[], library_version=LV, profile=None)
+    without = instantiate(EchoGuidance(), skills=[], memories=[], library_version=LV, profile=None)
+    u1, _, t1 = with_skill.respond(_persona(), _scenario(), angry, "a")
+    u0, _, t0 = without.respond(_persona(), _scenario(), angry, "a")
+    assert u1 == "[skill:skill-calm] 先回应对方的情绪"
+    assert u0 == "plain"
+    assert (t1["selected"], t0["selected"]) == ("skill-calm", None)
+    assert t1["signals"] == ["emotion_high", "first_turn"]
+
+
+def test_the_skill_does_not_fire_when_its_trigger_is_false():
+    inst = instantiate(EchoGuidance(), skills=[_calm_skill()], memories=[], library_version=LV, profile=None)
+    u, _, t = inst.respond(_persona(), _scenario(), [TurnRecord(0, "b", "你好")], "a")
+    assert (u, t["candidates"], t["selected"]) == ("plain", [], None)
+
+
+def test_conflicts_and_memory_hits_are_in_the_trace():
+    skills = [_calm_skill(), _calm_skill(id="skill-firm", priority=5, policy_instructions=("坚持立场",))]
+    mem = MemoryEntry("mem-angry", 1, "pb", "对方容易生气", "2026-01-01T00:00:00Z", 0.9)
+    echo = EchoGuidance()
+    inst = instantiate(echo, skills=skills, memories=[mem], library_version={"skill": 7, "memory": 2}, profile={"name": "x"})
+    _, _, trace = inst.respond(_persona(), _scenario(), [TurnRecord(0, "b", "我很生气")], "a")
+    assert trace["candidates"] == ["skill-firm", "skill-calm"]
+    assert trace["selected"] == "skill-firm"
+    assert trace["conflict"] == {"skills": ["skill-firm", "skill-calm"], "rule": TIE_BREAK_RULE}
+    assert trace["memory_hits"] == ["mem-angry"]
+    assert trace["library_version"] == {"skill": "7", "memory": "2"}
+    assert echo.calls == [["[skill:skill-firm] 坚持立场", "[memory:mem-angry] pb: 对方容易生气"]]
+    validate_trace(trace)
+
+
+def test_a_plain_backend_still_gets_a_trace():
+    inst = instantiate(ScriptedBackend({"a": ["hi"]}), skills=[_calm_skill()], memories=[], library_version=LV, profile=None)
+    u, thought, trace = inst.respond(_persona(), _scenario(), [TurnRecord(0, "b", "我很生气")], "a")
+    assert (u, thought, trace["selected"]) == ("hi", None, "skill-calm")
+
+
+def test_the_instance_runs_as_a_runner_backend():
+    inst = instantiate(EchoGuidance(), skills=[_calm_skill()], memories=[], library_version=LV, profile=None)
+    assignment = RoleAssignment("s1", [RoleBinding("b", "pb", "frozen_reference"), RoleBinding("a", "pa", "self_play")], 4)
+    personas = {"pa": _persona(), "pb": Persona("pb", ["t"], "m", "s", ["v"])}
+    ep = run_episode(_scenario(), assignment, personas,
+                     {"a": inst, "b": ScriptedBackend({"b": ["我很生气", "好吧"]})}, "ep-1")
+    assert [t.utterance for t in ep.turns] == ["我很生气", "[skill:skill-calm] 先回应对方的情绪", "好吧", "plain"]
+    assert ep.turns[0].activation_trace is None
+    assert ep.turns[1].activation_trace["selected"] == "skill-calm"
+    assert ep.turns[3].activation_trace["selected"] is None
+
+
+def test_the_backend_gets_a_copy_of_history():
+    class Meddler:
+        def respond_guided(self, persona, scenario, history, speaker_slot, guidance):
+            history.clear()
+            return "x", None
+
+    history = [TurnRecord(0, "b", "你好")]
+    instantiate(Meddler(), skills=[], memories=[], library_version=LV, profile=None).respond(_persona(), _scenario(), history, "a")
+    assert len(history) == 1
+
+
+def test_a_guided_backend_returning_a_triple_is_rejected():
+    class Bad:
+        def respond_guided(self, persona, scenario, history, speaker_slot, guidance):
+            return "x", None, {}
+
+    with pytest.raises(TypeError, match="guided backend"):
+        instantiate(Bad(), skills=[], memories=[], library_version=LV, profile=None).respond(_persona(), _scenario(), [], "a")
+
+
+def test_instantiate_validates_its_inputs():
+    ok = dict(skills=[], memories=[], library_version=LV, profile=None)
+    with pytest.raises(SimpleActioDataError, match="duplicate skill id"):
+        instantiate(EchoGuidance(), **{**ok, "skills": [_calm_skill(), _calm_skill()]})
+    with pytest.raises(SimpleActioDataError, match="unknown signal"):
+        instantiate(EchoGuidance(), **{**ok, "skills": [_calm_skill(trigger={"signal": "custom"})]})
+    with pytest.raises(SimpleActioDataError):
+        instantiate(EchoGuidance(), **{**ok, "memories": [{"id": "m"}]})
+    with pytest.raises(SimpleActioDataError):
+        instantiate(EchoGuidance(), **{**ok, "library_version": {"skill": 1}})
+    with pytest.raises(SimpleActioDataError):
+        instantiate(EchoGuidance(), **{**ok, "profile": "x"})
+    with pytest.raises(SimpleActioDataError):
+        instantiate(EchoGuidance(), **ok, memory_limit=-1)
+    with pytest.raises(TypeError):
+        instantiate(EchoGuidance(), [], [], LV, None)  # 除后端外全部 keyword-only
+
+
+def test_a_custom_registry_signal_can_drive_a_skill():
+    reg = default_registry()
+    reg.register("mentions_money", lambda h, s: any("钱" in t.utterance for t in h if t.speaker_slot != s))
+    inst = instantiate(EchoGuidance(), skills=[_calm_skill(trigger={"signal": "mentions_money"})],
+                       memories=[], library_version=LV, profile=None, registry=reg)
+    u, _, trace = inst.respond(_persona(), _scenario(), [TurnRecord(0, "b", "钱不够")], "a")
+    assert trace["selected"] == "skill-calm"
+    assert "mentions_money" in trace["signals"]
+
+
+# ---------------- 依赖边界 ----------------
+
+def _imports(path):
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            yield from (a.name for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            yield node.module
+
+
+_ALLOWED = ("simple_actio", "simulator.datamodel", "__future__", "copy", "dataclasses", "re", "typing")
+
+
+def _allowed(mod):
+    return any(mod == a or mod.startswith(a + ".") for a in _ALLOWED)
+
+
+def test_simple_actio_only_imports_itself_simulator_datamodel_and_the_stdlib():
+    for path in sorted(SRC.glob("*.py")):
+        for mod in _imports(path):
+            assert _allowed(mod), (path.name, mod)
+
+
+def test_every_simple_actio_source_starts_with_future_annotations():
+    for path in sorted(SRC.glob("*.py")):
+        body = ast.parse(path.read_text(encoding="utf-8")).body
+        if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+            body = body[1:]
+        assert body, path.name
+        first = body[0]
+        assert isinstance(first, ast.ImportFrom) and first.module == "__future__", path.name
+```
+
+- [ ] **Step 2: 运行,确认失败**
+
+Run: 全量命令 + `tests/test_simple_actio_instance.py`
+Expected: 收集阶段报错 `ModuleNotFoundError: No module named 'simple_actio.instance'`,`1 error`。
+
+- [ ] **Step 3: 写实现**
+
+新建 `src/simple_actio/trace.py`:
+
+```python
+"""激活轨迹的精确模式(计划 6 的对外契约,计划 7 的经验分析器消费它)。
+
+轨迹要经 protobuf Struct 传输,而 Struct 把所有数字存成 double:整数 3 回来是 3.0。
+所以模式里**没有任何数字**:叶子只有 str、None、bool,容器只有 list 与 dict。
+这样经过真实 gRPC 往返后,轨迹逐字段、逐类型相等,消费方不需要做规范化。
+"""
+from __future__ import annotations
+
+from simple_actio.errors import SimpleActioDataError
+
+TRACE_SCHEMA = "simple_actio.trace.v1"
+TIE_BREAK_RULE = "priority_desc,version_desc,id_asc"
+TRACE_KEYS = (
+    "schema", "signals", "candidates", "selected", "conflict",
+    "memory_hits", "experience", "library_version",
+)
+
+
+def build_trace(
+    *,
+    signals: list[str] | tuple[str, ...],
+    candidates: list[str] | tuple[str, ...],
+    selected: str | None,
+    memory_hits: list[str] | tuple[str, ...],
+    experience: tuple[str, str] | None,
+    library_version: dict[str, str],
+) -> dict:
+    """按模式组装一份新的轨迹字典。conflict 由 candidates 推出:命中不止一个时为
+    {"skills": candidates, "rule": TIE_BREAK_RULE},否则为 None。"""
+    trace = {
+        "schema": TRACE_SCHEMA,
+        "signals": list(signals),
+        "candidates": list(candidates),
+        "selected": selected,
+        "conflict": (
+            {"skills": list(candidates), "rule": TIE_BREAK_RULE} if len(candidates) > 1 else None
+        ),
+        "memory_hits": list(memory_hits),
+        "experience": (
+            None if experience is None else {"id": experience[0], "tier": experience[1]}
+        ),
+        "library_version": {"skill": library_version["skill"], "memory": library_version["memory"]},
+    }
+    validate_trace(trace)
+    return trace
+
+
+def _str_list(value: object, what: str, *, prefix: str = "", ascending: bool = False) -> list[str]:
+    """非空字符串列表,不得重复;给了 prefix 时每项都以它开头;ascending 时必须严格升序。"""
+    if not isinstance(value, list) or any(not isinstance(v, str) or not v for v in value):
+        raise SimpleActioDataError(f"trace.{what}: expected a list of non-empty strings, got {value!r}")
+    if len(set(value)) != len(value):
+        raise SimpleActioDataError(f"trace.{what}: duplicate entries in {value!r}")
+    if prefix and any(not v.startswith(prefix) or v == prefix for v in value):
+        raise SimpleActioDataError(f"trace.{what}: every id must start with {prefix!r}, got {value!r}")
+    if ascending and value != sorted(value):
+        raise SimpleActioDataError(f"trace.{what}: expected ascending order, got {value!r}")
+    return value
+
+
+def validate_trace(trace: object) -> None:
+    """不合模式抛 SimpleActioDataError。消费方(计划 7)读落盘 episode 时也用它。"""
+    if not isinstance(trace, dict) or set(trace) != set(TRACE_KEYS):
+        got = sorted(trace) if isinstance(trace, dict) else type(trace).__name__
+        raise SimpleActioDataError(f"trace: expected exactly keys {sorted(TRACE_KEYS)}, got {got}")
+    if trace["schema"] != TRACE_SCHEMA:
+        raise SimpleActioDataError(f"trace.schema: expected {TRACE_SCHEMA!r}, got {trace['schema']!r}")
+    _str_list(trace["signals"], "signals", ascending=True)
+    candidates = _str_list(trace["candidates"], "candidates", prefix="skill-")
+    selected = trace["selected"]
+    if candidates:
+        if selected != candidates[0]:
+            raise SimpleActioDataError(f"trace.selected: expected the first candidate {candidates[0]!r}, got {selected!r}")
+    elif selected is not None:
+        raise SimpleActioDataError(f"trace.selected: expected None with no candidates, got {selected!r}")
+    expected_conflict = {"skills": candidates, "rule": TIE_BREAK_RULE} if len(candidates) > 1 else None
+    if trace["conflict"] != expected_conflict:
+        raise SimpleActioDataError(f"trace.conflict: expected {expected_conflict!r}, got {trace['conflict']!r}")
+    _str_list(trace["memory_hits"], "memory_hits", prefix="mem-")
+    exp = trace["experience"]
+    if exp is not None:
+        if (
+            not isinstance(exp, dict) or set(exp) != {"id", "tier"}
+            or not isinstance(exp["id"], str) or not exp["id"]
+            or exp["tier"] not in ("primary", "secondary", "fallback")
+        ):
+            raise SimpleActioDataError(f"trace.experience: expected None or {{id, tier}}, got {exp!r}")
+    lv = trace["library_version"]
+    if (
+        not isinstance(lv, dict) or set(lv) != {"skill", "memory"}
+        or any(not isinstance(v, str) or not v for v in lv.values())
+    ):
+        raise SimpleActioDataError(f"trace.library_version: expected {{skill: str, memory: str}}, got {lv!r}")
+
+
+def normalize_library_version(library_version: object) -> dict[str, str]:
+    """instantiate 接受 {"skill": x, "memory": y},x、y 是非空字符串或非负整数;
+    一律规范成十进制字符串(整数 3 → "3"),这样它进轨迹后不受 Struct 的浮点化影响。"""
+    if not isinstance(library_version, dict) or set(library_version) != {"skill", "memory"}:
+        raise SimpleActioDataError(f"library_version: expected {{skill, memory}}, got {library_version!r}")
+    out: dict[str, str] = {}
+    for key in ("skill", "memory"):
+        v = library_version[key]
+        if isinstance(v, bool) or not isinstance(v, (str, int)):
+            raise SimpleActioDataError(f"library_version.{key}: expected str or int, got {v!r}")
+        if isinstance(v, int):
+            if v < 0:
+                raise SimpleActioDataError(f"library_version.{key}: expected a non-negative int, got {v!r}")
+            v = str(v)
+        if not v:
+            raise SimpleActioDataError(f"library_version.{key}: expected a non-empty string")
+        out[key] = v
+    return out
+```
+
+新建 `src/simple_actio/instance.py`:
+
+```python
+"""SimpleActioInstance:绑定模型后端、技能、记忆、推理经验与库版本的智能体实例(闭环集成设计 §8.1)。
+
+respond 的参数与 ModelBackend 相同、返回三元组 (utterance, inner_thought, trace),
+所以 runner 可以直接把它当后端用(R12),MindAgent 的客户端循环也直接调用它。
+本模块不导入 simulator.backends:后端协议在这里按结构重新声明。
+"""
+from __future__ import annotations
+
+from copy import deepcopy
+from dataclasses import dataclass
+from typing import Protocol, runtime_checkable
+
+from simple_actio.errors import SimpleActioDataError
+from simple_actio.experience import ExperienceActivation, ReasoningExperience, activate
+from simple_actio.memory import MemoryEntry, retrieve
+from simple_actio.signals import SignalRegistry, default_registry
+from simple_actio.skills import RouteResult, Skill, check_library, route
+from simple_actio.trace import build_trace, normalize_library_version
+from simple_actio.triggers import InvalidTriggerError, validate_trigger
+from simulator.datamodel import Persona, Scenario, TurnRecord
+
+
+class PlainBackend(Protocol):
+    """与 simulator.backends.ModelBackend 同形:返回 (utterance, inner_thought)。"""
+
+    def respond(
+        self, persona: Persona, scenario: Scenario, history: list[TurnRecord], speaker_slot: str,
+    ) -> tuple[str, str | None]: ...
+
+
+@runtime_checkable
+class GuidedBackend(Protocol):
+    """带指导语的后端协议:guidance 是 SimpleActio 渲染出的指令文本列表(可能为空)。"""
+
+    def respond_guided(
+        self,
+        persona: Persona,
+        scenario: Scenario,
+        history: list[TurnRecord],
+        speaker_slot: str,
+        guidance: list[str],
+    ) -> tuple[str, str | None]: ...
+
+
+class IgnoreGuidance:
+    """把普通后端包装成 GuidedBackend:忽略指导语,原样调用 respond。"""
+
+    def __init__(self, inner: PlainBackend) -> None:
+        self.inner = inner
+
+    def respond_guided(
+        self,
+        persona: Persona,
+        scenario: Scenario,
+        history: list[TurnRecord],
+        speaker_slot: str,
+        guidance: list[str],
+    ) -> tuple[str, str | None]:
+        return self.inner.respond(persona, scenario, history, speaker_slot)
+
+
+def as_guided(backend: object) -> GuidedBackend:
+    """有 respond_guided 的原样返回;只有 respond 的套 IgnoreGuidance;都没有抛 TypeError。"""
+    if isinstance(backend, GuidedBackend):
+        return backend
+    if callable(getattr(backend, "respond", None)):
+        return IgnoreGuidance(backend)
+    raise TypeError(f"model_backend must have respond() or respond_guided(), got {type(backend).__name__}")
+
+
+def render_guidance(
+    selected: Skill | None,
+    experience: ExperienceActivation | None,
+    memory_hits: list[MemoryEntry],
+) -> list[str]:
+    """指导语的固定顺序:选中技能的策略、推理经验的当前一级、检索到的记忆。"""
+    lines: list[str] = []
+    if selected is not None:
+        lines += [f"[skill:{selected.id}] {text}" for text in selected.policy_instructions]
+    if experience is not None:
+        lines += [
+            f"[experience:{experience.experience_id}/{experience.tier}] {text}"
+            for text in experience.instructions
+        ]
+    lines += [f"[memory:{m.id}] {m.subject}: {m.content}" for m in memory_hits]
+    return lines
+
+
+def _memory_query(history: list[TurnRecord], speaker_slot: str) -> str:
+    """V1 的记忆查询词:对方最后一句;对方还没说话时为空串(检索不到任何条目)。"""
+    for t in reversed(history):
+        if t.speaker_slot != speaker_slot:
+            return t.utterance
+    return ""
+
+
+@dataclass(frozen=True)
+class SimpleActioInstance:
+    backend: GuidedBackend
+    skills: tuple[Skill, ...]
+    memories: tuple[MemoryEntry, ...]
+    experiences: tuple[ReasoningExperience, ...]
+    library_version: dict
+    profile: dict | None
+    registry: SignalRegistry
+    memory_limit: int
+
+    def decide(self, history: list[TurnRecord], speaker_slot: str) -> tuple[RouteResult, ExperienceActivation | None, list[MemoryEntry]]:
+        """只做路由、经验与记忆,不调模型后端。纯函数(给定实例与输入)。"""
+        routed = route(self.skills, history, speaker_slot, self.registry)
+        exp = activate(self.experiences, history, speaker_slot, self.registry)
+        hits = retrieve(self.memories, _memory_query(history, speaker_slot), limit=self.memory_limit)
+        return routed, exp, hits
+
+    def respond(
+        self, persona: Persona, scenario: Scenario, history: list[TurnRecord], speaker_slot: str,
+    ) -> tuple[str, str | None, dict]:
+        routed, exp, hits = self.decide(history, speaker_slot)
+        guidance = render_guidance(routed.selected, exp, hits)
+        reply = self.backend.respond_guided(persona, scenario, deepcopy(history), speaker_slot, guidance)
+        if not isinstance(reply, (tuple, list)) or len(reply) != 2:
+            raise TypeError(f"guided backend must return (utterance, inner_thought), got {reply!r}")
+        trace = build_trace(
+            signals=routed.signals,
+            candidates=routed.candidates,
+            selected=routed.selected.id if routed.selected is not None else None,
+            memory_hits=[m.id for m in hits],
+            experience=None if exp is None else (exp.experience_id, exp.tier),
+            library_version=self.library_version,
+        )
+        return reply[0], reply[1], trace
+
+
+def instantiate(
+    model_backend: object,
+    *,
+    skills: list[Skill] | tuple[Skill, ...],
+    memories: list[MemoryEntry] | tuple[MemoryEntry, ...],
+    library_version: dict,
+    profile: dict | None,
+    experiences: list[ReasoningExperience] | tuple[ReasoningExperience, ...] = (),
+    registry: SignalRegistry | None = None,
+    memory_limit: int = 3,
+) -> SimpleActioInstance:
+    """组装实例。SimpleActio 不决定用哪个库版本:skills、memories、experiences 由调用方按
+    library_version 读好传进来(补充 A.4)。registry 缺省为 default_registry()。
+    profile 是调用方的画像元数据,V1 只随实例保存(深拷贝),不参与路由与指导语。"""
+    reg = registry if registry is not None else default_registry()
+    skills = tuple(skills)
+    check_library(skills, reg)
+    memories = tuple(memories)
+    for m in memories:
+        if not isinstance(m, MemoryEntry):
+            raise SimpleActioDataError(f"expected MemoryEntry, got {type(m).__name__}")
+    experiences = tuple(experiences)
+    seen: set[str] = set()
+    for e in experiences:
+        if not isinstance(e, ReasoningExperience):
+            raise SimpleActioDataError(f"expected ReasoningExperience, got {type(e).__name__}")
+        if e.id in seen:
+            raise SimpleActioDataError(f"duplicate experience id {e.id!r}")
+        seen.add(e.id)
+        for what, trig in (("applies_when", e.applies_when), ("primary", e.primary.when), ("secondary", e.secondary.when)):
+            try:
+                validate_trigger(trig, reg)
+            except InvalidTriggerError as exc:
+                raise SimpleActioDataError(f"experience {e.id}.{what}: {exc}") from None
+    if isinstance(memory_limit, bool) or not isinstance(memory_limit, int) or memory_limit < 0:
+        raise SimpleActioDataError(f"memory_limit: expected a non-negative int, got {memory_limit!r}")
+    if profile is not None and not isinstance(profile, dict):
+        raise SimpleActioDataError(f"profile: expected a dict or None, got {type(profile).__name__}")
+    return SimpleActioInstance(
+        backend=as_guided(model_backend),
+        skills=skills,
+        memories=memories,
+        experiences=experiences,
+        library_version=normalize_library_version(library_version),
+        profile=deepcopy(profile),
+        registry=reg,
+        memory_limit=memory_limit,
+    )
+```
+
+- [ ] **Step 4: 运行,确认通过**
+
+Run: 全量命令 + `tests/test_simple_actio_instance.py`
+Expected: `30 passed`。
+
+- [ ] **Step 5: 全量回归**
+
+Run: 全量命令
+Expected: `B+183` passed(本任务增量 +30;以 820 为起点实测为 1003),无警告。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add src/simple_actio/trace.py
+git add src/simple_actio/instance.py
+git add tests/test_simple_actio_instance.py
+git commit -m "feat: SimpleActioInstance (respond returns utterance, thought, trace; skills rendered as guidance for respond_guided) and the number-free trace schema"
+```
+
+---
+
+### Task 77: 端到端——SimpleActio 实例作客户端,经真实 loopback gRPC 跑会话并落盘
+
+**Files:**
+- Test: `tests/test_simple_actio_realtime_e2e.py`
+
+**Interfaces:**
+- Consumes: 任务 72 的 `submit_turn(..., activation_trace=...)`;任务 76 的 `instantiate`、`validate_trace`;`create_server`、`EnvironmentServiceClient`、`write_episode`/`read_episode`、`GitStore`。
+- Produces: 无新名字。`_play` 是 MindAgent 部署驱动器(计划 7)客户端循环的最小形态,可作参考。
+
+**设计要点:**
+- **搭法照 `tests/test_mt_trajectory_interact.py`**:`tmp_path` 里的 `GitStore` 写好情境;`create_server(..., scenario_resolver=..., on_session_closed=...)`,钩子把 episode `write_episode` 到 `run-simple-actio` 下;客户端用 `grpc.insecure_channel("127.0.0.1:<port>")`。
+- **对手先说、SimpleActio 后说**(MindAgent 场景),`purpose="deployment_simulation"`,对手第一句"我真的很生气!!"触发 `emotion_high`。
+- **断言**:落盘 episode 里对手轮次的轨迹全是 `None`;客户端轮次的轨迹与客户端提交的逐字段、逐类型相等,且通过 `validate_trace`;两条同优先级技能按版本裁决、冲突写进轨迹;记忆命中;`library_version` 的整数 4 规范成 `"4"`;客户端本地重建的 episode 与落盘的一致(说明回显保留了客户端自己的轨迹)。第二条用例用空技能库,证明输出随技能改变。
+- **本任务只加测试,不改源码**:任务 72、76 已经让这条链路成立,所以测试写好就通过。没有"先失败"这一步;它的价值是锁住整条链路。撰写本计划时做过变异验证:把 `_drain_ready_events` 改成连客户端自己轮次的轨迹也抹掉,`test_client_turns_carry_traces_and_opponent_turns_do_not` 失败(`At index 1 diff: ... 'activation_trace': None} != {... 'activation_trace': {'schema': 'simple_actio.trace.v1', ...`)。
+
+- [ ] **Step 1: 写测试**
+
+新建 `tests/test_simple_actio_realtime_e2e.py`:
+
+```python
+import time
+
+import grpc
+import pytest
+
+from simple_actio.instance import instantiate
+from simple_actio.memory import MemoryEntry
+from simple_actio.skills import Skill
+from simple_actio.trace import validate_trace
+from controlplane.gitstore import GitStore
+from simulator.backends import ScriptedBackend
+from simulator.datamodel import Persona, RoleAssignment, RoleBinding, RoleSlot, Scenario
+from simulator.realtime.client import EnvironmentServiceClient
+from simulator.realtime.proto import realtime_env_pb2_grpc as pb2_grpc
+from simulator.realtime.server import create_server
+from simulator.store_adapter import read_episode, read_scenario, write_episode, write_scenario
+
+RUN = "run-simple-actio"
+
+
+class EchoGuidance:
+    def respond_guided(self, persona, scenario, history, speaker_slot, guidance):
+        return ("|".join(guidance) or "plain", f"saw {len(history)} turns")
+
+
+def _personas():
+    return {pid: Persona(pid, ["t"], "m", "s", ["v"]) for pid in ("pa", "pb")}
+
+
+def _assignment():
+    # 对手 b 先说,SimpleActio 扮演的 a 后说(MindAgent 场景)
+    return RoleAssignment(
+        "s1", [RoleBinding("b", "pb", "frozen_reference", model_ref="zengen-v1"),
+               RoleBinding("a", "pa", "self_play")], 4,
+    )
+
+
+def _instance(skills):
+    mem = MemoryEntry("mem-temper", 1, "pb", "对方一急就会生气", "2026-10-01T00:00:00Z", 0.9,
+                      "ep-earlier", ("生气",))
+    return instantiate(EchoGuidance(), skills=skills, memories=[mem],
+                       library_version={"skill": 4, "memory": "mem-lib-1"}, profile={"role": "agent"})
+
+
+CALM = Skill("skill-calm", 2, "micro", {"signal": "emotion_high"}, ("先回应对方的情绪",), priority=1)
+FIRM = Skill("skill-firm", 1, "macro", {"signal": "emotion_high"}, ("坚持立场",), priority=1)
+
+
+@pytest.fixture
+def env(tmp_path):
+    store = GitStore(str(tmp_path))
+    store.init()
+    write_scenario(store, Scenario("s1", "bg", [RoleSlot("a", "a"), RoleSlot("b", "b")], "c", ["n"],
+                                   "deployment_simulation"))
+    stored = []
+
+    def on_closed(episode):
+        write_episode(store, RUN, episode)
+        stored.append(episode.id)
+
+    def factory(scenario, assignment, personas, client_slot):
+        return {s: ScriptedBackend({s: ["我真的很生气!!", "好吧"]}) for s in assignment.slot_ids() - {client_slot}}
+
+    server = create_server(factory, port=0, turn_timeout_s=2.0, on_session_closed=on_closed,
+                           scenario_resolver=lambda sid: read_scenario(store, sid))
+    server.start()
+    channel = grpc.insecure_channel(f"127.0.0.1:{server.bound_port}")
+    yield store, stored, channel
+    channel.close()
+    server.stop(0)
+
+
+def _play(store, channel, instance):
+    """MindAgent 客户端循环的最小形态:respond → 带轨迹提交 → 直到会话结束。"""
+    client = EnvironmentServiceClient(pb2_grpc.EnvironmentServiceStub(channel))
+    client.create_session(scenario_id="s1", role_assignment=_assignment(), personas=_personas(),
+                          purpose="deployment_simulation", client_driven_slot="a")
+    scenario = read_scenario(store, "s1")
+    sent = []
+    while not client.closed:
+        utterance, thought, trace = instance.respond(_personas()["pa"], scenario, client.turns, "a")
+        sent.append(trace)
+        client.submit_turn(utterance, thought, activation_trace=trace)
+    return client.drain_until_end(), sent
+
+
+def _stored(store, stored):
+    deadline = time.monotonic() + 3.0
+    while not stored and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert stored, "episode was not persisted"
+    return read_episode(store, RUN, stored[0])
+
+
+def test_client_turns_carry_traces_and_opponent_turns_do_not(env):
+    store, stored, channel = env
+    episode, sent = _play(store, channel, _instance([CALM, FIRM]))
+    persisted = _stored(store, stored)
+
+    assert [t.speaker_slot for t in persisted.turns] == ["b", "a", "b", "a"]
+    assert [t.activation_trace for t in persisted.turns if t.speaker_slot == "b"] == [None, None]
+    client_traces = [t.activation_trace for t in persisted.turns if t.speaker_slot == "a"]
+    assert client_traces == sent  # 经真实 gRPC 往返再落盘,逐字段相等
+    for got, want in zip(client_traces, sent):
+        validate_trace(got)
+        for key in want:
+            assert type(got[key]) is type(want[key]), key
+
+    first = client_traces[0]
+    assert first["candidates"] == ["skill-calm", "skill-firm"]  # 同优先级,版本 2 先于版本 1
+    assert first["selected"] == "skill-calm"
+    assert first["conflict"]["skills"] == ["skill-calm", "skill-firm"]
+    assert first["memory_hits"] == ["mem-temper"]
+    assert first["library_version"] == {"skill": "4", "memory": "mem-lib-1"}
+    assert client_traces[1]["selected"] is None  # "好吧" 不触发 emotion_high
+
+    assert persisted.turns[1].utterance == "[skill:skill-calm] 先回应对方的情绪|[memory:mem-temper] pb: 对方一急就会生气"
+    assert persisted.turns[1].inner_thought == "saw 1 turns"
+    # 客户端本地重建的 episode 与服务端落盘的一致(客户端自己的轮次带轨迹回显)
+    assert [t.to_dict() for t in episode.turns] == [t.to_dict() for t in persisted.turns]
+
+
+def test_without_skills_the_wire_output_differs_and_traces_select_nothing(env):
+    store, stored, channel = env
+    _, sent = _play(store, channel, _instance([]))
+    persisted = _stored(store, stored)
+    assert persisted.turns[1].utterance == "[memory:mem-temper] pb: 对方一急就会生气"
+    assert [t["selected"] for t in sent] == [None, None]
+    assert [t.activation_trace for t in persisted.turns if t.speaker_slot == "a"] == sent
+```
+
+- [ ] **Step 2: 运行,确认通过**
+
+Run: 全量命令 + `tests/test_simple_actio_realtime_e2e.py`
+Expected: `2 passed`。
+
+- [ ] **Step 3: 全量回归**
+
+Run: 全量命令
+Expected: `B+185` passed(本任务增量 +2;以 820 为起点实测为 1005),无警告。
+
+- [ ] **Step 4: 提交**
+
+```bash
+git add tests/test_simple_actio_realtime_e2e.py
+git commit -m "test: an SimpleActio instance plays the client slot over a real loopback server; persisted client turns carry traces, opponent turns do not"
+```
+
+---
+
+### Task 78: 全量回归与改动范围检查
+
+**Files:** 无改动。
+
+- [ ] **Step 1: 全量测试**
+
+Run: 全量命令
+Expected: `B+185` passed,无警告。B 是任务 70 Step 1 记下的起点;增量依次为 +5、+10、+11、+38、+39、+50、+30、+2(任务 70 至 77),共 +185。(以 820 为起点实测为 1005。)
+
+- [ ] **Step 2: 改动范围只在本计划的文件表里**
+
+以任务 70 Step 1 记下的 `BASE` 为准(新开的 shell 里先把执行记录里的值重新赋给 `BASE`)。真实仓库里本计划的提交之后可能紧跟别的计划的提交,所以不要用 `HEAD~N` 作首选:
+
+```bash
+BASE=<任务 70 Step 1 记下的提交号>
+git diff --stat "$BASE"..HEAD -- . ':(exclude)docs' | tail -1
+git diff --name-only "$BASE"..HEAD -- . ':(exclude)docs'
+```
+
+退路(执行记录丢了 `BASE` 时):取任务 70 那个提交的父提交,`BASE="$(git log --format=%H --grep='SubmitTurn carries an optional activation_trace' | tail -1)~1"`;本计划的提交确定是最近 8 个且之后没有别的提交时,也可用 `BASE=HEAD~8`。
+
+Expected:第一条输出 `28 files changed, 2351 insertions(+), 31 deletions(-)`(若 `pyproject.toml` 的列表在别的计划里已变长,插入/删除行数不变,因为本计划对它仍是一行改一行);第二条恰好列出:
+
+```
+pyproject.toml
+src/simple_actio/__init__.py
+src/simple_actio/_check.py
+src/simple_actio/errors.py
+src/simple_actio/experience.py
+src/simple_actio/instance.py
+src/simple_actio/memory.py
+src/simple_actio/signals.py
+src/simple_actio/skills.py
+src/simple_actio/text.py
+src/simple_actio/trace.py
+src/simple_actio/triggers.py
+src/simulator/realtime/backend.py
+src/simulator/realtime/client.py
+src/simulator/realtime/driver.py
+src/simulator/realtime/proto/realtime_env.proto
+src/simulator/realtime/proto/realtime_env_pb2.py
+src/simulator/realtime/proto/realtime_env_pb2.pyi
+src/simulator/realtime/servicer.py
+src/simulator/runner.py
+tests/test_simple_actio_instance.py
+tests/test_simple_actio_memory_experience.py
+tests/test_simple_actio_realtime_e2e.py
+tests/test_simple_actio_signals.py
+tests/test_simple_actio_skills.py
+tests/test_realtime_activation_trace.py
+tests/test_realtime_proto_submit_trace.py
+tests/test_runner_activation_trace.py
+```
+
+前提是 `BASE..HEAD` 之间只有本计划的提交;夹了或跟了别的计划的提交,用 `git log --stat "$BASE"..HEAD` 逐个看,只核对本计划的 8 个提交。`realtime_env_pb2_grpc.py` 不应出现;出现了说明本机生成器版本不同,回到任务 70 Step 1。`git status --short` 除原本就有的 `cli/package*.json` 外应为空。
+
+- [ ] **Step 3: 依赖边界与生成物的复查**
+
+```bash
+grep -rn "^from\|^import" src/simple_actio | grep -v "from simple_actio\|from simulator.datamodel\|from __future__\|^.*import re$\|from copy\|from dataclasses\|from typing"
+```
+
+Expected: 无输出。
+
+```bash
+git diff "$BASE"..HEAD -- src/simulator/realtime/proto/realtime_env_pb2.py | grep -c '^[-+][^-+]'
+```
+
+Expected: `26`(13 行删、13 行增:描述符 1 行 + 偏移量 12 行)。
+
+本任务不提交。
+
+---
+
+## 完成标准
+
+- 全量命令 `B+185` passed,无警告(B 为任务 70 Step 1 实测的起点;各任务增量 +5、+10、+11、+38、+39、+50、+30、+2;以 820 为起点实测为 1005);起点 B 的既有测试一行未改。
+- `SubmitTurn` 有 `optional google.protobuf.Struct activation_trace = 3`;三个生成文件由 `scripts/gen_realtime_proto.sh` 产生,差异只在新字段,`realtime_env_pb2_grpc.py` 未变。
+- 客户端 `submit_turn(..., *, activation_trace=...)` 提交的轨迹,经真实 loopback gRPC 写进服务端落盘的 episode 与客户端回显,逐字段、逐类型相等;`None` 与 `{}` 可区分;对手轮次的轨迹与内心独白仍不下行给客户端,但照常落盘。
+- `run_episode` 同时接受二元组与三元组后端。
+- `simple_actio` 包:`Skill`、`MemoryEntry`、`ReasoningExperience` 的 `to_dict`/`from_dict` 按"对外契约"往返,技能 id 以 `skill-`、记忆 id 以 `mem-` 开头;信号注册表与三个内置信号;五个算子的谓词语言;路由、快照、检索、三级回退都是纯函数;`instantiate(...).respond(...)` 返回三元组,能直接作 runner 后端;技能经 `respond_guided` 改变输出;激活轨迹符合 `simple_actio.trace.v1` 模式且没有数字。
+- `simple_actio` 只导入自身、`simulator.datamodel` 与标准库(有静态测试);`pyproject.toml` 的 wheel 列表含 `src/simple_actio`。
+- `git diff --name-only` 只涉及本计划文件表里的 28 个文件(加本计划文档自身)。
+
+## 已知限制
+
+- **`mindtrainer` 的 InteractTrain 不能直接用 SimpleActio 实例当策略。** `InteractTrajectorySource` 写的是 `utterance, thought = self._policy.respond(...)`,三元组会解包失败;它也不带轨迹提交。本计划不改 `mindtrainer`(设计 §8.2 只要求协议与 runner)。要接时只需改那两行:解包可变长度、把第三项作 `activation_trace=` 传给 `submit_turn`。
+- **非 SimpleActio 客户端带数字的轨迹,落盘的是浮点数**(Ruling 5),协议层不规范化。
+- **信号词典、阈值、检索参数都是拍的**(设计 §14 第 3 条)。二字切分的词面重叠检不到近义表达;`emotion_high` 是子串匹配,"不生气"也会命中。
+- **记忆检索不按主体过滤。** `retrieve` 支持 `subjects`,但 `SimpleActioInstance` 不传,因为记忆的 `subject` 与 persona id、角色位之间的对应还没有约定;等计划 7 定了再接。
+- **`profile` 只保存,不参与决策**(Ruling 17)。
+- **轨迹只记录"选了谁",不记录"后端是否照做"。** `IgnoreGuidance` 包装的普通后端会忽略指导语,但轨迹照样写 `selected`;经验分析器看到的是路由决定,不是实际行为。
+- **重新生成依赖锁定的 `grpcio-tools 1.84.0`。** 升级它会改生成物的版本头;那时要重新做任务 70 Step 1 的比较。
+
+## 未验证项
+
+- **计划里的全部代码与测试都在一份临时拷贝里真实跑过**:每个任务的"确认失败"输出、"确认通过"计数与累计总数(825 → 835 → 846 → 884 → 923 → 973 → 1003 → 1005)、`git diff --stat` 与生成物 diff 都来自真实运行;端到端与 gRPC 测试连续跑 5 次全部通过。定稿后又在第二份全新拷贝里**只按本文档**操作一遍:从文档中原样抽出全部代码块与差异块,按任务顺序写文件、`git apply`、运行生成脚本,结果与第一份拷贝逐文件相同,全量 `1005 passed`。任务 70 Step 1 的命令(`TMPDIR` 指向拷贝内目录)也照原样跑过,三份 diff 为空。拷贝不含 `.git` 历史,所以以下几项**没有**在真实仓库里验证:
+  - **绝对通过数依赖执行顺序。** 计划 1 至 5 先落地时起点高于 820,所以本计划只保证增量(共 +185),不保证绝对数;820 起点下实测的 825/835/846/884/923/973/1003/1005 只作参考。增量本身是在 820 起点上数出来的,没有在计划 1 至 5 落地后的树上验证过。
+  - 各任务的 `git commit` 命令本身(拷贝里用的是临时提交的提交信息);任务 78 Step 2 用 `git log --grep` 取基线的那条命令(拷贝里直接用了基线提交的哈希,结果见 Step 2 的 Expected)。
+- **其他机器上的生成器版本**:只在本机(`grpcio-tools 1.84.0`、macOS)验证过重新生成逐字节一致。
+- **轨迹模式能否满足计划 7 的经验分析器**:计划 7 还没写;`signals`、`referenced_signals` 是按设计 §8.3 的描述推出来的需求。
+- **真实模型后端如何使用指导语**:只用罐头后端验证过"指导语改变输出";真实模型是否遵循指导语没有证据。

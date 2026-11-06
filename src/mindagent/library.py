@@ -3,8 +3,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from actio.skills import Skill
-from actio.trace import normalize_library_version
+from simple_actio.skills import Skill
+from simple_actio.trace import normalize_library_version
 from controlplane.gitstore import GitStore
 from controlplane.paths import CONTROL_PLANE_ROOT, library_state_file
 from mindagent.errors import MindAgentDataError
@@ -48,7 +48,7 @@ def read_library_versions(store: GitStore) -> dict:
 def _read_entry(store: GitStore, rel: str):
     """库文件读不出(YAML 坏、信封校验失败、schema 版本无法迁移)转成 MindAgentDataError,点名文件。
     库文件不在调和循环的视图里,控制面 CP-17 的暂停规则管不到它;轮次处理器只接 MindAgentDataError
-    与 ActioDataError,别的异常会从处理器漏出去打崩守护进程。OSError 不在 UNREADABLE 里,原样上抛。"""
+    与 SimpleActioDataError,别的异常会从处理器漏出去打崩守护进程。OSError 不在 UNREADABLE 里,原样上抛。"""
     try:
         return store.read_product(rel)
     except UNREADABLE as exc:
@@ -58,7 +58,7 @@ def _read_entry(store: GitStore, rel: str):
 def load_library(store: GitStore) -> LibraryState:
     """读当前正式库:skill_library/ 下状态为 effective 的条目,按 id 排序;版本取自 library_state。
     不读 memory_library/:设计二起记忆在树外的部署库里(设计二第 9 节"旧数据"),旧目录由
-    check_memory_library_empty 在装配期把关。条目结构不合法抛 actio 的 ActioDataError,
+    check_memory_library_empty 在装配期把关。条目结构不合法抛 simple_actio 的 SimpleActioDataError,
     文件读不出抛 MindAgentDataError(都是确定性错误)。"""
     skills = []
     for rel in store.list_products(f"{CONTROL_PLANE_ROOT}/skill_library"):
@@ -68,7 +68,7 @@ def load_library(store: GitStore) -> LibraryState:
     state = read_library_versions(store)
     return LibraryState(
         skills=tuple(sorted(skills, key=lambda s: s.id)),
-        # 设计 §8.3:版本一律是字符串,经 actio 的 normalize_library_version 规范化(整数 3 → "3")
+        # 设计 §8.3:版本一律是字符串,经 simple_actio 的 normalize_library_version 规范化(整数 3 → "3")
         version=normalize_library_version({"skill": state["skill_version"], "memory": state["memory_version"]}),
     )
 

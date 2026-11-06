@@ -18,7 +18,7 @@
 | 情境、人格、仿真运行器、数据集、实时环境协议 | `20-socialsimulator.md` |
 | 诊断评测怎么打分、怎么判退化、怎么防污染 | `21-diagnostic-evaluation.md` |
 | 训练怎么跑、奖励怎么算、怎么续训 | `30-mindtrainer.md` |
-| 技能、记忆、激活轨迹 | `40-actio.md` |
+| 技能、记忆、激活轨迹 | `40-simple-actio.md` |
 | 部署态智能体怎么自进化 | `50-mindagent.md` |
 | 策略经验怎么沉淀、怎么注入下一轮规划 | `55-strategy-experience.md` |
 | 配方怎么校验、检索、记战绩 | `60-recipestore.md` |
@@ -54,7 +54,7 @@
 | 3 RecipeStore | 40 至 48 | `plans/2026-10-09-recipestore.md` |
 | 4 TrainPlanner | 50 至 56 | `plans/2026-10-09-trainplanner.md` |
 | 5 TrainScheduler | 60 至 68 | `plans/2026-10-09-trainscheduler.md` |
-| 6 Actio | 70 至 78 | `plans/2026-10-09-actio.md` |
+| 6 SimpleActio | 70 至 78 | `plans/2026-10-09-simple-actio.md` |
 | 7 MindAgent | 80 至 89 | `plans/2026-10-09-mindagent.md` |
 | 8 调和循环扩展 | 90 至 99 | `plans/2026-10-09-reconcile-extension.md` |
 | 9 组合根与端到端 | 100 至 109 | `plans/2026-10-09-factory-and-e2e.md` |

@@ -34,7 +34,7 @@ Rise 是一套"AI驱动的社会心智后训练工厂"——一个 RSI(AI训练A
 | 开源组件复用策略 | **只复用底层基础设施,业务逻辑自建**(仿真环境、奖励设计、评测基准等业务逻辑不直接套用SOTOPIA/Concordia/verl等项目代码,而是自建;分布式训练/推理框架复用成熟开源库) | 决定了"共享基础设施层"与"能力子系统层"的分层 |
 | 人工审核 | **关键决策点设人工审核门**,其余环节全自动 | 产生ControlPlane承载的三个审核门机制 |
 | RSI决策后端 | **可插拔,v1推荐外部CLI强模型**(Claude/Codex/DeepSeek harness),而非要求被训练模型零外部信号自举决策 | TrainPlanner的核心设计前提,决定了它不产出持久化策略权重,输出限定为结构化决策 |
-| 智能体基础设施 | SocialSimulator 与 MindAgent 共用同一套社会心智基础智能体框架 **Actio**(技能库+显式记忆+人格实例化+模型后端抽象),模型后端可为自部署 ZenGen 或外部API | Actio 被提升为共享基础设施层组件,而非挂在单一子系统下 |
+| 智能体基础设施 | SocialSimulator 与 MindAgent 共用同一套社会心智基础智能体框架 **SimpleActio**(技能库+显式记忆+人格实例化+模型后端抽象),模型后端可为自部署 ZenGen 或外部API | SimpleActio 被提升为共享基础设施层组件,而非挂在单一子系统下 |
 | 训练/推理基础设施 | 训练框架用 **ROLL**,推理用 **vLLM**,归入共享基础设施层 | 明确基础设施层的具体技术选型 |
 
 ## 3. 总体架构
@@ -48,7 +48,7 @@ flowchart TB
     subgraph CAP["能力子系统层"]
         SS["SocialSimulator<br/>(批量生成/评测 + 实时环境服务)"]
         MT["MindTrainer<br/>InteractTrain+BatchTrain→ZenGen"]
-        MA["MindAgent<br/>Actio智能体+技能记忆RSI"]
+        MA["MindAgent<br/>SimpleActio智能体+技能记忆RSI"]
         RS["RecipeStore<br/>配方仓库+生命周期"]
         TS["TrainScheduler<br/>决策执行器"]
         TP["TrainPlanner<br/>决策学习者(可插拔后端)"]
@@ -57,18 +57,18 @@ flowchart TB
     CP[("ControlPlane<br/>状态机+3审核门+版本化存储")]
 
     subgraph INFRA["共享基础设施层"]
-        ACTIO["Actio<br/>社会心智基础智能体框架"]
+        SIMPLE_ACTIO["SimpleActio<br/>社会心智基础智能体框架"]
         ROLL["ROLL 训练引擎"]
         VLLM["vLLM 推理引擎"]
         EXT["外部推理桥接<br/>CLI: Claude/Codex/DeepSeek"]
     end
 
     CAP <-->|读写产物/订阅事件| CP
-    SS -.实例化仿真人格.-> ACTIO
-    MA -.实例化部署态智能体.-> ACTIO
+    SS -.实例化仿真人格.-> SIMPLE_ACTIO
+    MA -.实例化部署态智能体.-> SIMPLE_ACTIO
     MT -.分布式训练.-> ROLL
     SS & MT & MA -.推理服务.-> VLLM
-    ACTIO -.模型后端: ZenGen或外部API.-> VLLM
+    SIMPLE_ACTIO -.模型后端: ZenGen或外部API.-> VLLM
     TP -.v1推荐后端.-> EXT
 ```
 
@@ -93,7 +93,7 @@ flowchart TB
 - MindAgent 的模拟部署交互**复用**实时环境服务模块的经验采集接口,不自建模拟能力
 - 经验采集接口预留扩展点:未来可从"仅模拟"扩展到"模拟+真实生产交互日志"两路输入(v1不实现,仅保留接口可扩展性)
 
-**依赖**:Actio(实例化仿真人格)、vLLM(推理服务)、可选调用外部推理桥接获取更有创意的情境生成。
+**依赖**:SimpleActio(实例化仿真人格)、vLLM(推理服务)、可选调用外部推理桥接获取更有创意的情境生成。
 
 ### 4.2 MindTrainer
 
@@ -108,7 +108,7 @@ flowchart TB
 
 ### 4.3 MindAgent
 
-**职责**:部署态社会心智智能体运行时RSI(技能库、prompt自进化、显式记忆),不改变模型权重。基于 Actio 实例化,模型后端可为最新晋级的 ZenGen checkpoint 或外部API。
+**职责**:部署态社会心智智能体运行时RSI(技能库、prompt自进化、显式记忆),不改变模型权重。基于 SimpleActio 实例化,模型后端可为最新晋级的 ZenGen checkpoint 或外部API。
 
 **触发机制**:自主订阅 ControlPlane 的"checkpoint已晋级"事件,自动启动新一轮自进化循环,不由 TrainScheduler 主动调度——这是 MindAgent 作为独立子系统而非任务执行器的关键设计点。
 
@@ -173,7 +173,7 @@ flowchart TB
 
 | 组件 | 承载能力 | 使用方 |
 |---|---|---|
-| **Actio** | 社会心智基础智能体框架:技能库+显式记忆+人格实例化+模型后端抽象 | SocialSimulator(仿真人格实例化)、MindAgent(部署态智能体实例化) |
+| **SimpleActio** | 社会心智基础智能体框架:技能库+显式记忆+人格实例化+模型后端抽象 | SocialSimulator(仿真人格实例化)、MindAgent(部署态智能体实例化) |
 | **ROLL** | 分布式训练引擎 | MindTrainer(InteractTrain + BatchTrain) |
 | **vLLM** | 推理引擎 | MindTrainer(rollout生成)、SocialSimulator(仿真人格模型驱动)、MindAgent(部署态智能体模型服务) |
 | **外部推理桥接** | CLI方式调用Claude Code/Codex/DeepSeek harness等外部强模型 | TrainPlanner(v1推荐决策后端)、SocialSimulator(可选,创意情境生成) |
@@ -293,7 +293,7 @@ MindAgent的自进化循环与"配方沉淀→触发下一轮规划"是并行分
 | ⑥ | **TrainPlanner** | 决策学习者(工厂元认知RSI) |
 | ⑦ | **ControlPlane** | 状态机+审核门+版本化存储 |
 
-共享基础设施:**Actio**(智能体框架)、**ROLL**(训练引擎)、**vLLM**(推理引擎)、**外部推理桥接**(CLI强模型调用)。
+共享基础设施:**SimpleActio**(智能体框架)、**ROLL**(训练引擎)、**vLLM**(推理引擎)、**外部推理桥接**(CLI强模型调用)。
 
 工厂整体产出物模型代称:**ZenGen**。
 

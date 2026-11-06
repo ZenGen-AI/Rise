@@ -8,8 +8,8 @@ def build() -> Canvas:
     c = Canvas(
         1080, 730, title="Rise 系统架构",
         desc="四层结构。控制层放决策与配方相关的四个组件。协调层 ControlPlane 配三道人工审核门。"
-             "计算层放三个子系统。共享基础设施放 Actio、Starling 记忆库、远端计算层、训练与推理引擎。"
-             "三个计算层子系统都使用 Actio 实例,MindTrainer 用的是训练位实例。"
+             "计算层放三个子系统。共享基础设施放 SimpleActio、Starling 记忆库、远端计算层、训练与推理引擎。"
+             "三个计算层子系统都使用 SimpleActio 实例,MindTrainer 用的是训练位实例。"
              "所有子系统经 ControlPlane 读写产物,只有两条受限直连接口绕过它。")
     c.lane(14, 44, 1052, 146, "控制层(本地开发机)", kind="control")
     c.lane(14, 214, 1052, 128, "协调层", kind="control", dashed=False)
@@ -30,7 +30,7 @@ def build() -> Canvas:
 
     cm = c.box(40, 590, 215, "远端计算层 compute", "经 SSH 在远端 GPU 主机上跑作业\nGPU 租约 · 预检 · 作业控制", kind="infra", h=80)
     rv = c.box(300, 590, 160, "ROLL · vLLM", "分布式训练 · 推理引擎", kind="infra", h=80)
-    ac = c.box(500, 590, 240, "Actio", "带技能库与显式记忆的智能体框架\n每次响应附带激活轨迹\nStarling 记忆", kind="infra", h=80)
+    ac = c.box(500, 590, 240, "SimpleActio", "带技能库与显式记忆的智能体框架\n每次响应附带激活轨迹\nStarling 记忆", kind="infra", h=80)
     st = c.box(800, 590, 250, "Starling", "个体记忆 · 语句级抽取 · 语义召回\nSQLite 内嵌,一个世界一个库,人格是主体", kind="infra", h=80)
 
     def fx(node, target):
@@ -48,10 +48,10 @@ def build() -> Canvas:
     c.edge(ss, ma, label="②", tail=True, color=ORANGE, width=2.4)
     c.edge(mt, cm, "bottom", "top")
     c.edge(cm, rv, "right", "left", label="驱动")
-    # SocialSimulator 正下方是 ROLL · vLLM,出口靠右、在两层之间的空隙里横移,再落到 Actio 顶边
+    # SocialSimulator 正下方是 ROLL · vLLM,出口靠右、在两层之间的空隙里横移,再落到 SimpleActio 顶边
     c.edge(ss, ac, "bottom", "top", a_f=0.8, b_f=0.17)
     c.edge(ma, ac, "bottom", "top", a_f=0.2, b_f=(ma.x + ma.w * 0.2 - ac.x) / ac.w)
-    # MindTrainer 的训练位实例:从 MindTrainer 底边右端下行,穿过计算层与共享层之间的空隙,横移后落到 Actio 顶边左端
+    # MindTrainer 的训练位实例:从 MindTrainer 底边右端下行,穿过计算层与共享层之间的空隙,横移后落到 SimpleActio 顶边左端
     c.edge(mt, ac, "bottom", "top", a_f=0.97, b_f=0.06, label="训练位实例", label_at=0.62,
            via=[(mt.x + mt.w * 0.97, 552), (ac.x + ac.w * 0.06, 552)])
     c.edge(ac, st, "right", "left", label="读写", tail=True)

@@ -5,7 +5,7 @@ from mindtrainer.dispatch import make_mindtrainer_dispatcher
 
 STAND_IN_RUNTIME = {
     "backend": "stand-in", "starling_version": None, "extraction": None, "embedding": None,
-    "trace_schema": "actio.trace.v2",
+    "trace_schema": "simple_actio.trace.v2",
 }
 
 

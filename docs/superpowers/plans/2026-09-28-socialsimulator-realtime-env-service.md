@@ -35,7 +35,7 @@
 - **角色-模型后端映射必须由调用方显式指定**(spec §2.2 关键接口约定):`CreateSession` 必须携带完整 `RoleAssignment`,不由服务内部写死。
 - **会话生命周期状态机**(spec §2.6.1):`CREATED → ACTIVE → COMPLETING → CLOSED`,异常路径 `→ FAILED`(可从 CREATED/ACTIVE/COMPLETING 进入)。CREATED 到 ACTIVE 之间**无额外确认步骤**——`CreateSession` 校验通过即直接 ACTIVE,不做"预检+确认"两次往返。
 - **TurnUpdate 每轮完成后立即推送**(spec §2.6.2 硬约束),不是攒够整段对话再返回——这是本计划扩展 `run_episode` 新增 `on_turn` 回调的直接依据。
-- **激活轨迹字段协议层强制项**(spec §2.6.3):`TurnRecordProto` 必须为 `activation_trace` 预留结构化字段;裸模型(V1 全部角色)时该字段**语义上为空**(proto3 `optional` 未设置,`HasField()` 返回 `False`),区别于"激活轨迹为空列表"这种不同语义(留给 Actio 计划落地时用)。
+- **激活轨迹字段协议层强制项**(spec §2.6.3):`TurnRecordProto` 必须为 `activation_trace` 预留结构化字段;裸模型(V1 全部角色)时该字段**语义上为空**(proto3 `optional` 未设置,`HasField()` 返回 `False`),区别于"激活轨迹为空列表"这种不同语义(留给 SimpleActio 计划落地时用)。
 - **并发会话隔离**(spec §2.6.4 硬约束):每个会话有独立 `session_id` 和独立服务端状态,会话间**不共享任何可变状态**。
 - **异常路径判定必须显式区分**(spec §2.6.5):服务端侧异常(角色后端调用失败)主动发 `EndSession`(带终止原因),不是简单断连;客户端侧异常(进程崩溃/连接中断)靠流迭代器异常/结束检测,标记会话 FAILED,不需要客户端配合;超过最大轮次仍未终止由 `run_episode` 自身的 `max_turns` 语义兜底。
 - **可测试性**(spec §2.6.8):会话状态机是纯状态转移逻辑,可完全脱离真实 gRPC 连接单测。并发隔离用构造的多会话并发场景测试状态不串。异常路径可用 mock/受控输入触发,不需要真实拉起远程服务——本计划的失败路径测试用真实 `127.0.0.1` 本地 socket(轻量、确定性、不依赖外部网络),不算"远程服务"。
@@ -2152,7 +2152,7 @@ Task 1(proto+依赖)是唯一无依赖基石。2(状态机)、3(run_episode 扩�
 
 **验证基线:** 全部 11 任务完成后,`uv run --extra dev pytest -q` 全绿;Plan 2/3 既有全部 runner/diagnostic 测试在 Task 3 后仍绿(回归保护是 Task 3 的验收硬条件,与 Plan 3 Task 8 扩展 `stop_predicate` 时的验收标准同规格)。
 
-**已知后续依赖本计划的工作(不在本计划范围内)**:MindTrainer 的 InteractTrain Trajectory Source 实现(会是 `EnvironmentServiceClient` 的第一个真实调用方,需要真实的"自博弈模型"提供 `submit_turn` 的话语来源,即真实 LLM 推理,而非 `ScriptedBackend`)、MindAgent 的模拟部署驱动器(第二个调用方,角色互换:MindAgent 自身是 `client_driven_slot`,由完整 Actio 实例而非裸模型驱动)、Actio 的 `ActivationTrace` 真正写入 `TurnRecord.activation_trace`(本计划协议层已预留字段,填充逻辑属于 Actio 计划)、spec §2.2 的"开发者工具接口"(人工 CLI 交互式调试,独立 dev-only 功能)、spec 补充 E 的 `FailureRecord` 持久化与 T1 自动重试(跨子系统横切设计)。
+**已知后续依赖本计划的工作(不在本计划范围内)**:MindTrainer 的 InteractTrain Trajectory Source 实现(会是 `EnvironmentServiceClient` 的第一个真实调用方,需要真实的"自博弈模型"提供 `submit_turn` 的话语来源,即真实 LLM 推理,而非 `ScriptedBackend`)、MindAgent 的模拟部署驱动器(第二个调用方,角色互换:MindAgent 自身是 `client_driven_slot`,由完整 SimpleActio 实例而非裸模型驱动)、SimpleActio 的 `ActivationTrace` 真正写入 `TurnRecord.activation_trace`(本计划协议层已预留字段,填充逻辑属于 SimpleActio 计划)、spec §2.2 的"开发者工具接口"(人工 CLI 交互式调试,独立 dev-only 功能)、spec 补充 E 的 `FailureRecord` 持久化与 T1 自动重试(跨子系统横切设计)。
 
 **收尾:** whole-branch review → fix-wave(如需)→ finishing-a-development-branch(合入 main;因 session git-fenced,ff-only merge 在 main checkout 终端执行)。
 

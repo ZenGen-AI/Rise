@@ -2,12 +2,12 @@
 
 | 项 | 内容 |
 |---|---|
-| 一句话 | 新模型晋级后,部署 Actio 实例采集经验,分析行为缺口,生成并验证技能提案,经审核门②收录进正式库 |
+| 一句话 | 新模型晋级后,部署 SimpleActio 实例采集经验,分析行为缺口,生成并验证技能提案,经审核门②收录进正式库 |
 | 状态 | 部分落地:配置、库读取、失败守卫、部署、分析、提案、验证、打包、轮次与收录两个处理器、调和循环触发与组合根装配 [已落地],已由 `factory run --enable agent,admit` 经 `reconcile_once` 端到端跑通;闭环里的模型后端是罐头实现(`factory.agent.CannedGuidedBackend`,不加载 checkpoint),轮次产物不记后端来源;部署记忆(经部署记忆管理面访问,配了记忆配置用 Starling,否则用落盘替身)、部署实例按 episode 新造、门② 的记忆收录改路 [已落地];记忆按一个情境一个部署世界组织、人格是其中的主体 [已落地] |
 | 所在层 | 计算层 |
 | 代码位置 | `src/mindagent` [已落地] |
 | 基线提交 | `b826440`(2026-10-21) |
-| 依赖 | ControlPlane(`controlplane`)、Actio(`actio`,含记忆端口、管理面与 Starling 适配器)、外部推理桥接(`inference_bridge`)、SocialSimulator(`simulator` 的数据模型、产物读写、实时环境服务客户端) |
+| 依赖 | ControlPlane(`controlplane`)、SimpleActio(`simple_actio`,含记忆端口、管理面与 Starling 适配器)、外部推理桥接(`inference_bridge`)、SocialSimulator(`simulator` 的数据模型、产物读写、实时环境服务客户端) |
 | 被依赖 | factory 组合根(注册两个处理器);调和循环经注入调用处理器;命令行读提案载荷 |
 | 对应实施计划 | 工作包 7(任务 80 至 89)与工作包 8、9 的触发与装配 [已落地];智能体记忆设计的第 5 步(部署记忆、轮次摘要、快照重放、门② 改路,替身路径)[已落地];Starling 部署管理面:第 7 步 [已落地];记忆按情境世界组织的 MindAgent 部分:世界布局、部署轮次按世界、门② 增量带 `scenario_id` [已落地] |
 
@@ -28,7 +28,7 @@
 | TrainScheduler | 决策执行器:装配上下文、校验决策、构造训练指令、提名配方 | 控制层 | [已落地],含策略经验(默认关) |
 | TrainPlanner | 决策学习者:经可插拔后端给出下一轮训练决策 | 控制层 | [已落地],默认后端经桥接调用命令行模型 |
 
-共享基础设施有五个。**Actio** 是带技能库与显式记忆的智能体框架,每次响应附带激活轨迹;记忆由内嵌的 **Starling** 提供,可选 extra `memory`,一个模拟世界一个树外 SQLite 库,人格是其中的主体(部署一个情境一个世界,训练一条 rollout 一个世界)[已落地]。**外部推理桥接**用命令行调用外部强模型。**远端计算层** `compute` 经 SSH 在远端 GPU 主机上跑作业 [已落地]。**ROLL** 是分布式训练引擎,**vLLM** 是推理引擎。V1 经远端计算层接入 ROLL 的 LoRA SFT [已落地](由 `--executor roll` 装配,已在真实主机上从指令跑到候选一次)与 vLLM 推理服务 [已落地](命令拼装、SSH 隧道、服务生命周期;真机端到端待补)。已落地部分仍由确定性 mock 顶替。真实 GRPO 加 OPD 训练与真实 judge [推迟]。
+共享基础设施有五个。**SimpleActio** 是带技能库与显式记忆的智能体框架,每次响应附带激活轨迹;它是 Actio 的简化版,功能完备的正式版 Actio 完成后再接入 [计划中]。记忆由内嵌的 **Starling** 提供,可选 extra `memory`,一个模拟世界一个树外 SQLite 库,人格是其中的主体(部署一个情境一个世界,训练一条 rollout 一个世界)[已落地]。**外部推理桥接**用命令行调用外部强模型。**远端计算层** `compute` 经 SSH 在远端 GPU 主机上跑作业 [已落地]。**ROLL** 是分布式训练引擎,**vLLM** 是推理引擎。V1 经远端计算层接入 ROLL 的 LoRA SFT [已落地](由 `--executor roll` 装配,已在真实主机上从指令跑到候选一次)与 vLLM 推理服务 [已落地](命令拼装、SSH 隧道、服务生命周期;真机端到端待补)。已落地部分仍由确定性 mock 顶替。真实 GRPO 加 OPD 训练与真实 judge [推迟]。
 
 **状态标记。** **[已落地]** 表示代码在主干上且有测试。**[计划中]** 表示设计与实施计划已定,代码还没写。**[推迟]** 表示明确不在 V1 范围内。图只画目标系统,不标进展,进展只看正文的状态标记。
 
@@ -55,7 +55,7 @@
 | Scenario、Persona、RoleAssignment | 社会情境、人格模板,以及把角色位绑定到具体人格与模型后端的分配 |
 | Recipe(配方) | 验证有效的完整训练方案,分 batch、interact、agent_rsi 三类 |
 | DiagnosticReport | 诊断评测产出的报告:维度、分数、置信区间、错误类型、退化标记 |
-| Activation trace(激活轨迹) | Actio 每次响应附带的记录:命中的技能候选、选中的技能、命中的记忆 |
+| Activation trace(激活轨迹) | SimpleActio 每次响应附带的记录:命中的技能候选、选中的技能、命中的记忆 |
 | Evidence grade(证据等级) | 诊断报告的可信等级 `stub`、`mock`、`real`,决定它能否驱动规划与提名;缺标记一律判 `stub`,失败关闭 |
 <!-- shared:end context-block -->
 
@@ -63,12 +63,12 @@
 
 MindAgent 是 AgentRSI 路径的执行者:不改权重,只让技能库与记忆库变好。
 
-它回答三个问题:部署态智能体哪里做得不对,怎么改,改了是否生效。答案以增量提案交人审,批准后才进正式库。它站在计算层。上游是调和循环,下游是正式技能库与各人格的部署记忆库。它经受限直连接口②向 SocialSimulator 的实时环境服务采集部署经验,经 Actio 建出被部署的实例。
+它回答三个问题:部署态智能体哪里做得不对,怎么改,改了是否生效。答案以增量提案交人审,批准后才进正式库。它站在计算层。上游是调和循环,下游是正式技能库与各人格的部署记忆库。它经受限直连接口②向 SocialSimulator 的实时环境服务采集部署经验,经 SimpleActio 建出被部署的实例。
 
 <!-- figure:begin 50-mindagent-context -->
 ![MindAgent 上下文](diagrams/50-mindagent-context.svg)
 
-**图 1　MindAgent 上下文**　调和循环产生 start_agent_round 与 admit_proposal 两个动作,交给组合根注册的 MindAgent 处理器。MindAgent 读模型与正式库、写轮次与提案,经受限直连②向实时环境服务采集部署经验,用 Actio 建实例,可选经外部推理桥接生成技能策略。门②由人工批准提案。
+**图 1　MindAgent 上下文**　调和循环产生 start_agent_round 与 admit_proposal 两个动作,交给组合根注册的 MindAgent 处理器。MindAgent 读模型与正式库、写轮次与提案,经受限直连②向实时环境服务采集部署经验,用 SimpleActio 建实例,可选经外部推理桥接生成技能策略。门②由人工批准提案。
 
 <details>
 <summary>文字版:图中的节点与连线</summary>
@@ -80,7 +80,7 @@ MindAgent 是 AgentRSI 路径的执行者:不改权重,只让技能库与记忆�
 - 门② 人工审核:review · approve · reject / 验证结果在场才可批准
 - MindAgent:轮次处理器 · 收录处理器 / 部署 · 分析 · 提案 · 验证 · 打包
 - 实时环境服务:SocialSimulator / gRPC 双向流 · 对手人格
-- Actio:技能库 · 显式记忆 / 每次响应附激活轨迹
+- SimpleActio:技能库 · 显式记忆 / 每次响应附激活轨迹
 - 外部推理桥接:可选:生成技能策略
 
 **连线**
@@ -91,7 +91,7 @@ MindAgent 是 AgentRSI 路径的执行者:不改权重,只让技能库与记忆�
 - ControlPlane → MindAgent:调用处理器
 - MindAgent → ControlPlane:读写产物
 - MindAgent ↔ 实时环境服务:② 部署会话
-- MindAgent → Actio:instantiate
+- MindAgent → SimpleActio:instantiate
 - MindAgent → 外部推理桥接:可选
 
 </details>
@@ -99,7 +99,7 @@ MindAgent 是 AgentRSI 路径的执行者:不改权重,只让技能库与记忆�
 
 调和循环产生 `start_agent_round` 与 `admit_proposal` 两个动作,交给 MindAgent 的两个处理器。factory 组合根在启动时注册处理器,并注入配置与各类工厂。MindAgent 读模型产物与正式库,写轮次产物与提案。部署会话经接口②走 gRPC 双向流,对手由实时环境服务扮演。外部推理桥接是可选的,V1 只用于生成技能策略;验证函数支持可选的 judge 附注,V1 的轮次处理器不装配它。
 
-智能体记忆设计给部署实例加上记忆 [已落地]。Starling 是内嵌的 SQLite 记忆库,配了记忆配置时每个情境在仓库之外有一个部署世界库文件;没配时用落盘的 FileTupleStore 替身。记忆跨轮次持久累积。本包经 Actio 的部署记忆管理面 DeploymentMemoryStore 访问部署世界,不导入 Starling。门② 批准的记忆增量写进同一个部署世界,不再写进产物树。
+智能体记忆设计给部署实例加上记忆 [已落地]。Starling 是内嵌的 SQLite 记忆库,配了记忆配置时每个情境在仓库之外有一个部署世界库文件;没配时用落盘的 FileTupleStore 替身。记忆跨轮次持久累积。本包经 SimpleActio 的部署记忆管理面 DeploymentMemoryStore 访问部署世界,不导入 Starling。门② 批准的记忆增量写进同一个部署世界,不再写进产物树。
 
 一个情境一个部署世界,这个情境绑定的人格都是其中的主体 [已落地]。智能体位与部署对手位都在世界里跨会话积累记忆。理由:同一情境的几个人身处同一个世界,一人一库把他们拆进了平行世界。
 
@@ -113,7 +113,7 @@ MindAgent 是 AgentRSI 路径的执行者:不改权重,只让技能库与记忆�
 |---|---|---|
 | MA-G1 | 每个新晋级的 effective 模型自动开一轮 agent 轮次 | 轮次产物 `agent-round-<model>` 走到 `executed` 或 `failed` |
 | MA-G2 | 从部署 episode 中统计出"选中的技能不针对当前信号"的缺口 | 分析器在构造数据上给出确定的发现,同一批数据重跑同一 id |
-| MA-G3 | 每条发现产出一份技能增量草案 | 草案能被 Actio 的技能解析读回 |
+| MA-G3 | 每条发现产出一份技能增量草案 | 草案能被 SimpleActio 的技能解析读回 |
 | MA-G4 | 用离线重放证明候选技能按预期改变行为(R13) | 提案载荷带 `fired_on_motivating`、`fired_elsewhere` |
 | MA-G5 | 批准的提案收录进正式库,库版本加一 | `library_state` 版本递增,`admitted` 记下来源提案 |
 | MA-G6 | 两个处理器在任一崩溃点重入都收敛 | 故障注入测试:不重复部署、不重复写提案、不重复递增 |
@@ -141,7 +141,7 @@ MindAgent 是 AgentRSI 路径的执行者:不改权重,只让技能库与记忆�
 
 | 约束 | 内容 | 影响 |
 |---|---|---|
-| 依赖方向 | 只导入 `controlplane`、`actio`、`inference_bridge`、`simulator`、`grpc`、`yaml` 与标准库;记忆只经 `actio` 的记忆端口与部署记忆管理面访问 | 失败分类与信号视图规则要在本包另写一份;本包不导入 `starling`;不设记忆配置时部署路用 FileTupleStore,它把条目与事件表存成 JSON 文件 |
+| 依赖方向 | 只导入 `controlplane`、`simple_actio`、`inference_bridge`、`simulator`、`grpc`、`yaml` 与标准库;记忆只经 `simple_actio` 的记忆端口与部署记忆管理面访问 | 失败分类与信号视图规则要在本包另写一份;本包不导入 `starling`;不设记忆配置时部署路用 FileTupleStore,它把条目与事件表存成 JSON 文件 |
 | 记忆的唯一权威 | 部署记忆存在产物树之外的部署世界里(配了记忆配置时是仓库之外的 Starling 库),产物树不存记忆内容 | 记忆不能从产物树追溯,只靠轮次产物里的起点摘要与运行时身份补 |
 | 反向隔离 | `controlplane` 不导入 `mindagent` | 处理器类型写成字面 `Callable`,不引用调和循环的别名 |
 | 产物读写 | 一律经 `GitStore` 与信封 | 写入内容不变时不提交,重入可用 HEAD 不变来判定空操作 |
@@ -195,25 +195,25 @@ MindAgent 是 AgentRSI 路径的执行者:不改权重,只让技能库与记忆�
 
 | 模块 | 职责 | 依赖 | 状态 |
 |---|---|---|---|
-| `config` | 冻结配置 `AgentConfig`,找出 Actio 占的角色位 | `simulator.datamodel` | [已落地] |
-| `library` | 读正式库与库版本,推出收录后的条目 id;`LibraryState` 没有 `memories`,不读 `memory_library/` | `actio`、`controlplane.paths` | [已落地] |
+| `config` | 冻结配置 `AgentConfig`,找出 SimpleActio 占的角色位 | `simulator.datamodel` | [已落地] |
+| `library` | 读正式库与库版本,推出收录后的条目 id;`LibraryState` 没有 `memories`,不读 `memory_library/` | `simple_actio`、`controlplane.paths` | [已落地] |
 | `failures` | 判"读不出"、校验 run id、只记一次失败记录 | `controlplane.ledger` | [已落地] |
-| `deployment` | 流水线 1:经接口②跑部署 episode 并落盘;收实例工厂 make_instance,每次尝试开端口、造实例、跑、关实例;每条 episode 开始前备份整个情境世界,重试前 `restore_from` 回滚;恢复、开下一次尝试与提交前等世界的端口全关 | 实时环境服务客户端、`store_adapter`、`memory_layout`、`actio` 部署记忆管理面 | [已落地] |
-| `analysis` | 流水线 2:跨 episode 统计行为缺口 | `actio.signals`、`actio.triggers` | [已落地] |
-| `proposals` | 流水线 3:规则模板或桥接生成技能草案 | `actio.skills`、`inference_bridge` | [已落地] |
-| `verify` | 流水线 4:离线重放度量行为改变;每个情境一份验证快照,按 episode 的情境取实例,只读重放 | `analysis`、Actio 实例 | [已落地] |
+| `deployment` | 流水线 1:经接口②跑部署 episode 并落盘;收实例工厂 make_instance,每次尝试开端口、造实例、跑、关实例;每条 episode 开始前备份整个情境世界,重试前 `restore_from` 回滚;恢复、开下一次尝试与提交前等世界的端口全关 | 实时环境服务客户端、`store_adapter`、`memory_layout`、`simple_actio` 部署记忆管理面 | [已落地] |
+| `analysis` | 流水线 2:跨 episode 统计行为缺口 | `simple_actio.signals`、`simple_actio.triggers` | [已落地] |
+| `proposals` | 流水线 3:规则模板或桥接生成技能草案 | `simple_actio.skills`、`inference_bridge` | [已落地] |
+| `verify` | 流水线 4:离线重放度量行为改变;每个情境一份验证快照,按 episode 的情境取实例,只读重放 | `analysis`、SimpleActio 实例 | [已落地] |
 | `packaging` | 流水线 5:按阈值筛选,写提案产物 | `controlplane.paths` | [已落地] |
 | `rounds` | 轮次处理器工厂,取代旧轮次;处理器开始按情境拿世界锁(被占抛 `DeferredError`),写 `memory_runtime` 与 `episode_digests`(一条 episode 一个世界摘要);把 `pending` 轮次写成终态前先回滚在途 episode | 以上全部 | [已落地] |
-| `admit` | 收录处理器工厂;记忆增量带 `scenario_id`,经部署记忆管理面调 `remember_event`,写前拿所涉情境的世界锁。锁被占,或任何轮次有未提交的起点快照(只含技能的提案同样延后),抛 `DeferredError`。抽取失败按类别分两路:`timeout`、`transport_failure` 延后重试;其余类别一条记忆增量都没提交过时提案改为 `rejected`,部分已提交时记 T3、不再重抽 | `library`、`failures`、`memory_layout`、`controlplane.deferred`、`actio` 部署记忆管理面 | [已落地] |
-| `memory_layout` | 部署记忆根目录的磁盘布局:世界锁、整世界的起点快照加 `.world` 旁注文件、每个情境一份验证快照,以及门② 与装配期检查用的快照查询与旧布局识别 | `actio`、`controlplane.lock` | [已落地] |
+| `admit` | 收录处理器工厂;记忆增量带 `scenario_id`,经部署记忆管理面调 `remember_event`,写前拿所涉情境的世界锁。锁被占,或任何轮次有未提交的起点快照(只含技能的提案同样延后),抛 `DeferredError`。抽取失败按类别分两路:`timeout`、`transport_failure` 延后重试;其余类别一条记忆增量都没提交过时提案改为 `rejected`,部分已提交时记 T3、不再重抽 | `library`、`failures`、`memory_layout`、`controlplane.deferred`、`simple_actio` 部署记忆管理面 | [已落地] |
+| `memory_layout` | 部署记忆根目录的磁盘布局:世界锁、整世界的起点快照加 `.world` 旁注文件、每个情境一份验证快照,以及门② 与装配期检查用的快照查询与旧布局识别 | `simple_actio`、`controlplane.lock` | [已落地] |
 | `errors` | 本包异常:数据错误、解析耗尽、轮次失败、覆盖失败 | 无 | [已落地] |
 
 **依赖方向规则**
 
 | 规则 | 内容 |
 |---|---|
-| 可以导入 | `controlplane`、`actio`(含记忆端口与部署记忆管理面)、`inference_bridge`、`simulator.datamodel`、`simulator.store_adapter`、`simulator.realtime.client` |
-| 不得导入 | `mindtrainer`、`diagnostic`、`recipestore`、`trainplanner`、`trainscheduler`、`factory`;`starling` 只有 `actio` 的 Starling 适配器可以导入 |
+| 可以导入 | `controlplane`、`simple_actio`(含记忆端口与部署记忆管理面)、`inference_bridge`、`simulator.datamodel`、`simulator.store_adapter`、`simulator.realtime.client` |
+| 不得导入 | `mindtrainer`、`diagnostic`、`recipestore`、`trainplanner`、`trainscheduler`、`factory`;`starling` 只有 `simple_actio` 的 Starling 适配器可以导入 |
 | 反向 | `controlplane` 不出现 `mindagent`;静态测试强制 [已落地] |
 
 ## 4. 数据模型与状态机
@@ -231,7 +231,7 @@ MindAgent 是 AgentRSI 路径的执行者:不改权重,只让技能库与记忆�
 | `Verification` [已落地] | `method`、`episodes`、`fired_on_motivating`、`fired_elsewhere`、`notes`、可选 `quality_notes` | `method` 固定为 `replay_behavior` |
 | 部署世界 [已落地] | 一个 `scenario_id` 一个树外库文件(Starling 的 `.db` 或替身的 `.json`);这个情境绑定的全部人格是主体,每条记忆与事件行带主体;库内事件表的 `seq` 是持久的单调时钟 | 轮次独占;端口绑定 (世界, 主体),召回只返回本主体的记忆;库不进产物树,不能从 git 历史追溯 |
 | 起点快照 | 某条部署 episode 开始前整个情境世界的副本,加它的逻辑摘要 | 摘要记进轮次产物;副本在 episode 成功后删 |
-| 部署记忆管理面 | DeploymentMemoryStore:按世界 id 开 (世界, 主体) 端口、写与放弃门② 事件、列 `pending` 事件、备份、覆盖、算摘要、`wait_closed` | 在 `actio`,本包只调它;两个实现 StarlingDeploymentStore、FileTupleStore;`restore_from` 在该世界还有任何打开的端口时抛 MemoryFailureError |
+| 部署记忆管理面 | DeploymentMemoryStore:按世界 id 开 (世界, 主体) 端口、写与放弃门② 事件、列 `pending` 事件、备份、覆盖、算摘要、`wait_closed` | 在 `simple_actio`,本包只调它;两个实现 StarlingDeploymentStore、FileTupleStore;`restore_from` 在该世界还有任何打开的端口时抛 MemoryFailureError |
 
 | `AgentConfig` 字段 [已落地] | `max_turns` | `episodes_per_scenario` | `max_retries_per_episode` | `min_support` / `min_ratio` | 验证阈值 | `max_parse_retries` |
 |---|---|---|---|---|---|---|
@@ -271,7 +271,7 @@ MindAgent 是 AgentRSI 路径的执行者:不改权重,只让技能库与记忆�
 
 正式库状态产物 `library_state` [已落地]:id 为 `library-state`,类型 `library_state`,状态恒为 `executed`。载荷是 `skill_version`、`memory_version`、`admitted` 三个键,两个版本都是十进制数字串,`admitted` 是收录记录的列表,每条含 `proposal_id`、`skill_version`、`memory_version` 与 `entries`(该次收录写入的条目 id 列表)。信封 `version` 每次收录加一,`links` 是最近一次收录的提案 id。文件不存在时等价于两个版本都是 `"0"`。版本不是十进制数字串(如 `lib-3`、空串、`3.0`、布尔、负数)时读取方抛 `MindAgentDataError`:收录处理器当作确定性失败,轮次处理器判 T3。空库不需要这份产物,预置初始技能时由人手写技能产物与这份产物。
 
-`memory_version` 仍然递增,但它计的是门② 记忆收录的次数,不再对应 `memory_library/` 里的条目。它仍是 Actio 实例 `library_version` 的一部分,但 episode 复用只比较其中的技能版本:记忆收录不让已提交的 episode 重跑。
+`memory_version` 仍然递增,但它计的是门② 记忆收录的次数,不再对应 `memory_library/` 里的条目。它仍是 SimpleActio 实例 `library_version` 的一部分,但 episode 复用只比较其中的技能版本:记忆收录不让已提交的 episode 重跑。
 
 候选技能与桥接输出的形状 [已落地]:规则模板生成的候选技能 id 为 `skill-candidate-<信号名>`,版本 1,层级 `micro`,优先级 100,触发条件是单个信号,指令取模板文本。桥接路径下外部模型只写 `instructions` 与 `description`,必须恰好输出这两个键,多一个键也不合格;不合格带着原因重问,总次数 `1 + max_parse_retries`,耗尽抛 `ProposalParseError`。传了桥接而 `run_id` 为空时,调用桥接之前就抛 `MindAgentDataError`。规则生成器标识 `rule_template.v1`,桥接生成器标识 `bridge.v1`,提示模板版本 `mindagent-skill-v1`。每次尝试的 task id 带尝试序号,所以每次尝试各记一条成本。
 
@@ -335,7 +335,7 @@ payload:
 
 ## 5. 接口契约
 
-结论:对外只有两个处理器工厂,各返回一个形状为 `Callable[[GitStore, Action], None]` 的处理器;以下签名 [已落地]。部署记忆的契约落在 Actio 一侧,本包一侧的签名在入口与流水线函数里。
+结论:对外只有两个处理器工厂,各返回一个形状为 `Callable[[GitStore, Action], None]` 的处理器;以下签名 [已落地]。部署记忆的契约落在 SimpleActio 一侧,本包一侧的签名在入口与流水线函数里。
 
 **入口**
 
@@ -357,7 +357,7 @@ def make_admit_proposal_handler(*, memory_store, memory_layout,
 
 轮次处理器的 `action.target_id` 是模型 id `zengen-vN`,收录处理器的是提案 id;两者都不读 `detail`。
 
-三个注入的工厂 [已落地]:`client_factory()` 每条会话新建一个客户端,可选的关键字参数 `deadline_s` 给这一条流的 deadline;`backend_factory` 取 `model_id` 与 `checkpoint_ref`,每次新建模型后端,每次部署尝试一份、验证时基线与候选各一份;验证器的参数 `base_instance_factory` 收 `extra_skills` 与 `scenario_id`,每次返回新的 Actio 实例,传空元组得到基线。部署实例的 `profile` 是 `{model_id, round_id}`。
+三个注入的工厂 [已落地]:`client_factory()` 每条会话新建一个客户端,可选的关键字参数 `deadline_s` 给这一条流的 deadline;`backend_factory` 取 `model_id` 与 `checkpoint_ref`,每次新建模型后端,每次部署尝试一份、验证时基线与候选各一份;验证器的参数 `base_instance_factory` 收 `extra_skills` 与 `scenario_id`,每次返回新的 SimpleActio 实例,传空元组得到基线。部署实例的 `profile` 是 `{model_id, round_id}`。
 
 处理器内部的实现从这个情境的验证快照恢复一个临时世界,开智能体位主体的只读端口 [已落地]。
 
@@ -371,7 +371,7 @@ def run_deployment_episodes(store, make_instance, client_factory, *, memory_stor
                             stream_deadline_s=None, admission_wait_s=65.0,
                             register_episode=..., unregister_episode=...,
                             close_wait_s=SESSION_CLOSE_WAIT_S) -> list[Episode]: ...
-# make_instance(episode_id, memory, holder) -> ActioInstance:每次尝试新造,episode_id 带轮次前缀,holder 是智能体位人格
+# make_instance(episode_id, memory, holder) -> SimpleActioInstance:每次尝试新造,episode_id 带轮次前缀,holder 是智能体位人格
 # episode_digests: Mapping[str, str];on_episode_start(部署 id, 世界摘要):每条 episode 备份起点后调一次
 # register_episode(部署 id, round_id) / unregister_episode(部署 id):每次尝试前后登记,服务端据此给对手位开端口
 # 技能版本变了的重跑用 rerun_episode_id(base, skill_version) 换新逻辑 id
@@ -442,10 +442,10 @@ def load_library(store) -> LibraryState: ...
 | 邻居 | 本文依赖它什么 | 它依赖本文什么 |
 |---|---|---|
 | ControlPlane | 路径函数、`ledger.record_failure`、状态迁移检查、`GitStore` 写入内容不变不提交 [已落地] | 两个处理器的名字、位置与形状;终态由处理器自己写回 |
-| Actio | `instantiate`、`respond` 返回三元组、`library_version`、`validate_trace`、`referenced_signals`、内置信号、技能与记忆的 id 前缀 `skill-`、`mem-` [已落地]。`instantiate` 多收逻辑 `episode_id`,实例多 `close()` | 正式库里的技能条目格式;库版本为字符串;`scenario_id` 对应的部署世界在记忆根目录下 |
-| Actio 的部署记忆管理面 | DeploymentMemoryStore 八个方法按世界 id 管库,实现是 StarlingDeploymentStore 与 FileTupleStore;`open(world_id, holder)`。`remember_event` 按事件 key 幂等,收据是三段写入的事件行。`backup_to` 备份出自洽的单文件副本;`wait_closed` 等世界的端口全关;`restore_from` 在该世界还有任何打开的端口时抛 MemoryFailureError | 只经它访问部署世界;FileTupleStore 也落盘,提交点协议在两个实现上一样成立;同一个管理面实例由部署驱动器、门② 与服务端共用 |
-| Actio 的记忆失败 | `recall`、`embed_pending` 的失败与 `remember` 抛出的异常是 MemoryFailureError,`transient` 分真假。MemoryEventConflict、MemoryClosedError 是它的子类,`transient` 为假。`remember` 返回 `failed` 只计数、不抛 | 本包直接接这个异常类:瞬态按条回滚重跑,确定性判轮次 `failed`(T3) |
-| SocialSimulator | 实时环境服务客户端的"客户端后说"、`submit_turn` 带激活轨迹、回显自己轮次时保留轨迹、`write_episode` [已落地]。`CreateSession` 的可选 `episode_id` 字段:部署的逻辑 episode id `deploy-<model>-<scenario>-<k>` 重试不变,服务端据此落盘;事件 key 另带的轮次前缀不进这个字段。同一个 `episode_id` 仍有活动会话时,创建被拒为瞬态 `role_backend_unavailable`;格式不合白名单才是 `invalid_session`。“活动”从准入登记起,到 servicer 收尾完或移交滞留表为止 | 部署会话的 `purpose` 固定为 `deployment_simulation`;Actio 占 `self_play` 位;部署对手位的 Actio 实例开部署世界的端口 [已落地];创建被拒按终止原因查瞬态集合,不再一律不可重跑。`role_backend_unavailable`(准入满或 episode id 撞上活动会话)先在同一次尝试里退避重建(总等待 65 秒,不计入重试次数),仍被拒再按条重跑 |
+| SimpleActio | `instantiate`、`respond` 返回三元组、`library_version`、`validate_trace`、`referenced_signals`、内置信号、技能与记忆的 id 前缀 `skill-`、`mem-` [已落地]。`instantiate` 多收逻辑 `episode_id`,实例多 `close()` | 正式库里的技能条目格式;库版本为字符串;`scenario_id` 对应的部署世界在记忆根目录下 |
+| SimpleActio 的部署记忆管理面 | DeploymentMemoryStore 八个方法按世界 id 管库,实现是 StarlingDeploymentStore 与 FileTupleStore;`open(world_id, holder)`。`remember_event` 按事件 key 幂等,收据是三段写入的事件行。`backup_to` 备份出自洽的单文件副本;`wait_closed` 等世界的端口全关;`restore_from` 在该世界还有任何打开的端口时抛 MemoryFailureError | 只经它访问部署世界;FileTupleStore 也落盘,提交点协议在两个实现上一样成立;同一个管理面实例由部署驱动器、门② 与服务端共用 |
+| SimpleActio 的记忆失败 | `recall`、`embed_pending` 的失败与 `remember` 抛出的异常是 MemoryFailureError,`transient` 分真假。MemoryEventConflict、MemoryClosedError 是它的子类,`transient` 为假。`remember` 返回 `failed` 只计数、不抛 | 本包直接接这个异常类:瞬态按条回滚重跑,确定性判轮次 `failed`(T3) |
+| SocialSimulator | 实时环境服务客户端的"客户端后说"、`submit_turn` 带激活轨迹、回显自己轮次时保留轨迹、`write_episode` [已落地]。`CreateSession` 的可选 `episode_id` 字段:部署的逻辑 episode id `deploy-<model>-<scenario>-<k>` 重试不变,服务端据此落盘;事件 key 另带的轮次前缀不进这个字段。同一个 `episode_id` 仍有活动会话时,创建被拒为瞬态 `role_backend_unavailable`;格式不合白名单才是 `invalid_session`。“活动”从准入登记起,到 servicer 收尾完或移交滞留表为止 | 部署会话的 `purpose` 固定为 `deployment_simulation`;SimpleActio 占 `self_play` 位;部署对手位的 SimpleActio 实例开部署世界的端口 [已落地];创建被拒按终止原因查瞬态集合,不再一律不可重跑。`role_backend_unavailable`(准入满或 episode id 撞上活动会话)先在同一次尝试里退避重建(总等待 65 秒,不计入重试次数),仍被拒再按条重跑 |
 | SocialSimulator(部署对手位)[已落地] | 服务端造部署会话资源时按 `info.episode_id` 查 `AgentRuntime` 的部署登记表,拿到 `round_id`,以 `(scenario_id, persona_id)` 开部署世界的端口;会话终态随 `SessionResources.close` 关端口。查不到登记时对手位用空 `TupleMemory`,记一条 warning | 部署驱动器每次尝试前经组合根注入的 `register_episode` 登记 episode id 到轮次 id,尝试结束在 `finally` 里注销 |
 | 外部推理桥接 | `complete(prompt, *, run_id, task_id)`、`BridgeError` 带 `category` 与 `attempts`、每次成功调用记一条成本 [已落地] | 传入非空 `run_id`;每次尝试用不同 `task_id` |
 | factory 组合根 | 注入配置、客户端工厂、模型后端工厂、人格加载器、可选桥接 [已落地];读树外记忆配置,把部署记忆管理面交给本包:配置在场用 StarlingDeploymentStore(根目录是配置里的 `root`),不在场用 FileTupleStore,根目录是 `<git 目录>/rise-memory`(与 `rise.lock` 同处,不入树、跨重启保留;不用临时目录,每次重启换空库会让崩溃重入与门② 收录失效);部署会话的时间预算随配置在场与否取值 | 按名字 `mindagent.rounds.make_start_round_handler` 取工厂 [已落地];启动时 `memory_library/` 必须为空 |
@@ -567,7 +567,7 @@ join 等不到时,服务端把资源移进滞留表,由回收线程过后再关�
 | `max_turns`、`goal_reached` | 接受,落盘 |
 | `timeout`、`role_backend_timeout`、`role_backend_unavailable`(准入满,或逻辑 episode id 撞上活动会话)、`role_memory_unavailable`、`persistence_failed`、传输层 `UNAVAILABLE` | T1:整条重跑,至多 `max_retries_per_episode` 次,重跑前先回滚部署世界;用尽后轮次保持 `pending` 并上抛。创建会话被拒为 `role_backend_unavailable` 时,先在同一次尝试里退避重建(总等待 65 秒,不计入重试次数),仍被拒再按本行处理 |
 | `invalid_session`、`role_backend_rejected`、`role_backend_failure`、`client_disconnected`、其他状态码、协议错乱;加上 `role_memory_failure` | 不重跑,轮次 `failed`(T3);部署路沿用轮次的 T3 口径,与训练侧指令判 T2 不冲突 |
-| Actio 实例自身抛异常(MemoryFailureError 除外,见下一行) | 先 `abort()` 会话,原异常原样上抛,不重跑、不包装;到了轮次处理器,`ActioDataError` 与 `MindAgentDataError` 一族收成轮次 `failed`(T3),其余异常上抛,轮次保持 `pending` |
+| SimpleActio 实例自身抛异常(MemoryFailureError 除外,见下一行) | 先 `abort()` 会话,原异常原样上抛,不重跑、不包装;到了轮次处理器,`SimpleActioDataError` 与 `MindAgentDataError` 一族收成轮次 `failed`(T3),其余异常上抛,轮次保持 `pending` |
 | 实例抛 MemoryFailureError(`recall`、`embed_pending` 失败,或 `remember` 抛异常) | 先 `abort()` 会话。`transient` 为真:按条回滚重跑,至多 `max_retries_per_episode` 次,用尽后上抛,轮次保持 `pending`。`transient` 为假(含 MemoryEventConflict、MemoryClosedError):不重跑,轮次 `failed`(T3)。`remember` 返回 `failed`(含 `failure_category` 为 `timeout`)只计数、不抛 |
 
 **部署路的时间预算**
@@ -737,7 +737,7 @@ join 等不到时,服务端把资源移进滞留表,由回收线程过后再关�
 | MA-20 | 审核类状态机在 Python 的 `controlplane.states` 有 `approved → rejected` 一条边,只许收录处理器走;命令行的 `REVIEW_TRANSITIONS` 不加 | 抽取失败留在 `approved`;给 `approved` 加一个失败态;两份迁移表保持一致 | 现有的 `approved` 只能去 `effective`,没有出口放一个确定性失败的提案;一条专用边不扩大状态集。命令行不加这条边,所以人不能把已批准的提案改回拒绝 | 迁移表对所有审核类产物共用,这条边对它们都合法,约束靠只有收录处理器走;两份迁移表从此有意不同 |
 | MA-21 | 部署世界里的 `pending` 事件行各有主人:对话事件归产生它的 episode(智能体位与对手位的都算),门② 事件归提案;谁写的谁处理。对话事件在 episode 内重试一次,仍失败则留 `pending`;episode 成功时在落盘后、删起点快照之前按前缀对本 episode 留下的行调 `abandon_event`,最终失败时用起点快照回滚,实例的 `close()` 不放弃 | 每条 episode 开始前统一补齐所有 `pending` 行 | 统一补齐会替别人的事件再抽一次,或把别人的事件放弃;主人明确,起点快照里就没有别人的 `pending` 行 | 进程在 episode 中途崩溃后,它留下的 `pending` 行由重入时的覆盖清掉。MA-22 规定用起点快照覆盖部署世界,世界回到没有这些行的状态 |
 | MA-22 | 删起点快照是 episode 的提交点:成功时先落盘 episode,再放弃本 episode 留下的 `pending` 行,再删起点快照。轮次重入时按 episode 顺序检查。起点快照还在,就说明它在途时崩溃。先关实例与端口,再用起点快照 `restore_from` 覆盖部署世界,核对摘要等于 `episode_digests` 记的值(还没记过摘要时不核对,用覆盖后的摘要补记),再重跑,不重新备份起点。复用只看快照已删与 `digest_before`,不比较部署世界当前摘要。覆盖失败抛 RestoreFailedError(继承 `AgentRoundFailedError`,T3),世界与快照都保留 | 用 episode 文件是否存在判提交;复用时比较部署世界当前摘要;崩溃后直接重跑不覆盖 | episode 文件与记忆写入不在一个事务里,需要一个单点判这条 episode 提交没有。已提交的 episode 写过记忆,世界摘要本来就变了,比较当前摘要会让每条已提交的 episode 都不可复用。直接重跑会把半截记忆带进新的起点 | 落盘后、删快照前崩溃,已落盘的 episode 会重跑一遍;覆盖失败要人处理;复用判据已由 MA-34 取代 |
-| MA-23 | 部署记忆的管理面 DeploymentMemoryStore 放在 `actio`,按人格 id 提供 `open`、`remember_event`、`abandon_event`、`pending_events`、`backup_to`、`restore_from`、`digest`。实现有 StarlingDeploymentStore 与 FileTupleStore(JSON 落盘)。`restore_from` 在该人格还有打开的端口时抛 MemoryFailureError。本包不导入 `starling` | MindAgent 直接导入 Starling;替身只在内存里 | 管理面在 Actio 里,依赖方向才不破。替身也落盘,提交点与回滚在两种实现上一样成立,契约测试能覆盖崩溃重入。覆盖正被打开的 SQLite 文件会写坏库,所以先确认没有打开的端口 | Actio 多出一个协议,两个实现要过同一套契约测试;按人格 id 管库已由 MA-31 取代 |
+| MA-23 | 部署记忆的管理面 DeploymentMemoryStore 放在 `simple_actio`,按人格 id 提供 `open`、`remember_event`、`abandon_event`、`pending_events`、`backup_to`、`restore_from`、`digest`。实现有 StarlingDeploymentStore 与 FileTupleStore(JSON 落盘)。`restore_from` 在该人格还有打开的端口时抛 MemoryFailureError。本包不导入 `starling` | MindAgent 直接导入 Starling;替身只在内存里 | 管理面在 SimpleActio 里,依赖方向才不破。替身也落盘,提交点与回滚在两种实现上一样成立,契约测试能覆盖崩溃重入。覆盖正被打开的 SQLite 文件会写坏库,所以先确认没有打开的端口 | SimpleActio 多出一个协议,两个实现要过同一套契约测试;按人格 id 管库已由 MA-31 取代 |
 | MA-24 | 部署实例按 episode 新造:驱动器收 make_instance(episode_id, memory),每次尝试开该人格的端口、造实例、跑会话、`close()` 实例。覆盖部署库的顺序是关实例与端口、`restore_from`、重开端口、新造实例 | 驱动器收一个现成的实例,所有 episode 共用;覆盖时不关端口 | 事件 key 的前缀是逻辑 episode id,实例构造时就要定。实例持有打开的端口,覆盖前必须先关;新造的实例才不带着上次尝试的状态 | 每次尝试多一次开关端口与造实例 |
 | MA-25 | 已提交的 episode 不随记忆收录重跑,只有技能版本变了才重跑。重跑用新的逻辑 id `deploy-{model}-{scenario}-{k}-s{技能版本}`;新一轮第一次运行用 base id | 记忆版本变也重跑;重跑沿用原逻辑 id | 已提交 episode 的事件已是 `committed`,同一逻辑 id 重跑会让对手的新发言撞上 MemoryEventConflict,召回还会看到自己“未来”的记忆。新 id 让事件 key 不同 | 技能收录后重跑的 episode 以新 id 落盘,多一份文件 |
 | MA-26 | 轮次判 `failed`(T3)时,先对在途 episode 用起点快照 `restore_from` 回滚部署世界,再删快照,再写失败记录;覆盖失败时世界与快照都保留 | 只写失败记录,把半截记忆留在库里 | 在途 episode 的半截记忆留在部署世界里,下一轮的起点就带着它,而这些记忆没有一条完整的 episode 对应。回滚让失败的轮次不污染下一轮 | 失败路径多一次覆盖;覆盖也失败时要人处理 |
@@ -814,7 +814,7 @@ join 等不到时,服务端把资源移进滞留表,由回收线程过后再关�
 | 单元 | 配置校验、库读取、分析、提案、验证、打包 | 罐头模型后端、构造的 Episode |
 | 组件 | 部署驱动器与两个处理器 | 真实 loopback 服务端、替身客户端、`ScriptedBridge` [已落地]、故障注入 |
 | 端到端 | 三轮 AgentRSI 环路加一次收录 | 真实 loopback 服务端,对手为脚本化后端 |
-| 静态 | 依赖方向、`__future__` 首行;本包不导入 `starling`(全仓库只有 `actio/memory_starling.py` 导入它) | 无 |
+| 静态 | 依赖方向、`__future__` 首行;本包不导入 `starling`(全仓库只有 `simple_actio/memory_starling.py` 导入它) | 无 |
 | 组件 | 门② 改路:记忆增量走 `remember_event`;重入补收据不二次抽取,崩在 ③ 之前按 `engram_ref` 补;确定性抽取失败后事件 `abandoned`、提案 `rejected`,且之后任何路径都不会把它写进记忆;瞬态抽取失败(单条或部分已提交)事件留 `pending`、写 T1、延后重试,抽取恢复后收录完;部分已提交后确定性失败记 T3、留 `approved`,重入不再抽取;一般事实(空 `interlocutor`)在替身上判 T2;抛异常后提案留 `approved` | FileTupleStore、故障注入 |
 | 组件 | episode 重试回滚:第二次尝试前关实例与端口、`restore_from` 后部署世界回到起点,摘要相同;`restore_from` 在端口未关时抛错;第二条 episode 的事件 key 前缀是它自己的逻辑 id;第二轮用同一 `deploy-<model>-<scenario>-<k>` 时事件 key 带轮次前缀,不撞上一轮已 `committed` 的 key | 真 Starling 或 FileTupleStore、故障注入 |
 | 组件 | 部署崩溃重入:episode 中途崩溃(起点快照在)重入时先覆盖再重跑;episode 已落盘但起点快照没删时同样重跑;已提交的 episode 被复用、不重跑,记忆收录后也不重跑,技能版本变了才以新逻辑 id 重跑;覆盖失败判轮次 `failed`,世界与快照都保留;轮次判 `failed` 时在途 episode 被回滚 | 真 Starling 或 FileTupleStore、故障注入 |
@@ -865,7 +865,7 @@ join 等不到时,服务端把资源移进滞留表,由回收线程过后再关�
 | 部署、分析、提案、验证、打包 | [已落地] | 工作包 7 |
 | 轮次处理器与收录处理器 | [已落地] | 工作包 7 |
 | 调和循环触发与注入、组合根装配与端到端 | [已落地] | 工作包 8、工作包 9 |
-| 记忆端口、部署记忆管理面 DeploymentMemoryStore 与 Starling 适配器(Actio 一侧) | [已落地] | 端口与落盘替身、Starling 适配器都已落地;本包依赖它们,不实现它们 |
+| 记忆端口、部署记忆管理面 DeploymentMemoryStore 与 Starling 适配器(SimpleActio 一侧) | [已落地] | 端口与落盘替身、Starling 适配器都已落地;本包依赖它们,不实现它们 |
 | 部署记忆(部署世界、世界锁、起点快照、摘要、episode 复用判据)、部署实例按 episode 新造、轮次失败先回滚、已提交 episode 不随记忆收录重跑、部署路时间预算 | [已落地] | 替身与 Starling 两条路径都已接通,组合根按记忆配置选 |
 | 验证重放在快照副本上只读 | [已落地] | 基线与候选各从验证快照恢复一份临时副本 |
 | 门② 记忆增量走 `remember_event`、写前拿世界锁并在锁被占时抛 `DeferredError`、确定性抽取失败 `approved → rejected` | [已落地] | `controlplane.states` 有这条边;命令行的迁移表没有 |
@@ -944,7 +944,7 @@ join 等不到时,服务端把资源移进滞留表,由回收线程过后再关�
 | 部署记忆 | 每个情境一个树外部署世界(配了记忆配置时是 Starling 库,否则是替身的 JSON 文件),持久,跨轮次累积 |
 | 起点快照 | 某条部署 episode 开始前整个部署世界的副本及其逻辑摘要;重试与崩溃重入前用它覆盖部署世界;删它是这条 episode 的提交点 |
 | 事件收据 | 部署世界事件表里的一行,由三段写入留下:先以 `pending` 记下事件 key 与原文,抽取后改 `committed` 并填 `engram_ref` 与语句 id。同 key 再写时据此返回同一批 id,不再抽取;崩在改 `committed` 之前,按 `engram_ref` 补 |
-| 部署记忆管理面 | DeploymentMemoryStore:Actio 里按世界 id 管库的协议。本包经它开端口、写门② 事件、备份、覆盖、算摘要与等端口全关;实现是 StarlingDeploymentStore 与 FileTupleStore |
+| 部署记忆管理面 | DeploymentMemoryStore:SimpleActio 里按世界 id 管库的协议。本包经它开端口、写门② 事件、备份、覆盖、算摘要与等端口全关;实现是 StarlingDeploymentStore 与 FileTupleStore |
 | 部署世界 | 一个 `scenario_id` 一个树外库文件;这个情境绑定的人格都是其中的主体,智能体位与部署对手位都在里面跨会话积累记忆 |
 | 主体 | 世界里的一个人格,即 holder;端口绑定 (世界, 主体),召回只返回本主体名下的记忆 |
 | 世界锁 | `deploy/<scenario_id>.lock` 的独占文件锁;处理器开始拿,返回或抛出时放;部署轮次拿本轮全部情境的,门② 拿所涉情境的 |

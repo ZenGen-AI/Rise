@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from actio.memory import TupleMemory
+from simple_actio.memory import TupleMemory
 from controlplane.daemon import DirectiveFailedError
 from factory.memory_runtime import STAND_IN_MEMORY_RUNTIME, stand_in_memory_resolver
 from memory_fixtures import STAND_IN_RUNTIME  # Task 24 的测试夹具先于本模块存在,这里钉住两份相等
@@ -13,7 +13,7 @@ def test_the_stand_in_runtime_identity_is_the_one_the_design_fixes():
     assert STAND_IN_MEMORY_RUNTIME == STAND_IN_RUNTIME
     assert STAND_IN_MEMORY_RUNTIME == {
         "backend": "stand-in", "starling_version": None, "extraction": None, "embedding": None,
-        "trace_schema": "actio.trace.v2",
+        "trace_schema": "simple_actio.trace.v2",
     }
 
 
@@ -43,7 +43,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from actio.memory_port import MemoryFailureError
+from simple_actio.memory_port import MemoryFailureError
 from factory.memory_config import MemoryConfig
 from factory.memory_runtime import StarlingLayout, starling_memory_runtime
 from mindtrainer.training_config import MEMORY_RUNTIME_KEYS
@@ -70,7 +70,7 @@ def test_the_starling_runtime_identity_has_the_five_keys_and_no_secrets(tmp_path
                        "max_retries": 0, "prompts": "p" * 64},
         "embedding": {"base_url": "https://embed.example/v1", "model": "m-e", "dim": 256,
                       "timeout_ms": 4000, "max_retries": 0},
-        "trace_schema": "actio.trace.v2",
+        "trace_schema": "simple_actio.trace.v2",
     }
     assert "root" not in repr(rt) and str(tmp_path) not in repr(rt)        # 根目录路径不进哈希
     assert json.loads(json.dumps(rt)) == rt                                 # 进 config_hash,必须能序列化
@@ -155,7 +155,7 @@ def test_importing_the_module_does_not_need_starling():
         "from factory.memory_config import MemoryConfig\n"
         "from factory.memory_runtime import StandInTrainingWorlds, StarlingLayout, StarlingTrainingWorlds\n"
         "from factory.memory_runtime import starling_memory_resolver, starling_memory_runtime\n"
-        "assert 'actio.memory_starling' not in sys.modules\n"
+        "assert 'simple_actio.memory_starling' not in sys.modules\n"
         "assert StarlingLayout(Path('/m')).seed('s1', 't1') == Path('/m/seeds/s1/t1.db')\n"
         "assert StarlingLayout(Path('/m')).rollout_world('r', 'e') == Path('/m/runs/r/e.db')\n"
         "w = StandInTrainingWorlds(); w.bind('r', None)\n"
@@ -179,7 +179,7 @@ starling_only = pytest.mark.skipif(__import__("importlib.util").util.find_spec("
 
 @starling_only
 def test_the_resolver_digests_seed_worlds_per_scenario_and_empty_starts(tmp_path):
-    from actio.memory_starling import StarlingDeploymentStore, empty_digest
+    from simple_actio.memory_starling import StarlingDeploymentStore, empty_digest
     from factory.memory_runtime import starling_memory_resolver
     from starling_fakes import FakeOpenAI, offline_api_key
     lay = StarlingLayout(tmp_path)
@@ -202,7 +202,7 @@ def test_the_resolver_digests_seed_worlds_per_scenario_and_empty_starts(tmp_path
 def test_a_seed_whose_files_match_no_scenario_is_a_readable_t2(tmp_path):
     """旧布局的种子 `seeds/<seed>/<persona>.db` 不会被读;配了种子却一个情境都对不上、目录里又有库时拒绝,
     不让整批训练悄悄从空世界起(原因写种子 id 与文件主名,不含根目录路径)。"""
-    from actio.memory_starling import StarlingDeploymentStore
+    from simple_actio.memory_starling import StarlingDeploymentStore
     from factory.memory_runtime import starling_memory_resolver
     from starling_fakes import FakeOpenAI, offline_api_key
     with FakeOpenAI(dim=256) as fake, offline_api_key():
@@ -219,7 +219,7 @@ def test_a_seed_whose_files_match_no_scenario_is_a_readable_t2(tmp_path):
 @starling_only
 def test_a_seed_that_covers_some_scenarios_starts_the_others_from_the_empty_world(tmp_path):
     """种子只覆盖部分情境是合法的:对上的取种子摘要,其余从空世界起;目录里多一份人格名的旧库不挡。"""
-    from actio.memory_starling import StarlingDeploymentStore, empty_digest
+    from simple_actio.memory_starling import StarlingDeploymentStore, empty_digest
     from factory.memory_runtime import starling_memory_resolver
     from starling_fakes import FakeOpenAI, offline_api_key
     with FakeOpenAI(dim=256) as fake, offline_api_key():
@@ -234,7 +234,7 @@ def test_a_seed_that_covers_some_scenarios_starts_the_others_from_the_empty_worl
 
 @starling_only
 def test_an_empty_seed_directory_still_starts_every_scenario_from_the_empty_world(tmp_path):
-    from actio.memory_starling import empty_digest
+    from simple_actio.memory_starling import empty_digest
     from factory.memory_runtime import starling_memory_resolver
     (tmp_path / "seeds" / "s1").mkdir(parents=True)
     resolve = starling_memory_resolver(StarlingLayout(tmp_path), {"backend": "starling"})
@@ -304,7 +304,7 @@ def test_an_unreadable_seed_directory_is_not_taken_for_an_empty_start(tmp_path):
 def test_a_changed_embedding_vector_changes_the_seed_digest(tmp_path):
     """Review Focus:嵌入端点换了向量 → 起点摘要变 → config_hash 变 → 续训升 T3(T3 本身由 计划 A Task 25 的
     test_the_resolved_memory_is_part_of_the_config_hash 钉住;这里钉住前半段:同模型名、不同向量,摘要不同)。"""
-    from actio.memory_starling import StarlingDeploymentStore
+    from simple_actio.memory_starling import StarlingDeploymentStore
     from starling_fakes import FakeOpenAI, offline_api_key
     out = []
     for salt in ("", "v2"):

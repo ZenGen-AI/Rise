@@ -2369,4 +2369,4 @@ git commit -m "feat: read-only observability commands (trace/cost)"
 
 ## Execution Handoff
 
-计划已保存至 `docs/superpowers/plans/2026-09-26-controlplane-factory-simulator.md`。这是 Rise 计划序列的第 1 个（ControlPlane + 工厂模拟器骨架），后续计划：SocialSimulator → MindTrainer → RecipeStore+TrainScheduler → MindAgent+Actio → TrainPlanner → InteractTrain 闭环。
+计划已保存至 `docs/superpowers/plans/2026-09-26-controlplane-factory-simulator.md`。这是 Rise 计划序列的第 1 个（ControlPlane + 工厂模拟器骨架），后续计划：SocialSimulator → MindTrainer → RecipeStore+TrainScheduler → MindAgent+SimpleActio → TrainPlanner → InteractTrain 闭环。

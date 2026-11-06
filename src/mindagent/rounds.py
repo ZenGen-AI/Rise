@@ -41,10 +41,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TypeVar
 
-from actio.errors import ActioDataError
-from actio.instance import instantiate
-from actio.memory_port import PERSONA_ID_PATTERN, DeploymentMemoryStore, MemoryFailureError
-from actio.skills import Skill
+from simple_actio.errors import SimpleActioDataError
+from simple_actio.instance import instantiate
+from simple_actio.memory_port import PERSONA_ID_PATTERN, DeploymentMemoryStore, MemoryFailureError
+from simple_actio.skills import Skill
 from controlplane.deferred import DeferredError
 from controlplane.envelope import BigRef, Envelope, InvalidBigRefError, OwnerRef
 from controlplane.gitstore import GitStore
@@ -420,7 +420,7 @@ def make_start_round_handler(
         except AgentRoundFailedError as exc:
             # 驱动器自己抛的覆盖失败:库与副本都保留,不再回滚
             record(exc.reason, exc.point, 0, roll_back=not isinstance(exc, RestoreFailedError))
-        except (MindAgentDataError, ActioDataError) as exc:
+        except (MindAgentDataError, SimpleActioDataError) as exc:
             record(f"{type(exc).__name__}: {exc}", "mindagent.rounds", 0)
 
     def _run(store: GitStore, env: Envelope, lib: LibraryState, run_id: str, model_id: str,

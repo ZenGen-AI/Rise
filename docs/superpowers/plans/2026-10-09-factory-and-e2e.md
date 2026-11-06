@@ -105,7 +105,7 @@
 20. **Ruling: `repo_commit` 取 `--repo-commit` 的值;不传时取组合根所在代码仓库根(`src/factory/wire.py` 往上两级)的 `git rev-parse HEAD`;不是 git 仓库、没有 `git`、或命令失败时为 `None`,原样交给 `make_nominate_handler`,由计划 5 在 `repro.errors` 里如实记一条错误(不是警告,设计 R20)。装配时取一次,整个进程用同一个值。V1 的配方候选因此恒有两条 `repro` 缺口(`eval_anchor.taxonomy_version`、`eval_anchor.item_pool_version`,设计 §14 第 9 条);取不到 HEAD 时才多出第三条。** —— 原因:设计 §6.1 要求配方锚定代码版本;控制面仓库(`GitStore` 指向的那个)不是代码仓库,不能用它的 HEAD;取不到时编造一个值比留空更糟。 —— 判错的代价:守护进程跨提交长跑时,记的是启动那一刻的提交,不是产出那一轮时的提交(「已知限制」第 9 条);工作区有未提交改动时也照样记 HEAD。
 21. **Ruling: `--confirm-directives/--no-confirm-directives` 由 `factory.handlers.scheduler_config_loader(confirm_directives)` 实现:每次调用照常读 `scheduler.yaml`,开关不为 `None` 时只在返回的 `SchedulerConfig` 上 `dataclasses.replace(confirm_directives=...)`,不写回文件;规划与提名两个处理器共用这个 loader。`scheduler.yaml` 的其余八个键组合根不碰。** —— 原因:计划 5 的处理器每次调用都经 `config_loader` 读配置(计划 5 Ruling 20),覆盖放在 loader 里就不必改计划 5;不写回文件,人看到的配置就是实际的默认行为。 —— 判错的代价:`--no-confirm-directives` 跑出来的指令,事后看 `scheduler.yaml` 看不出它为什么没停在 `awaiting_confirmation`;要看启动命令。
 22. **Ruling: 智能体轮次的配置是组合根自己的配置信封 `control-plane/config/agent.yaml`:必填 `scenario_ids`、`bindings`(`RoleBinding.to_dict()` 的列表)、`opponent_lines`;可选 `AgentConfig` 的其余八个字段,缺省用 `AgentConfig` 的默认值;未知键与类型错一律 `FactoryConfigError`。`install-defaults` 写入的默认值:三个 `deployment_simulation` 情境 `factory-deploy-s1..s3`、两个人格、`bindings = [user: frozen_reference(model_ref=zengen-v1), agent: self_play]`、对手台词 `["我真的很生气!!", "好吧,你说说看", "那就这样吧"]`、`max_turns: 4`、`min_support: 3`、`min_ratio: 0.5`。** —— 原因:计划 7 的 `AgentConfig` 明说"不落进 git 树",交给组合根决定来源;放成配置信封才能不改代码地换情境;默认值照计划 7 任务 88 的端到端(对手首句含情绪词,空库也有可分析的信号)。 —— 判错的代价:`AgentConfig` 加了字段时,`agent.yaml` 会把新字段当成未知键拒绝,要同步改 `factory.agent`(它用 `dataclasses.fields(AgentConfig)` 求可选键,所以只要新字段有默认值就自动接受);对手的 `model_ref` 只是标签。
-23. **Ruling: V1 的 `backend_factory` 一律是罐头 `CannedGuidedBackend`(把 Actio 渲染的指导语拼成话语,与计划 7 任务 88 的 `Echo` 同一行为),默认入口与开发入口相同;`personas_loader` 用 `simulator.store_adapter.read_persona` 从树里读;`client_factory` 来自进程内 loopback 实时服务端 `AgentRuntime`(对手位用 `ScriptedBackend` 说 `opponent_lines`,情境经 `scenario_resolver` 从树里读),第一次要客户端时才起,`Assembly.close()` 时关通道并 `stop(0).wait()`;每个客户端的 stub 外包一层 `DeadlineStub`,每条 `Interact` 流带 15 秒 deadline(计划 7 已知限制 4,与它测试夹具里的 `_DeadlineStub` 同一写法;生产用的 `EnvironmentServiceClient` 自己没有 deadline,改它属于 simulator);`backends.yaml` 有 `agent` 项才构造桥接,没有就传 `None`(规则模板生成器)。** —— 原因:V1 没有加载 checkpoint 的推理后端(设计 §15);部署会话必须有实时服务端,组合根是唯一能起它的地方;懒启动让没有部署动作的 tick 不开端口。 —— 判错的代价:部署 episode 只证明技能路由与轨迹,不代表模型能力;服务端只绑 `127.0.0.1`,不能跨机器部署;一条部署会话超过 15 秒就以 `DEADLINE_EXCEEDED` 结束(计划 7 判为不可重跑的会话失败,轮次 `failed`),真实模型后端变慢时要调 `interact_deadline_s`(目前不在 `agent.yaml` 里)。
+23. **Ruling: V1 的 `backend_factory` 一律是罐头 `CannedGuidedBackend`(把 SimpleActio 渲染的指导语拼成话语,与计划 7 任务 88 的 `Echo` 同一行为),默认入口与开发入口相同;`personas_loader` 用 `simulator.store_adapter.read_persona` 从树里读;`client_factory` 来自进程内 loopback 实时服务端 `AgentRuntime`(对手位用 `ScriptedBackend` 说 `opponent_lines`,情境经 `scenario_resolver` 从树里读),第一次要客户端时才起,`Assembly.close()` 时关通道并 `stop(0).wait()`;每个客户端的 stub 外包一层 `DeadlineStub`,每条 `Interact` 流带 15 秒 deadline(计划 7 已知限制 4,与它测试夹具里的 `_DeadlineStub` 同一写法;生产用的 `EnvironmentServiceClient` 自己没有 deadline,改它属于 simulator);`backends.yaml` 有 `agent` 项才构造桥接,没有就传 `None`(规则模板生成器)。** —— 原因:V1 没有加载 checkpoint 的推理后端(设计 §15);部署会话必须有实时服务端,组合根是唯一能起它的地方;懒启动让没有部署动作的 tick 不开端口。 —— 判错的代价:部署 episode 只证明技能路由与轨迹,不代表模型能力;服务端只绑 `127.0.0.1`,不能跨机器部署;一条部署会话超过 15 秒就以 `DEADLINE_EXCEEDED` 结束(计划 7 判为不可重跑的会话失败,轮次 `failed`),真实模型后端变慢时要调 `interact_deadline_s`(目前不在 `agent.yaml` 里)。
 24. **Ruling: 端到端测试用人工登记的低分基线 `run-000`(全错的 mock 报告 + `zengen-v1`,`links = [cand-run-000, run-000]`),第一轮训练的候选晋级为 `zengen-v2`。** —— 原因:mock 诊断给每个候选同样的分(Ruling 5),没有更低的基线,`compute_gain` 恒为 0,提名永远跳过,闭环转不到配方这一步;基线经计划 8 的真实评估器写出,形状与真实报告相同。 —— 判错的代价:测试里的模型版本号比 run 号大 1,读断言时要注意;真实部署第一次闭环也需要人登记一个基线。
 25. **Ruling: 整圈端到端用计划 4 的 `HeuristicBackend` 做规划(`--planner-backend heuristic`),不用罐头桥接;设计 §13 已同步为允许这样做。桥接的正向路径由任务 102 的假可执行体测试覆盖(`CliBridge` 取回文本、凭证打码),规划经桥接的正向端到端没有,只测了失败路径(R18,任务 108 的 `test_a_bridge_failure_fails_the_decision_and_stops_the_loop`)。** —— 原因:`HeuristicBackend` 是计划 4 的真实确定性后端,命令行一个开关就能选到,端到端里每一步都是真实代码;罐头桥接要另造一个吐固定 JSON 的假可执行体,它证明的只是"桥接能把字符串带回来",这一点任务 102 已经证明。 —— 判错的代价:规划提示经真实桥接往返时才出现的格式问题,例如模型输出带 Markdown 围栏、前后多出说明文字、JSON 被截断,要到接上真实后端才暴露;计划 4 的解析与重试逻辑在这条路径上只有计划 4 自己的单测覆盖。
 
@@ -119,14 +119,14 @@
 - **`src/` 下每个源文件以 `from __future__ import annotations` 开头**(模块 docstring 之后的第一条语句也算);任务 100 的 `tests/test_factory_boundaries.py` 对 `src/factory/` 强制检查。
 - **依赖方向**:`factory` 可以导入任何包;**任何包都不导入 `factory`**(任务 100 有测试)。`controlplane` 仍不导入任何新包。
 - **不引入新第三方依赖。** `pyproject.toml` 的 `dependencies` 不动。
-- **新顶层包 `factory` 加进 `pyproject.toml` 的 wheel 包列表,用追加式脚本追加在列表末尾**(Ruling 18;`tests/test_mt_packaging.py` 强制检查)。前面的计划已追加过 `src/inference_bridge`、`src/actio`、`src/recipestore`、`src/trainplanner`、`src/trainscheduler`、`src/mindagent`,顺序取决于执行顺序,**以执行时的实际列表为准**,只在末尾加 `"src/factory"`,其余不动。
+- **新顶层包 `factory` 加进 `pyproject.toml` 的 wheel 包列表,用追加式脚本追加在列表末尾**(Ruling 18;`tests/test_mt_packaging.py` 强制检查)。前面的计划已追加过 `src/inference_bridge`、`src/simple_actio`、`src/recipestore`、`src/trainplanner`、`src/trainscheduler`、`src/mindagent`,顺序取决于执行顺序,**以执行时的实际列表为准**,只在末尾加 `"src/factory"`,其余不动。
 - **凭证绝不进 git 树**;凭证值不进标准输出、标准错误、异常信息、日志(任务 102 有测试)。
 - **读写产物走 `GitStore` + `Envelope`;配置走 `read_config` / `write_config`。** 唯一的直接文件读取是 `logs` 读 `file://` 引用指向的日志文件(那不是产物)。
 - **`mindtrainer.wire` 与 `scripts/run_controlplane.py` 保持原样,不删、不改**(任务 109 用 `git diff` 证明)。
 - **不传 `--enable` 时与 `scripts/run_controlplane.py` 逐字节相同**(任务 104 有测试)。幂等比较只看 `control-plane/` 下的产物与提交说明;仓库排他锁的锁文件在控制面仓库的 `.git/` 下(计划 8 任务 98),不在被比较的范围里。
 - **仓库排他锁**:`run` 与 `reconcile` 的写入路径取锁(计划 8 任务 98);锁被占用时退出码 2、树里不写任何东西;只读子命令 `trace`、`cost`、`logs` 不取锁(任务 104 有测试)。
 - **默认关闭 `--allow-mock-evidence`;开发入口显式打开**(Ruling 15)。
-- **只改本计划文件表里的文件。** 不碰 `src/controlplane`、`src/diagnostic`、`src/mindtrainer`、`src/inference_bridge`、`src/trainplanner`、`src/recipestore`、`src/trainscheduler`、`src/actio`、`src/mindagent`、`src/simulator`、`schemas/`、`cli/`。跨计划核对发现的冲突只报告,不在本计划里修(任务 109)。
+- **只改本计划文件表里的文件。** 不碰 `src/controlplane`、`src/diagnostic`、`src/mindtrainer`、`src/inference_bridge`、`src/trainplanner`、`src/recipestore`、`src/trainscheduler`、`src/simple_actio`、`src/mindagent`、`src/simulator`、`schemas/`、`cli/`。跨计划核对发现的冲突只报告,不在本计划里修(任务 109)。
 - **`git add` 逐个文件**,不用 `git add .` / `-A`;**不要碰** `cli/package.json`、`cli/package-lock.json`。
 - **提交信息不加 `Co-Authored-By` 行**(用户明确要求)。下文每个提交命令都照此写。
 - **测试命令**一律是 `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error`(下文称"全量命令";跑单个文件时在末尾加路径),不得出现警告。
@@ -424,7 +424,7 @@ PY
 grep -c '"src/factory"' pyproject.toml
 ```
 
-Expected:打印的 `packages` 行保留执行前的全部项、顺序不变,末尾是 `"src/factory"`;最后一行 `1`。九份计划都落地时(撰写时在集成拷贝里实测的顺序)为 `packages = ["src/controlplane", "src/simulator", "src/diagnostic", "src/mindtrainer", "src/inference_bridge", "src/recipestore", "src/trainplanner", "src/trainscheduler", "src/actio", "src/mindagent", "src/factory"]`;前面几项的顺序随执行顺序而变。重复运行只打印 `already listed` 与同一行,不改文件。
+Expected:打印的 `packages` 行保留执行前的全部项、顺序不变,末尾是 `"src/factory"`;最后一行 `1`。九份计划都落地时(撰写时在集成拷贝里实测的顺序)为 `packages = ["src/controlplane", "src/simulator", "src/diagnostic", "src/mindtrainer", "src/inference_bridge", "src/recipestore", "src/trainplanner", "src/trainscheduler", "src/simple_actio", "src/mindagent", "src/factory"]`;前面几项的顺序随执行顺序而变。重复运行只打印 `already listed` 与同一行,不改文件。
 
 - [ ] **Step 5: 跑测试,确认通过**
 
@@ -2613,7 +2613,7 @@ _OPTIONAL = tuple(f.name for f in fields(AgentConfig) if f.name not in ("scenari
 
 
 class CannedGuidedBackend:
-    """V1 唯一的智能体模型后端:不加载 checkpoint,把 Actio 渲染的指导语拼成话语。
+    """V1 唯一的智能体模型后端:不加载 checkpoint,把 SimpleActio 渲染的指导语拼成话语。
     技能是否生效在落盘的 episode 里直接看得见;它不代表任何模型能力。"""
 
     def respond_guided(self, persona, scenario, history, speaker_slot, guidance):
@@ -3436,7 +3436,7 @@ git commit -m "test: closed-loop and MindAgent end to end through the factory"
 7. **R18 的落点**:计划 5 与计划 7 都把任何 `BridgeError` 升级为 T3 并写失败记录;任务 108 在真实子进程桥接上验证了计划 5 一侧(计划 7 一侧由它自己的任务 87 覆盖,本计划的 MindAgent 端到端不走桥接)。
 8. **最大 run 的数值序。** 设计 §3.2 把"最大 run"定为 `run-<数字>` 的数值序,计划 8 用 `_RUN_ID = re.compile(r"^run-([0-9]+)$")` 与 `_latest_numbered_run` 实现,它自己的测试也按数值序写。`tests/test_factory_run_order.py` 在本计划一侧直接对计划 8 的纯函数 `reconcile(TreeState)` 再断言三件事:树里同时有 `run-9` 与 `run-011` 时 `plan_next_round` 选 `run-011`(两种列表顺序都试);`scratch` 目录不挡住 `run-002`;没有任何 `run-<数字>` 时不触发。按字符串序取最大的旧实现下三条都会失败(撰写时在计划 8 修订前的重放上实测过:分别选了 `run-9`、什么都不选、选了 `scratch`),所以它们能区分两种口径。计划 5 一侧的口径见第 4 条。
 9. **配方类型集合。** 计划 3 的 `recipestore.validate.RECIPE_TYPES` 与计划 4 的 `trainplanner.context.RECIPE_TYPES` 是两份字面量,都是 `("batch", "interact", "agent_rsi")`;两个包互不导入(计划 4 的已知限制第 9 条),本计划是唯一同时导入两边的地方。`test_recipe_types_agree_between_recipestore_and_trainplanner` 断言两份集合相等且各自无重复,失败信息写明"两边都要改";计划 3 的字面量旁有反向注释指向这条测试。变异检查(撰写时做过):把计划 4 一侧删掉 `agent_rsi`,这条失败,信息里列出两边的集合。
-10. **controlplane 不导入任何新包。** 设计 §11 的依赖方向要求 `controlplane` 不导入 `inference_bridge`、`recipestore`、`trainplanner`、`trainscheduler`、`actio`、`mindagent`、`factory`;各计划的边界测试只检查自己包往外的导入(计划 3 与 `actio` 一侧都没有反向检查)。`test_controlplane_imports_none_of_the_new_packages` 用 `ast` 解析 `src/controlplane` 下全部 `.py`,收集绝对导入的顶层包名,失败信息写出"哪个文件第几行导入了哪个包"。变异检查(撰写时做过):往 `controlplane/ledger.py` 末尾加一行 `import recipestore`,这条失败,信息为 `controlplane/ledger.py:138 imports recipestore`。
+10. **controlplane 不导入任何新包。** 设计 §11 的依赖方向要求 `controlplane` 不导入 `inference_bridge`、`recipestore`、`trainplanner`、`trainscheduler`、`simple_actio`、`mindagent`、`factory`;各计划的边界测试只检查自己包往外的导入(计划 3 与 `simple_actio` 一侧都没有反向检查)。`test_controlplane_imports_none_of_the_new_packages` 用 `ast` 解析 `src/controlplane` 下全部 `.py`,收集绝对导入的顶层包名,失败信息写出"哪个文件第几行导入了哪个包"。变异检查(撰写时做过):往 `controlplane/ledger.py` 末尾加一行 `import recipestore`,这条失败,信息为 `controlplane/ledger.py:138 imports recipestore`。
 11. **run 编号的两份解析。** 计划 5 的 `trainscheduler.run_ids.run_number` 与计划 8 的 `controlplane.reconcile._RUN_ID` 各写了一份 run 编号正则;早先一边用 `\d`、一边用 `[0-9]`,遇到 Unicode 数字会分叉(计划 5 分配出来的 id 计划 8 不认,或反过来),现在两边与设计 §3.2 统一成 `^run-([0-9]+)$`。`test_run_number_parsers_agree` 对同一组名字比较两边:`run-1`、`run-001`、`run-999`、`run-1000`、`run-٥٠`(阿拉伯-印度数字 U+0665 U+0660)、`run-1b`、`run-`、`RUN-001`、`run-+1`、`scratch`;断言计划 5 解析出编号当且仅当计划 8 的正则匹配,且两边编号相等,失败信息写明"两边都要改"。其中 `run-٥٠` 正好区分 `[0-9]` 与 `\d`(`\d` 会匹配它),任何一边退回 `\d` 这条就失败。变异检查(撰写时做过):把计划 8 的 `_RUN_ID` 临时改回 `^run-(\d+)$`,只有 `test_run_number_parsers_agree[run-٥٠]` 失败,其余 9 个参数通过;改回后 10 个全过。
 12. **分层规则。** 设计 §11 规定 `controlplane` 不导入 `diagnostic` 与 `mindtrainer`、`mindtrainer` 不导入 `diagnostic`、`diagnostic` 不导入 `mindtrainer`;原先只有计划 2、计划 8 里的一次性 grep(计划 8 另有一条 `diagnostic` 不导入 `mindtrainer` 的测试,与这里重复无妨)。`test_layer_rules_hold` 用 `ast` 扫 `src/` 下这三个包的真实源码(只看绝对导入),失败信息写出"文件:行号 imports 包"。撰写时在按计划 1–8 重放出的集成拷贝上确认现状成立;变异检查(撰写时做过):分别往 `controlplane/ledger.py`、`controlplane/daemon.py`、`mindtrainer/dispatch.py`、`diagnostic/evaluator.py` 末尾加一行越界导入,四次都失败,信息依次为 `controlplane/ledger.py:138 imports diagnostic`、`controlplane/daemon.py:360 imports mindtrainer`、`mindtrainer/dispatch.py:245 imports diagnostic`、`diagnostic/evaluator.py:112 imports mindtrainer`。
 13. **仓库排他锁。** 计划 8 任务 98 的 `controlplane.lock` 只用标准库,锁文件在控制面仓库的 `.git/rise.lock`:它不在 `control-plane/` 下,也不被 git 追踪,所以任务 104 的"逐字节相同"比较不受影响;第 10 条(`controlplane` 不导入新包)与第 12 条(分层规则)的 `ast` 检查对它同样成立。`factory` 自己不取 `run` 的锁(Ruling 27):`run` 的锁由 `run_daemon` 取,`reconcile_one_tick` 在装配之前取。两条用例在任务 104,不在 `tests/test_factory_cross_plan.py`,所以任务 109 的用例数不变。
@@ -3569,7 +3569,7 @@ def test_recipe_types_agree_between_recipestore_and_trainplanner():
     assert len(set(trainplanner_types)) == len(trainplanner_types)
 
 
-NEW_PACKAGES = ("inference_bridge", "recipestore", "trainplanner", "trainscheduler", "actio", "mindagent", "factory")
+NEW_PACKAGES = ("inference_bridge", "recipestore", "trainplanner", "trainscheduler", "simple_actio", "mindagent", "factory")
 
 
 def test_controlplane_imports_none_of_the_new_packages():
@@ -3754,7 +3754,7 @@ Expected:只列出下面 28 个文件(九份计划按序重放、前八份提交
 - [ ] **Step 7: 守住不该动的文件**
 
 ```bash
-git diff --stat "$BASE"..HEAD -- src/mindtrainer/wire.py scripts/run_controlplane.py src/controlplane src/diagnostic src/mindtrainer src/inference_bridge src/trainplanner src/recipestore src/trainscheduler src/actio src/mindagent src/simulator schemas cli
+git diff --stat "$BASE"..HEAD -- src/mindtrainer/wire.py scripts/run_controlplane.py src/controlplane src/diagnostic src/mindtrainer src/inference_bridge src/trainplanner src/recipestore src/trainscheduler src/simple_actio src/mindagent src/simulator schemas cli
 git diff "$BASE"..HEAD -- pyproject.toml | grep '^[-+]packages'
 grep -rn "^from factory\|^import factory" src --include=*.py | grep -v "^src/factory/"
 ```

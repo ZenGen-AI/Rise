@@ -28,7 +28,7 @@
 | TrainScheduler | 决策执行器:装配上下文、校验决策、构造训练指令、提名配方 | 控制层 | [已落地],含策略经验(默认关) |
 | TrainPlanner | 决策学习者:经可插拔后端给出下一轮训练决策 | 控制层 | [已落地],默认后端经桥接调用命令行模型 |
 
-共享基础设施有五个。**Actio** 是带技能库与显式记忆的智能体框架,每次响应附带激活轨迹;记忆由内嵌的 **Starling** 提供,可选 extra `memory`,一个模拟世界一个树外 SQLite 库,人格是其中的主体(部署一个情境一个世界,训练一条 rollout 一个世界)[已落地]。**外部推理桥接**用命令行调用外部强模型。**远端计算层** `compute` 经 SSH 在远端 GPU 主机上跑作业 [已落地]。**ROLL** 是分布式训练引擎,**vLLM** 是推理引擎。V1 经远端计算层接入 ROLL 的 LoRA SFT [已落地](由 `--executor roll` 装配,已在真实主机上从指令跑到候选一次)与 vLLM 推理服务 [已落地](命令拼装、SSH 隧道、服务生命周期;真机端到端待补)。已落地部分仍由确定性 mock 顶替。真实 GRPO 加 OPD 训练与真实 judge [推迟]。
+共享基础设施有五个。**SimpleActio** 是带技能库与显式记忆的智能体框架,每次响应附带激活轨迹;它是 Actio 的简化版,功能完备的正式版 Actio 完成后再接入 [计划中]。记忆由内嵌的 **Starling** 提供,可选 extra `memory`,一个模拟世界一个树外 SQLite 库,人格是其中的主体(部署一个情境一个世界,训练一条 rollout 一个世界)[已落地]。**外部推理桥接**用命令行调用外部强模型。**远端计算层** `compute` 经 SSH 在远端 GPU 主机上跑作业 [已落地]。**ROLL** 是分布式训练引擎,**vLLM** 是推理引擎。V1 经远端计算层接入 ROLL 的 LoRA SFT [已落地](由 `--executor roll` 装配,已在真实主机上从指令跑到候选一次)与 vLLM 推理服务 [已落地](命令拼装、SSH 隧道、服务生命周期;真机端到端待补)。已落地部分仍由确定性 mock 顶替。真实 GRPO 加 OPD 训练与真实 judge [推迟]。
 
 **状态标记。** **[已落地]** 表示代码在主干上且有测试。**[计划中]** 表示设计与实施计划已定,代码还没写。**[推迟]** 表示明确不在 V1 范围内。图只画目标系统,不标进展,进展只看正文的状态标记。
 
@@ -55,7 +55,7 @@
 | Scenario、Persona、RoleAssignment | 社会情境、人格模板,以及把角色位绑定到具体人格与模型后端的分配 |
 | Recipe(配方) | 验证有效的完整训练方案,分 batch、interact、agent_rsi 三类 |
 | DiagnosticReport | 诊断评测产出的报告:维度、分数、置信区间、错误类型、退化标记 |
-| Activation trace(激活轨迹) | Actio 每次响应附带的记录:命中的技能候选、选中的技能、命中的记忆 |
+| Activation trace(激活轨迹) | SimpleActio 每次响应附带的记录:命中的技能候选、选中的技能、命中的记忆 |
 | Evidence grade(证据等级) | 诊断报告的可信等级 `stub`、`mock`、`real`,决定它能否驱动规划与提名;缺标记一律判 `stub`,失败关闭 |
 <!-- shared:end context-block -->
 
@@ -106,7 +106,7 @@ TrainScheduler 的规划处理器调用它落账与重算,再调 `assemble_conte
 | 配方战绩(`track_record.yaml`) | 已入库配方的每次复用 | 未入库的新配置、被拒候选、扰动值 |
 | 诊断报告 | 单个候选的分数与退化 | 按策略签名聚合后的可比证据 |
 | 失败记录 | 失败点、类别、重试次数 | 不覆盖:失败轮没有终态候选,落账不会为它触发 |
-| Actio 的推理经验 | 回合内的三级回退指令 | 与部署态智能体的行为无关,互不共享 |
+| SimpleActio 的推理经验 | 回合内的三级回退指令 | 与部署态智能体的行为无关,互不共享 |
 
 覆盖面由 `plan_next_round` 的触发条件决定:它只为编号最大的 run 产生,且该 run 的规划决策一旦是终态,处理器直接返回。因此落账只发生在"最大 run 第一次进入规划"的时刻。历史 run、功能关闭期间的 run、决策已终态的 run 都不会补账。补账需要一个独立的扫描动作,V1 不做。
 
@@ -165,7 +165,7 @@ TrainScheduler 的规划处理器调用它落账与重算,再调 `assemble_conte
 | 规则 | 内容 |
 |---|---|
 | 可以导入 | `controlplane`(`envelope`、`evidence`、`gitstore`、`paths`)、`recipes_port`(只为增益)、标准库 |
-| 不得导入 | `trainplanner`、RecipeStore 的其他模块、`mindagent`、`actio`、`diagnostic`、`simulator`、`factory` |
+| 不得导入 | `trainplanner`、RecipeStore 的其他模块、`mindagent`、`simple_actio`、`diagnostic`、`simulator`、`factory` |
 | 反向 | `controlplane` 不导入本模块;`trainplanner` 不导入本模块 |
 
 对 RecipeStore 的导入收口到 `recipes_port`,与 TrainScheduler 的既有做法一致:改一处只改一个文件。增益必须复用 `compute_gain`,不另写一份,否则基线与证据规则会漂移。

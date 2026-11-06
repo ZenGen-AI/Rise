@@ -64,7 +64,7 @@
 
 ### 3.3 事件 key
 
-一个世界里所有主体共用一张事件表，主键是 `key`。今天的 key 是 `<逻辑 episode id>#<turn_index>`。实例只写别人的发言（`actio.instance` 的 `_remember_new`），所以同一轮会被除说话人以外的每个主体各写一次。
+一个世界里所有主体共用一张事件表，主键是 `key`。今天的 key 是 `<逻辑 episode id>#<turn_index>`。实例只写别人的发言（`simple_actio.instance` 的 `_remember_new`），所以同一轮会被除说话人以外的每个主体各写一次。
 
 - 两个角色位时：第 3 轮是 A 说的，只有 B 写它，key 不会撞。
 - 三个及以上角色位时：A 说的第 3 轮，B 和 C 都会写，key 就撞了。替身的 `_Ledger.begin` 把同 key、同文本的事件当成幂等重写，第二个主体的那条记忆根本写不进去。Starling 的事件主键是 `(tenant_id, key)`，同样会撞。

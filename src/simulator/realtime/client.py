@@ -184,7 +184,7 @@ class EnvironmentServiceClient:
         结束则返回结束前收到的轮次，此后 closed 为 True。会话已结束时再调用
         抛 RuntimeError。不假定角色数量或客户端位置。
 
-        activation_trace:客户端角色由完整 Actio 实例扮演时的激活轨迹,服务端写进
+        activation_trace:客户端角色由完整 SimpleActio 实例扮演时的激活轨迹,服务端写进
         该轮的 TurnRecord 并在回显里带回。None 表示不带(裸模型);{} 是"轨迹为空",
         两者在协议上可区分。经 protobuf Struct 传输,数字一律变成浮点数。"""
         if self._closed:

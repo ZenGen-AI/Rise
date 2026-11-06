@@ -5,8 +5,8 @@
 import grpc
 import pytest
 
-from actio.memory import FileTupleStore
-from actio.trace import validate_trace
+from simple_actio.memory import FileTupleStore
+from simple_actio.trace import validate_trace
 from controlplane.envelope import BigRef, Envelope, OwnerRef
 from controlplane.gitstore import GitStore
 from controlplane.paths import agent_round_file, library_state_file, model_file, proposal_file, skill_file

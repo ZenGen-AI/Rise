@@ -113,7 +113,7 @@ def test_recipe_types_agree_between_recipestore_and_trainplanner():
     assert len(set(trainplanner_types)) == len(trainplanner_types)
 
 
-NEW_PACKAGES = ("inference_bridge", "recipestore", "trainplanner", "trainscheduler", "actio", "mindagent", "factory",
+NEW_PACKAGES = ("inference_bridge", "recipestore", "trainplanner", "trainscheduler", "simple_actio", "mindagent", "factory",
                 "compute")
 
 
@@ -166,9 +166,9 @@ def test_run_number_parsers_agree(name):
 # 设计 §11 的分层规则:{源包: 不得导入的包}
 LAYER_RULES = {
     "controlplane": ("diagnostic", "mindtrainer"),
-    "mindtrainer": ("diagnostic", "actio"),
+    "mindtrainer": ("diagnostic", "simple_actio"),
     "diagnostic": ("mindtrainer",),
-    "simulator": ("actio",),
+    "simulator": ("simple_actio",),
 }
 
 
@@ -185,7 +185,7 @@ def _top_level_imports(path):
 
 def test_layer_rules_hold():
     """设计 §11 的分层规则,在真实源码上常驻检查:controlplane 不导入 diagnostic 与 mindtrainer,
-    mindtrainer 不导入 diagnostic 与 actio,diagnostic 不导入 mindtrainer,simulator 不导入 actio。
+    mindtrainer 不导入 diagnostic 与 simple_actio,diagnostic 不导入 mindtrainer,simulator 不导入 simple_actio。
     各计划里原先只有一次性 grep。"""
     from pathlib import Path
 
@@ -201,14 +201,14 @@ def test_layer_rules_hold():
     assert not offenders, "layer rules (design §11) violated: " + "; ".join(offenders)
 
 
-def test_only_actio_memory_starling_imports_starling():
-    """设计二全局约束:全 src/ 只有 actio/memory_starling.py 导入 starling(factory 经它间接用)。"""
+def test_only_simple_actio_memory_starling_imports_starling():
+    """设计二全局约束:全 src/ 只有 simple_actio/memory_starling.py 导入 starling(factory 经它间接用)。"""
     from pathlib import Path
 
     src = Path(__file__).resolve().parents[1] / "src"
     offenders = [f"{p.relative_to(src)}:{n}" for p in sorted(src.rglob("*.py"))
                  for n, top in _top_level_imports(p)
-                 if top == "starling" and p.relative_to(src).as_posix() != "actio/memory_starling.py"]
+                 if top == "starling" and p.relative_to(src).as_posix() != "simple_actio/memory_starling.py"]
     assert offenders == []
 
 

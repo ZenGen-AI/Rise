@@ -20,8 +20,8 @@ from typing import TYPE_CHECKING
 
 import grpc
 
-from actio.memory import TupleMemory
-from actio.memory_port import PERSONA_ID_PATTERN, DeploymentMemoryStore
+from simple_actio.memory import TupleMemory
+from simple_actio.memory_port import PERSONA_ID_PATTERN, DeploymentMemoryStore
 from controlplane.gitstore import GitStore
 from controlplane.paths import CONTROL_PLANE_ROOT
 from factory.configio import describe, key_names, read_tree_config
@@ -49,7 +49,7 @@ _OPTIONAL = tuple(f.name for f in fields(AgentConfig) if f.name not in ("scenari
 
 
 class CannedGuidedBackend:
-    """V1 唯一的智能体模型后端:不加载 checkpoint,把 Actio 渲染的指导语拼成话语。
+    """V1 唯一的智能体模型后端:不加载 checkpoint,把 SimpleActio 渲染的指导语拼成话语。
     技能是否生效在落盘的 episode 里直接看得见;它不代表任何模型能力。"""
 
     def respond_guided(self, persona, scenario, history, speaker_slot, guidance):
@@ -135,7 +135,7 @@ class DeadlineStub:
 
 class AgentRuntime:
     """进程内的 loopback 实时服务端,第一次 client_factory() 时才启动;close() 关通道、停服务端并等它停完。
-    对手位的底座后端按各自绑定的驱动分派(见 _backends),再一律包成带记忆的 Actio 实例(每个位一个各自的记忆端口,
+    对手位的底座后端按各自绑定的驱动分派(见 _backends),再一律包成带记忆的 SimpleActio 实例(每个位一个各自的记忆端口,
     外套记忆异常的转换后端):传了 training_worlds 且会话登记给了训练 run 时,是这条 rollout 的世界(客户端按
     episode id 建好的,训练位也在里面)里该位人格的端口,会话终态关上,世界由客户端删;传了 deployment_store 且会话的
     episode id 由部署驱动器登记过轮次时,是部署世界(世界 = 情境 id)里该位人格的端口,随会话资源关闭;其余是空
@@ -297,7 +297,7 @@ class AgentRuntime:
         其余会话(没传工厂,或没登记):显式 scripted 同上,别的一律是原来的 ScriptedBackend(不循环,全局台词),
         不碰工厂、不调 driver_for。
 
-        上面得到的只是底座。每个对手位的底座都再包成带记忆的 Actio 实例(memory_role_backend):每个位一个各自的
+        上面得到的只是底座。每个对手位的底座都再包成带记忆的 SimpleActio 实例(memory_role_backend):每个位一个各自的
         记忆端口,holder 是该位绑定的人格 id,情境对话方取自绑定表(槽位 -> 角色卡 id)。对话台词不变,每轮多一份
         v2 轨迹。记忆有三种:
         - 会话登记给了训练 run 且传了 training_worlds:training_worlds.join_rollout(info.episode_id, 该位人格),

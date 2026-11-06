@@ -33,7 +33,7 @@ def build() -> Canvas:
         c.edge(rd, p, "bottom", "top", a_f=(p.cx - rd.x) / rd.w)
         c.badge(p.x, p.y, i, kind="compute")
 
-    c.note(40, 486, 700, "可以导入:controlplane、actio、inference_bridge、simulator(数据模型、产物读写、实时客户端)\n"
+    c.note(40, 486, 700, "可以导入:controlplane、simple_actio、inference_bridge、simulator(数据模型、产物读写、实时客户端)\n"
                          "不得导入:mindtrainer、diagnostic、factory;controlplane 也不导入 mindagent", kind="neutral")
     c.legend(40, 580, [("compute", "计算层模块", False)])
     return c

@@ -4,11 +4,11 @@
 
 **Goal:** 把计划 A 里只用替身跑通的记忆换成 Starling:先在 Starling 仓库补齐本仓库需要的公开接口并经 PR 合入,再在本仓库接上适配器、树外记忆配置与训练路副本,最后把设计文档的状态与措辞收尾。
 
-**Architecture:** Starling 一侧按它自己的约定把状态机与算法写进 C++、经 pybind 暴露,门面只做转发(三段写入的事件表、逻辑摘要、备份、只嵌入不维护、召回放宽到 volatile 与降级即抛)。本仓库一侧,`actio/memory_starling.py` 是唯一导入 `starling` 的模块,`StarlingMemory` 与 `StarlingDeploymentStore` 过计划 A 的同一套契约测试;`factory/memory_config.py` 读树外配置并在装配期拒绝不合法的环境;未设 `RISE_MEMORY_CONFIG` 时一切照计划 A 的替身跑。
+**Architecture:** Starling 一侧按它自己的约定把状态机与算法写进 C++、经 pybind 暴露,门面只做转发(三段写入的事件表、逻辑摘要、备份、只嵌入不维护、召回放宽到 volatile 与降级即抛)。本仓库一侧,`simple_actio/memory_starling.py` 是唯一导入 `starling` 的模块,`StarlingMemory` 与 `StarlingDeploymentStore` 过计划 A 的同一套契约测试;`factory/memory_config.py` 读树外配置并在装配期拒绝不合法的环境;未设 `RISE_MEMORY_CONFIG` 时一切照计划 A 的替身跑。
 
 **Tech Stack:** Python 3.11+、pytest;Starling 侧另有 C++17、CMake ≥3.27、Ninja、pybind11、GoogleTest、SQLite ≥3.46。CMake 与 Ninja 是 pip 轮子(Starling 的 `requirements-build.txt`),不装系统包;系统只需要 C++ 编译器(本机 Apple Clang)。本仓库 `uv` 装 `memory` extra 时由 scikit-build-core 在构建隔离里自取 cmake 与 ninja。
 
-**Spec:** `docs/superpowers/specs/2026-10-25-actio-starling-memory-design.md`(已并入 `docs/design/` 的 00、20、30、40、50、90 六篇)。本计划是施工顺序的第 6 到 8 步,前提是 `docs/superpowers/plans/2026-10-27-agent-memory-standin.md`(第 1 到 5 步)已合入。正文里的 `R1`、`R28` 之类编号指写计划时的裁定台账 `docs/superpowers/plans/2026-10-27-agent-memory-rulings.md`。
+**Spec:** `docs/superpowers/specs/2026-10-25-simple-actio-starling-memory-design.md`(已并入 `docs/design/` 的 00、20、30、40、50、90 六篇)。本计划是施工顺序的第 6 到 8 步,前提是 `docs/superpowers/plans/2026-10-27-agent-memory-standin.md`(第 1 到 5 步)已合入。正文里的 `R1`、`R28` 之类编号指写计划时的裁定台账 `docs/superpowers/plans/2026-10-27-agent-memory-rulings.md`。
 
 ## Global Constraints
 
@@ -16,7 +16,7 @@
 - 本仓库测试命令:`PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest <path> -q -p no:cacheprovider`;需要 Starling 的用例加 `--extra memory`。
 - Starling 仓库(`/Users/jaredguo-mini/develop/memory/starling`)的构建与测试:首次 `python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt`;动了 C++、绑定或迁移后先 `.venv/bin/python scripts/configure_build.py --build --test`,再 `.venv/bin/python scripts/configure_build.py --python-editable`;Python 测试 `PYTHONDONTWRITEBYTECODE=1 STARLING_RUN_LLM_E2E= .venv/bin/python -m pytest tests/python`;提交门是全量 ctest、`pytest tests/python` 全绿再跑 `python scripts/ci_static_scan.py`。
 - Starling 的状态机、算法、编排一律进 C++(它的 `CLAUDE.md`),Python 门面只转发。
-- 依赖方向:本仓库只有 `src/actio/memory_starling.py` 导入 `starling`;`simulator`、`mindtrainer`、`mindagent` 不导入 `starling`。
+- 依赖方向:本仓库只有 `src/simple_actio/memory_starling.py` 导入 `starling`;`simulator`、`mindtrainer`、`mindagent` 不导入 `starling`。
 - 本仓库只加可选 extra `memory = ["starling-memory @ git+https://github.com/ruijieguo/starling@<合并提交>"]`,合并提交在第 6 步 PR 合入后才有。
 - 凭证只从环境变量读(`OPENAI_API_KEY`),异常信息只报变量名或异常类名与 `failure_category`,不含端点地址与密钥。
 - 真端点用例不进 CI,只在设 `RISE_MEMORY_LIVE=1` 时手动跑。
@@ -1088,12 +1088,12 @@ Expected: `MERGED <40 位 SHA>`。把这个 SHA 原样交给第 7 步。Starling
 **Files:**
 - Modify: `pyproject.toml`(`[project.optional-dependencies]` 加 `memory`;`[tool.pytest.ini_options].markers` 加 `memory_live`)、`uv.lock`(`uv lock` 重新生成)
 - Create: `tests/starling_fakes.py`(本机回环的 OpenAI 兼容假端点,本步后续任务共用)
-- Modify: `tests/test_actio_instance.py`(`_ALLOWED` 之外,`starling` 只许出现在 `memory_starling.py`)
-- Modify: `tests/test_factory_cross_plan.py`(新增"全 `src/` 只有 `actio/memory_starling.py` 导入 `starling`")
+- Modify: `tests/test_simple_actio_instance.py`(`_ALLOWED` 之外,`starling` 只许出现在 `memory_starling.py`)
+- Modify: `tests/test_factory_cross_plan.py`(新增"全 `src/` 只有 `simple_actio/memory_starling.py` 导入 `starling`")
 - Test: `tests/test_starling_fakes.py`(新)
 
 **Interfaces:**
-- Consumes: Task 12 记下的 Starling 合并提交 SHA;Task 1 `starling.make_openai_embedder(*, model, base_url, dim, timeout_ms, max_retries=0)`;Starling 现有 `make_openai_llm(*, model, base_url, timeout_ms, max_retries, max_tokens)`(`python/starling/memory.py:48`);`actio.text.tokens`。
+- Consumes: Task 12 记下的 Starling 合并提交 SHA;Task 1 `starling.make_openai_embedder(*, model, base_url, dim, timeout_ms, max_retries=0)`;Starling 现有 `make_openai_llm(*, model, base_url, timeout_ms, max_retries, max_tokens)`(`python/starling/memory.py:48`);`simple_actio.text.tokens`。
 - Produces:
   - extra `memory = ["starling-memory @ git+https://github.com/ruijieguo/starling@<Task 12 的合并提交>"]`;pytest 标记 `memory_live`。
   - `tests/starling_fakes.py`:`class FakeOpenAI`(上下文管理器,`with FakeOpenAI(dim=256) as fake:`),属性 `base_url: str`(`http://127.0.0.1:<port>/v1`)、`dim: int`、`chat_calls: int`、`embedding_calls: int`,可在运行中改的开关 `fail_embeddings: bool = False`、`fail_keys: set[str]`(段落 key 在其中则 `/chat/completions` 回 500)、`chat_delay_s: float = 0.0`、`salt: str = ""`(改它就改向量);`shared_fake_openai() -> FakeOpenAI`(进程内唯一一个、懒启动、daemon 线程,给 `PORT_FACTORIES` 这种拿不到夹具的地方用);`fake_vector(text: str, *, dim: int, salt: str = "") -> list[float]`。
@@ -1155,18 +1155,18 @@ def test_a_failing_key_and_a_failing_embedder_surface_as_starling_failures(tmp_p
 
 ```python
 # tests/test_factory_cross_plan.py 追加
-def test_only_actio_memory_starling_imports_starling():
-    """设计二全局约束:全 src/ 只有 actio/memory_starling.py 导入 starling(factory 经它间接用)。"""
+def test_only_simple_actio_memory_starling_imports_starling():
+    """设计二全局约束:全 src/ 只有 simple_actio/memory_starling.py 导入 starling(factory 经它间接用)。"""
     from pathlib import Path
 
     src = Path(__file__).resolve().parents[1] / "src"
     offenders = [f"{p.relative_to(src)}:{n}" for p in sorted(src.rglob("*.py"))
                  for n, top in _top_level_imports(p)
-                 if top == "starling" and p.relative_to(src).as_posix() != "actio/memory_starling.py"]
+                 if top == "starling" and p.relative_to(src).as_posix() != "simple_actio/memory_starling.py"]
     assert offenders == []
 ```
 
-`tests/test_actio_instance.py` 的 `test_actio_only_imports_itself_simulator_datamodel_and_the_stdlib` 改为:`path.name == "memory_starling.py"` 时另许 `starling`(含子模块)、`os`、`tempfile`(Task 15 的原子替换与 Task 17 的空库摘要要用),其余文件不变。
+`tests/test_simple_actio_instance.py` 的 `test_simple_actio_only_imports_itself_simulator_datamodel_and_the_stdlib` 改为:`path.name == "memory_starling.py"` 时另许 `starling`(含子模块)、`os`、`tempfile`(Task 15 的原子替换与 Task 17 的空库摘要要用),其余文件不变。
 
 - [ ] **Step 2: 跑测试确认失败**
 
@@ -1179,55 +1179,55 @@ Expected: FAIL,`ModuleNotFoundError: No module named 'starling_fakes'`;改 `pypr
 - `tests/starling_fakes.py`:`http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)` 在 daemon 线程里 `serve_forever`,先例是 Starling 仓库的 `tests/python/test_evidence_answer_native.py:28-45`。
   - `POST .../embeddings`:`fail_embeddings` 为真回 503;否则对 `input`(字符串或列表)逐条 `fake_vector`,回 `{"data": [{"index": i, "embedding": v}], "model": ...}`。
   - `POST .../chat/completions`:取唯一一条 user 消息的 `content`;按开头判断是哪一遍抽取:以 `"You are an extractor for a Statement-based memory system."` 起头的是信念抽取,其余两遍(`general_fact_prompt.py`、`episodic_prompt.py` 的开头)一律回内容 `"[]"`。信念抽取用 `re.search(r"\[([^\]\n]+)\] ([^：\n]+)：([^\n]+)", content)` 取 key、说话方、原话:key 在 `fail_keys` 里回 500;否则回 `[{"holder":"self","holder_perspective":"FIRST_PERSON","subject":"cog-<说话方>","predicate":"responsible_for","object":"<原话>","modality":"BELIEVES","polarity":"POS","nesting_depth":0}]`。回之前 `time.sleep(chat_delay_s)`。每次请求把 `chat_calls` 或 `embedding_calls` 加一(持锁)。
-  - `fake_vector`:对 `actio.text.tokens(text)` 的每个词面,`int(sha256((salt + "\0" + tok).encode()).hexdigest()[:8], 16) % dim` 处加 1,再归一化;空词面集合给全零向量。这样余弦只来自共有词面,与替身 `TupleMemory` 的重叠打分同向,规范样例的命中顺序两边可比;没有共有词面时余弦恰为 0。
+  - `fake_vector`:对 `simple_actio.text.tokens(text)` 的每个词面,`int(sha256((salt + "\0" + tok).encode()).hexdigest()[:8], 16) % dim` 处加 1,再归一化;空词面集合给全零向量。这样余弦只来自共有词面,与替身 `TupleMemory` 的重叠打分同向,规范样例的命中顺序两边可比;没有共有词面时余弦恰为 0。
   - 不发外网请求;`OPENAI_API_KEY` 由各用例 `monkeypatch.setenv` 成占位值(C++ 适配器从环境读它)。
 - Starling 的提示词开头与段落里 `[<key>] ` 前缀的形状,实施时先在 Starling 仓库 `grep -n '^EXTRACTION_PROMPT' python/starling/extractor/prompts.py` 与 Task 6 的 payload 拼法核对;对不上就改假端点的判别式,不改适配器。
 
 - [ ] **Step 4: 跑测试确认通过,并跑相邻回归**
 
-Run(带 memory): `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev --extra memory pytest tests/test_starling_fakes.py tests/test_factory_cross_plan.py tests/test_actio_instance.py -q -p no:cacheprovider`
+Run(带 memory): `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev --extra memory pytest tests/test_starling_fakes.py tests/test_factory_cross_plan.py tests/test_simple_actio_instance.py -q -p no:cacheprovider`
 Expected: PASS
-Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_starling_fakes.py tests/test_factory_cross_plan.py tests/test_actio_instance.py -q -p no:cacheprovider`
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_starling_fakes.py tests/test_factory_cross_plan.py tests/test_simple_actio_instance.py -q -p no:cacheprovider`
 Expected: PASS,`test_starling_fakes.py` 整个文件 skipped
 
 - [ ] **Step 5: 提交**
 
 ```bash
 git add pyproject.toml uv.lock
-git add tests/starling_fakes.py tests/test_starling_fakes.py tests/test_actio_instance.py tests/test_factory_cross_plan.py
+git add tests/starling_fakes.py tests/test_starling_fakes.py tests/test_simple_actio_instance.py tests/test_factory_cross_plan.py
 git commit -m "build(memory): 加 memory extra 与离线 OpenAI 兼容假端点,钉住只有 memory_starling 导入 starling"
 ```
 
 ### Task 14: `StarlingMemory`:端口适配器、穷举失败映射、过共享契约
 
 **Files:**
-- Create: `src/actio/memory_starling.py`(`StarlingEndpoints`、`StarlingMemory`、`translate_failure`;本任务不含部署管理面,Task 15 加)
-- Modify: `tests/test_actio_memory_contract.py`(`PORT_FACTORIES` 加 `"starling"`)
+- Create: `src/simple_actio/memory_starling.py`(`StarlingEndpoints`、`StarlingMemory`、`translate_failure`;本任务不含部署管理面,Task 15 加)
+- Modify: `tests/test_simple_actio_memory_contract.py`(`PORT_FACTORIES` 加 `"starling"`)
 - Modify: `tests/starling_fakes.py`(加 `offline_api_key()` 与 `FakeOpenAI.endpoints()`)
-- Test: `tests/test_actio_memory_starling.py`(新)
+- Test: `tests/test_simple_actio_memory_starling.py`(新)
 
 **Interfaces:**
 - Consumes:
-  - 第 1 步:`MemoryHit`、`MemoryEvent`、`RememberOutcome`、`MemoryFailureError(message, *, transient)`、`MemoryEventConflict(message)`、`MemoryClosedError(message)`、`MemoryBackend`;`tests/test_actio_memory_contract.py` 的 `PORT_FACTORIES` 与 `make_port`。
+  - 第 1 步:`MemoryHit`、`MemoryEvent`、`RememberOutcome`、`MemoryFailureError(message, *, transient)`、`MemoryEventConflict(message)`、`MemoryClosedError(message)`、`MemoryBackend`;`tests/test_simple_actio_memory_contract.py` 的 `PORT_FACTORIES` 与 `make_port`。
   - 第 6 步:`Memory.open(db_path, *, agent, llm, embedder)`、`Memory.recall(query, *, k, strict, include_volatile)`(命中是 `{"row", "score", "content_id"}`)、`Memory.remember_event(key, text, *, interlocutor, epoch="2026-01-01T00:00:00Z") -> RememberResult`(`statement_ids`、`extraction_failed`、`failure_category`、`outcome`)、`Memory.embed_pending(now) -> EmbedStats(embedded, failed)`、`Memory.next_seq()`、`Memory.digest()`、`Memory.close(timeout=)`(超时抛 `TimeoutError`);异常 `starling.RecallDegradedError`、`starling.EventConflict`、`starling.MemoryClosed`。**另需**把语句 UUID 换成内容 id 的公开门面 `Memory.content_ids(statement_ids: list[str]) -> dict[str, str]`(Task 9 只写了 C++ `content_ids` 与绑定 `memory_content_ids`,门面上没有;待裁定,见最终报告)。
   - Task 13:`tests/starling_fakes.py` 的 `FakeOpenAI`、`shared_fake_openai()`。
 - Produces:
-  - `actio.memory_starling.StarlingEndpoints(extraction_base_url: str, extraction_model: str, embedding_base_url: str, embedding_model: str, embedding_dim: int, timeout_ms: int, max_retries: int)`,frozen dataclass;方法 `make_llm()`、`make_embedder()`。
-  - `actio.memory_starling.StarlingMemory(memory, *, close_timeout_s: float = 60.0, on_close: Callable[[], None] | None = None)`,满足 `MemoryBackend`;类方法 `StarlingMemory.open(path: Path, *, persona_id: str, endpoints: StarlingEndpoints, close_timeout_s: float = 60.0) -> StarlingMemory`。
-  - `actio.memory_starling.translate_failure(exc: BaseException) -> MemoryFailureError`(第 10 节的表,Task 15 复用)。
-  - `actio.memory_starling.EPOCH = "2026-01-01T00:00:00Z"`。
+  - `simple_actio.memory_starling.StarlingEndpoints(extraction_base_url: str, extraction_model: str, embedding_base_url: str, embedding_model: str, embedding_dim: int, timeout_ms: int, max_retries: int)`,frozen dataclass;方法 `make_llm()`、`make_embedder()`。
+  - `simple_actio.memory_starling.StarlingMemory(memory, *, close_timeout_s: float = 60.0, on_close: Callable[[], None] | None = None)`,满足 `MemoryBackend`;类方法 `StarlingMemory.open(path: Path, *, persona_id: str, endpoints: StarlingEndpoints, close_timeout_s: float = 60.0) -> StarlingMemory`。
+  - `simple_actio.memory_starling.translate_failure(exc: BaseException) -> MemoryFailureError`(第 10 节的表,Task 15 复用)。
+  - `simple_actio.memory_starling.EPOCH = "2026-01-01T00:00:00Z"`。
   - `tests/starling_fakes.py`:`offline_api_key() -> AbstractContextManager[None]`(只在块内把 `OPENAI_API_KEY` 设成占位值,退出时还原);`FakeOpenAI.endpoints(*, timeout_ms: int = 2000, max_retries: int = 0) -> StarlingEndpoints`。
 
 - [ ] **Step 1: 写失败的测试**
 
 ```python
-# tests/test_actio_memory_contract.py(PORT_FACTORIES 加一项;导入补 pytest 已有、starling_fakes)
+# tests/test_simple_actio_memory_contract.py(PORT_FACTORIES 加一项;导入补 pytest 已有、starling_fakes)
 from starling_fakes import offline_api_key, shared_fake_openai
 
 
 def _starling_port(fresh_dir):
     pytest.importorskip("starling")            # 未装时这一参数跳过,契约只跑替身(设计源第 11 节)
-    from actio.memory_starling import StarlingMemory
+    from simple_actio.memory_starling import StarlingMemory
     fresh_dir.mkdir(parents=True)
     with offline_api_key():                      # C++ 适配器在构造时读 OPENAI_API_KEY
         return StarlingMemory.open(fresh_dir / "pa.db", persona_id="pa",
@@ -1242,18 +1242,18 @@ PORT_FACTORIES = {
 ```
 
 ```python
-# tests/test_actio_memory_starling.py
+# tests/test_simple_actio_memory_starling.py
 """StarlingMemory 的专属用例:失败映射(第 10 节的表)、渲染(4.4 节)、close 的期限。契约用例在共享契约里。"""
 import re
 import threading
 
 import pytest
 
-from actio.memory_port import MemoryClosedError, MemoryEvent, MemoryEventConflict, MemoryFailureError
+from simple_actio.memory_port import MemoryClosedError, MemoryEvent, MemoryEventConflict, MemoryFailureError
 from starling_fakes import FakeOpenAI, offline_api_key
 
 starling = pytest.importorskip("starling")
-from actio.memory_starling import StarlingMemory, translate_failure  # noqa: E402
+from simple_actio.memory_starling import StarlingMemory, translate_failure  # noqa: E402
 
 EV = MemoryEvent("ep-1#0", "pb：我担心预算超支", "pb")
 
@@ -1379,17 +1379,17 @@ def test_close_with_a_call_in_flight_times_out_and_the_port_stays_usable_for_a_s
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run(带 memory): `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev --extra memory pytest tests/test_actio_memory_starling.py tests/test_actio_memory_contract.py -q -p no:cacheprovider`
-Expected: FAIL,`ModuleNotFoundError: No module named 'actio.memory_starling'`;契约用例的 `starling` 参数同一原因报错
+Run(带 memory): `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev --extra memory pytest tests/test_simple_actio_memory_starling.py tests/test_simple_actio_memory_contract.py -q -p no:cacheprovider`
+Expected: FAIL,`ModuleNotFoundError: No module named 'simple_actio.memory_starling'`;契约用例的 `starling` 参数同一原因报错
 
 - [ ] **Step 3: 实现**
 
-`src/actio/memory_starling.py`,首条语句 `from __future__ import annotations`;导入 `datetime`、`pathlib`、`dataclasses`、`typing`、`actio.memory_port` 与 `starling`(全仓库唯一一处)。
+`src/simple_actio/memory_starling.py`,首条语句 `from __future__ import annotations`;导入 `datetime`、`pathlib`、`dataclasses`、`typing`、`simple_actio.memory_port` 与 `starling`(全仓库唯一一处)。
 
 - `StarlingEndpoints.make_llm()`:`starling.make_openai_llm(model=..., base_url=..., timeout_ms=..., max_retries=...)`;`make_embedder()`:`starling.make_openai_embedder(model=..., base_url=..., dim=..., timeout_ms=..., max_retries=...)`。两个公开工厂在 Task 1 已改成无条件覆盖 `max_retries`(C++ 默认是 3,`include/starling/extractor/openai_adapter.hpp:28`;旧的"非零才覆盖"会让配置的 0 静默变成 3 次重试,打破 6.4 节"每次网络调用至多 4 秒"),所以不碰私有的 `starling._core` 配置类。测试加一条 `test_endpoints_with_zero_retries_do_not_retry`:假端点第一次返回 500,断言只收到一次请求。密钥仍只由 C++ 从 `OPENAI_API_KEY` 读。
 - `StarlingMemory.open`:`starling.Memory.open(str(path), agent=persona_id, llm=endpoints.make_llm(), embedder=endpoints.make_embedder())`,任何异常经 `translate_failure` 改抛。
 - 每个公开方法先查 `self._closed`,为真抛 `MemoryClosedError("memory port is closed")`;再在 `try` 里调门面,`except Exception as exc: raise translate_failure(exc) from None`(`from None`:原文可能含端点地址)。
-- `recall(query, *, limit)`:`limit` 不是非负 int(排除 bool)抛 `ActioDataError`;`limit == 0` 直接返回 `[]`;否则 `memory.recall(query, k=limit, mode="semantic", strict=True, include_volatile=True)`,丢掉 `score <= 0.0` 的命中(余弦不为正就是不相似;没有这条,Starling 的 top-k 会把零分行也补满 k 条,契约样例"天气只命中 #4"过不了,待裁定),渲染成 `MemoryHit("mem-" + hit["content_id"][:16], text)`,按 id 去重保序。`text` 照 4.4 节:`f"{row.subject_id} {neg}{row.predicate} {row.object_value}（{row.modality}，置信度 {row.confidence:.2f}）"`,`neg` 在 `polarity` 为负时是"不"(取值先 `grep -n 'polarity' include/starling/retrieval/*.hpp` 确认是 `"neg"` 还是枚举名)。
+- `recall(query, *, limit)`:`limit` 不是非负 int(排除 bool)抛 `SimpleActioDataError`;`limit == 0` 直接返回 `[]`;否则 `memory.recall(query, k=limit, mode="semantic", strict=True, include_volatile=True)`,丢掉 `score <= 0.0` 的命中(余弦不为正就是不相似;没有这条,Starling 的 top-k 会把零分行也补满 k 条,契约样例"天气只命中 #4"过不了,待裁定),渲染成 `MemoryHit("mem-" + hit["content_id"][:16], text)`,按 id 去重保序。`text` 照 4.4 节:`f"{row.subject_id} {neg}{row.predicate} {row.object_value}（{row.modality}，置信度 {row.confidence:.2f}）"`,`neg` 在 `polarity` 为负时是"不"(取值先 `grep -n 'polarity' include/starling/retrieval/*.hpp` 确认是 `"neg"` 还是枚举名)。
 - `remember(event)`:`res = memory.remember_event(event.key, event.text, interlocutor=event.interlocutor)`(`epoch` 用默认值,即 4.3 节的时钟起点);`res.extraction_failed` 为真返回 `RememberOutcome((), True, res.failure_category or "unknown")`;否则 `ids = memory.content_ids(res.statement_ids)`,返回 `RememberOutcome(tuple("mem-" + ids[s][:16] for s in res.statement_ids), False, None)`。`[key] ` 前缀由 Starling 加,这里只传原文。
 - `embed_pending()`:`now = EPOCH + memory.next_seq() 秒`(`datetime` 算,秒级 ISO,带 `Z`);`stats.failed > 0` 抛 `MemoryFailureError(f"embed_pending: {stats.failed} statement(s) failed to embed", transient=True)`;否则返回 `stats.embedded`。
 - `digest()` 转发。`close()`:已关为空操作;`memory.close(timeout=self._close_timeout_s)`;成功后置 `_closed` 并调 `on_close`;`TimeoutError` 或其他异常经 `translate_failure` 抛(都是非瞬态),**不**置 `_closed`,所以在途调用返回后可以再关一次(Task 18 的副本收尾靠这一点决定删不删目录)。
@@ -1397,48 +1397,48 @@ Expected: FAIL,`ModuleNotFoundError: No module named 'actio.memory_starling'`;�
 
 - [ ] **Step 4: 跑测试确认通过,并跑相邻回归**
 
-Run(带 memory): `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev --extra memory pytest tests/test_actio_memory_starling.py tests/test_actio_memory_contract.py tests/test_actio_instance.py tests/test_factory_cross_plan.py -q -p no:cacheprovider`
+Run(带 memory): `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev --extra memory pytest tests/test_simple_actio_memory_starling.py tests/test_simple_actio_memory_contract.py tests/test_simple_actio_instance.py tests/test_factory_cross_plan.py -q -p no:cacheprovider`
 Expected: PASS(契约用例三个参数都跑)
-Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_actio_memory_contract.py tests/test_actio_memory_starling.py -q -p no:cacheprovider`
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_simple_actio_memory_contract.py tests/test_simple_actio_memory_starling.py -q -p no:cacheprovider`
 Expected: PASS,`starling` 参数与专属文件 skipped
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/actio/memory_starling.py
-git add tests/test_actio_memory_contract.py tests/test_actio_memory_starling.py tests/starling_fakes.py
-git commit -m "feat(actio): StarlingMemory 适配器,召回严格并放宽到 volatile,失败按表映射瞬态,过共享契约"
+git add src/simple_actio/memory_starling.py
+git add tests/test_simple_actio_memory_contract.py tests/test_simple_actio_memory_starling.py tests/starling_fakes.py
+git commit -m "feat(simple_actio): StarlingMemory 适配器,召回严格并放宽到 volatile,失败按表映射瞬态,过共享契约"
 ```
 
 ### Task 15: `StarlingDeploymentStore`:部署管理面,`remember_event` 崩溃后重调
 
 **Files:**
-- Modify: `src/actio/memory_starling.py`(加 `StarlingDeploymentStore`)
-- Test: `tests/test_actio_starling_store.py`(新)
+- Modify: `src/simple_actio/memory_starling.py`(加 `StarlingDeploymentStore`)
+- Test: `tests/test_simple_actio_starling_store.py`(新)
 
 **Interfaces:**
 - Consumes:
   - Task 14:`StarlingEndpoints`、`StarlingMemory(memory, *, close_timeout_s, on_close)`、`translate_failure`。
-  - 第 1 步:`DeploymentMemoryStore` 协议、`PERSONA_ID_PATTERN`、`ActioDataError`、`RememberOutcome`;FileTupleStore 的管理面语义(`restore_from` 在该人格有打开的端口时抛 `MemoryFailureError(transient=False)`;`backup_to`/`restore_from` 返回逻辑摘要;人格还没有库时等同空库)。
+  - 第 1 步:`DeploymentMemoryStore` 协议、`PERSONA_ID_PATTERN`、`SimpleActioDataError`、`RememberOutcome`;FileTupleStore 的管理面语义(`restore_from` 在该人格有打开的端口时抛 `MemoryFailureError(transient=False)`;`backup_to`/`restore_from` 返回逻辑摘要;人格还没有库时等同空库)。
   - 第 6 步:`Memory.remember_event`、`abandon_event(key)`(未知 key 抛 `KeyError`,已放弃再放弃空操作,`committed` 抛 `EventConflict`)、`pending_events() -> list[PendingEvent]`(按 `seq` 升序)、`backup_to(path)`(目标已存在抛 `FileExistsError`)、`digest()`、`close(timeout=)`。
 - Produces:
-  - `actio.memory_starling.StarlingDeploymentStore(root: Path, *, endpoints: StarlingEndpoints, close_timeout_s: float = 60.0)`,满足 `DeploymentMemoryStore`;库在 `root / f"{persona_id}.db"`(第 5 步约定传入的是 `<记忆根>/deploy`,所以落在 5.3 节的 `deploy/<persona_id>.db`)。
+  - `simple_actio.memory_starling.StarlingDeploymentStore(root: Path, *, endpoints: StarlingEndpoints, close_timeout_s: float = 60.0)`,满足 `DeploymentMemoryStore`;库在 `root / f"{persona_id}.db"`(第 5 步约定传入的是 `<记忆根>/deploy`,所以落在 5.3 节的 `deploy/<persona_id>.db`)。
   - `StarlingDeploymentStore.digest_of(path: Path) -> str`:只读地算一个库文件的摘要(Task 16 的解析器与 Task 18 的种子都用;打开、`digest()`、`close`)。
 
 - [ ] **Step 1: 写失败的测试**
 
 ```python
-# tests/test_actio_starling_store.py
+# tests/test_simple_actio_starling_store.py
 import sqlite3
 
 import pytest
 
-from actio.errors import ActioDataError
-from actio.memory_port import DeploymentMemoryStore, MemoryBackend, MemoryEventConflict, MemoryFailureError
+from simple_actio.errors import SimpleActioDataError
+from simple_actio.memory_port import DeploymentMemoryStore, MemoryBackend, MemoryEventConflict, MemoryFailureError
 from starling_fakes import FakeOpenAI, offline_api_key
 
 pytest.importorskip("starling")
-from actio.memory_starling import StarlingDeploymentStore  # noqa: E402
+from simple_actio.memory_starling import StarlingDeploymentStore  # noqa: E402
 
 KEY = "r1/deploy-m-s-0#1"                      # 部署 key 带轮次前缀、含 "/",只进事件 key
 
@@ -1468,7 +1468,7 @@ def test_persona_ids_are_checked_before_any_path_is_built(tmp_path, fake, bad):
     for call in (lambda: store.open(bad), lambda: store.digest(bad),
                  lambda: store.remember_event(bad, KEY, "pb：你好", interlocutor="pb"),
                  lambda: store.backup_to(bad, tmp_path / "x.db")):
-        with pytest.raises(ActioDataError, match="persona_id"):
+        with pytest.raises(SimpleActioDataError, match="persona_id"):
             call()
     assert not (tmp_path / "deploy").exists() or list((tmp_path / "deploy").iterdir()) == []
 
@@ -1517,7 +1517,7 @@ def test_restore_refuses_while_a_port_is_open_and_leaves_the_library_alone(tmp_p
     snap = tmp_path / "snap.db"
     store.backup_to("pa", snap)
     port = store.open("pa")
-    port.remember(__import__("actio.memory_port", fromlist=["MemoryEvent"]).MemoryEvent(KEY, "pb：你好", "pb"))
+    port.remember(__import__("simple_actio.memory_port", fromlist=["MemoryEvent"]).MemoryEvent(KEY, "pb：你好", "pb"))
     d = store.digest("pa")
     with pytest.raises(MemoryFailureError) as info:
         store.restore_from("pa", snap)
@@ -1540,12 +1540,12 @@ def test_a_corrupt_library_or_backup_is_a_non_transient_failure(tmp_path, fake):
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run(带 memory): `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev --extra memory pytest tests/test_actio_starling_store.py -q -p no:cacheprovider`
-Expected: FAIL,`ImportError: cannot import name 'StarlingDeploymentStore' from 'actio.memory_starling'`
+Run(带 memory): `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev --extra memory pytest tests/test_simple_actio_starling_store.py -q -p no:cacheprovider`
+Expected: FAIL,`ImportError: cannot import name 'StarlingDeploymentStore' from 'simple_actio.memory_starling'`
 
 - [ ] **Step 3: 实现**
 
-- 每个收 `persona_id` 的方法第一句 `PERSONA_ID_PATTERN.fullmatch`,不合法抛 `ActioDataError(f"persona_id: {persona_id!r}")`(R6),之后才拼 `root / f"{persona_id}.db"`;`root` 在第一次写时 `mkdir(parents=True, exist_ok=True)`。
+- 每个收 `persona_id` 的方法第一句 `PERSONA_ID_PATTERN.fullmatch`,不合法抛 `SimpleActioDataError(f"persona_id: {persona_id!r}")`(R6),之后才拼 `root / f"{persona_id}.db"`;`root` 在第一次写时 `mkdir(parents=True, exist_ok=True)`。
 - `open(persona_id)`:`StarlingMemory.open(path, persona_id=..., endpoints=..., close_timeout_s=...)`,构造时传 `on_close`,把实例内的 `self._open[persona_id]` 计数减一(加一在打开成功后),计数与 FileTupleStore 同样只在实例内,所以组合根只造一个 store(计划 A Task 35 已经如此)。
 - `remember_event`、`abandon_event`、`pending_events`、`digest`:各自 `Memory.open(...)` 一个短命连接、调一次、`close(timeout=close_timeout_s)`,异常经 `translate_failure`。不复用端口的连接:管理面由门② 与 MindAgent 在人格库锁下单线程调用(计划 A Task 34),短命连接最简单;端口开着时同库再开一条连接是 SQLite WAL 允许的,门② 在有未提交起点副本时已延后(计划 A Task 34),不会与在途 episode 并发写。`remember_event` 的返回照 Task 14 `StarlingMemory.remember` 同一译法(抽出一个模块私有函数 `_outcome(memory, res)` 两处共用)。`pending_events` 返回 `[p.key for p in memory.pending_events()]`。
 - `backup_to(persona_id, path)`:人格还没有库时先 `Memory.open` 建空库;`path.parent.mkdir(parents=True, exist_ok=True)`;`path` 已存在先 `unlink`(起点副本由 MindAgent 管,覆盖是它要的语义;Starling 拒绝已存在的目标);`memory.backup_to(path)`;返回 `digest_of(path)`。
@@ -1554,14 +1554,14 @@ Expected: FAIL,`ImportError: cannot import name 'StarlingDeploymentStore' from '
 
 - [ ] **Step 4: 跑测试确认通过,并跑相邻回归**
 
-Run(带 memory): `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev --extra memory pytest tests/test_actio_starling_store.py tests/test_actio_memory_starling.py tests/test_actio_memory_contract.py tests/test_actio_file_tuple_store.py -q -p no:cacheprovider`
+Run(带 memory): `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev --extra memory pytest tests/test_simple_actio_starling_store.py tests/test_simple_actio_memory_starling.py tests/test_simple_actio_memory_contract.py tests/test_simple_actio_file_tuple_store.py -q -p no:cacheprovider`
 Expected: PASS
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/actio/memory_starling.py tests/test_actio_starling_store.py
-git commit -m "feat(actio): StarlingDeploymentStore 部署管理面,库在 deploy/<persona_id>.db,人格 id 拼路径前校验"
+git add src/simple_actio/memory_starling.py tests/test_simple_actio_starling_store.py
+git commit -m "feat(simple_actio): StarlingDeploymentStore 部署管理面,库在 deploy/<persona_id>.db,人格 id 拼路径前校验"
 ```
 
 ### Task 16: `factory/memory_config.py`:树外记忆配置、密钥、根目录归属与 Starling 安装来源
@@ -1789,7 +1789,7 @@ Expected: FAIL,`ModuleNotFoundError: No module named 'factory.memory_config'`
 
 - [ ] **Step 3: 实现**
 
-- 文件头 docstring 说明与 `eval_config.py` 同一做法(5.1 节、F15);首条语句 `from __future__ import annotations`。不导入 `starling`(全局约束:只有 `actio/memory_starling.py` 导入它),安装信息一律经 `importlib.metadata` 读。
+- 文件头 docstring 说明与 `eval_config.py` 同一做法(5.1 节、F15);首条语句 `from __future__ import annotations`。不导入 `starling`(全局约束:只有 `simple_actio/memory_starling.py` 导入它),安装信息一律经 `importlib.metadata` 读。
 - `read_memory_config`:顺序与 `read_eval_config` 相同:变量为空 → `None`;不是绝对路径;不存在;`_check_private`(符号链接、非普通文件、`S_IMODE & 0o077` 非零都拒绝,文字含 `chmod 600`);配置文件自己的 `resolve()` 落在 `repo_root.resolve()` 下拒绝("must live outside the control-plane repository",评测配置没有这一条,5.1 节要求有);YAML 不是映射;缺键多键按 `f"{path}: missing {key_names(missing)}, unknown {key_names(unknown)}"`。`root` 照 `_check_absolute`,文字 `"memory config: root must be an absolute path"` / `"memory config: root must live outside the control-plane repository"`;比较前对 `root` 也 `resolve()`,防符号链接绕进仓库。两个模型名是非空 `str`;`embedding_dim` 是正 int、`timeout_ms` 是正 int、`max_retries` 是非负 int,三者都排除 `bool`。
 - `normalize_base_url`:不是非空 `str` → `f"memory config: {key} must be a non-empty URL"`;`urllib.parse.urlsplit`;`username` 或 `password` 不为 `None`(即 netloc 里有 `@`)→ `f"memory config: {key} must not carry user:password@ (value not shown)"`;scheme 不是 `http`/`https`、没有主机、带 query 或 fragment → `f"memory config: {key} must be an http(s) endpoint URL without query or fragment (value not shown)"`(Starling 在它后面直接拼 `/chat/completions` 与 `/embeddings`,带 query 的地址拼出来是错的;这一条是本计划加的,不在 5.1 节键表里)。返回 `f"{scheme.lower()}://{hostname.lower()}{':' + str(port) if port else ''}{path.rstrip('/')}"`。所有报错都不含取值。
 - `check_api_key`:`env.get("OPENAI_API_KEY", "").strip()` 为空 → `FactoryConfigError("OPENAI_API_KEY is empty or unset; the Starling memory reads its key from it")`。
@@ -1812,7 +1812,7 @@ git commit -m "feat(factory): 读树外记忆配置,校验密钥变量、根目�
 
 **Files:**
 - Modify: `src/factory/memory_runtime.py`(第 4、5 步建的模块;加 `starling_memory_runtime`、`starling_memory_resolver`、`StarlingLayout`)
-- Modify: `src/actio/memory_starling.py`(加 `empty_digest() -> str` 与 `extraction_prompts_digest() -> str`)
+- Modify: `src/simple_actio/memory_starling.py`(加 `empty_digest() -> str` 与 `extraction_prompts_digest() -> str`)
 - Test: `tests/test_factory_memory_runtime.py`(追加)
 
 **Interfaces:**
@@ -1822,8 +1822,8 @@ git commit -m "feat(factory): 读树外记忆配置,校验密钥变量、根目�
   - 第 4 步:`factory.memory_runtime.STAND_IN_MEMORY_RUNTIME`(五个键)、`stand_in_memory_resolver(seed, persona_ids)` 的形状;计划 A Task 25 的约定:解析器抛 `DirectiveFailedError` 时原因原样保留,其余异常只报类名;解析后再跑 `validate_training_config`,runtime 键集合要等于 5.2 节五个键。
   - Starling:`starling.__version__`、`starling.ExtractionConfig`(frozen dataclass,三段提示词与阈值都是字段,`python/starling/extractor/config.py:21-50`)。
 - Produces:
-  - `actio.memory_starling.empty_digest() -> str`:在临时目录里新建一个空库算出的摘要(进程内缓存)。
-  - `actio.memory_starling.extraction_prompts_digest() -> str`:`dataclasses.asdict(ExtractionConfig())` 规范化 JSON 的 sha256。
+  - `simple_actio.memory_starling.empty_digest() -> str`:在临时目录里新建一个空库算出的摘要(进程内缓存)。
+  - `simple_actio.memory_starling.extraction_prompts_digest() -> str`:`dataclasses.asdict(ExtractionConfig())` 规范化 JSON 的 sha256。
   - `factory.memory_runtime.StarlingLayout(root: Path)`,frozen dataclass:`deploy_dir() -> Path`、`seed(seed_id, persona_id) -> Path`(`root/"seeds"/seed_id/f"{persona_id}.db"`)、`runs_dir() -> Path`、`session_copy(run_id, session_id, slot_id) -> Path`、`client_copy(run_id, episode_id, slot_id) -> Path`(`root/"runs"/run_id/"client"/episode_id/f"{slot_id}.db"`);每段名字先过 `simulator.realtime.validation.validate_episode_id`(同一白名单:`[A-Za-z0-9._-]{1,128}` 且不是 `.`、`..`),人格 id 过 `PERSONA_ID_PATTERN`,不合法抛 `ValueError`(`seed_id` 不合法时是 `DirectiveFailedError`,见下)。
   - `factory.memory_runtime.starling_memory_runtime(config: MemoryConfig, *, version: str, install_source: str, prompts_digest: str) -> dict`:5.2 节五个键,值见下。
   - `factory.memory_runtime.starling_memory_resolver(layout: StarlingLayout, runtime: dict) -> Callable[[str | None, tuple[str, ...]], tuple[dict[str, str], dict]]`。
@@ -1858,7 +1858,7 @@ def test_the_starling_runtime_identity_has_the_five_keys_and_no_secrets(tmp_path
                        "max_retries": 0, "prompts": "p" * 64},
         "embedding": {"base_url": "https://embed.example/v1", "model": "m-e", "dim": 256,
                       "timeout_ms": 4000, "max_retries": 0},
-        "trace_schema": "actio.trace.v2",
+        "trace_schema": "simple_actio.trace.v2",
     }
     assert "root" not in repr(rt) and str(tmp_path) not in repr(rt)        # 根目录路径不进哈希
 
@@ -1895,7 +1895,7 @@ starling_only = pytest.mark.skipif(__import__("importlib.util").util.find_spec("
 
 @starling_only
 def test_the_resolver_digests_seed_libraries_and_empty_starts(tmp_path):
-    from actio.memory_starling import StarlingDeploymentStore, empty_digest
+    from simple_actio.memory_starling import StarlingDeploymentStore, empty_digest
     from factory.memory_runtime import starling_memory_resolver
     from starling_fakes import FakeOpenAI, offline_api_key
     lay = StarlingLayout(tmp_path)
@@ -1926,7 +1926,7 @@ def test_a_missing_or_unsafe_seed_is_a_readable_t2(tmp_path):
 def test_a_changed_embedding_vector_changes_the_seed_digest(tmp_path):
     """Review Focus:嵌入端点换了向量 → 起点摘要变 → config_hash 变 → 续训升 T3(T3 本身由 计划 A Task 25 的
     test_the_resolved_memory_is_part_of_the_config_hash 钉住;这里钉住前半段:同模型名、不同向量,摘要不同)。"""
-    from actio.memory_starling import StarlingDeploymentStore
+    from simple_actio.memory_starling import StarlingDeploymentStore
     from starling_fakes import FakeOpenAI, offline_api_key
     out = []
     for salt in ("", "v2"):
@@ -1948,8 +1948,8 @@ Expected: FAIL,`ImportError: cannot import name 'StarlingLayout' from 'factory.m
 
 - [ ] **Step 3: 实现**
 
-- `starling_memory_runtime`:返回上面测试里的形状。`starling_version = f"{version}+{install_source}"`(`version` 由调用方传 `starling.__version__` 的值,`install_source` 是 Task 16 的 `git:` 或 `record:` 串,5.2 节"`__version__` 加安装来源")。两个 `base_url` 用配置里已规范化的值;`trace_schema` 取 `actio.trace.TRACE_SCHEMA_V2`。`root` 不进身份:同一份库搬了目录不是另一个实验,而路径进了哈希会让换机即 T3。
-- 本模块不 `import starling`:`version` 与 `prompts_digest` 由 Task 19 的装配函数从 `actio.memory_starling` 取(那里导入 `starling`),再传进来;`actio.memory_starling` 加 `starling_version() -> str`(返回 `starling.__version__`),与 `empty_digest`、`extraction_prompts_digest` 并列。
+- `starling_memory_runtime`:返回上面测试里的形状。`starling_version = f"{version}+{install_source}"`(`version` 由调用方传 `starling.__version__` 的值,`install_source` 是 Task 16 的 `git:` 或 `record:` 串,5.2 节"`__version__` 加安装来源")。两个 `base_url` 用配置里已规范化的值;`trace_schema` 取 `simple_actio.trace.TRACE_SCHEMA_V2`。`root` 不进身份:同一份库搬了目录不是另一个实验,而路径进了哈希会让换机即 T3。
+- 本模块不 `import starling`:`version` 与 `prompts_digest` 由 Task 19 的装配函数从 `simple_actio.memory_starling` 取(那里导入 `starling`),再传进来;`simple_actio.memory_starling` 加 `starling_version() -> str`(返回 `starling.__version__`),与 `empty_digest`、`extraction_prompts_digest` 并列。
 - `extraction_prompts_digest`:`hashlib.sha256(json.dumps(dataclasses.asdict(starling.ExtractionConfig()), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()`。本仓库从不传 `extraction=`,所以默认配置就是实际在用的配置;提示词或阈值随 Starling 升级变化,身份就变。
 - `starling_memory_resolver(layout, runtime)` 返回的闭包 `resolve(seed, persona_ids)`:
   - `seed is None`:每个人格都是 `empty_digest()`。
@@ -1967,7 +1967,7 @@ Expected: PASS,三条 `starling_only` 用例 skipped
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/factory/memory_runtime.py src/actio/memory_starling.py tests/test_factory_memory_runtime.py
+git add src/factory/memory_runtime.py src/simple_actio/memory_starling.py tests/test_factory_memory_runtime.py
 git commit -m "feat(factory): Starling 的记忆运行时身份与按种子算起点摘要的解析器"
 ```
 
@@ -1981,7 +1981,7 @@ git commit -m "feat(factory): Starling 的记忆运行时身份与按种子算�
 
 **Interfaces:**
 - Consumes:
-  - Task 17:`StarlingLayout`(`seed`、`session_copy`、`client_copy`、`runs_dir`);Task 15 的模块私有复制函数 `_copy_library(src: Path, dest: Path)`(Task 15 `digest_of` 里"连同 `-wal` 复制"那一步,本任务把它提成 `actio.memory_starling.copy_library` 公开名);Task 14 `StarlingMemory.open(path, *, persona_id, endpoints, close_timeout_s)`、`StarlingEndpoints`。
+  - Task 17:`StarlingLayout`(`seed`、`session_copy`、`client_copy`、`runs_dir`);Task 15 的模块私有复制函数 `_copy_library(src: Path, dest: Path)`(Task 15 `digest_of` 里"连同 `-wal` 复制"那一步,本任务把它提成 `simple_actio.memory_starling.copy_library` 公开名);Task 14 `StarlingMemory.open(path, *, persona_id, endpoints, close_timeout_s)`、`StarlingEndpoints`。
   - 第 3 步:`memory_role_backend(inner, *, memory, episode_id, interlocutors)`、`MemoryTranslatingBackend.close()`(close 失败抛 `FactoryMemoryFailureError`);计划 A Task 17 的 `AgentRuntime._backends(info) -> SessionResources`(`closers = (*每个对手位的 backend.close, drop)`);计划 A Task 21 的 `policy_for_rollout(episode_id)`;计划 A Task 15 的 `_session_runs`。
   - 第 2 步:`SessionInfo(scenario, assignment, personas, client_slot, session_id, episode_id)`;`SessionResources.close()` 逐个跑 closer、各自 `try`、失败只记 warning;join 超时的资源不 close(滞留表),所以 closer 跑起来时在途后端调用都已返回。
 - Produces:
@@ -2008,8 +2008,8 @@ import threading
 import pytest
 
 pytest.importorskip("starling")
-from actio.memory_port import MemoryEvent, MemoryFailureError  # noqa: E402
-from actio.memory_starling import StarlingDeploymentStore, empty_digest  # noqa: E402
+from simple_actio.memory_port import MemoryEvent, MemoryFailureError  # noqa: E402
+from simple_actio.memory_starling import StarlingDeploymentStore, empty_digest  # noqa: E402
 from factory.memory_runtime import StarlingLayout, TrainingCopies  # noqa: E402
 from starling_fakes import FakeOpenAI, offline_api_key  # noqa: E402
 
@@ -2145,7 +2145,7 @@ Expected: PASS(替身路径不变)
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/factory/memory_runtime.py src/factory/agent.py src/factory/interact_policy.py src/actio/memory_starling.py
+git add src/factory/memory_runtime.py src/factory/agent.py src/factory/interact_policy.py src/simple_actio/memory_starling.py
 git add tests/test_factory_training_copies.py tests/test_factory_interact_wire.py
 git commit -m "feat(factory): 训练路副本从种子复制,对手位按会话、训练位按 rollout,端口全关才删"
 ```
@@ -2161,7 +2161,7 @@ git commit -m "feat(factory): 训练路副本从种子复制,对手位按会话�
 - Test: `tests/test_factory_memory_wiring.py`(新)
 
 **Interfaces:**
-- Consumes:Task 16 `read_memory_config`、`check_api_key`、`claim_memory_root`、`starling_install_source`、`MEMORY_CONFIG_ENV`;Task 17 `StarlingLayout`、`starling_memory_runtime`、`starling_memory_resolver`、`actio.memory_starling.starling_version`/`extraction_prompts_digest`;Task 18 `TrainingCopies`、`AgentRuntime(..., training_copies=)`、`make_policy_factory(..., training_copies=)`;Task 15 `StarlingDeploymentStore`;第 4 步 `stand_in_memory_resolver`;第 5 步 `DeploymentMemory(store, layout, runtime, scratch_store_factory)`、`stand_in_deployment_memory(repo_root)`、`MemoryLayout(root, suffix=".db")`、`make_start_round_handler(..., stream_deadline_s=None)`;第 3 步 `run_daemon(..., on_locked=None)`、`factory.wire.INTERACT_TURN_TIMEOUT_S = 90.0`;`factory.cli.main(argv, *, env, builders) -> int`(`FactoryConfigError` → 2)。
+- Consumes:Task 16 `read_memory_config`、`check_api_key`、`claim_memory_root`、`starling_install_source`、`MEMORY_CONFIG_ENV`;Task 17 `StarlingLayout`、`starling_memory_runtime`、`starling_memory_resolver`、`simple_actio.memory_starling.starling_version`/`extraction_prompts_digest`;Task 18 `TrainingCopies`、`AgentRuntime(..., training_copies=)`、`make_policy_factory(..., training_copies=)`;Task 15 `StarlingDeploymentStore`;第 4 步 `stand_in_memory_resolver`;第 5 步 `DeploymentMemory(store, layout, runtime, scratch_store_factory)`、`stand_in_deployment_memory(repo_root)`、`MemoryLayout(root, suffix=".db")`、`make_start_round_handler(..., stream_deadline_s=None)`;第 3 步 `run_daemon(..., on_locked=None)`、`factory.wire.INTERACT_TURN_TIMEOUT_S = 90.0`;`factory.cli.main(argv, *, env, builders) -> int`(`FactoryConfigError` → 2)。
 - Produces:
   - `factory.memory_runtime.DEPLOY_MEMORY_TURN_TIMEOUT_S = 40.0`、`DEPLOY_MEMORY_PER_TURN_S = 40.0`。
   - `factory.memory_runtime.MemoryWiring(backend: str, deployment: DeploymentMemory | None, memory_resolver: Callable, training_copies: TrainingCopies | None, sweep: Callable[[], int] | None)`,frozen dataclass。
@@ -2243,7 +2243,7 @@ def test_a_root_owned_by_another_repo_is_exit_code_2(tmp_path, store, capsys):
 
 def test_with_starling_the_round_handler_gets_starling_memory_and_a_40s_budget(tmp_path, store, monkeypatch):
     pytest.importorskip("starling")
-    from actio.memory_starling import StarlingDeploymentStore
+    from simple_actio.memory_starling import StarlingDeploymentStore
     import factory.handlers as fh
     seen = {}
     monkeypatch.setattr(fh, "make_start_round_handler", lambda **kw: seen.setdefault("round", kw) and None or (lambda s, a: None))
@@ -2299,7 +2299,7 @@ Expected: FAIL,`ImportError: cannot import name 'memory_wiring' from 'factory.me
 
 - `memory_wiring(repo_root, env, *, deployment)`:
   1. `config = read_memory_config(env=env, repo_root=repo_root)`;`None` → `_log.info("memory backend: stand-in")`,返回 `MemoryWiring("stand-in", stand_in_deployment_memory(repo_root) if deployment else None, stand_in_memory_resolver, None, None)`。
-  2. 否则按序:`install = starling_install_source()`(未安装、editable 在这里退出码 2,先于任何对 `actio.memory_starling` 的导入与对根目录的写);`check_api_key(env)`;`claim_memory_root(config.root, repo_root)`;惰性 `from actio.memory_starling import StarlingDeploymentStore, StarlingEndpoints, extraction_prompts_digest, starling_version`。`ImportError`(装了包但 C++ 扩展载不进来)也译成同一条 `pip install '.[memory]'` 的 `FactoryConfigError`。
+  2. 否则按序:`install = starling_install_source()`(未安装、editable 在这里退出码 2,先于任何对 `simple_actio.memory_starling` 的导入与对根目录的写);`check_api_key(env)`;`claim_memory_root(config.root, repo_root)`;惰性 `from simple_actio.memory_starling import StarlingDeploymentStore, StarlingEndpoints, extraction_prompts_digest, starling_version`。`ImportError`(装了包但 C++ 扩展载不进来)也译成同一条 `pip install '.[memory]'` 的 `FactoryConfigError`。
   3. `endpoints = StarlingEndpoints(...)` 取自配置;`runtime = starling_memory_runtime(config, version=starling_version(), install_source=install, prompts_digest=extraction_prompts_digest())`;`layout = StarlingLayout(config.root)`;`copies = TrainingCopies(layout, endpoints)`。
   4. `deployment` 为真时 `DeploymentMemory(StarlingDeploymentStore(layout.deploy_dir(), endpoints=endpoints), MemoryLayout(config.root, suffix=".db"), copy.deepcopy(runtime), lambda p: StarlingDeploymentStore(p, endpoints=endpoints))`。
   5. `_log.info("memory backend: starling")`,返回 `MemoryWiring("starling", deployment, starling_memory_resolver(layout, runtime), copies, copies.sweep)`。
@@ -2344,7 +2344,7 @@ git commit -m "feat(factory): 按记忆配置装配 Starling,部署等提交 40 
 import pytest
 
 pytest.importorskip("starling")
-from actio.memory_starling import StarlingDeploymentStore  # noqa: E402
+from simple_actio.memory_starling import StarlingDeploymentStore  # noqa: E402
 from mindagent.memory_layout import MemoryLayout  # noqa: E402
 from starling_fakes import FakeOpenAI, offline_api_key  # noqa: E402
 
@@ -2400,7 +2400,7 @@ TURNS = [f"pb：第{i}轮,我担心预算超支,人手也不够" for i in range(
 
 @pytest.fixture
 def live_port(tmp_path):
-    from actio.memory_starling import StarlingEndpoints, StarlingMemory
+    from simple_actio.memory_starling import StarlingEndpoints, StarlingMemory
     from factory.memory_config import check_api_key, read_memory_config
     cfg = read_memory_config(env=os.environ, repo_root=__import__("pathlib").Path(__file__).resolve().parents[1])
     assert cfg is not None, "RISE_MEMORY_CONFIG must point at a real config"
@@ -2413,7 +2413,7 @@ def live_port(tmp_path):
 
 
 def test_ten_turns_stay_within_the_per_call_budget(live_port, capsys):
-    from actio.memory_port import MemoryEvent
+    from simple_actio.memory_port import MemoryEvent
     port, limit = live_port
     took = {"recall": [], "remember": [], "embed_pending": []}
     for i, text in enumerate(TURNS):
@@ -2429,7 +2429,7 @@ def test_ten_turns_stay_within_the_per_call_budget(live_port, capsys):
 
 
 def test_recall_brings_back_the_related_sentence(live_port):
-    from actio.memory_port import MemoryEvent
+    from simple_actio.memory_port import MemoryEvent
     port, _ = live_port
     port.remember(MemoryEvent("q#0", "pb：我负责鉴权模块", "pb"))
     port.remember(MemoryEvent("q#1", "pb：明天下雨", "pb"))
@@ -2469,8 +2469,8 @@ git commit -m "test(memory): 部署记忆语义在 Starling 上再跑一遍,真�
 ### 工具与规则(写计划时核对过,`docs/design/tools/` 三个脚本)
 
 - `python3 docs/design/tools/check_docs.py [文档名...]`:单篇检查。有错误退出码 1,告警不影响退出码。要点:
-  - 共享区块 `<!-- shared:begin NAME -->` 与图块 `<!-- figure:begin NAME -->` 必须与源同步,否则报错。**区块里的内容是生成的,不许手改**:`context-block` 的源是 `docs/design/_shared/context-block.md`(现含一处 `[计划中]`,第 15 行:Actio 与 Starling 那句),图块的源是 `docs/design/diagrams/fig_*.py`,改完跑 `python3 docs/design/tools/sync_docs.py` 重写文档。
-  - 正文反引号包着的仓库路径(`src|tests|scripts|cli|schemas` 开头)必须真实存在,**同一行带 `[计划中]` 或 `[推迟]` 的除外**。所以把一行的 `[计划中]` 改成 `[已落地]` 时,这一行里的路径必须已存在(`src/actio/memory_port.py` 等第 1 到 7 步建好的文件)。
+  - 共享区块 `<!-- shared:begin NAME -->` 与图块 `<!-- figure:begin NAME -->` 必须与源同步,否则报错。**区块里的内容是生成的,不许手改**:`context-block` 的源是 `docs/design/_shared/context-block.md`(现含一处 `[计划中]`,第 15 行:SimpleActio 与 Starling 那句),图块的源是 `docs/design/diagrams/fig_*.py`,改完跑 `python3 docs/design/tools/sync_docs.py` 重写文档。
+  - 正文反引号包着的仓库路径(`src|tests|scripts|cli|schemas` 开头)必须真实存在,**同一行带 `[计划中]` 或 `[推迟]` 的除外**。所以把一行的 `[计划中]` 改成 `[已落地]` 时,这一行里的路径必须已存在(`src/simple_actio/memory_port.py` 等第 1 到 7 步建好的文件)。
   - 反引号里的类名(CamelCase)、带括号的调用、以包名开头的点号路径,在代码或施工计划里都找不到会告警;**只在施工计划里的符号所在行必须带 `[计划中]`**。第 8 步反过来:符号落地后进了代码,`[计划中]` 摘掉不告警;但如果某个符号**最终没按计划落地**(改了名),文档里的旧名既不在代码也不在计划里,会告警,所以改名要同步改文档。
   - 禁用措辞(出现即报错):`计划 N`(引用实施计划编号)、`docs/superpowers`、`详见`、`参见`、`上游设计|前置文档|旧设计`、指向其他 `.md` 的链接。**文档里不许写计划文件路径**。
   - 子系统文档章节(`## 0.` 到 `## 10.` 与 `## 附 本文术语`)必须齐全且顺序固定;头部元信息缺行报错。
@@ -2480,7 +2480,7 @@ git commit -m "test(memory): 部署记忆语义在 Starling 上再跑一遍,真�
   - 测试数:正文里"三到四位数 + 个/条 + 测试/用例"的数字,必须是 `pytest --collect-only` 实测的单文件数、分组和、总数之一(`known_test_numbers`),否则告警。它调的是 `uv run --quiet pytest --collect-only -q`,不带 `--extra dev`,第 8 步跑检查器前先确认能收集(见 Task 29 的前置检查)。
   - 行数:每篇 250 到 900 行,超出告警(不是错误)。**但本步把 900 当硬上限**:30 与 90 现在恰好 900 行(`len(text.split("\n"))`),40 是 895,所以这三篇只许改写、不许净增。
   - 决策编号:`R1` 到 `R21` 是总览决策表专用的编号范围,正文里写 `R22` 以上会报"引用了不存在的决策"。**本步不要在任何文档正文里写台账的 `R18`、`R28` 这样的编号**(台账编号是计划内部的,不进设计文档);文档只写措辞。
-  - 术语:`§` 告警(改成就地写出内容),`状态库`、`旁路`、`审批`、`闸门` 等告警,`v1`、`v2` 小写版本号告警(写 `actio.trace.v1` 这种带点号的不受影响,因为规则排除了前后带 `.`、字母的情形)。
+  - 术语:`§` 告警(改成就地写出内容),`状态库`、`旁路`、`审批`、`闸门` 等告警,`v1`、`v2` 小写版本号告警(写 `simple_actio.trace.v1` 这种带点号的不受影响,因为规则排除了前后带 `.`、字母的情形)。
   - 图的引用:每个 `diagrams/*.svg` 都必须被某篇文档引用(`--final` 才报错)。
 - `python3 docs/design/tools/sync_docs.py [文档名]` 重写区块;`--check` 只检查,不同步时退出码 1。
 - 单篇的 `[计划中]` 行内带路径的例外只对**同一行**生效;跨行表格单元格不算。
@@ -2492,21 +2492,21 @@ git commit -m "test(memory): 部署记忆语义在 Starling 上再跑一遍,真�
 | 00-overview.md | 869 | 31 | 67 | 4(第 7 行图例、500 行、793 行、33 行图例类) |
 | 20-socialsimulator.md | 845 | 55 | 112 | 6 |
 | 30-mindtrainer.md | 900 | 0 | 71 | 13 |
-| 40-actio.md | 895 | 5 | 119 | 1(图例) |
+| 40-simple-actio.md | 895 | 5 | 119 | 1(图例) |
 | 50-mindagent.md | 844 | 56 | 154 | 1(图例) |
 | 90-factory-and-cli.md | 900 | 0 | 112 | 3 |
 | 70-trainscheduler.md | 714 | 186 | 2(一处是共享区块里的那句,一处是图例) | 1 |
 | 10-controlplane.md | 702 | 198 | 3 | 0(一处在共享区块,一处图例,一处 331 行 `on_locked`) |
 
-(每篇的图例行"**[计划中]** 表示……"是定义,永远保留,不算待改标记;每篇共享区块那一句 `Actio ... 可选 extra memory [计划中]` 也在 `context-block` 里,改源头一次、七篇同步。)
+(每篇的图例行"**[计划中]** 表示……"是定义,永远保留,不算待改标记;每篇共享区块那一句 `SimpleActio ... 可选 extra memory [计划中]` 也在 `context-block` 里,改源头一次、七篇同步。)
 
 ### 设计二合入后设计源又改了四次,文档还没跟上(Task 21 先补)
 
-`git log 4775eb9..HEAD -- docs/superpowers/specs/2026-10-25-actio-starling-memory-design.md` 有四个提交(`be2ebbd`、`4b58349`、`c782cac`、`f0b0ff2`),而 `docs/design` 最后一次改动是 `4775eb9`。这四个提交改了:`close()` 不再放弃事件(放弃改由 MindAgent 在 episode 最终结束时做)、`TupleMemory.recall` 的 id 一律是内容 id、部署事件 key 的轮次前缀、`embed_pending` 返回成功条数且有失败就抛、`recall` 抛 `RecallDegradedError`、`.owner` 用 `O_CREAT | O_EXCL`、整条流 deadline 按调用方传、S4 改为 volatile、摘要按 `snapshot` 后的条目算。这些在文档里是**旧措辞**,和 、、 同属"写回"的范围。Task 21 先把它们补齐再处理台账裁定,否则后面按台账改一遍、再按设计源改一遍,会改两次同一行。
+`git log 4775eb9..HEAD -- docs/superpowers/specs/2026-10-25-simple-actio-starling-memory-design.md` 有四个提交(`be2ebbd`、`4b58349`、`c782cac`、`f0b0ff2`),而 `docs/design` 最后一次改动是 `4775eb9`。这四个提交改了:`close()` 不再放弃事件(放弃改由 MindAgent 在 episode 最终结束时做)、`TupleMemory.recall` 的 id 一律是内容 id、部署事件 key 的轮次前缀、`embed_pending` 返回成功条数且有失败就抛、`recall` 抛 `RecallDegradedError`、`.owner` 用 `O_CREAT | O_EXCL`、整条流 deadline 按调用方传、S4 改为 volatile、摘要按 `snapshot` 后的条目算。这些在文档里是**旧措辞**,和 、、 同属"写回"的范围。Task 21 先把它们补齐再处理台账裁定,否则后面按台账改一遍、再按设计源改一遍,会改两次同一行。
 
 ### 任务顺序与依赖
 
-Task 21 补设计源已变而文档没跟的措辞 → Task 22 总览 → Task 23 模拟器 → Task 24 MindTrainer → Task 25 Actio → Task 26 MindAgent → Task 27 组合根 → Task 28 TrainScheduler 与 ControlPlane 的小改 → Task 29 设计源 spec 同步 → Task 30 图核对 → Task 31 收尾(全量测试、检查器、删 `.parts/`)。
+Task 21 补设计源已变而文档没跟的措辞 → Task 22 总览 → Task 23 模拟器 → Task 24 MindTrainer → Task 25 SimpleActio → Task 26 MindAgent → Task 27 组合根 → Task 28 TrainScheduler 与 ControlPlane 的小改 → Task 29 设计源 spec 同步 → Task 30 图核对 → Task 31 收尾(全量测试、检查器、删 `.parts/`)。
 
 **文档任务之间的耦合**:共享区块 `context-block` 一处改动影响七篇文档的同步状态,所以放在 Task 22 第一步(改源 + `sync_docs.py` 全量重写);之后每个任务只动自己那一篇,不再碰共享区块。
 
@@ -2536,13 +2536,13 @@ Expected: 末行形如 `3816 tests collected`(落地后数字更大)。`check_co
 对每一步,用 `git log --oneline --grep` 或文件存在性确认,写成清单:
 
 ```bash
-ls src/actio/memory_port.py src/actio/memory_starling.py src/factory/memory_config.py \
+ls src/simple_actio/memory_port.py src/simple_actio/memory_starling.py src/factory/memory_config.py \
    src/factory/memory_translate.py src/factory/memory_runtime.py src/simulator/realtime/resources.py \
    src/mindagent/memory_layout.py 2>&1
 git log --oneline -60 | grep -n "memory\|记忆\|Starling" | head -40
 python3 - <<'PY'
 import importlib
-for name in ["actio.memory_port", "actio.memory", "actio.trace", "simulator.realtime.resources",
+for name in ["simple_actio.memory_port", "simple_actio.memory", "simple_actio.trace", "simulator.realtime.resources",
              "factory.memory_translate", "factory.memory_runtime", "mindagent.memory_layout"]:
     try:
         importlib.import_module(name); print("ok  ", name)
@@ -2551,7 +2551,7 @@ for name in ["actio.memory_port", "actio.memory", "actio.trace", "simulator.real
 PY
 ```
 
-Expected: 第 1 到 5 步的模块全 `ok`。`actio.memory_starling`、`factory.memory_config` 属第 7 步;它们的 `ls` 报 `No such file` 表示第 7 步未落地,则 Task 25/Task 26/Task 27 里标注"依第 7 步"的行**保持 `[计划中]`**,其余照改。
+Expected: 第 1 到 5 步的模块全 `ok`。`simple_actio.memory_starling`、`factory.memory_config` 属第 7 步;它们的 `ls` 报 `No such file` 表示第 7 步未落地,则 Task 25/Task 26/Task 27 里标注"依第 7 步"的行**保持 `[计划中]`**,其余照改。
 
 - [ ] **Step 4: 把"第 7 步是否落地"的结论写进实施笔记**
 
@@ -2573,7 +2573,7 @@ Expected: 第 1 到 5 步的模块全 `ok`。`actio.memory_starling`、`factory.
 
 **Interfaces:**
 - Consumes: Task 21 的落地清单。
-- Produces: 00 篇的状态口径(其余六篇的头部「状态」行与它一致);`context-block.md` 去掉 Actio/Starling 那句的 `[计划中]`(Starling 适配器与 `memory` extra 在第 7 步落地才摘,见下)。
+- Produces: 00 篇的状态口径(其余六篇的头部「状态」行与它一致);`context-block.md` 去掉 SimpleActio/Starling 那句的 `[计划中]`(Starling 适配器与 `memory` extra 在第 7 步落地才摘,见下)。
 
 - [ ] **Step 1: 列出本篇每条 `[计划中]`,分成"摘"、"留"、"改措辞"三类**
 
@@ -2584,7 +2584,7 @@ Run: `grep -n "\[计划中\]" docs/design/00-overview.md | cut -c1-110`
 | 行 | 内容 | 处理 |
 |---|---|---|
 | 7 | 状态标记定义(图例) | 保留 |
-| 8 | 头部「状态」:`智能体记忆 [计划中]` | 摘成 `[已落地]`;句子改成"智能体记忆 [已落地]:场景二每个角色位都是带记忆的 Actio 智能体,记忆端口的生产实现是 Starling 适配器 [已落地/计划中 依第 7 步],替身是内存元组与落盘的 FileTupleStore。……"(措辞定稿在 Step 2) |
+| 8 | 头部「状态」:`智能体记忆 [计划中]` | 摘成 `[已落地]`;句子改成"智能体记忆 [已落地]:场景二每个角色位都是带记忆的 SimpleActio 智能体,记忆端口的生产实现是 Starling 适配器 [已落地/计划中 依第 7 步],替身是内存元组与落盘的 FileTupleStore。……"(措辞定稿在 Step 2) |
 | 13 | 一页读懂里的 `[计划中]` | 摘;若同句含 Starling 才有的内容且第 7 步未合,拆成两个标记 |
 | 36、41 | 一页读懂表与段落 | 摘 |
 | 140、144、162-164、175 | 分层表、Starling 段、模块表、依赖表(`starling` 只限 `memory_starling.py`) | 第 7 步合了就摘;没合就留 |
@@ -2641,7 +2641,7 @@ Expected: 0 错误 0 告警。常见失败:
 ```bash
 git add docs/design/_shared/context-block.md docs/design/00-overview.md docs/design/TEMPLATE.md \
         docs/design/10-controlplane.md docs/design/20-socialsimulator.md docs/design/21-diagnostic-evaluation.md \
-        docs/design/30-mindtrainer.md docs/design/40-actio.md docs/design/50-mindagent.md \
+        docs/design/30-mindtrainer.md docs/design/40-simple-actio.md docs/design/50-mindagent.md \
         docs/design/55-strategy-experience.md docs/design/60-recipestore.md docs/design/70-trainscheduler.md \
         docs/design/71-trainplanner.md docs/design/80-inference-bridge.md docs/design/90-factory-and-cli.md
 git commit -m "docs(design): 总览与共享区块按第 1 到 5 步落地摘去计划中标记,写回召回放宽与门② 部分失败的措辞"
@@ -2722,7 +2722,7 @@ git commit -m "docs(design): 模拟器篇——会话资源、准入、客户端
 
 ---
 
-### Task 24: MindTrainer(30)——训练路换成 Actio 实例、`memory` 块与哈希落地(只改写,不净增)
+### Task 24: MindTrainer(30)——训练路换成 SimpleActio 实例、`memory` 块与哈希落地(只改写,不净增)
 
 **Files:**
 - Modify: `docs/design/30-mindtrainer.md`(71 个 `[计划中]` 行,**行数 900,余量 0**;净增必须 ≤ 0)
@@ -2760,7 +2760,7 @@ Run: `grep -n "\[计划中\]" docs/design/30-mindtrainer.md | cut -c1-100`
 3. 逻辑 episode id 的真实形状:旧措辞在 493、899 行,`{run}-{stage}-{scenario}-r{k}` → 实际是 `{run_id}-grpo{step}-{scenario_id}-r{k}`(`logical_episode_id(run_id, step, scenario_id, k)`):同一情境在不同 GRPO step 反复出现,只写阶段名会撞。493 行加半句"续训从同一 step 重跑时 id 与上次相同,同名 episode 文件被覆盖,批只认本次产出的 id";899 行术语只改形状。(20 篇 436、40 篇无此形状,20 篇的改动在 Task 23。)
 4. 时间预算:543 行"每条指令按 `max_turns_per_episode × 90 秒` 算(`PER_TURN_DEADLINE_S` 取 90 秒),指令结束后还原"。代码里**没有还原**:流 deadline 由轨迹源的常量 `mindtrainer.trajectory_source.PER_TURN_DEADLINE_S` 算,经 `client_factory(deadline_s=)` 传,不改运行时 `interact_deadline_s`。改成"……由轨迹源按 `max_turns_per_episode × 90 秒` 算(常量 `PER_TURN_DEADLINE_S` 取 90 秒),经 `client_factory(deadline_s=)` 传入;不改运行时的 `interact_deadline_s`,所以同开时部署会话不借用训练的值"。同一单元格改写。
 5. 副本 close 失败:548 行"训练位副本 close 的等待 | 不适用 | 60 秒,与服务端 join 同值;超时判 `role_memory_failure`,这条 rollout 不重试"后补半句"。close 抛异常同样判 `role_memory_failure`、不重试,即使 rollout 本身已结束:close 失败说明副本库状态不可信"。
-6. 角色位 Actio 实例的 `library_version`():训练路不读技能库,取 `{"skill": "0", "memory": "0"}`。30 篇没写,在 491 行"交出什么与轨迹源"单元格末尾补一句。
+6. 角色位 SimpleActio 实例的 `library_version`():训练路不读技能库,取 `{"skill": "0", "memory": "0"}`。30 篇没写,在 491 行"交出什么与轨迹源"单元格末尾补一句。
 7. 排除清单、摘要口径等属 40 篇,不在本篇。
 
 - [ ] **Step 3: 腾地方——可合并或删减的段落候选(本篇必须净增 ≤ 0)**
@@ -2771,7 +2771,7 @@ Run: `grep -n "\[计划中\]" docs/design/30-mindtrainer.md | cut -c1-100`
 |---|---|---|---|
 | 时间预算表后的重复叙述 | 550 行"两个 90 秒方向相反,互不嵌套……"与 20 篇 634 行逐字重复(写计划时 `grep -n "两个 90 秒方向相反"` 核对:20 篇 634、30 篇 550、90 篇 548 行是同义改写) | 删 30 篇 550 行及其后的空行;表内两行已讲清,20 篇保留原文 | 2 行 |
 | 552 行里"对手 API 回 429、5xx……"罗列 | 与 20 篇 697-698 行故障表同内容(20 篇 693-698 行是准入、白名单、join、副本删除、相邻消息超时) | 删 552 行中从"对手 API 回 429、5xx 或连不上"到"记录保持 `pending` [已落地]。"的整句,保留"单次后端调用超时……"与后面"对手位的记忆失败另有两个终止原因"两句 | 0(同一段内缩短,不省行;只在这一行留出新增措辞的字数) |
-| 798 行(带记忆的端到端,摘后 `[已落地]`)与 797 行(已落地的 `--interact` 端到端) | 两行都是 `factory reconcile --once --interact` 的端到端,差别只在是否带记忆 | 合成一行:"端到端 | `factory reconcile --once --interact` 走到候选 `pending_review`,episode 都在产物树里;带记忆时训练位与对手位都是 Actio,episode 每轮带激活轨迹,训练记录的 `policy_backend` 带 `memory` 块 | 假 vLLM、替身记忆" | 1 行 |
+| 798 行(带记忆的端到端,摘后 `[已落地]`)与 797 行(已落地的 `--interact` 端到端) | 两行都是 `factory reconcile --once --interact` 的端到端,差别只在是否带记忆 | 合成一行:"端到端 | `factory reconcile --once --interact` 走到候选 `pending_review`,episode 都在产物树里;带记忆时训练位与对手位都是 SimpleActio,episode 每轮带激活轨迹,训练记录的 `policy_backend` 带 `memory` 块 | 假 vLLM、替身记忆" | 1 行 |
 | 721-730 决策表 MT-21 到 MT-26 的"备选"列 | 备选只是"保持原状"的重复 | 把 MT-22、MT-25、MT-26 的备选列压成一句 | 0(缩单元格,不省行) |
 | 897-899 术语表 | 设计二术语(逻辑 episode id 等)各缩一行 | 缩写,不删行 | 0 |
 
@@ -2814,26 +2814,26 @@ Expected: 行数 ≤ 900;0 错误 0 告警。
 
 ```bash
 git add docs/design/30-mindtrainer.md
-git commit -m "docs(design): MindTrainer 篇——训练路换成 Actio、memory 块与哈希标为已落地,摘要与身份写进本次派发的配置,不回写指令"
+git commit -m "docs(design): MindTrainer 篇——训练路换成 SimpleActio、memory 块与哈希标为已落地,摘要与身份写进本次派发的配置,不回写指令"
 ```
 
 ---
 
-### Task 25: Actio(40)——记忆端口、替身、轨迹 v2 落地;`close()` 不放弃、摘要与召回口径写回(只改写,不净增)
+### Task 25: SimpleActio(40)——记忆端口、替身、轨迹 v2 落地;`close()` 不放弃、摘要与召回口径写回(只改写,不净增)
 
 **Files:**
-- Modify: `docs/design/40-actio.md`(119 个 `[计划中]` 行,**行数 895,余量 5**;净增必须 ≤ +5,目标 ≤ 0)
+- Modify: `docs/design/40-simple-actio.md`(119 个 `[计划中]` 行,**行数 895,余量 5**;净增必须 ≤ +5,目标 ≤ 0)
 - Test: 两个检查器 + `sync_docs --check`
 
 **Interfaces:**
-- Consumes: 第 1 步落地的名字:`actio.memory_port`(`MemoryHit`、`MemoryEvent`、`RememberOutcome`、`MemoryBackend`、`DeploymentMemoryStore`、`MemoryFailureError`、`MemoryEventConflict`、`MemoryClosedError`、`PERSONA_ID_PATTERN`)、`actio.memory`(`content_id`、`TupleMemory`、`FileTupleStore(root, *, extraction_failure=)`、私有 `_Ledger`)、`actio.trace`(`TRACE_SCHEMA_V1`、`TRACE_SCHEMA_V2`、`TRACE_KEYS_V2`、`MEMORY_TRACE_KEYS`)、`instantiate(..., memory=, episode_id=, interlocutors=, replay_read_only=)`、`ActioInstance.close()`。第 7 步(依之而定):`actio/memory_starling.py` 的 `StarlingMemory`、`StarlingDeploymentStore`。
+- Consumes: 第 1 步落地的名字:`simple_actio.memory_port`(`MemoryHit`、`MemoryEvent`、`RememberOutcome`、`MemoryBackend`、`DeploymentMemoryStore`、`MemoryFailureError`、`MemoryEventConflict`、`MemoryClosedError`、`PERSONA_ID_PATTERN`)、`simple_actio.memory`(`content_id`、`TupleMemory`、`FileTupleStore(root, *, extraction_failure=)`、私有 `_Ledger`)、`simple_actio.trace`(`TRACE_SCHEMA_V1`、`TRACE_SCHEMA_V2`、`TRACE_KEYS_V2`、`MEMORY_TRACE_KEYS`)、`instantiate(..., memory=, episode_id=, interlocutors=, replay_read_only=)`、`SimpleActioInstance.close()`。第 7 步(依之而定):`simple_actio/memory_starling.py` 的 `StarlingMemory`、`StarlingDeploymentStore`。
 - Produces: 40 篇头部「状态」「代码位置」「被依赖」「对应实施计划」四行;第 3、4、5、8 章与第 9、10 章的状态与措辞。
 
 40 篇是最贴近代码的一篇,台账裁定最多落在这里。**先做 Step 2 的措辞写回(每条都是同一单元格改写),再做 Step 1 的摘标记**,否则摘标记后路径检查会要求该行路径存在。
 
 - [ ] **Step 1: 列清单并分类**
 
-Run: `grep -n "\[计划中\]" docs/design/40-actio.md | cut -c1-100`
+Run: `grep -n "\[计划中\]" docs/design/40-simple-actio.md | cut -c1-100`
 
 行段:6-12(头部)、31-33(图例,保留)、68-70、108-110、115、127-128、135-136、140、146-151、156、206、209、221-226、244-245、251、258-263、273、280、311、332、335、354-355、363、386-388、392、412、443-448、451-453、465-467、479、488-489、493、539-541、550-553、558、605、608-609、612-614、674-677、711、740-751(决策 AC-13 到 AC-24)、755、764-769、783-784、806、825、836-838、845-846、859-862、866、883-888。
 
@@ -2869,22 +2869,22 @@ Run: `grep -n "\[计划中\]" docs/design/40-actio.md | cut -c1-100`
 9. **`abandon_event` 未知 key**():40 篇 275 行状态表 `abandoned` 行出口列补"未知 key 抛 MemoryFailureError(`transient` 为假),已放弃再放弃为空操作";`committed` 行不许放弃保持。
 10. **`MemoryClosedError` 与 `close(timeout=)`**():388 行不变量 8 后补"`close` 等门面在途调用返回后合并 WAL 并关连接;关后调用抛 MemoryClosedError"。
 11. **异常包装**(R5):764 行"`recall`、`embed_pending` 失败,或 `remember` 抛异常"后补"实例把端口抛出的非 MemoryFailureError 异常包成 MemoryFailureError(类名, `transient` 为假):未知异常判确定性失败,宁可 T2 不无限重试"。
-12. **人格 id 字符集**(R6):258-263 行实体表加不了行,把 262 行 DeploymentMemoryStore 的"约束"列末尾补"人格 id 须匹配 `PERSONA_ID_PATTERN`(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`),两个部署管理面拼路径前都校验,不合法抛 ActioDataError"。
-13. **空查询词与 `episode_id` 必填**(R3、R4):411-440 行入口签名之后的叙述里补一句:"查询词为空串时实例不调 `recall`;`episode_id` 必填按'会写库'判断,即 `replay_read_only` 为假时要求"(443 行单元格里已有"可写端口没给 `episode_id` 时抛 `ActioDataError`",核对一致,只补空查询词)。
-14. **`TRACE_SCHEMA` 改名**(R9):469 行 `actio.trace` 模块表 `TRACE_SCHEMA` → `TRACE_SCHEMA_V1`、`TRACE_SCHEMA_V2`、`TRACE_KEYS_V2`。**这一行已在 `[已落地]` 行里**,所以改名后符号在代码里存在,检查器不告警;若不改,旧名在代码里已不存在,会告警"在代码与施工计划里都找不到"。
-15. **工作包 9 的 `instantiate` 参数**(设计源 bd12718):443 行已含 `interlocutors`,411-414 行代码块里 `instantiate` 签名 `memories=None, memory=None, episode_id=None, replay_read_only=False,` 缺 `interlocutors=None`,补进去(同一行,不增行):`memories=None, memory=None, episode_id=None, interlocutors=None, replay_read_only=None,`(`replay_read_only` 默认 `None`,`memories=` 简写默认只读,`memory=` 默认可写;核对 `src/actio/instance.py` 的真实默认值后抄)。
+12. **人格 id 字符集**(R6):258-263 行实体表加不了行,把 262 行 DeploymentMemoryStore 的"约束"列末尾补"人格 id 须匹配 `PERSONA_ID_PATTERN`(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`),两个部署管理面拼路径前都校验,不合法抛 SimpleActioDataError"。
+13. **空查询词与 `episode_id` 必填**(R3、R4):411-440 行入口签名之后的叙述里补一句:"查询词为空串时实例不调 `recall`;`episode_id` 必填按'会写库'判断,即 `replay_read_only` 为假时要求"(443 行单元格里已有"可写端口没给 `episode_id` 时抛 `SimpleActioDataError`",核对一致,只补空查询词)。
+14. **`TRACE_SCHEMA` 改名**(R9):469 行 `simple_actio.trace` 模块表 `TRACE_SCHEMA` → `TRACE_SCHEMA_V1`、`TRACE_SCHEMA_V2`、`TRACE_KEYS_V2`。**这一行已在 `[已落地]` 行里**,所以改名后符号在代码里存在,检查器不告警;若不改,旧名在代码里已不存在,会告警"在代码与施工计划里都找不到"。
+15. **工作包 9 的 `instantiate` 参数**(设计源 bd12718):443 行已含 `interlocutors`,411-414 行代码块里 `instantiate` 签名 `memories=None, memory=None, episode_id=None, replay_read_only=False,` 缺 `interlocutors=None`,补进去(同一行,不增行):`memories=None, memory=None, episode_id=None, interlocutors=None, replay_read_only=None,`(`replay_read_only` 默认 `None`,`memories=` 简写默认只读,`memory=` 默认可写;核对 `src/simple_actio/instance.py` 的真实默认值后抄)。
 
 - [ ] **Step 3: 头部四行与第 9 章**
 
 - 第 6 行「状态」:把"设计二 [计划中]:……"整段改成已落地口径,Starling 适配器那一半依第 7 步:第 7 步未合,写"……;Starling 适配器与树外记忆配置 [计划中]"。
-- 第 9 行「代码位置」、第 10 行「被依赖」、第 12 行「对应实施计划」按同一规则改。**这一行不能写计划文件路径,也不能写带日期的文件名**:`check_docs` 的禁用规则对 `docs/superpowers` 报错,对 `计划 2026`(文件名里的"计划"加日期)报"引用实施计划编号";写计划时在一份 40 篇的副本上实测过,只有不带日期的短名能通过。所以这一行写成:`工作包 6(任务 70 至 78)[已落地]。设计二的 Actio 部分:替身路径施工计划(agent-memory-standin,第 1 到 5 步中属于 Actio 的第 1 步:记忆端口、替身、每轮读写、轨迹 actio.trace.v2)[已落地];Starling 路径施工计划(agent-memory-starling,第 7 步:Starling 适配器与树外记忆配置,依 Starling 的 PR 合入)[计划中 或 已落地,依第 7 步]`。完整路径只写进提交信息(见 Task 31 与本步末尾"需要控制者裁定"第 1 条)。
-- 第 9 章 803-804 行:`合计 185 个用例` 是 `b826440` 基线数;第 1 步改了 `test_actio_instance.py`(30→新数)、新增 `tests/test_actio_memory_port.py`、`tests/test_actio_memory_contract.py`、`tests/test_actio_file_tuple_store.py`。先实测:
+- 第 9 行「代码位置」、第 10 行「被依赖」、第 12 行「对应实施计划」按同一规则改。**这一行不能写计划文件路径,也不能写带日期的文件名**:`check_docs` 的禁用规则对 `docs/superpowers` 报错,对 `计划 2026`(文件名里的"计划"加日期)报"引用实施计划编号";写计划时在一份 40 篇的副本上实测过,只有不带日期的短名能通过。所以这一行写成:`工作包 6(任务 70 至 78)[已落地]。设计二的 SimpleActio 部分:替身路径施工计划(agent-memory-standin,第 1 到 5 步中属于 SimpleActio 的第 1 步:记忆端口、替身、每轮读写、轨迹 simple_actio.trace.v2)[已落地];Starling 路径施工计划(agent-memory-starling,第 7 步:Starling 适配器与树外记忆配置,依 Starling 的 PR 合入)[计划中 或 已落地,依第 7 步]`。完整路径只写进提交信息(见 Task 31 与本步末尾"需要控制者裁定"第 1 条)。
+- 第 9 章 803-804 行:`合计 185 个用例` 是 `b826440` 基线数;第 1 步改了 `test_simple_actio_instance.py`(30→新数)、新增 `tests/test_simple_actio_memory_port.py`、`tests/test_simple_actio_memory_contract.py`、`tests/test_simple_actio_file_tuple_store.py`。先实测:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest --collect-only -qq -p no:cacheprovider \
-  tests/test_actio_signals.py tests/test_actio_skills.py tests/test_actio_memory_experience.py \
-  tests/test_actio_instance.py tests/test_actio_realtime_e2e.py tests/test_actio_memory_port.py \
-  tests/test_actio_memory_contract.py tests/test_actio_file_tuple_store.py \
+  tests/test_simple_actio_signals.py tests/test_simple_actio_skills.py tests/test_simple_actio_memory_experience.py \
+  tests/test_simple_actio_instance.py tests/test_simple_actio_realtime_e2e.py tests/test_simple_actio_memory_port.py \
+  tests/test_simple_actio_memory_contract.py tests/test_simple_actio_file_tuple_store.py \
   tests/test_realtime_proto_submit_trace.py tests/test_runner_activation_trace.py \
   tests/test_realtime_activation_trace.py 2>&1 | tail -12
 ```
@@ -2899,18 +2899,18 @@ PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest --collect-only -qq -p no:cac
 | 840-846 局限表 "二字切分检不到近义表达" 与 "Starling 没装时退化为替身" | 两行都在讲替身与 Starling 的差别 | 合成一行 | 1 行 |
 | 574-600 图 3 文字版与 561-566 正文的重复 | 图块是生成的,**不能删**;但 561-566 的叙述段有两句和图说明逐字相同 | 删正文里重复的一句 | 1-2 行 |
 
-先做 Step 2、3 的改写后量行数:`python3 -c "print(len(open('docs/design/40-actio.md', encoding='utf-8').read().split('\n')))"`,≤ 900 即可;超了按上表腾。
+先做 Step 2、3 的改写后量行数:`python3 -c "print(len(open('docs/design/40-simple-actio.md', encoding='utf-8').read().split('\n')))"`,≤ 900 即可;超了按上表腾。
 
 - [ ] **Step 5: 跑检查器**
 
-Run: `python3 docs/design/tools/check_docs.py 40-actio.md; python3 docs/design/tools/check_consistency.py | tail -3; python3 docs/design/tools/sync_docs.py --check`
+Run: `python3 docs/design/tools/check_docs.py 40-simple-actio.md; python3 docs/design/tools/check_consistency.py | tail -3; python3 docs/design/tools/sync_docs.py --check`
 Expected: 0 错误 0 告警。常见失败:`符号告警 ... 只在施工计划里` 说明某个依第 7 步的符号所在行误摘了标记;`测试数 N 不在实测...` 说明 185 没改全(头部、803、825 三处)。
 
 - [ ] **Step 6: 提交**
 
 ```bash
-git add docs/design/40-actio.md
-git commit -m "docs(design): Actio 篇——记忆端口、替身、轨迹 v2 标为已落地,close 只关库、摘要按 snapshot 与全行、召回放宽到 volatile 写回,补测试数"
+git add docs/design/40-simple-actio.md
+git commit -m "docs(design): SimpleActio 篇——记忆端口、替身、轨迹 v2 标为已落地,close 只关库、摘要按 snapshot 与全行、召回放宽到 volatile 写回,补测试数"
 ```
 
 ---
@@ -2968,7 +2968,7 @@ Run: `grep -n "\[计划中\]" docs/design/50-mindagent.md | cut -c1-100`
 - [ ] **Step 3: 头部三行与测试表**
 
 - 第 6 行「状态」:`部署记忆换成 Starling(经部署记忆管理面访问)、部署实例按 episode 新造、门② 的记忆收录改路 [计划中]` 拆成两半:部署实例按 episode 新造、门② 改路、人格库锁、起点副本 [已落地](替身 FileTupleStore 上);换成 Starling [计划中 依第 7 步]。
-- 第 9 行「依赖」`Actio(……含记忆端口、管理面与 Starling 适配器 [计划中])`:端口与管理面摘,Starling 适配器依第 7 步。
+- 第 9 行「依赖」`SimpleActio(……含记忆端口、管理面与 Starling 适配器 [计划中])`:端口与管理面摘,Starling 适配器依第 7 步。
 - 第 12 行「对应实施计划」`智能体记忆设计的第 7 步(部署记忆、轮次摘要、快照重放、门② 改路)[计划中]`:写成"智能体记忆设计的第 5 步(部署记忆、轮次摘要、快照重放、门② 改路,替身路径)[已落地]"(原文写的"第 7 步"是旧施工顺序里的步号,现在 MindAgent 是第 5 步;施工顺序在 `4775eb9` 调过)。
 - 第 9 章用例数:719 行 `共 152 个用例` 与 809 行 `九个测试文件共 152 个用例` 是基线实测数。第 5 步改了:`test_ma_admit.py`(22→新数)、`test_ma_rounds.py`(28)、`test_ma_deployment.py`(22),新增 `test_ma_memory_layout.py`,`test_ma_config_library.py`(27)也加了用例,`test_ma_e2e.py` 可能改。实测:
 
@@ -3005,7 +3005,7 @@ git commit -m "docs(design): MindAgent 篇——部署记忆、轮次摘要、�
 
 ---
 
-### Task 27: factory 与命令行(90)——记忆装配、转换后端、对手包 Actio、时间预算落地(只改写,不净增)
+### Task 27: factory 与命令行(90)——记忆装配、转换后端、对手包 SimpleActio、时间预算落地(只改写,不净增)
 
 **Files:**
 - Modify: `docs/design/90-factory-and-cli.md`(112 个 `[计划中]` 行,**行数 900,余量 0**;净增必须 ≤ 0)
@@ -3015,7 +3015,7 @@ git commit -m "docs(design): MindAgent 篇——部署记忆、轮次摘要、�
 - Consumes: 第 3、4、5 步落地的名字:`factory.memory_translate`(`MemoryTranslatingBackend`、`FactoryMemoryUnavailableError`、`FactoryMemoryFailureError`)、`factory.memory_runtime`(`STAND_IN_MEMORY_RUNTIME`、`stand_in_memory_resolver`、`stand_in_memory_root`)、`AgentRuntime.client_factory(*, deadline_s=)`、`run_daemon(..., on_locked=)`、`PER_TURN_DEADLINE_S = 90.0` 在 `mindtrainer.trajectory_source`、`POLICY_TIMEOUT_S`、`INTERACT_TURN_TIMEOUT_S`、`controlplane.lock.git_dir`。第 7 步(依之而定):`factory.memory_config`、`RISE_MEMORY_CONFIG`、清扫函数、`.owner` 归属检查、`StarlingDeploymentStore` 的选择、Starling 运行时解析器。
 - Produces: 90 篇头部三行(「代码位置」「依赖」「对应实施计划」)与第 3 到 10 章。
 
-**一个关键事实**:90 篇里相当多的 `[计划中]` 讲的是**第 7 步**的东西(`factory.memory_config`、本机记忆配置、第 12 到 17 条拒绝项、`.owner`、Starling 解析器),它们依第 7 步。第 7 步未合入时这些行**全部保留**;第 3、4、5 步的东西(转换后端、对手包 Actio、`policy_for_rollout`、时间预算、替身解析器、替身部署根目录、部署实例工厂)摘。
+**一个关键事实**:90 篇里相当多的 `[计划中]` 讲的是**第 7 步**的东西(`factory.memory_config`、本机记忆配置、第 12 到 17 条拒绝项、`.owner`、Starling 解析器),它们依第 7 步。第 7 步未合入时这些行**全部保留**;第 3、4、5 步的东西(转换后端、对手包 SimpleActio、`policy_for_rollout`、时间预算、替身解析器、替身部署根目录、部署实例工厂)摘。
 
 - [ ] **Step 1: 列清单并分类**
 
@@ -3025,11 +3025,11 @@ Run: `grep -n "\[计划中\]" docs/design/90-factory-and-cli.md | cut -c1-100`
 
 | 分类 | 行段 | 处理 |
 |---|---|---|
-| 第 3 步,摘 | 194-195(`factory.agent`)、199(`factory.interact_policy`)、201(`factory.memory_translate`)、202(`respond_guided` 与超时)、543(策略工厂形态)、544(会话登记)、548(时间预算:等待上限)、549(内层与记忆)、550(对手位包 Actio)、724-736 中 FC-24、25、26、27(清扫的 `run_daemon(on_locked=)` 部分)、30、31、32、759-766 中对应故障行 | `[计划中]` → `[已落地]` |
+| 第 3 步,摘 | 194-195(`factory.agent`)、199(`factory.interact_policy`)、201(`factory.memory_translate`)、202(`respond_guided` 与超时)、543(策略工厂形态)、544(会话登记)、548(时间预算:等待上限)、549(内层与记忆)、550(对手位包 SimpleActio)、724-736 中 FC-24、25、26、27(清扫的 `run_daemon(on_locked=)` 部分)、30、31、32、759-766 中对应故障行 | `[计划中]` → `[已落地]` |
 | 第 4 步,摘 | 301-305(`interact` 段 `memory: {seed}`)、420、428-430、545(`memory_resolver` 的替身一路)、546(续训与替身)、547(每条 rollout 的私有副本)、698(`approved` 相关不在本篇)、717、721、749-754 中替身解析器相关行 | 摘 |
 | 第 5 步,摘 | 374(替身部署根目录)、733(FC-29 的 FileTupleStore 半句)、325-327(目录布局表)、813(部署路装配测试)、874 | 摘 |
 | 依第 7 步 | 6-10(头部)里 `src/factory/memory_config.py`、`memory_translate.py` 中的 `memory_config`、200(`factory.memory_config`)、283-284(本机记忆配置、记忆库目录)、329(`.owner`)、333、358、368-370(第 11 到 12 条中 Starling 部分)、375、462、466-470 中 Starling 的两行(469 的 `memory_starling`、470)、525、552(启动清扫的 `reconcile` 一半可摘:`run_daemon(on_locked=)` 已在第 3 步)、566、581-586(第 12 到 17 条拒绝项)、598、721 | 第 7 步未合则留 |
-| 保留(要真端点或真机) | 848、849(Starling 未上 PyPI,源码构建)、850(记忆库必须与 Actio 同机)、851(挂死的对手后端占会话名额——属第 2 步,落地后改"已落地"并留作已知局限)、873(延迟)、874(每会话开库对 GRPO 一步)、875(向量稳定性)、876(两个开关同开取 90 秒)、877(旧版本 Starling 写下的库) | 851 摘,其余不摘 |
+| 保留(要真端点或真机) | 848、849(Starling 未上 PyPI,源码构建)、850(记忆库必须与 SimpleActio 同机)、851(挂死的对手后端占会话名额——属第 2 步,落地后改"已落地"并留作已知局限)、873(延迟)、874(每会话开库对 GRPO 一步)、875(向量稳定性)、876(两个开关同开取 90 秒)、877(旧版本 Starling 写下的库) | 851 摘,其余不摘 |
 
 (853 行 `writeProduct` 那条是设计二之前就有的 `[计划中]`,与本步无关,不动。)
 
@@ -3064,7 +3064,7 @@ PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest --collect-only -qq -p no:cac
   tests/test_mt_wire.py tests/test_repo_lock.py 2>&1 | tail -12
 ```
 
-810-815 行是 `施工时定` 的叙述行,每行的"测试文件"列写"施工时定"+状态 `[计划中]`:把落地了的行改成真实文件名与用例数(替身路径端到端、部署路装配、对手工厂包 Actio、起点哈希与副本、extra 缺失跳过各对应哪个文件,查 `grep -ln "stand-in\|STAND_IN" tests/test_factory_*.py` 确定),依第 7 步的"记忆配置读取"、"extra 缺失跳过"两行留着。
+810-815 行是 `施工时定` 的叙述行,每行的"测试文件"列写"施工时定"+状态 `[计划中]`:把落地了的行改成真实文件名与用例数(替身路径端到端、部署路装配、对手工厂包 SimpleActio、起点哈希与副本、extra 缺失跳过各对应哪个文件,查 `grep -ln "stand-in\|STAND_IN" tests/test_factory_*.py` 确定),依第 7 步的"记忆配置读取"、"extra 缺失跳过"两行留着。
 
 - [ ] **Step 4: 腾地方——可合并或删减的段落候选(本篇必须净增 ≤ 0)**
 
@@ -3090,7 +3090,7 @@ Expected: 行数 ≤ 900;0 错误 0 告警。
 
 ```bash
 git add docs/design/90-factory-and-cli.md
-git commit -m "docs(design): 组合根篇——转换后端、对手包 Actio、替身解析器与部署根目录、时间预算标为已落地,替身根目录与 PR 接口列表写回"
+git commit -m "docs(design): 组合根篇——转换后端、对手包 SimpleActio、替身解析器与部署根目录、时间预算标为已落地,替身根目录与 PR 接口列表写回"
 ```
 
 ---
@@ -3169,7 +3169,7 @@ git commit -m "docs(design): 调度器篇的 interact 段加 memory 键与样例
 ### Task 29: 设计源 spec 按台账同步措辞
 
 **Files:**
-- Modify: `docs/superpowers/specs/2026-10-25-actio-starling-memory-design.md`(590 行;不受 900 行上限约束,也不受 `check_docs` 检查,但保持每条改动小)
+- Modify: `docs/superpowers/specs/2026-10-25-simple-actio-starling-memory-design.md`(590 行;不受 900 行上限约束,也不受 `check_docs` 检查,但保持每条改动小)
 - Test: 无自动检查。核对办法:每条改完用 `grep -n` 确认旧措辞已无。
 
 **Interfaces:**
@@ -3199,7 +3199,7 @@ git commit -m "docs(design): 调度器篇的 interact 段加 memory 键与样例
 13. R40——§8 签名增补:416 行 `make_openai_embedder(*, model, base_url, dim, timeout_ms)` → 加 `max_retries=0`;421 行 `remember_event(key, text, *, interlocutor)` → 加 `epoch`;事件表列表 `(列:key、text、……、state)` → 加 `tenant_id`、`failure_category`,主键 `(tenant_id, key)`;`[key] ` 文本前缀"在 Starling 侧加"(196 行 `key` 作为前缀写进 Starling 的文本:`[<key>] <text>` 已写,补"前缀由 Starling 侧加")。
 14. R41——`abandon_event` 未知 key:424 行补 `未知 key 抛 KeyError(本仓库适配器映射为 MemoryFailureError,transient 为假);已放弃再放弃为空操作,与替身一致`。
 15. R42——`close(timeout=)`:420 行 `Memory.close()` 的作用 `关闭 SQLite 连接并等待自己的工作线程退出` → 补`;\`close(timeout=)\` 等门面在途调用返回后合并 WAL 并关连接,关后调用抛 \`MemoryClosed\``。
-16. R5、R6、R3、R4(第 1 步):`grep -n "MemoryFailureError" $S` 的 4.3、4.1 节附近补三句:端口抛出的非 `MemoryFailureError` 异常由实例包成 `MemoryFailureError(类名, transient=False)`;人格 id 字符集统一为 `PERSONA_ID_PATTERN = ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`(`actio/memory_port.py`),两个部署管理面拼路径前都校验;查询词为空串时实例不调 `recall`,`episode_id` 必填按"会写库"(`replay_read_only` 为假)判断。
+16. R5、R6、R3、R4(第 1 步):`grep -n "MemoryFailureError" $S` 的 4.3、4.1 节附近补三句:端口抛出的非 `MemoryFailureError` 异常由实例包成 `MemoryFailureError(类名, transient=False)`;人格 id 字符集统一为 `PERSONA_ID_PATTERN = ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`(`simple_actio/memory_port.py`),两个部署管理面拼路径前都校验;查询词为空串时实例不调 `recall`,`episode_id` 必填按"会写库"(`replay_read_only` 为假)判断。
 17. R9:设计源 4.6 节没有 `TRACE_SCHEMA` 字样(grep 无),不改。
 18. 状态头:第 3 行"状态:修订稿第七版,待审阅"→"状态:修订稿第七版,已审定并入 docs/design,按施工计划落地;本稿是历史来源,与 docs/design 冲突以 docs/design 为准"。
 
@@ -3207,7 +3207,7 @@ git commit -m "docs(design): 调度器篇的 interact 段加 memory 键与样例
 
 Run:
 ```bash
-S=docs/superpowers/specs/2026-10-25-actio-starling-memory-design.md
+S=docs/superpowers/specs/2026-10-25-simple-actio-starling-memory-design.md
 grep -n "派发时写回\|派发时算出并写回\|之外的临时目录\|成功提交后对这条\|{run}-{stage}" "$S" || echo "旧措辞已清"
 ```
 Expected: `旧措辞已清`。
@@ -3215,7 +3215,7 @@ Expected: `旧措辞已清`。
 - [ ] **Step 3: 提交**
 
 ```bash
-git add docs/superpowers/specs/2026-10-25-actio-starling-memory-design.md
+git add docs/superpowers/specs/2026-10-25-simple-actio-starling-memory-design.md
 git commit -m "docs(spec): 按施工中的裁定同步措辞——派发器不回写指令、替身根目录、放弃时机、门② 部分失败、Starling 侧进 C++"
 ```
 
@@ -3224,7 +3224,7 @@ git commit -m "docs(spec): 按施工中的裁定同步措辞——派发器不�
 ### Task 30: 生成图与最终代码核对(预期不改图)
 
 **Files:**
-- 只读核对: `docs/design/diagrams/fig_00-architecture.py`、`fig_00-closed-loop.py`、`fig_00-states.py`、`fig_10-controlplane-states.py`、`fig_20-socialsimulator-states.py`、`fig_30-mindtrainer-flow.py`、`fig_40-actio-architecture.py`、`fig_40-actio-context.py`、`fig_40-actio-respond.py`、`fig_50-mindagent-admission.py`、`fig_50-mindagent-context.py`
+- 只读核对: `docs/design/diagrams/fig_00-architecture.py`、`fig_00-closed-loop.py`、`fig_00-states.py`、`fig_10-controlplane-states.py`、`fig_20-socialsimulator-states.py`、`fig_30-mindtrainer-flow.py`、`fig_40-simple-actio-architecture.py`、`fig_40-simple-actio-context.py`、`fig_40-simple-actio-respond.py`、`fig_50-mindagent-admission.py`、`fig_50-mindagent-context.py`
 - 可能 Modify(仅当模块名、函数名、状态与最终代码不符): 对应的 `fig_*.py`,然后 `python3 docs/design/diagrams/build_all.py <名字>` 与 `python3 docs/design/tools/sync_docs.py`
 - Test: `check_docs.py`(图卫生与节点数)+ `sync_docs.py --check`
 
@@ -3238,11 +3238,11 @@ git commit -m "docs(spec): 按施工中的裁定同步措辞——派发器不�
 
 | 图 | 要核对的名字(来自源文件) | 核对办法 | 预期 |
 |---|---|---|---|
-| `fig_40-actio-architecture` | `memory.py`("TupleMemory 替身")、`memory_port.py`("MemoryBackend 协议 · MemoryHit · MemoryEvent")、`memory_starling.py`("StarlingMemory 适配器")、`starling` | `ls src/actio/`;`grep -n "^class " src/actio/memory_port.py src/actio/memory.py` | 名字都在。`FileTupleStore`、`DeploymentMemoryStore` 在图里**没画**:图上 `memory.py` 的副标题只写 "TupleMemory 替身",可以不改(图是模块组成,不是类清单)。若想补,改 `memory.py` 副标题为 "MemoryEntry · snapshot\nTupleMemory · FileTupleStore",节点宽度够(190)就改,**这是选改,不是必改** |
-| `fig_40-actio-respond` | "recall 取前 memory_limit 条"、"逐条 remember 对方新发言\n再 embed_pending 一次\n只读重放时跳过"、"MemoryFailureError" | `sed -n '/def respond/,/return/p' src/actio/instance.py \| head -80` 看顺序:recall → 渲染 → 后端 → remember → embed_pending → 轨迹;空查询词不调 recall(R3) | 顺序一致则不改;若 R3 的"空查询词不 recall"值得画,在"记忆检索"副标题加一行"查询词为空则跳过",**选改** |
-| `fig_40-actio-context` | "Starling 记忆库"、"每个人格一个 SQLite 库(树外)" | 无需核对代码 | 不改 |
+| `fig_40-simple-actio-architecture` | `memory.py`("TupleMemory 替身")、`memory_port.py`("MemoryBackend 协议 · MemoryHit · MemoryEvent")、`memory_starling.py`("StarlingMemory 适配器")、`starling` | `ls src/simple_actio/`;`grep -n "^class " src/simple_actio/memory_port.py src/simple_actio/memory.py` | 名字都在。`FileTupleStore`、`DeploymentMemoryStore` 在图里**没画**:图上 `memory.py` 的副标题只写 "TupleMemory 替身",可以不改(图是模块组成,不是类清单)。若想补,改 `memory.py` 副标题为 "MemoryEntry · snapshot\nTupleMemory · FileTupleStore",节点宽度够(190)就改,**这是选改,不是必改** |
+| `fig_40-simple-actio-respond` | "recall 取前 memory_limit 条"、"逐条 remember 对方新发言\n再 embed_pending 一次\n只读重放时跳过"、"MemoryFailureError" | `sed -n '/def respond/,/return/p' src/simple_actio/instance.py \| head -80` 看顺序:recall → 渲染 → 后端 → remember → embed_pending → 轨迹;空查询词不调 recall(R3) | 顺序一致则不改;若 R3 的"空查询词不 recall"值得画,在"记忆检索"副标题加一行"查询词为空则跳过",**选改** |
+| `fig_40-simple-actio-context` | "Starling 记忆库"、"每个人格一个 SQLite 库(树外)" | 无需核对代码 | 不改 |
 | `fig_50-mindagent-admission` | "记忆增量只许三键:persona_id · text · interlocutor"、"记忆 remember_event 进该人格的 Starling 库"、"不合法或异常:留在 approved\n记忆抽取失败:提案 rejected\nfailure-admit-<提案>"、desc 里 "增量不合法或写记忆抛异常记 T2 失败记录,提案留在 approved。记忆抽取失败则提案改为 rejected。" | 对照 计划 A Task 34 的实现(`src/mindagent/admit.py`) | **这张图要改**: 说部分失败留 `approved`, 说瞬态异常写 T1。desc 与第 33 行的方框文字改为:"不合法或异常:留在 approved\n记忆抽取失败:一条都没提交才 rejected\n部分已提交:留在 approved"。方框高度 `hh = 90` 是三行的,四行会溢出,改成两行以内:"异常或部分已提交:留 approved\n一条都没提交且抽取失败:rejected\nfailure-admit-<提案>"(仍三行)。图说明 desc 同步。这是"图只画目标系统"的目标系统本身变了,不是进展标记 |
-| `fig_50-mindagent-context` | "Actio:技能库 · 显式记忆" | 无需核对 | 不改 |
+| `fig_50-mindagent-context` | "SimpleActio:技能库 · 显式记忆" | 无需核对 | 不改 |
 | `fig_00-states`、`fig_10-controlplane-states` | `approved → rejected` 虚线 | 对照 `controlplane/states.py` | `fig_00-states` 已画并标"仅收录处理器走"。**`fig_10-controlplane-states` 没画这条边**(上面 grep 只有 `appr`、`rej` 两个节点,没有 `edge(appr, rej)`):10 篇第 41 行 Task 28 已补文字,图要补一条虚线 `c.edge(appr, rej, ..., dashed=True, label="仅收录处理器")`,照 `fig_00-states.py` 第 29 行的写法,在 `c.edge(pend, rej, ...)` 之后加 `c.edge(appr, rej, "right", "bottom", label="仅收录处理器", label_at=0.35, dashed=True)`,并在 `legend` 里加一项虚线说明(`fig_00-states.py` 第 46 行同款)。这张图当前 12 个节点,边不是节点,不变。写计划时 `fig_10-controlplane-states.py` 第 14-31 行核对过只有 `pend → rej`、没有 `appr → rej` |
 | `fig_20-socialsimulator-states` | "记忆失败" | 无需核对 | 不改 |
 | `fig_30-mindtrainer-flow` | "interact 算起点记忆摘要" | 无需核对 | 不改 |
@@ -3360,7 +3360,7 @@ git commit -m "docs(design): 智能体记忆文档与图收尾,路线图第 8 �
 | 00-overview | 67 | 10 | 24 | 约 10(第 7、21 到 28 项风险;SYS-27 等随第 7 步摘) | 约 20 到 34 |
 | 20-socialsimulator | 112 | 5 | 8 | 约 5 | 约 8 到 13 |
 | 30-mindtrainer | 71 | 12 | 13 | 约 12 | 约 14 到 25 |
-| 40-actio | 119 | 5 | 30 | 约 5 | 约 15 到 35 |
+| 40-simple-actio | 119 | 5 | 30 | 约 5 | 约 15 到 35 |
 | 50-mindagent | 154 | 5 | 25 | 约 5 | 约 12 到 30 |
 | 90-factory-and-cli | 112 | 10 | 63 | 约 10 | 约 40 到 73 |
 | 70-trainscheduler | 2 | 2(共享区块与图例) | 0 | 1(区块摘后) | 2 |
@@ -3374,7 +3374,7 @@ git commit -m "docs(design): 智能体记忆文档与图收尾,路线图第 8 �
 - 30:127、388、400、853、854、857、870(设计二之前就有)和 872、873、874(真机单轮延迟、抽取嵌入延迟、每会话开库)。
 - 40:859 到 862(抽取嵌入延迟、召回命中质量、不跑 `tick` 的召回质量、外部端点向量稳定性)。
 - 50:817 到 820(同上四项,`VACUUM INTO` 跨迁移版本在其中)。
-- 90:848 到 850(Starling 未上 PyPI、记忆库必须与 Actio 同机)、853(设计二之前就有)、873 到 877(延迟、每会话开库、向量稳定性、两开关同开、旧版本库能否打开)。
+- 90:848 到 850(Starling 未上 PyPI、记忆库必须与 SimpleActio 同机)、853(设计二之前就有)、873 到 877(延迟、每会话开库、向量稳定性、两开关同开、旧版本库能否打开)。
 - 全部六篇与 70、10 的图例定义行。
 
 **设计源 §13 的"未核实"六项**(真抽取嵌入延迟 4 秒、真嵌入召回质量、`VACUUM INTO` 跨版本、每会话开库对一步时长、不跑 `tick` 的召回质量、外部端点向量稳定性)**在施工后仍然未核实**,文档里对应项保留 `[计划中]`;第 6 步 Task 10 的 `backup_to` 可以在 Starling 的 PR 里加"旧版本库备份后用新版本打开"的用例,若加了且通过,则 40 篇 859 之外的"`VACUUM INTO` 副本"项(50 篇 818、00 篇 796、90 篇 877)可摘。是否加了看 Task 10 实际落地的测试清单,不要凭计划摘。

@@ -1,10 +1,10 @@
 import pytest
 
-from actio.skills import Skill
-from actio.trace import build_trace
+from simple_actio.skills import Skill
+from simple_actio.trace import build_trace
 from mindagent.analysis import BehaviorFinding, analyze, finding_id, signal_turns
 from mindagent.errors import MindAgentDataError
-from actio.signals import default_registry
+from simple_actio.signals import default_registry
 from simulator.datamodel import Episode, RoleAssignment, RoleBinding, TurnRecord
 
 LV = {"skill": "1", "memory": "0"}

@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from actio.skills import Skill
+from simple_actio.skills import Skill
 from mindagent.analysis import BehaviorFinding, agent_slot_of_episode, visible_history
 from mindagent.errors import MindAgentDataError
 from mindagent.proposals import ProposalDraft

@@ -28,7 +28,7 @@
 | TrainScheduler | 决策执行器:装配上下文、校验决策、构造训练指令、提名配方 | 控制层 | [已落地],含策略经验(默认关) |
 | TrainPlanner | 决策学习者:经可插拔后端给出下一轮训练决策 | 控制层 | [已落地],默认后端经桥接调用命令行模型 |
 
-共享基础设施有五个。**Actio** 是带技能库与显式记忆的智能体框架,每次响应附带激活轨迹;记忆由内嵌的 **Starling** 提供,可选 extra `memory`,一个模拟世界一个树外 SQLite 库,人格是其中的主体(部署一个情境一个世界,训练一条 rollout 一个世界)[已落地]。**外部推理桥接**用命令行调用外部强模型。**远端计算层** `compute` 经 SSH 在远端 GPU 主机上跑作业 [已落地]。**ROLL** 是分布式训练引擎,**vLLM** 是推理引擎。V1 经远端计算层接入 ROLL 的 LoRA SFT [已落地](由 `--executor roll` 装配,已在真实主机上从指令跑到候选一次)与 vLLM 推理服务 [已落地](命令拼装、SSH 隧道、服务生命周期;真机端到端待补)。已落地部分仍由确定性 mock 顶替。真实 GRPO 加 OPD 训练与真实 judge [推迟]。
+共享基础设施有五个。**SimpleActio** 是带技能库与显式记忆的智能体框架,每次响应附带激活轨迹;它是 Actio 的简化版,功能完备的正式版 Actio 完成后再接入 [计划中]。记忆由内嵌的 **Starling** 提供,可选 extra `memory`,一个模拟世界一个树外 SQLite 库,人格是其中的主体(部署一个情境一个世界,训练一条 rollout 一个世界)[已落地]。**外部推理桥接**用命令行调用外部强模型。**远端计算层** `compute` 经 SSH 在远端 GPU 主机上跑作业 [已落地]。**ROLL** 是分布式训练引擎,**vLLM** 是推理引擎。V1 经远端计算层接入 ROLL 的 LoRA SFT [已落地](由 `--executor roll` 装配,已在真实主机上从指令跑到候选一次)与 vLLM 推理服务 [已落地](命令拼装、SSH 隧道、服务生命周期;真机端到端待补)。已落地部分仍由确定性 mock 顶替。真实 GRPO 加 OPD 训练与真实 judge [推迟]。
 
 **状态标记。** **[已落地]** 表示代码在主干上且有测试。**[计划中]** 表示设计与实施计划已定,代码还没写。**[推迟]** 表示明确不在 V1 范围内。图只画目标系统,不标进展,进展只看正文的状态标记。
 
@@ -55,7 +55,7 @@
 | Scenario、Persona、RoleAssignment | 社会情境、人格模板,以及把角色位绑定到具体人格与模型后端的分配 |
 | Recipe(配方) | 验证有效的完整训练方案,分 batch、interact、agent_rsi 三类 |
 | DiagnosticReport | 诊断评测产出的报告:维度、分数、置信区间、错误类型、退化标记 |
-| Activation trace(激活轨迹) | Actio 每次响应附带的记录:命中的技能候选、选中的技能、命中的记忆 |
+| Activation trace(激活轨迹) | SimpleActio 每次响应附带的记录:命中的技能候选、选中的技能、命中的记忆 |
 | Evidence grade(证据等级) | 诊断报告的可信等级 `stub`、`mock`、`real`,决定它能否驱动规划与提名;缺标记一律判 `stub`,失败关闭 |
 <!-- shared:end context-block -->
 
@@ -194,9 +194,9 @@ TrainScheduler 是决策执行器:它把 TrainPlanner 的结构化决策落成�
 | 可以导入 | `trainplanner`(`backends` 只取类型、`context`、`decision`、`planner`、`templates`) |
 | 可以导入 | `inference_bridge` 只取 `BridgeError`;`recipestore` 只经 `recipes_port` |
 | 可以导入 | `mindtrainer` 恰好 `training_config` 与 `data_spec` 两个模块 |
-| 不得导入 | `mindtrainer` 的其他模块(`dispatch`、`orchestrator`、`executor`、`data_producer`)、`diagnostic`、`simulator`、`actio`、`mindagent`、`factory` |
+| 不得导入 | `mindtrainer` 的其他模块(`dispatch`、`orchestrator`、`executor`、`data_producer`)、`diagnostic`、`simulator`、`simple_actio`、`mindagent`、`factory` |
 | 反方向 | `controlplane`、`recipestore`、`trainplanner`、`mindtrainer`、`inference_bridge` 都不导入 `trainscheduler` |
-| 策略经验两模块更严 | `experience` 与 `experience_port` 不得导入 `trainplanner`、`inference_bridge`、`diagnostic`、`simulator`、`actio`、`mindagent`、`factory`;配方只经 `recipes_port`。由 `tests/test_se_boundaries.py` 强制,上下文类型由 `assemble` 拼装 |
+| 策略经验两模块更严 | `experience` 与 `experience_port` 不得导入 `trainplanner`、`inference_bridge`、`diagnostic`、`simulator`、`simple_actio`、`mindagent`、`factory`;配方只经 `recipes_port`。由 `tests/test_se_boundaries.py` 强制,上下文类型由 `assemble` 拼装 |
 
 测试文件不受此限,可以导入 `mindtrainer.dispatch` 与 `mindtrainer.data_producer` 跑端到端。
 

@@ -567,12 +567,12 @@ def test_a_three_tuple_reply_sends_its_trace_and_a_two_tuple_sends_none(store):
 
         def respond(self, persona, scenario, history, speaker_slot):
             self.n += 1
-            return ("a", None, {"schema": "actio.trace.v2", "n": str(self.n)}) if self.n % 2 else ("b", None)
+            return ("a", None, {"schema": "simple_actio.trace.v2", "n": str(self.n)}) if self.n % 2 else ("b", None)
 
     factory = _FakeFactory()
     InteractTrajectorySource(factory, _fixed(Traced()), store, _cfg(**_ONE_GROUP), run_id="run-1").collect()
     traces = factory.clients[0].traces
-    assert traces[0] == {"schema": "actio.trace.v2", "n": "1"} and traces[1] is None
+    assert traces[0] == {"schema": "simple_actio.trace.v2", "n": "1"} and traces[1] is None
 
 
 def test_a_reply_of_the_wrong_length_is_a_policy_bug_and_is_not_retried(store):

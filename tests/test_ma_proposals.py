@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from actio.skills import Skill
+from simple_actio.skills import Skill
 from controlplane.gitstore import GitStore
 from controlplane.paths import run_trace_file
 from inference_bridge import BridgeError, ScriptedBridge

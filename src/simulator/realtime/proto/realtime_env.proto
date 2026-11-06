@@ -66,7 +66,7 @@ message SessionReady {
 }
 
 // 客户端 → 服务端:为 client_driven_slot 当前这一轮提交话语。
-// activation_trace:客户端角色由完整 Actio 实例扮演时携带的激活轨迹(§2.6.3);
+// activation_trace:客户端角色由完整 SimpleActio 实例扮演时携带的激活轨迹(§2.6.3);
 // 裸模型不设置(HasField=false),以区分"没有轨迹"与"轨迹为空"。
 message SubmitTurn {
   string utterance = 1;

@@ -2,19 +2,19 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 场景二的每个角色位都成为带记忆的 Actio 智能体,每轮读写记忆;训练路的起点记忆进 `config_hash`;MindAgent 的部署记忆有提交点与回滚。全部只用替身记忆跑通,不依赖 Starling。
+**Goal:** 场景二的每个角色位都成为带记忆的 SimpleActio 智能体,每轮读写记忆;训练路的起点记忆进 `config_hash`;MindAgent 的部署记忆有提交点与回滚。全部只用替身记忆跑通,不依赖 Starling。
 
-**Architecture:** Actio 抽出记忆端口 `MemoryBackend` 与部署记忆管理面 `DeploymentMemoryStore`,替身是内存的 `TupleMemory` 与落盘的 `FileTupleStore`,两者过同一套契约测试。模拟器的会话改由 `SessionResources` 持有各角色位的智能体并有序收尾;训练位与对手位都换成 Actio 实例,记忆异常经组合根转换成模拟器认得的两个基类。训练配置加 `memory` 段,派发器经注入的解析器解出起点摘要与运行时身份。MindAgent 按 episode 新造实例,删起点副本即提交。
+**Architecture:** SimpleActio 抽出记忆端口 `MemoryBackend` 与部署记忆管理面 `DeploymentMemoryStore`,替身是内存的 `TupleMemory` 与落盘的 `FileTupleStore`,两者过同一套契约测试。模拟器的会话改由 `SessionResources` 持有各角色位的智能体并有序收尾;训练位与对手位都换成 SimpleActio 实例,记忆异常经组合根转换成模拟器认得的两个基类。训练配置加 `memory` 段,派发器经注入的解析器解出起点摘要与运行时身份。MindAgent 按 episode 新造实例,删起点副本即提交。
 
 **Tech Stack:** Python 3.11+、pytest、grpc。无新增第三方依赖。
 
-**Spec:** `docs/superpowers/specs/2026-10-25-actio-starling-memory-design.md`(已并入 `docs/design/` 的 00、20、30、40、50、90 六篇)。本计划是施工顺序的第 1 到 5 步;第 6 到 8 步(Starling PR、接入、文档收尾)在 `docs/superpowers/plans/2026-10-27-agent-memory-starling.md`。
+**Spec:** `docs/superpowers/specs/2026-10-25-simple-actio-starling-memory-design.md`(已并入 `docs/design/` 的 00、20、30、40、50、90 六篇)。本计划是施工顺序的第 1 到 5 步;第 6 到 8 步(Starling PR、接入、文档收尾)在 `docs/superpowers/plans/2026-10-27-agent-memory-starling.md`。
 
 ## Global Constraints
 
 - 每个源文件首条语句 `from __future__ import annotations`。
 - 测试命令:`PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest <path> -q -p no:cacheprovider`。
-- 依赖方向:`simulator` 与 `mindtrainer` 不得导入 `actio`、`starling`;`actio` 只导入自身、`simulator.datamodel` 与标准库(本计划新增 `hashlib`、`json`、`pathlib`、`datetime`,`tests/test_actio_instance.py` 的 `_ALLOWED` 随之加);`mindagent` 不导入 `starling`;`trainscheduler` 不得导入 `simulator`、`actio`、`mindagent`、`factory`。
+- 依赖方向:`simulator` 与 `mindtrainer` 不得导入 `simple_actio`、`starling`;`simple_actio` 只导入自身、`simulator.datamodel` 与标准库(本计划新增 `hashlib`、`json`、`pathlib`、`datetime`,`tests/test_simple_actio_instance.py` 的 `_ALLOWED` 随之加);`mindagent` 不导入 `starling`;`trainscheduler` 不得导入 `simulator`、`simple_actio`、`mindagent`、`factory`。
 - 不新增第三方依赖。
 - 凭证只从环境变量读,异常信息只报变量名或异常类名与 `failure_category`,不含端点地址与密钥。
 - 每个任务先写失败的测试、确认失败、再实现。
@@ -32,7 +32,7 @@
 - **替身下 `memory.seed` 非 null**:替身没有种子库。应在派发时判 T2,原因写明种子需要记忆配置,不能静默当空库跑。见 Task 26。
 - **本设计落地前写下的 pending interact run 没有 `memory` 段**:应在派发器算哈希之前判 T2,原因是 `interact config has no memory section (written before memory support)`,不能续上旧 run 跑出记忆不一致的实验。见 Task 28。
 - **门② 部分收录后抽取一直失败**:前几条已提交、后一条反复抽取失败时,动作一直按退避重试,不写树,也不会收敛。现在只能等抽取恢复,或由人手工经管理面放弃那条事件并处置提案;本计划不提供这条命令。Task 34 的测试只钉住"抽取恢复后收敛",一直失败的人工出口留给后续。
-- **生成路产出的人格 id 不符合 `PERSONA_ID_PATTERN`**:人格 id 现在会拼进库文件名。现有生成器产出 `pers-auto-<n>`,符合;但仓库没有对人格 id 的入口校验,手写的人格可能含其他字符。`FileTupleStore` 遇到不合法 id 应抛 `ActioDataError`,派发与部署按 T2 失败,不能拼出越界路径。见 Task 4。
+- **生成路产出的人格 id 不符合 `PERSONA_ID_PATTERN`**:人格 id 现在会拼进库文件名。现有生成器产出 `pers-auto-<n>`,符合;但仓库没有对人格 id 的入口校验,手写的人格可能含其他字符。`FileTupleStore` 遇到不合法 id 应抛 `SimpleActioDataError`,派发与部署按 T2 失败,不能拼出越界路径。见 Task 4。
 
 ---
 
@@ -41,17 +41,17 @@
 ### Task 1: 记忆端口的值类型、异常与两个协议
 
 **Files:**
-- Create: `src/actio/memory_port.py`
-- Test: `tests/test_actio_memory_port.py`(新)
-- Modify: `tests/test_actio_instance.py`(`_ALLOWED` 加 `"pathlib"`)
+- Create: `src/simple_actio/memory_port.py`
+- Test: `tests/test_simple_actio_memory_port.py`(新)
+- Modify: `tests/test_simple_actio_instance.py`(`_ALLOWED` 加 `"pathlib"`)
 
 **Interfaces:**
 - Consumes: 无
-- Produces(全部在 `actio.memory_port`):
+- Produces(全部在 `simple_actio.memory_port`):
   - `@dataclass(frozen=True) MemoryHit(id: str, text: str)`
   - `@dataclass(frozen=True) MemoryEvent(key: str, text: str, interlocutor: str)`(没有 `seq`)
   - `@dataclass(frozen=True) RememberOutcome(stored: tuple[str, ...], failed: bool, category: str | None)`
-  - `class MemoryFailureError(Exception)`:`__init__(self, message: str, *, transient: bool)`,属性 `transient: bool`;不继承 `ActioDataError`/`ValueError`
+  - `class MemoryFailureError(Exception)`:`__init__(self, message: str, *, transient: bool)`,属性 `transient: bool`;不继承 `SimpleActioDataError`/`ValueError`
   - `class MemoryEventConflict(MemoryFailureError)`、`class MemoryClosedError(MemoryFailureError)`:`__init__(self, message: str)`,`transient` 恒为 `False`
   - `@runtime_checkable class MemoryBackend(Protocol)`:`recall(query: str, *, limit: int) -> list[MemoryHit]`、`remember(event: MemoryEvent) -> RememberOutcome`、`embed_pending() -> int`、`digest() -> str`、`close() -> None`
   - `PERSONA_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")`:人格 id 拼进库文件名前的统一校验,两个部署管理面都用(导入白名单已有 `re`)。
@@ -60,13 +60,13 @@
 - [ ] **Step 1: 写失败的测试**
 
 ```python
-# tests/test_actio_memory_port.py
+# tests/test_simple_actio_memory_port.py
 import dataclasses
 
 import pytest
 
-from actio.errors import ActioDataError
-from actio.memory_port import (
+from simple_actio.errors import SimpleActioDataError
+from simple_actio.memory_port import (
     DeploymentMemoryStore, MemoryBackend, MemoryClosedError, MemoryEvent, MemoryEventConflict,
     MemoryFailureError, MemoryHit, RememberOutcome,
 )
@@ -85,7 +85,7 @@ def test_port_value_types_are_frozen_with_exact_fields():
 def test_memory_failure_is_its_own_exception_and_carries_transient():
     exc = MemoryFailureError("RecallDegradedError", transient=True)
     assert exc.transient is True and str(exc) == "RecallDegradedError"
-    assert not isinstance(exc, ActioDataError) and not isinstance(exc, ValueError)
+    assert not isinstance(exc, SimpleActioDataError) and not isinstance(exc, ValueError)
     with pytest.raises(TypeError):
         MemoryFailureError("x")  # transient 必须显式给
 
@@ -119,25 +119,25 @@ def test_both_protocols_are_checked_by_method_names():
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_actio_memory_port.py -q -p no:cacheprovider`
-Expected: FAIL,`ModuleNotFoundError: No module named 'actio.memory_port'`
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_simple_actio_memory_port.py -q -p no:cacheprovider`
+Expected: FAIL,`ModuleNotFoundError: No module named 'simple_actio.memory_port'`
 
 - [ ] **Step 3: 实现**
 
-`src/actio/memory_port.py`:首条语句 `from __future__ import annotations`,只导入 `dataclasses`、`re`(`PERSONA_ID_PATTERN`)、`typing`(`Protocol`、`runtime_checkable`)与 `pathlib`(`Path`,两个协议的 `path` 参数与 Task 4 的 `FileTupleStore(root: Path)` 都用它)。`tests/test_actio_instance.py` 的 `_imports` 用 `ast.walk` 扫全部导入,`if TYPE_CHECKING:` 下的导入也会被扫到,所以 `_ALLOWED` 显式加 `"pathlib"`(仍是标准库,合同的依赖方向不变);不导入 `actio.errors`,因为 `MemoryFailureError` 刻意不是 `ActioDataError`:驱动器与轨迹源按 `transient` 分 T1/T2,数据错误另有分支。
+`src/simple_actio/memory_port.py`:首条语句 `from __future__ import annotations`,只导入 `dataclasses`、`re`(`PERSONA_ID_PATTERN`)、`typing`(`Protocol`、`runtime_checkable`)与 `pathlib`(`Path`,两个协议的 `path` 参数与 Task 4 的 `FileTupleStore(root: Path)` 都用它)。`tests/test_simple_actio_instance.py` 的 `_imports` 用 `ast.walk` 扫全部导入,`if TYPE_CHECKING:` 下的导入也会被扫到,所以 `_ALLOWED` 显式加 `"pathlib"`(仍是标准库,合同的依赖方向不变);不导入 `simple_actio.errors`,因为 `MemoryFailureError` 刻意不是 `SimpleActioDataError`:驱动器与轨迹源按 `transient` 分 T1/T2,数据错误另有分支。
 
 两个协议的方法签名照 Interfaces 抄,docstring 写明设计源 4.1 的语义:`embed_pending` 只做嵌入、返回成功条数、有失败就抛瞬态 `MemoryFailureError`;`digest` 是逻辑摘要(sha256 小写十六进制);`close` 只关库、不放弃任何事件,关闭后再调 `recall`/`remember`/`embed_pending`/`digest` 抛 `MemoryClosedError`,再调 `close` 是空操作(调用方的 `finally` 可能各关一次);`restore_from` 在该人格还有打开的端口时抛 `MemoryFailureError(transient=False)`;`backup_to`/`restore_from` 返回副本/恢复后的逻辑摘要。`MemoryHit.id` 是内容 id(`mem-` 前缀),同一 `recall` 结果里不重复。
 
 - [ ] **Step 4: 跑测试确认通过,并跑相邻回归**
 
-Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_actio_memory_port.py tests/test_actio_instance.py -q -p no:cacheprovider`
-Expected: PASS(白名单测试 `test_actio_only_imports_itself_simulator_datamodel_and_the_stdlib` 在加了 `"pathlib"` 之后通过)
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_simple_actio_memory_port.py tests/test_simple_actio_instance.py -q -p no:cacheprovider`
+Expected: PASS(白名单测试 `test_simple_actio_only_imports_itself_simulator_datamodel_and_the_stdlib` 在加了 `"pathlib"` 之后通过)
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/actio/memory_port.py tests/test_actio_memory_port.py tests/test_actio_instance.py
-git commit -m "feat(actio): 记忆端口的值类型、异常与两个协议"
+git add src/simple_actio/memory_port.py tests/test_simple_actio_memory_port.py tests/test_simple_actio_instance.py
+git commit -m "feat(simple_actio): 记忆端口的值类型、异常与两个协议"
 ```
 
 ---
@@ -145,19 +145,19 @@ git commit -m "feat(actio): 记忆端口的值类型、异常与两个协议"
 ### Task 2: `TupleMemory`、内容 id 与共享契约测试
 
 **Files:**
-- Modify: `src/actio/memory.py`(新增 `content_id`、`TupleMemory` 与模块私有的账本 `_Ledger`;`MemoryEntry`、`snapshot`、`overlap`、`retrieve` 不动)
+- Modify: `src/simple_actio/memory.py`(新增 `content_id`、`TupleMemory` 与模块私有的账本 `_Ledger`;`MemoryEntry`、`snapshot`、`overlap`、`retrieve` 不动)
 - Create: `tests/memory_contract_sample.yaml`(规范样例)
-- Create: `tests/test_actio_memory_contract.py`(共享契约,本任务只有 `"tuple"` 一个工厂)
-- Modify: `tests/test_actio_memory_experience.py`(追加 `TupleMemory` 专属用例;既有用例断言的是 `retrieve` 与条目自带 id,`retrieve` 行为不变,所以一条都不用改)
-- Modify: `tests/test_actio_instance.py`(`_ALLOWED` 加 `"hashlib"`、`"json"`、`"datetime"`)
+- Create: `tests/test_simple_actio_memory_contract.py`(共享契约,本任务只有 `"tuple"` 一个工厂)
+- Modify: `tests/test_simple_actio_memory_experience.py`(追加 `TupleMemory` 专属用例;既有用例断言的是 `retrieve` 与条目自带 id,`retrieve` 行为不变,所以一条都不用改)
+- Modify: `tests/test_simple_actio_instance.py`(`_ALLOWED` 加 `"hashlib"`、`"json"`、`"datetime"`)
 
 **Interfaces:**
 - Consumes: Task 1 的 `MemoryHit`、`MemoryEvent`、`RememberOutcome`、`MemoryEventConflict`、`MemoryClosedError`、`MemoryBackend`
 - Produces:
-  - `actio.memory.content_id(subject: str, content: str) -> str`:`"mem-" + sha256(json.dumps([subject, content], ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()[:16]`
-  - `actio.memory.TupleMemory(entries: tuple[MemoryEntry, ...] | list[MemoryEntry] = ())`,满足 `MemoryBackend`
-  - `actio.memory._Ledger`(模块私有,Task 4 的 `FileTupleStore` 复用):条目列表、事件表 `dict[str, dict]`、`next_seq: int`,以及 `recall`、`begin(event)`、`commit(key)`、`fail(key, category)`、`abandon(key)`、`digest()`、`to_json()`/`from_json()`
-  - `tests/test_actio_memory_contract.py` 的 `PORT_FACTORIES: dict[str, Callable[[Path], MemoryBackend]]`(参数是一个尚不存在的新目录)与夹具 `make_port`;Task 4 加 `"file"`,计划 B 加 `"starling"`
+  - `simple_actio.memory.content_id(subject: str, content: str) -> str`:`"mem-" + sha256(json.dumps([subject, content], ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()[:16]`
+  - `simple_actio.memory.TupleMemory(entries: tuple[MemoryEntry, ...] | list[MemoryEntry] = ())`,满足 `MemoryBackend`
+  - `simple_actio.memory._Ledger`(模块私有,Task 4 的 `FileTupleStore` 复用):条目列表、事件表 `dict[str, dict]`、`next_seq: int`,以及 `recall`、`begin(event)`、`commit(key)`、`fail(key, category)`、`abandon(key)`、`digest()`、`to_json()`/`from_json()`
+  - `tests/test_simple_actio_memory_contract.py` 的 `PORT_FACTORIES: dict[str, Callable[[Path], MemoryBackend]]`(参数是一个尚不存在的新目录)与夹具 `make_port`;Task 4 加 `"file"`,计划 B 加 `"starling"`
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -193,10 +193,10 @@ steps:
       - {query: 人手不够预算呢, limit: 3, hits: ["ep-sample#2", "ep-sample#0"]}
 ```
 
-(按 `actio.text.tokens` 算过:第二步查询词与 `#2` 共有"人手""不够"两个词面、与 `#0` 共有"预算"一个,所以顺序不靠平手裁决。)
+(按 `simple_actio.text.tokens` 算过:第二步查询词与 `#2` 共有"人手""不够"两个词面、与 `#0` 共有"预算"一个,所以顺序不靠平手裁决。)
 
 ```python
-# tests/test_actio_memory_contract.py
+# tests/test_simple_actio_memory_contract.py
 """记忆端口的共享契约(设计二 4.1 节、M17)。用例只经 MemoryBackend 的五个方法访问实现,
 不碰任何实现的内部;计划 B 往 PORT_FACTORIES 加 "starling"(Starling 未装时跳过)。"""
 import re
@@ -205,8 +205,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from actio.memory import TupleMemory
-from actio.memory_port import MemoryClosedError, MemoryEvent, MemoryEventConflict, MemoryHit
+from simple_actio.memory import TupleMemory
+from simple_actio.memory_port import MemoryClosedError, MemoryEvent, MemoryEventConflict, MemoryHit
 
 SAMPLE = yaml.safe_load(Path(__file__).with_name("memory_contract_sample.yaml").read_text(encoding="utf-8"))
 
@@ -300,9 +300,9 @@ def test_a_closed_port_raises_closed_on_every_method_and_close_is_idempotent(mak
 ```
 
 ```python
-# tests/test_actio_memory_experience.py(追加;文件头补 import hashlib、json、re,
-# 以及 from actio.memory import TupleMemory, content_id 与
-# from actio.memory_port import MemoryEvent, MemoryEventConflict, MemoryHit, RememberOutcome)
+# tests/test_simple_actio_memory_experience.py(追加;文件头补 import hashlib、json、re,
+# 以及 from simple_actio.memory import TupleMemory, content_id 与
+# from simple_actio.memory_port import MemoryEvent, MemoryEventConflict, MemoryHit, RememberOutcome)
 T0 = "2026-01-01T00:00:00Z"
 
 
@@ -349,9 +349,9 @@ def test_tuple_memory_ties_break_by_content_id_and_same_content_merges():
 
 
 def test_tuple_memory_validates_entries_at_construction():
-    with pytest.raises(ActioDataError):
+    with pytest.raises(SimpleActioDataError):
         TupleMemory(({"id": "mem-1"},))
-    with pytest.raises(ActioDataError, match="two different entries"):
+    with pytest.raises(SimpleActioDataError, match="two different entries"):
         TupleMemory((_m("mem-1", 1, T0), _m("mem-1", 1, T0, content="别的")))
 
 
@@ -383,38 +383,38 @@ def test_tuple_memory_remember_appends_an_entry_and_keeps_an_event_table():
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_actio_memory_contract.py tests/test_actio_memory_experience.py -q -p no:cacheprovider`
-Expected: FAIL,`ImportError: cannot import name 'TupleMemory' from 'actio.memory'`
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_simple_actio_memory_contract.py tests/test_simple_actio_memory_experience.py -q -p no:cacheprovider`
+Expected: FAIL,`ImportError: cannot import name 'TupleMemory' from 'simple_actio.memory'`
 
 - [ ] **Step 3: 实现**
 
-`src/actio/memory.py` 新增导入 `hashlib`、`json`、`datetime`(`datetime`、`timedelta`、`timezone`)与 `actio.memory_port` 的类型。
+`src/simple_actio/memory.py` 新增导入 `hashlib`、`json`、`datetime`(`datetime`、`timedelta`、`timezone`)与 `simple_actio.memory_port` 的类型。
 
 `_Ledger` 是两个替身共用的唯一一份逻辑,`TupleMemory` 把它放内存,Task 4 的 `FileTupleStore` 把它存 JSON,所以同样内容在两者上的命中与摘要逐值相等:
 
 - 字段:`entries: list[MemoryEntry]`、`events: dict[str, dict]`(行的键固定为 `key`、`text`、`interlocutor`、`seq`、`state`、`statement_ids`、`failure_category`)、`next_seq: int`(从 0 起)。
-- `recall(query, *, limit)`:`limit` 不是非负 int 抛 `ActioDataError`;取 `snapshot(entries)`,用 `overlap` 打分、留重叠 >= 1 的,按 `(重叠数降序, 置信度降序, content_id 升序)` 排序,按 `content_id` 去重保留第一条,取前 `limit` 条,渲染成 `MemoryHit(content_id(subject, content), f"{subject}: {content}")`。不直接调 `retrieve`:它的平手裁决用条目自带 id,同一内容换个 id 进来顺序就会变,违背 4.1 节"prompt 与轨迹不变";也不去重,而两条同内容条目会让轨迹的 `memory_hits` 出现重复 id。
+- `recall(query, *, limit)`:`limit` 不是非负 int 抛 `SimpleActioDataError`;取 `snapshot(entries)`,用 `overlap` 打分、留重叠 >= 1 的,按 `(重叠数降序, 置信度降序, content_id 升序)` 排序,按 `content_id` 去重保留第一条,取前 `limit` 条,渲染成 `MemoryHit(content_id(subject, content), f"{subject}: {content}")`。不直接调 `retrieve`:它的平手裁决用条目自带 id,同一内容换个 id 进来顺序就会变,违背 4.1 节"prompt 与轨迹不变";也不去重,而两条同内容条目会让轨迹的 `memory_hits` 出现重复 id。
 - `begin(event) -> tuple[str, ...] | None`:已有同 key 行时,`state == "abandoned"` 或文本不同抛 `MemoryEventConflict`;`committed` 返回存下的 `statement_ids`(幂等);`pending` 返回 `None`(交给调用方再抽一次)。新 key 写一行 `state="pending"`,`seq = next_seq`,随后 `next_seq += 1`,返回 `None`。
 - `commit(key) -> tuple[str, ...]`:按行里的原文追加 `MemoryEntry(id="mem-" + sha256(key)[:16], version=1, subject=interlocutor, content=text, timestamp=2026-01-01T00:00:00Z 加 seq 秒, confidence=1.0, source_episode=key)`,把行改成 `committed`、`statement_ids=[content_id(interlocutor, text)]`、`failure_category=None`。条目 id 取 key 的哈希而不是内容 id:两个 episode 说同一句话时内容 id 相同,同 id 同版本两条不同条目会让 `snapshot` 抛"two different entries";条目 id 不进命中也不进摘要。
 - `fail(key, category)`:行保持 `pending`,记下 `failure_category`。`abandon(key)`:`pending` 改 `abandoned`;`committed` 抛 `MemoryEventConflict`;已 `abandoned` 是空操作;未知 key 抛 `MemoryFailureError(transient=False)`。
 - `digest()`:形状就是测试里的 `_digest_of`,但条目取 `snapshot(entries)` 的结果(召回实际看到的那一份),不是原始列表:否则两个库的条目去掉 `id` 后多重集相同、而按 `id` 分组的版本归属不同时,摘要相同、召回却不同;`abandoned` 行进摘要时只保留 `{"key", "state"}` 两列(4.5 节)。
-- `to_json()`/`from_json(obj)`:`{"entries": [e.to_dict()...], "events": [行...按 seq], "next_seq": n}`;`from_json` 用 `MemoryEntry.from_dict` 还原并校验键集合,不合法抛 `ActioDataError`。
+- `to_json()`/`from_json(obj)`:`{"entries": [e.to_dict()...], "events": [行...按 seq], "next_seq": n}`;`from_json` 用 `MemoryEntry.from_dict` 还原并校验键集合,不合法抛 `SimpleActioDataError`。
 
-`TupleMemory.__init__(entries=())`:逐条查 `isinstance(e, MemoryEntry)`(否则 `ActioDataError`),再跑一次 `snapshot(entries)` 让同 id 同版本的冲突在构造时就抛。`remember(event)` = `begin`,返回非 `None` 就原样包成 `RememberOutcome(ids, False, None)`,否则 `commit` 后返回 `RememberOutcome(ids, False, None)`;替身的抽取从不失败。`embed_pending()` 返回 0。`close()` 置关闭标志,重复调用是空操作;关闭后其余四个方法抛 `MemoryClosedError`。
+`TupleMemory.__init__(entries=())`:逐条查 `isinstance(e, MemoryEntry)`(否则 `SimpleActioDataError`),再跑一次 `snapshot(entries)` 让同 id 同版本的冲突在构造时就抛。`remember(event)` = `begin`,返回非 `None` 就原样包成 `RememberOutcome(ids, False, None)`,否则 `commit` 后返回 `RememberOutcome(ids, False, None)`;替身的抽取从不失败。`embed_pending()` 返回 0。`close()` 置关闭标志,重复调用是空操作;关闭后其余四个方法抛 `MemoryClosedError`。
 
-`tests/test_actio_instance.py` 的 `_ALLOWED` 加 `"hashlib"`、`"json"`、`"datetime"`。
+`tests/test_simple_actio_instance.py` 的 `_ALLOWED` 加 `"hashlib"`、`"json"`、`"datetime"`。
 
 - [ ] **Step 4: 跑测试确认通过,并跑相邻回归**
 
-Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_actio_memory_contract.py tests/test_actio_memory_experience.py tests/test_actio_memory_port.py tests/test_actio_instance.py tests/test_ma_config_library.py -q -p no:cacheprovider`
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_simple_actio_memory_contract.py tests/test_simple_actio_memory_experience.py tests/test_simple_actio_memory_port.py tests/test_simple_actio_instance.py tests/test_ma_config_library.py -q -p no:cacheprovider`
 Expected: PASS
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/actio/memory.py tests/memory_contract_sample.yaml tests/test_actio_memory_contract.py
-git add tests/test_actio_memory_experience.py tests/test_actio_instance.py
-git commit -m "feat(actio): TupleMemory 用内容 id 召回,记忆端口共享契约与规范样例"
+git add src/simple_actio/memory.py tests/memory_contract_sample.yaml tests/test_simple_actio_memory_contract.py
+git add tests/test_simple_actio_memory_experience.py tests/test_simple_actio_instance.py
+git commit -m "feat(simple_actio): TupleMemory 用内容 id 召回,记忆端口共享契约与规范样例"
 ```
 
 ---
@@ -422,29 +422,29 @@ git commit -m "feat(actio): TupleMemory 用内容 id 召回,记忆端口共享�
 ### Task 3: 激活轨迹 v2
 
 **Files:**
-- Modify: `src/actio/trace.py`(`TRACE_SCHEMA` 改名为 `TRACE_SCHEMA_V1`,新增 `TRACE_SCHEMA_V2`、`TRACE_KEYS_V2`;`build_trace` 加 `memory`;`validate_trace` 按 `schema` 分两套键集合)
-- Test: `tests/test_actio_instance.py`(轨迹模式一节:导入行把 `TRACE_SCHEMA` 换成 `TRACE_SCHEMA_V1, TRACE_SCHEMA_V2`;`test_build_trace_exact_shape_with_a_conflict` 末行断言改成 `TRACE_SCHEMA_V1 == "actio.trace.v1"`,字典里的 `"schema": TRACE_SCHEMA` 改成 `TRACE_SCHEMA_V1`;其余 v1 用例不动,它们证明 v1 仍被接受)
+- Modify: `src/simple_actio/trace.py`(`TRACE_SCHEMA` 改名为 `TRACE_SCHEMA_V1`,新增 `TRACE_SCHEMA_V2`、`TRACE_KEYS_V2`;`build_trace` 加 `memory`;`validate_trace` 按 `schema` 分两套键集合)
+- Test: `tests/test_simple_actio_instance.py`(轨迹模式一节:导入行把 `TRACE_SCHEMA` 换成 `TRACE_SCHEMA_V1, TRACE_SCHEMA_V2`;`test_build_trace_exact_shape_with_a_conflict` 末行断言改成 `TRACE_SCHEMA_V1 == "simple_actio.trace.v1"`,字典里的 `"schema": TRACE_SCHEMA` 改成 `TRACE_SCHEMA_V1`;其余 v1 用例不动,它们证明 v1 仍被接受)
 
-`TRACE_SCHEMA` 只有 `src/actio/trace.py` 与 `tests/test_actio_instance.py` 引用(已 grep),不留别名。`src/mindagent/analysis.py` 经 `validate_trace` 消费轨迹、`src/mindagent/deployment.py` 的 `_reusable` 只读 `library_version`,两者对 v1 与 v2 都不用改。
+`TRACE_SCHEMA` 只有 `src/simple_actio/trace.py` 与 `tests/test_simple_actio_instance.py` 引用(已 grep),不留别名。`src/mindagent/analysis.py` 经 `validate_trace` 消费轨迹、`src/mindagent/deployment.py` 的 `_reusable` 只读 `library_version`,两者对 v1 与 v2 都不用改。
 
 **Interfaces:**
 - Consumes: 无
 - Produces:
-  - `actio.trace.TRACE_SCHEMA_V1 = "actio.trace.v1"`、`TRACE_SCHEMA_V2 = "actio.trace.v2"`;`TRACE_KEYS` 不变(八个),`TRACE_KEYS_V2 = TRACE_KEYS + ("memory",)`;`MEMORY_TRACE_KEYS = ("digest_before", "remembered", "extraction_failed")`
+  - `simple_actio.trace.TRACE_SCHEMA_V1 = "simple_actio.trace.v1"`、`TRACE_SCHEMA_V2 = "simple_actio.trace.v2"`;`TRACE_KEYS` 不变(八个),`TRACE_KEYS_V2 = TRACE_KEYS + ("memory",)`;`MEMORY_TRACE_KEYS = ("digest_before", "remembered", "extraction_failed")`
   - `build_trace(*, signals, candidates, selected, memory_hits, experience, library_version, memory: dict[str, str] | None = None) -> dict`:`memory` 为 `None` 产出 v1,否则产出 v2 并把 `memory` 复制进去
   - `validate_trace(trace)` 接受 v1 与 v2
 
 - [ ] **Step 1: 写失败的测试**
 
 ```python
-# tests/test_actio_instance.py(轨迹模式一节追加;文件头加 from google.protobuf import json_format, struct_pb2)
+# tests/test_simple_actio_instance.py(轨迹模式一节追加;文件头加 from google.protobuf import json_format, struct_pb2)
 MEM = {"digest_before": "ab" * 32, "remembered": "2", "extraction_failed": "0"}
 
 
 def test_build_trace_with_memory_is_v2_with_nine_keys():
     t = build_trace(signals=[], candidates=[], selected=None, memory_hits=["mem-a"], experience=None,
                     library_version=LV, memory=MEM)
-    assert TRACE_SCHEMA_V2 == "actio.trace.v2"
+    assert TRACE_SCHEMA_V2 == "simple_actio.trace.v2"
     assert t["schema"] == TRACE_SCHEMA_V2 and len(t) == 9 and t["memory"] == MEM
     assert t["memory"] is not MEM
     assert all(v is None or type(v) in (str, bool) for v in _walk_leaves(t))
@@ -474,47 +474,47 @@ V2_GOOD = dict(signals=[], candidates=[], selected=None, memory_hits=[], experie
 ])
 def test_validate_trace_rejects_a_bad_v2_memory_block(patch):
     good = build_trace(**V2_GOOD, memory=MEM)
-    with pytest.raises(ActioDataError, match=r"trace\.memory"):
+    with pytest.raises(SimpleActioDataError, match=r"trace\.memory"):
         validate_trace({**good, **patch})
 
 
 def test_the_schema_decides_the_key_set():
     v1 = build_trace(**V2_GOOD)
     v2 = build_trace(**V2_GOOD, memory=MEM)
-    with pytest.raises(ActioDataError, match="expected exactly keys"):
+    with pytest.raises(SimpleActioDataError, match="expected exactly keys"):
         validate_trace({**v1, "memory": MEM})                      # v1 带 memory 键
-    with pytest.raises(ActioDataError, match="expected exactly keys"):
+    with pytest.raises(SimpleActioDataError, match="expected exactly keys"):
         validate_trace({k: v for k, v in v2.items() if k != "memory"})  # v2 缺 memory 键
-    with pytest.raises(ActioDataError, match=r"trace\.schema"):
-        validate_trace({**v2, "schema": "actio.trace.v3"})
+    with pytest.raises(SimpleActioDataError, match=r"trace\.schema"):
+        validate_trace({**v2, "schema": "simple_actio.trace.v3"})
 
 
 def test_build_trace_rejects_a_bad_memory_block():
-    with pytest.raises(ActioDataError, match=r"trace\.memory"):
+    with pytest.raises(SimpleActioDataError, match=r"trace\.memory"):
         build_trace(**V2_GOOD, memory={**MEM, "remembered": 3})
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_actio_instance.py -q -p no:cacheprovider`
-Expected: FAIL,`ImportError: cannot import name 'TRACE_SCHEMA_V1' from 'actio.trace'`
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_simple_actio_instance.py -q -p no:cacheprovider`
+Expected: FAIL,`ImportError: cannot import name 'TRACE_SCHEMA_V1' from 'simple_actio.trace'`
 
 - [ ] **Step 3: 实现**
 
-`validate_trace`:先查是 dict;取 `trace.get("schema")`,`TRACE_SCHEMA_V1` 对应 `TRACE_KEYS`、`TRACE_SCHEMA_V2` 对应 `TRACE_KEYS_V2`,都不是抛 `ActioDataError("trace.schema: expected 'actio.trace.v1' or 'actio.trace.v2', got ...")`;键集合不等时沿用现有的 `"trace: expected exactly keys ..."` 文案。八个旧键的校验原样保留。v2 再校验 `memory`:是 dict、键集合恰为 `MEMORY_TRACE_KEYS`、三个值都是非空 `str`;`remembered` 与 `extraction_failed` 必须 `re.fullmatch(r"0|[1-9][0-9]*", v)`。用显式 `[0-9]` 而不是 `str.isdecimal()`,后者接受非 ASCII 数字;不许前导零,因为实例写的是 `str(int)`,同一计数只有一种写法。错误信息都以 `trace.memory` 开头。`re` 已在 `actio` 的导入白名单里。
+`validate_trace`:先查是 dict;取 `trace.get("schema")`,`TRACE_SCHEMA_V1` 对应 `TRACE_KEYS`、`TRACE_SCHEMA_V2` 对应 `TRACE_KEYS_V2`,都不是抛 `SimpleActioDataError("trace.schema: expected 'simple_actio.trace.v1' or 'simple_actio.trace.v2', got ...")`;键集合不等时沿用现有的 `"trace: expected exactly keys ..."` 文案。八个旧键的校验原样保留。v2 再校验 `memory`:是 dict、键集合恰为 `MEMORY_TRACE_KEYS`、三个值都是非空 `str`;`remembered` 与 `extraction_failed` 必须 `re.fullmatch(r"0|[1-9][0-9]*", v)`。用显式 `[0-9]` 而不是 `str.isdecimal()`,后者接受非 ASCII 数字;不许前导零,因为实例写的是 `str(int)`,同一计数只有一种写法。错误信息都以 `trace.memory` 开头。`re` 已在 `simple_actio` 的导入白名单里。
 
 `build_trace`:`memory` 不为 `None` 时 `schema` 取 `TRACE_SCHEMA_V2` 并加 `"memory": dict(memory)`;最后照旧调 `validate_trace`,所以坏的 `memory` 在构造时就抛。模块 docstring 补一句:v2 的计数也是十进制字符串,理由与 `library_version` 相同(Struct 把数字存成 double)。
 
 - [ ] **Step 4: 跑测试确认通过,并跑相邻回归**
 
-Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_actio_instance.py tests/test_ma_analysis.py tests/test_ma_verify.py tests/test_ma_deployment.py -q -p no:cacheprovider`
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_simple_actio_instance.py tests/test_ma_analysis.py tests/test_ma_verify.py tests/test_ma_deployment.py -q -p no:cacheprovider`
 Expected: PASS(此时实例还产出 v1,mindagent 测试里用 `build_trace` 造的 v1 轨迹照旧通过)
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/actio/trace.py tests/test_actio_instance.py
-git commit -m "feat(actio): 激活轨迹 v2 带 memory 块,v1 仍被接受"
+git add src/simple_actio/trace.py tests/test_simple_actio_instance.py
+git commit -m "feat(simple_actio): 激活轨迹 v2 带 memory 块,v1 仍被接受"
 ```
 
 ---
@@ -522,21 +522,21 @@ git commit -m "feat(actio): 激活轨迹 v2 带 memory 块,v1 仍被接受"
 ### Task 4: `FileTupleStore`:落盘替身与部署管理面
 
 **Files:**
-- Modify: `src/actio/memory.py`(新增 `FileTupleStore` 与它发出的端口类 `_FilePort`)
-- Modify: `tests/test_actio_memory_contract.py`(`PORT_FACTORIES` 加 `"file"`)
-- Create: `tests/test_actio_file_tuple_store.py`
+- Modify: `src/simple_actio/memory.py`(新增 `FileTupleStore` 与它发出的端口类 `_FilePort`)
+- Modify: `tests/test_simple_actio_memory_contract.py`(`PORT_FACTORIES` 加 `"file"`)
+- Create: `tests/test_simple_actio_file_tuple_store.py`
 
 **Interfaces:**
 - Consumes: Task 1 的全部类型;Task 2 的 `_Ledger`(`begin`/`commit`/`fail`/`abandon`/`digest`/`to_json`/`from_json`)、`TupleMemory`、`content_id`
 - Produces:
-  - `actio.memory.FileTupleStore(root: Path, *, extraction_failure: Callable[[MemoryEvent], str | None] | None = None)`,满足 `DeploymentMemoryStore`。`extraction_failure` 是故障注入口:对一条事件返回非 `None` 的字符串,就当作这次抽取以该 `failure_category` 失败;缺省从不失败。第 5 步的部署集成测试(第一次尝试留 `pending` 行)用它
+  - `simple_actio.memory.FileTupleStore(root: Path, *, extraction_failure: Callable[[MemoryEvent], str | None] | None = None)`,满足 `DeploymentMemoryStore`。`extraction_failure` 是故障注入口:对一条事件返回非 `None` 的字符串,就当作这次抽取以该 `failure_category` 失败;缺省从不失败。第 5 步的部署集成测试(第一次尝试留 `pending` 行)用它
   - 落盘格式:`<root>/<persona_id>.json` = `_Ledger.to_json()`,即 `{"entries": [...], "events": [...], "next_seq": n}`;人格还没有文件时等同空库
   - `open(persona_id)` 返回的端口满足 `MemoryBackend`;`port.digest() == store.digest(persona_id)`
 
 - [ ] **Step 1: 写失败的测试**
 
 ```python
-# tests/test_actio_memory_contract.py(PORT_FACTORIES 加一项;导入补 FileTupleStore)
+# tests/test_simple_actio_memory_contract.py(PORT_FACTORIES 加一项;导入补 FileTupleStore)
 PORT_FACTORIES = {
     "tuple": lambda fresh_dir: TupleMemory(),
     "file": lambda fresh_dir: FileTupleStore(fresh_dir).open("pa"),
@@ -544,14 +544,14 @@ PORT_FACTORIES = {
 ```
 
 ```python
-# tests/test_actio_file_tuple_store.py
+# tests/test_simple_actio_file_tuple_store.py
 import json
 
 import pytest
 
-from actio.errors import ActioDataError
-from actio.memory import FileTupleStore, TupleMemory, content_id
-from actio.memory_port import (
+from simple_actio.errors import SimpleActioDataError
+from simple_actio.memory import FileTupleStore, TupleMemory, content_id
+from simple_actio.memory_port import (
     DeploymentMemoryStore, MemoryBackend, MemoryEvent, MemoryEventConflict, MemoryFailureError,
     RememberOutcome,
 )
@@ -703,7 +703,7 @@ def test_the_port_and_the_management_plane_see_the_same_library(tmp_path):
 
 @pytest.mark.parametrize("bad", ["", "a/b", "../pa", ".hidden", "p a"])
 def test_persona_ids_must_be_safe_file_names(tmp_path, bad):
-    with pytest.raises(ActioDataError, match="persona_id"):
+    with pytest.raises(SimpleActioDataError, match="persona_id"):
         FileTupleStore(tmp_path).open(bad)
 
 
@@ -719,14 +719,14 @@ def test_a_corrupt_library_or_backup_is_a_non_transient_failure(tmp_path):
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_actio_file_tuple_store.py tests/test_actio_memory_contract.py -q -p no:cacheprovider`
-Expected: FAIL,`ImportError: cannot import name 'FileTupleStore' from 'actio.memory'`
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_simple_actio_file_tuple_store.py tests/test_simple_actio_memory_contract.py -q -p no:cacheprovider`
+Expected: FAIL,`ImportError: cannot import name 'FileTupleStore' from 'simple_actio.memory'`
 
 - [ ] **Step 3: 实现**
 
-`FileTupleStore.__init__` 建 `root`(`mkdir(parents=True, exist_ok=True)`),维护 `_open: dict[str, int]`(每个人格打开着的端口数)。`persona_id` 必须 `PERSONA_ID_PATTERN.fullmatch(persona_id)`(Task 1 定义),否则抛 `ActioDataError("persona_id: ...")`:它直接拼进文件名,`/` 与开头的 `.` 都不许。
+`FileTupleStore.__init__` 建 `root`(`mkdir(parents=True, exist_ok=True)`),维护 `_open: dict[str, int]`(每个人格打开着的端口数)。`persona_id` 必须 `PERSONA_ID_PATTERN.fullmatch(persona_id)`(Task 1 定义),否则抛 `SimpleActioDataError("persona_id: ...")`:它直接拼进文件名,`/` 与开头的 `.` 都不许。
 
-读写都经两个私有方法:`_load(persona_id) -> _Ledger`(没有文件返回空账本;`json`/`OSError`/`ActioDataError` 一律包成 `MemoryFailureError(type(exc).__name__, transient=False)`,只报类名)与 `_save(persona_id, ledger)`(写 `<persona_id>.json.tmp` 再 `Path.replace` 到正式文件,中途崩溃不会留下半个库)。每个操作都是"读整份、改、写整份";替身只在单线程里用(每个部署 episode 一条线程),不加锁,docstring 写明。
+读写都经两个私有方法:`_load(persona_id) -> _Ledger`(没有文件返回空账本;`json`/`OSError`/`SimpleActioDataError` 一律包成 `MemoryFailureError(type(exc).__name__, transient=False)`,只报类名)与 `_save(persona_id, ledger)`(写 `<persona_id>.json.tmp` 再 `Path.replace` 到正式文件,中途崩溃不会留下半个库)。每个操作都是"读整份、改、写整份";替身只在单线程里用(每个部署 episode 一条线程),不加锁,docstring 写明。
 
 `remember_event` 复刻设计源第 8 节的三段:① `_load`,`ledger.begin(event)`;返回了 id 就是幂等,直接返回 `RememberOutcome(ids, False, None)`,不调抽取;否则 `_save`(`pending` 行与 `seq` 在抽取前就落盘)。② 调 `extraction_failure(event)`(缺省视为 `None`)。③ 返回 `None` 时重新 `_load`、`ledger.commit(key)`、`_save`,返回 `RememberOutcome(ids, False, None)`;返回类别时 `ledger.fail(key, category)`、`_save`,返回 `RememberOutcome((), True, category)`,不抛。替身的语句不会在 ③ 之前就进库(`commit` 才追加条目),所以第 8 节"按 `engram_ref` 补收据"的分支在替身上不存在,`pending` 行重调一律重新抽取。
 
@@ -736,14 +736,14 @@ Expected: FAIL,`ImportError: cannot import name 'FileTupleStore' from 'actio.mem
 
 - [ ] **Step 4: 跑测试确认通过,并跑相邻回归**
 
-Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_actio_file_tuple_store.py tests/test_actio_memory_contract.py tests/test_actio_memory_experience.py tests/test_actio_instance.py -q -p no:cacheprovider`
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_simple_actio_file_tuple_store.py tests/test_simple_actio_memory_contract.py tests/test_simple_actio_memory_experience.py tests/test_simple_actio_instance.py -q -p no:cacheprovider`
 Expected: PASS(契约用例对 `tuple` 与 `file` 各跑一遍)
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/actio/memory.py tests/test_actio_memory_contract.py tests/test_actio_file_tuple_store.py
-git commit -m "feat(actio): FileTupleStore 落盘替身,三段写入、放弃与起点副本"
+git add src/simple_actio/memory.py tests/test_simple_actio_memory_contract.py tests/test_simple_actio_file_tuple_store.py
+git commit -m "feat(simple_actio): FileTupleStore 落盘替身,三段写入、放弃与起点副本"
 ```
 
 ---
@@ -751,28 +751,28 @@ git commit -m "feat(actio): FileTupleStore 落盘替身,三段写入、放弃与
 ### Task 5: 实例改持端口:读路径、v2 轨迹、`close` 与 `instantiate` 的新参数
 
 **Files:**
-- Modify: `src/actio/instance.py`(`render_guidance`、`ActioInstance` 的字段与 `decide`/`respond`/新增 `close`、`instantiate`)
-- Test: `tests/test_actio_instance.py`(新增假端口 `RecordingPort`、`LoggingBackend` 与本任务用例;改写 `test_render_guidance_order_and_format` 与 `test_conflicts_and_memory_hits_are_in_the_trace`)
-- Modify: `tests/test_actio_realtime_e2e.py`(第 113、117、127 行的 `mem-temper` 换成内容 id)
+- Modify: `src/simple_actio/instance.py`(`render_guidance`、`SimpleActioInstance` 的字段与 `decide`/`respond`/新增 `close`、`instantiate`)
+- Test: `tests/test_simple_actio_instance.py`(新增假端口 `RecordingPort`、`LoggingBackend` 与本任务用例;改写 `test_render_guidance_order_and_format` 与 `test_conflicts_and_memory_hits_are_in_the_trace`)
+- Modify: `tests/test_simple_actio_realtime_e2e.py`(第 113、117、127 行的 `mem-temper` 换成内容 id)
 
-随签名变化要动的既有调用方(已 grep `instantiate(`):`src/mindagent/rounds.py:245`、`tests/test_ma_deployment.py`、`tests/test_ma_verify.py` 都只用 `memories=`,简写保留且默认只读,所以不用改;`.memories` 属性除 `lib.memories`(`mindagent.library.LibraryState`,不是实例)外无人读。`ActioInstance.decide` 在 `src/actio/instance.py` 之外没有调用方(grep `\.decide(` 只命中 trainplanner 的同名方法);MindAgent 的验证重放 `src/mindagent/verify.py:replay` 调的是 `instance.respond`。
+随签名变化要动的既有调用方(已 grep `instantiate(`):`src/mindagent/rounds.py:245`、`tests/test_ma_deployment.py`、`tests/test_ma_verify.py` 都只用 `memories=`,简写保留且默认只读,所以不用改;`.memories` 属性除 `lib.memories`(`mindagent.library.LibraryState`,不是实例)外无人读。`SimpleActioInstance.decide` 在 `src/simple_actio/instance.py` 之外没有调用方(grep `\.decide(` 只命中 trainplanner 的同名方法);MindAgent 的验证重放 `src/mindagent/verify.py:replay` 调的是 `instance.respond`。
 
 **Interfaces:**
 - Consumes: Task 1 的 `MemoryBackend`、`MemoryHit`、`MemoryFailureError`;Task 2 的 `TupleMemory`、`content_id`;Task 3 的 `build_trace(..., memory=)`
 - Produces:
   - `render_guidance(selected: Skill | None, experience: ExperienceActivation | None, memory_hits: list[MemoryHit]) -> list[str]`,记忆行 `f"[memory:{h.id}] {h.text}"`
-  - `ActioInstance` 字段:`backend`、`skills`、`memory: MemoryBackend`、`experiences`、`library_version`、`profile`、`registry`、`memory_limit`、`replay_read_only: bool`、`episode_id: str | None`、`interlocutors: dict[str, str]`(去掉 `memories`)
-  - `ActioInstance.decide(history, speaker_slot) -> tuple[RouteResult, ExperienceActivation | None, list[MemoryHit]]`
-  - `ActioInstance.close() -> None`
-  - `instantiate(model_backend, *, skills, library_version, profile, memories=None, memory=None, episode_id=None, interlocutors=None, replay_read_only=None, experiences=(), registry=None, memory_limit=3) -> ActioInstance`
+  - `SimpleActioInstance` 字段:`backend`、`skills`、`memory: MemoryBackend`、`experiences`、`library_version`、`profile`、`registry`、`memory_limit`、`replay_read_only: bool`、`episode_id: str | None`、`interlocutors: dict[str, str]`(去掉 `memories`)
+  - `SimpleActioInstance.decide(history, speaker_slot) -> tuple[RouteResult, ExperienceActivation | None, list[MemoryHit]]`
+  - `SimpleActioInstance.close() -> None`
+  - `instantiate(model_backend, *, skills, library_version, profile, memories=None, memory=None, episode_id=None, interlocutors=None, replay_read_only=None, experiences=(), registry=None, memory_limit=3) -> SimpleActioInstance`
   - 每次 `respond` 的轨迹都是 v2;本任务里 `remembered`/`extraction_failed` 恒为 `"0"`(写路径在 Task 6)
-  - `ActioInstance._state: _MemoryState`(模块私有的可变计数,字段 `seen_turn`、`retry`、`remembered`、`extraction_failed`;`field(default_factory=_MemoryState, repr=False, compare=False)`),Task 6 的写路径用它
+  - `SimpleActioInstance._state: _MemoryState`(模块私有的可变计数,字段 `seen_turn`、`retry`、`remembered`、`extraction_failed`;`field(default_factory=_MemoryState, repr=False, compare=False)`),Task 6 的写路径用它
 
 - [ ] **Step 1: 写失败的测试**
 
 ```python
-# tests/test_actio_instance.py(文件头补:from actio.memory import FileTupleStore, TupleMemory, content_id;
-# from actio.memory_port import MemoryEvent, MemoryFailureError, MemoryHit, RememberOutcome)
+# tests/test_simple_actio_instance.py(文件头补:from simple_actio.memory import FileTupleStore, TupleMemory, content_id;
+# from simple_actio.memory_port import MemoryEvent, MemoryFailureError, MemoryHit, RememberOutcome)
 class RecordingPort:
     """记录调用顺序的假端口。log 可与 LoggingBackend 共用,于是能断言 recall/后端/remember 的先后。
     fail_keys:key -> 还要以 timeout 失败的次数;raise_on:方法名 -> 要抛的异常。"""
@@ -907,19 +907,19 @@ def test_read_failures_become_memory_failures_before_the_backend_is_called(metho
 
 def test_instantiate_memory_arguments():
     base = dict(skills=[], library_version=LV, profile=None)
-    with pytest.raises(ActioDataError, match="exactly one of"):
+    with pytest.raises(SimpleActioDataError, match="exactly one of"):
         instantiate(EchoGuidance(), **base)
-    with pytest.raises(ActioDataError, match="exactly one of"):
+    with pytest.raises(SimpleActioDataError, match="exactly one of"):
         instantiate(EchoGuidance(), **base, memories=[], memory=TupleMemory())
-    with pytest.raises(ActioDataError, match="episode_id"):
+    with pytest.raises(SimpleActioDataError, match="episode_id"):
         instantiate(EchoGuidance(), **base, memory=TupleMemory())
-    with pytest.raises(ActioDataError, match="episode_id"):
+    with pytest.raises(SimpleActioDataError, match="episode_id"):
         instantiate(EchoGuidance(), **base, memories=[], replay_read_only=False)
-    with pytest.raises(ActioDataError, match="memory"):
+    with pytest.raises(SimpleActioDataError, match="memory"):
         instantiate(EchoGuidance(), **base, memory=object(), episode_id="ep")
     for bad in ({"episode_id": ""}, {"episode_id": 3}, {"interlocutors": {"b": ""}},
                 {"interlocutors": [("b", "pb")]}, {"replay_read_only": "yes"}):
-        with pytest.raises(ActioDataError):
+        with pytest.raises(SimpleActioDataError):
             instantiate(EchoGuidance(), **base, memory=TupleMemory(), **{"episode_id": "ep", **bad})
     short = instantiate(EchoGuidance(), **base, memories=[])
     assert short.replay_read_only is True and short.episode_id is None and short.interlocutors == {}
@@ -936,7 +936,7 @@ def test_close_forwards_to_the_port():
 ```
 
 ```python
-# tests/test_actio_realtime_e2e.py(只换三处字面量;文件头补 from actio.memory import content_id)
+# tests/test_simple_actio_realtime_e2e.py(只换三处字面量;文件头补 from simple_actio.memory import content_id)
 TEMPER = content_id("pb", "对方一急就会生气")
 # 第 113 行
     assert first["memory_hits"] == [TEMPER]
@@ -948,23 +948,23 @@ TEMPER = content_id("pb", "对方一急就会生气")
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_actio_instance.py tests/test_actio_realtime_e2e.py -q -p no:cacheprovider`
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_simple_actio_instance.py tests/test_simple_actio_realtime_e2e.py -q -p no:cacheprovider`
 Expected: FAIL,`TypeError: instantiate() got an unexpected keyword argument 'memory'`;`render_guidance` 用例报 `AttributeError: 'MemoryHit' object has no attribute 'subject'`
 
 - [ ] **Step 3: 实现**
 
-`ActioInstance` 仍是 `@dataclass(frozen=True)`,配置字段照 Interfaces;另加 `_state: _MemoryState = field(default_factory=_MemoryState, repr=False, compare=False)`,`_MemoryState` 是模块私有的可变 dataclass(`seen_turn: int = -1`、`retry: tuple[MemoryEvent, ...] = ()`、`remembered: int = 0`、`extraction_failed: int = 0`),Task 6 的写路径用它;配置不可变、每 episode 的计数可变,分开放。一个带写入的实例只服务一条 episode(`episode_id` 在构造时定),一条线程用,docstring 写明。
+`SimpleActioInstance` 仍是 `@dataclass(frozen=True)`,配置字段照 Interfaces;另加 `_state: _MemoryState = field(default_factory=_MemoryState, repr=False, compare=False)`,`_MemoryState` 是模块私有的可变 dataclass(`seen_turn: int = -1`、`retry: tuple[MemoryEvent, ...] = ()`、`remembered: int = 0`、`extraction_failed: int = 0`),Task 6 的写路径用它;配置不可变、每 episode 的计数可变,分开放。一个带写入的实例只服务一条 episode(`episode_id` 在构造时定),一条线程用,docstring 写明。
 
-`instantiate` 的新校验,按此顺序,都抛 `ActioDataError`:
+`instantiate` 的新校验,按此顺序,都抛 `SimpleActioDataError`:
 - `memories` 与 `memory` 恰好一个不是 `None`,否则 `"exactly one of memories= and memory= is required"`。
-- `memories` 给了就构造 `TupleMemory(tuple(memories))`(条目类型与同版本冲突在那里查,沿用既有用例 `memories=[{"id": "m"}]` 抛 `ActioDataError`);`memory` 给了就要求 `isinstance(memory, MemoryBackend)`,否则 `"memory: expected a MemoryBackend, got <类名>"`。
+- `memories` 给了就构造 `TupleMemory(tuple(memories))`(条目类型与同版本冲突在那里查,沿用既有用例 `memories=[{"id": "m"}]` 抛 `SimpleActioDataError`);`memory` 给了就要求 `isinstance(memory, MemoryBackend)`,否则 `"memory: expected a MemoryBackend, got <类名>"`。
 - `replay_read_only`:`None` 时,只给 `memories` 取 `True`、给 `memory` 取 `False`;不是 `None` 就必须是 `bool`。
 - `episode_id`:`None` 或 `_check.text` 通过的非空字符串;生效的 `replay_read_only` 为假且 `episode_id is None` 抛 `"episode_id: required when the instance writes memory"`。合同只写了 `memory=` 一侧;`memories=` 加显式 `replay_read_only=False` 同样要写库,同样需要 key 前缀,所以按"会写库"而不是按参数名判断。
 - `interlocutors`:`None` 取 `{}`;否则必须是 dict 且键与值都是非空 `str`,存一份 `dict(...)` 副本。
 
 `decide`:`route`、`activate` 照旧;查询词 `q = _memory_query(history, speaker_slot)`,`q == ""` 时命中取 `[]`、不调 `recall`,否则 `self.memory.recall(q, limit=self.memory_limit)`,异常经 `_guard` 包装。docstring 改成"路由、经验与记忆召回,不调模型后端、不写库;召回经端口,所以不再是纯函数"。对方没开口时不调 `recall` 是本计划的取舍:替身对空串本来就返回空,Starling 一侧则要嵌入一个空查询词,`strict=True` 下可能抛瞬态失败,让对话开场那一轮无谓地重跑。
 
-`_guard(call)`:模块私有,`MemoryFailureError` 原样上抛;其余 `Exception` 改抛 `MemoryFailureError(type(exc).__name__, transient=False) from None`(第 10 节映射表:Starling 之外的异常一律非瞬态;只报类名,不带可能含端点的原文,与既有 `ActioDataError(...) from None` 的做法一致)。
+`_guard(call)`:模块私有,`MemoryFailureError` 原样上抛;其余 `Exception` 改抛 `MemoryFailureError(type(exc).__name__, transient=False) from None`(第 10 节映射表:Starling 之外的异常一律非瞬态;只报类名,不带可能含端点的原文,与既有 `SimpleActioDataError(...) from None` 的做法一致)。
 
 `respond`:`digest_before = _guard(self.memory.digest)` → `decide` → `render_guidance` → 后端 → (Task 6 在此插入写路径) → `build_trace(..., memory_hits=[h.id for h in hits], memory={"digest_before": digest_before, "remembered": str(state.remembered), "extraction_failed": str(state.extraction_failed)})`。`digest` 与 `recall` 任一失败都在调后端之前抛出。
 
@@ -972,14 +972,14 @@ Expected: FAIL,`TypeError: instantiate() got an unexpected keyword argument 'mem
 
 - [ ] **Step 4: 跑测试确认通过,并跑相邻回归**
 
-Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_actio_instance.py tests/test_actio_realtime_e2e.py tests/test_actio_memory_contract.py tests/test_ma_verify.py tests/test_ma_deployment.py tests/test_ma_rounds.py tests/test_ma_e2e.py tests/test_runner_activation_trace.py -q -p no:cacheprovider`
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_simple_actio_instance.py tests/test_simple_actio_realtime_e2e.py tests/test_simple_actio_memory_contract.py tests/test_ma_verify.py tests/test_ma_deployment.py tests/test_ma_rounds.py tests/test_ma_e2e.py tests/test_runner_activation_trace.py -q -p no:cacheprovider`
 Expected: PASS(实例现在产出 v2;`_reusable` 只比 `library_version`,分析器经 `validate_trace` 两版都收)
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/actio/instance.py tests/test_actio_instance.py tests/test_actio_realtime_e2e.py
-git commit -m "feat(actio): 实例改持记忆端口,召回经端口,轨迹升 v2"
+git add src/simple_actio/instance.py tests/test_simple_actio_instance.py tests/test_simple_actio_realtime_e2e.py
+git commit -m "feat(simple_actio): 实例改持记忆端口,召回经端口,轨迹升 v2"
 ```
 
 ---
@@ -987,17 +987,17 @@ git commit -m "feat(actio): 实例改持记忆端口,召回经端口,轨迹升 v
 ### Task 6: 实例的写路径:回复后 `remember` 对方新发言、episode 内重试一次、失败计数进轨迹
 
 **Files:**
-- Modify: `src/actio/instance.py`(`respond` 在后端回复之后、`build_trace` 之前插入写路径,新增私有方法 `_remember_new`)
-- Test: `tests/test_actio_instance.py`(复用 Task 5 的 `RecordingPort`、`LoggingBackend`、`_ported`)
+- Modify: `src/simple_actio/instance.py`(`respond` 在后端回复之后、`build_trace` 之前插入写路径,新增私有方法 `_remember_new`)
+- Test: `tests/test_simple_actio_instance.py`(复用 Task 5 的 `RecordingPort`、`LoggingBackend`、`_ported`)
 
 **Interfaces:**
-- Consumes: Task 5 的 `ActioInstance`(`memory`、`replay_read_only`、`episode_id`、`interlocutors`、`_state`)与 `_guard`;Task 1 的 `MemoryEvent`、`RememberOutcome`;Task 4 的 `FileTupleStore(root, extraction_failure=...)`
+- Consumes: Task 5 的 `SimpleActioInstance`(`memory`、`replay_read_only`、`episode_id`、`interlocutors`、`_state`)与 `_guard`;Task 1 的 `MemoryEvent`、`RememberOutcome`;Task 4 的 `FileTupleStore(root, extraction_failure=...)`
 - Produces:事件 key `f"{episode_id}#{turn_index}"`、文本 `f"{persona_id}：{utterance}"`(全角冒号)、`interlocutor = interlocutors.get(slot, slot)`;轨迹 `memory.remembered`/`memory.extraction_failed` 是本实例构造以来的累计值,含本轮的写入。第 2、3、5 步的组合根只需要给 `instantiate` 传 `memory=`、`episode_id=`、`interlocutors=`
 
 - [ ] **Step 1: 写失败的测试**
 
 ```python
-# tests/test_actio_instance.py(追加)
+# tests/test_simple_actio_instance.py(追加)
 B0, A1, B2, A3, B4 = (TurnRecord(0, "b", "钱不够"), TurnRecord(1, "a", "嗯"), TurnRecord(2, "b", "预算呢"),
                       TurnRecord(3, "a", "好"), TurnRecord(4, "b", "人手呢"))
 
@@ -1092,7 +1092,7 @@ def test_with_the_file_store_the_round_prefixed_key_lands_and_close_abandons_not
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_actio_instance.py -q -p no:cacheprovider`
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_simple_actio_instance.py -q -p no:cacheprovider`
 Expected: FAIL,`assert [...] == ['digest', 'recall', 'backend', 'remember', 'embed_pending']`(Task 5 之后实例还不写库)
 
 - [ ] **Step 3: 实现**
@@ -1108,7 +1108,7 @@ Expected: FAIL,`assert [...] == ['digest', 'recall', 'backend', 'remember', 'emb
 
 - [ ] **Step 4: 跑测试确认通过,并跑相邻回归**
 
-Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_actio_instance.py tests/test_actio_realtime_e2e.py tests/test_actio_file_tuple_store.py tests/test_actio_memory_contract.py tests/test_actio_memory_experience.py tests/test_actio_memory_port.py tests/test_ma_verify.py tests/test_ma_deployment.py tests/test_ma_rounds.py tests/test_ma_e2e.py tests/test_ma_analysis.py -q -p no:cacheprovider`
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_simple_actio_instance.py tests/test_simple_actio_realtime_e2e.py tests/test_simple_actio_file_tuple_store.py tests/test_simple_actio_memory_contract.py tests/test_simple_actio_memory_experience.py tests/test_simple_actio_memory_port.py tests/test_ma_verify.py tests/test_ma_deployment.py tests/test_ma_rounds.py tests/test_ma_e2e.py tests/test_ma_analysis.py -q -p no:cacheprovider`
 Expected: PASS
 
 再跑一次全量,确认没有别处依赖实例的旧字段:
@@ -1119,8 +1119,8 @@ Expected: PASS
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/actio/instance.py tests/test_actio_instance.py
-git commit -m "feat(actio): 回复后写入对方新发言,抽取失败只计数并在 episode 内重试一次"
+git add src/simple_actio/instance.py tests/test_simple_actio_instance.py
+git commit -m "feat(simple_actio): 回复后写入对方新发言,抽取失败只计数并在 episode 内重试一次"
 ```
 
 ---
@@ -1135,8 +1135,8 @@ git commit -m "feat(actio): 回复后写入对方新发言,抽取失败只计数
 - Test: `tests/test_factory_opponents.py`、`tests/test_factory_vllm_policy.py`
 
 **Interfaces:**
-- Consumes: 无(与 `actio.instance.GuidedBackend` 协议同形:`respond_guided(persona, scenario, history, speaker_slot, guidance: list[str]) -> tuple[str, str | None]`,本任务不导入 actio)
-- Produces: `chat_messages(persona, scenario, history, speaker_slot, guidance: Sequence[str] = ()) -> list[dict]`;`VllmPolicy.respond_guided(persona, scenario, history, speaker_slot, guidance)`、`ExternalApiBackend.respond_guided(persona, scenario, history, speaker_slot, guidance)`,返回 `(content, None)`。第 3 步的 Actio 包装直接调这两个方法。
+- Consumes: 无(与 `simple_actio.instance.GuidedBackend` 协议同形:`respond_guided(persona, scenario, history, speaker_slot, guidance: list[str]) -> tuple[str, str | None]`,本任务不导入 simple_actio)
+- Produces: `chat_messages(persona, scenario, history, speaker_slot, guidance: Sequence[str] = ()) -> list[dict]`;`VllmPolicy.respond_guided(persona, scenario, history, speaker_slot, guidance)`、`ExternalApiBackend.respond_guided(persona, scenario, history, speaker_slot, guidance)`,返回 `(content, None)`。第 3 步的 SimpleActio 包装直接调这两个方法。
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -1348,7 +1348,7 @@ Expected: FAIL,`ModuleNotFoundError: No module named 'simulator.realtime.resourc
 - `join(timeout_s)`:`cond.wait_for(lambda: self._in_flight == 0, timeout_s)`;`wait_for` 等待时释放锁,满足设计源 6.2 节"`join` 不持锁等待"。
 - `close`:第一次调用按顺序跑 `closers`,每个单独 `try`,异常只记 `logger.warning("session closer failed: %s", type(exc).__name__)` 后继续(设计源第 10 节:副本删除失败不分类、记日志、清扫兜底);之后的调用是空操作。`close` 不调 `quiesce`,也不碰 `backends`:关智能体与删副本目录都由工厂放进 `closers`(设计源 6.2 节"`close()` 直接调它们,包装层不转发")。
 
-`backend_timeout.py`:两个基类各配一段 docstring,写明 T1/T2 与驱动器的终止原因(`role_memory_unavailable` 瞬态、`role_memory_failure` 确定性),以及 `simulator` 不认 `actio.MemoryFailureError`、由组合根的转换后端改抛子类(设计源第 10 节)。
+`backend_timeout.py`:两个基类各配一段 docstring,写明 T1/T2 与驱动器的终止原因(`role_memory_unavailable` 瞬态、`role_memory_failure` 确定性),以及 `simulator` 不认 `simple_actio.MemoryFailureError`、由组合根的转换后端改抛子类(设计源第 10 节)。
 
 `TimeoutBackend.respond`:`resources` 不为 None 时,在调用方线程里先 `resources.enter_call()`(quiesce 后在这里抛 `SessionClosingError`,不起线程),daemon 线程的 `_call` 用 `try/finally` 在退出时 `resources.exit_call()`。超时只是调用方不再等,线程仍在计数里,直到自然结束。`resources` 为 None 时行为与现状逐行相同。
 
@@ -1620,7 +1620,7 @@ Expected: FAIL,驱动器用例得到 `("failed", "role_backend_failure")`;轨迹
 
 - [ ] **Step 3: 实现**
 
-`driver.py` 在 `except RoleBackendRejectedError` 之后、`except Exception` 之前加两个分支,形状与 `RoleBackendUnavailableError` 分支相同(`assert_transition` 到 `FAILED`,`outbox` 放 `DriverEvent(kind="failed", payload=...)`),注释写明 T1/T2 与"`simulator` 不认 `actio.MemoryFailureError`,组合根改抛这两个基类的子类"。`DriverEvent` 的 docstring 列举补上两个原因。
+`driver.py` 在 `except RoleBackendRejectedError` 之后、`except Exception` 之前加两个分支,形状与 `RoleBackendUnavailableError` 分支相同(`assert_transition` 到 `FAILED`,`outbox` 放 `DriverEvent(kind="failed", payload=...)`),注释写明 T1/T2 与"`simulator` 不认 `simple_actio.MemoryFailureError`,组合根改抛这两个基类的子类"。`DriverEvent` 的 docstring 列举补上两个原因。
 
 proto 的 `EndSession.reason` 注释补两行:`"role_memory_unavailable"`(对手位记忆暂时不可用;瞬态,T1)与 `"role_memory_failure"`(对手位记忆确定性失败;T2)。改完跑 `bash scripts/gen_realtime_proto.sh`,`git diff --quiet src/simulator/realtime/proto/*.py src/simulator/realtime/proto/*.pyi` 应为 0(注释不进描述符);不为 0 就把产物一并提交。
 
@@ -1650,7 +1650,7 @@ git commit -m "feat(simulator): 驱动器分出两个记忆终止原因,并登�
 - Modify: `src/factory/agent.py`(`AgentRuntime._backends` 第 200-224 行、`_on_session_closed` 第 171-189 行;只改签名形状)
 - Create: `tests/realtime_fixtures.py`(测试辅助,不以 `test_` 开头,pytest 不收集;与 `tests/rs_fixtures.py` 同一用法)
 - Create: `tests/test_realtime_session_resources.py`(本任务与 Task 13、Task 14 的 loopback 用例都放这里)
-- Modify(签名随改,见 Step 3 末尾的清单): `tests/test_realtime_activation_trace.py`、`tests/test_ma_e2e.py`、`tests/test_mt_trajectory_interact.py`、`tests/test_ma_deployment.py`、`tests/test_realtime_persistence.py`、`tests/test_realtime_client_transport.py`、`tests/test_realtime_servicer_limits.py`、`tests/test_realtime_client.py`、`tests/test_realtime_client_order.py`、`tests/test_realtime_client_abort.py`、`tests/test_model_ref_and_isolation_e2e.py`、`tests/test_mt_dispatch.py`、`tests/test_realtime_servicer_e2e.py`、`tests/test_mt_orchestrator.py`、`tests/test_actio_realtime_e2e.py`、`tests/test_mt_dispatch_synthesis.py`、`tests/test_factory_handlers.py`、`tests/test_factory_interact_e2e.py`
+- Modify(签名随改,见 Step 3 末尾的清单): `tests/test_realtime_activation_trace.py`、`tests/test_ma_e2e.py`、`tests/test_mt_trajectory_interact.py`、`tests/test_ma_deployment.py`、`tests/test_realtime_persistence.py`、`tests/test_realtime_client_transport.py`、`tests/test_realtime_servicer_limits.py`、`tests/test_realtime_client.py`、`tests/test_realtime_client_order.py`、`tests/test_realtime_client_abort.py`、`tests/test_model_ref_and_isolation_e2e.py`、`tests/test_mt_dispatch.py`、`tests/test_realtime_servicer_e2e.py`、`tests/test_mt_orchestrator.py`、`tests/test_simple_actio_realtime_e2e.py`、`tests/test_mt_dispatch_synthesis.py`、`tests/test_factory_handlers.py`、`tests/test_factory_interact_e2e.py`
 
 **Interfaces:**
 - Consumes: Task 8 的 `SessionInfo`、`SessionResources`、`TimeoutBackend(inner, timeout_s, resources)`;Task 9 的 `CreateSession.episode_id` 与 `create_session(episode_id=)`
@@ -1803,7 +1803,7 @@ Expected: FAIL,服务端仍按四个位置参数调工厂,`TypeError` 被当成�
 `factory/agent.py`:`_backends(self, info)` 从 `info.scenario`、`info.assignment`、`info.client_slot` 取原来的三个参数,函数体不变,最后 `return SessionResources(backends=backends)`;`_on_session_closed(self, session_id, episode)` 本任务仍按 `episode.scenario_id` 查 `_sessions`(按 `session_id` 路由在 Task 15)。
 
 既有测试的改写(只改签名,不改断言):
-- 下面每个文件 `from realtime_fixtures import plain_factory, plain_hook`,把传给 `create_server` 的旧形状工厂包一层 `plain_factory(...)`,`on_session_closed=` 的单参钩子包一层 `plain_hook(...)`:`test_realtime_activation_trace.py:109`、`test_ma_e2e.py:76`、`test_mt_trajectory_interact.py:95`、`test_ma_deployment.py:80`、`test_realtime_persistence.py:28`、`test_realtime_client.py:45`、`test_realtime_client_order.py:44`、`test_realtime_client_abort.py:36`、`test_model_ref_and_isolation_e2e.py:81`、`test_mt_dispatch.py:458`、`test_realtime_servicer_e2e.py:23,101,137,201,263`、`test_mt_orchestrator.py:470`、`test_actio_realtime_e2e.py:64`、`test_mt_dispatch_synthesis.py:453`。
+- 下面每个文件 `from realtime_fixtures import plain_factory, plain_hook`,把传给 `create_server` 的旧形状工厂包一层 `plain_factory(...)`,`on_session_closed=` 的单参钩子包一层 `plain_hook(...)`:`test_realtime_activation_trace.py:109`、`test_ma_e2e.py:76`、`test_mt_trajectory_interact.py:95`、`test_ma_deployment.py:80`、`test_realtime_persistence.py:28`、`test_realtime_client.py:45`、`test_realtime_client_order.py:44`、`test_realtime_client_abort.py:36`、`test_model_ref_and_isolation_e2e.py:81`、`test_mt_dispatch.py:458`、`test_realtime_servicer_e2e.py:23,101,137,201,263`、`test_mt_orchestrator.py:470`、`test_simple_actio_realtime_e2e.py:64`、`test_mt_dispatch_synthesis.py:453`。
 - `test_realtime_servicer_limits.py` 与 `test_realtime_client_transport.py` 各在自己的夹具里包一次(`start_server` 第 71 行、`serve` 第 119 行:`create_server(plain_factory(factory), ...)`),两处 `lambda *_: {...}` 工厂不用动;`test_realtime_servicer_limits.py:175` 的钩子改为 `lambda _sid, ep: closed.append(ep.id)`。
 - `test_factory_handlers.py`:加一个本地辅助 `_backends_of(runtime, scenario, assignment, personas, client_slot)`,返回 `runtime._backends(SessionInfo(scenario, assignment, personas, client_slot, "sess-test", "ep-sess-test")).backends`,第 238-368 行直接调 `runtime._backends(...)` 的十处换成它;第 562 行改为 `runtime._on_session_closed(f"sess-{i}", SimpleNamespace(...))`。
 - `test_factory_interact_e2e.py:95` 的替身钩子改为 `def hook(self, session_id, episode)`,转手 `real_hook(self, session_id, episode)`。
@@ -1815,7 +1815,7 @@ Expected: FAIL,服务端仍按四个位置参数调工厂,`TypeError` 被当成�
 Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_realtime_session_resources.py tests/test_realtime_servicer_limits.py tests/test_realtime_servicer_e2e.py tests/test_realtime_client.py tests/test_realtime_client_order.py tests/test_realtime_client_abort.py tests/test_realtime_client_transport.py tests/test_realtime_persistence.py tests/test_realtime_activation_trace.py -q -p no:cacheprovider`
 Expected: PASS
 
-Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_ma_e2e.py tests/test_ma_deployment.py tests/test_mt_trajectory_interact.py tests/test_mt_orchestrator.py tests/test_mt_dispatch.py tests/test_mt_dispatch_synthesis.py tests/test_model_ref_and_isolation_e2e.py tests/test_actio_realtime_e2e.py tests/test_factory_handlers.py tests/test_factory_interact_e2e.py -q -p no:cacheprovider`
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_ma_e2e.py tests/test_ma_deployment.py tests/test_mt_trajectory_interact.py tests/test_mt_orchestrator.py tests/test_mt_dispatch.py tests/test_mt_dispatch_synthesis.py tests/test_model_ref_and_isolation_e2e.py tests/test_simple_actio_realtime_e2e.py tests/test_factory_handlers.py tests/test_factory_interact_e2e.py -q -p no:cacheprovider`
 Expected: PASS
 
 - [ ] **Step 5: 提交**
@@ -1827,7 +1827,7 @@ git add tests/test_realtime_activation_trace.py tests/test_ma_e2e.py tests/test_
 git add tests/test_realtime_persistence.py tests/test_realtime_client_transport.py tests/test_realtime_servicer_limits.py
 git add tests/test_realtime_client.py tests/test_realtime_client_order.py tests/test_realtime_client_abort.py
 git add tests/test_model_ref_and_isolation_e2e.py tests/test_mt_dispatch.py tests/test_realtime_servicer_e2e.py
-git add tests/test_mt_orchestrator.py tests/test_actio_realtime_e2e.py tests/test_mt_dispatch_synthesis.py
+git add tests/test_mt_orchestrator.py tests/test_simple_actio_realtime_e2e.py tests/test_mt_dispatch_synthesis.py
 git add tests/test_factory_handlers.py tests/test_factory_interact_e2e.py
 git commit -m "refactor(simulator): 后端工厂收 SessionInfo 返回 SessionResources,落盘钩子带 session_id"
 ```
@@ -2213,7 +2213,7 @@ git commit -m "feat(factory): 会话落盘按 session_id 路由,注销情境不�
 
 ---
 
-## 第 3 步:训练路换成 Actio 实例
+## 第 3 步:训练路换成 SimpleActio 实例
 
 ### Task 16: 记忆异常的转换后端 `factory/memory_translate.py`
 
@@ -2223,11 +2223,11 @@ git commit -m "feat(factory): 会话落盘按 session_id 路由,注销情境不�
 
 **Interfaces:**
 - Consumes:
-  - 第 1 步:`actio.memory_port.MemoryFailureError(message: str, *, transient: bool)` 及子类 `MemoryEventConflict`、`MemoryClosedError`(`transient` 恒为假);`actio.memory.TupleMemory(entries=())`;`actio.instance.instantiate(model_backend, *, skills, library_version, profile, memory=..., episode_id=..., interlocutors=...)`,`ActioInstance.respond(...) -> tuple[str, str | None, dict]`,`ActioInstance.close() -> None`。
+  - 第 1 步:`simple_actio.memory_port.MemoryFailureError(message: str, *, transient: bool)` 及子类 `MemoryEventConflict`、`MemoryClosedError`(`transient` 恒为假);`simple_actio.memory.TupleMemory(entries=())`;`simple_actio.instance.instantiate(model_backend, *, skills, library_version, profile, memory=..., episode_id=..., interlocutors=...)`,`SimpleActioInstance.respond(...) -> tuple[str, str | None, dict]`,`SimpleActioInstance.close() -> None`。
   - 第 2 步:`simulator.realtime.backend_timeout.RoleMemoryUnavailableError(Exception)`、`RoleMemoryFailureError(Exception)`。
 - Produces:
   - `class FactoryMemoryUnavailableError(RoleMemoryUnavailableError)`、`class FactoryMemoryFailureError(RoleMemoryFailureError)`。
-  - `class MemoryTranslatingBackend`:`__init__(self, instance: ActioInstance)`;属性 `instance`;`respond(persona, scenario, history, speaker_slot) -> tuple[str, str | None, dict]`;`close() -> None`。
+  - `class MemoryTranslatingBackend`:`__init__(self, instance: SimpleActioInstance)`;属性 `instance`;`respond(persona, scenario, history, speaker_slot) -> tuple[str, str | None, dict]`;`close() -> None`。
   - `ROLE_LIBRARY_VERSION = {"skill": "0", "memory": "0"}`(训练路的角色位不读技能库,与 `mindagent.library` 空库同一写法)。
   - `memory_role_backend(inner: object, *, memory: MemoryBackend, episode_id: str, interlocutors: Mapping[str, str]) -> MemoryTranslatingBackend`:`instantiate(inner, skills=(), library_version=ROLE_LIBRARY_VERSION, profile=None, memory=memory, episode_id=episode_id, interlocutors=dict(interlocutors))` 外套转换后端。Task 17(对手位)与 Task 21(训练位)都只经它造实例。
 
@@ -2239,8 +2239,8 @@ from __future__ import annotations
 
 import pytest
 
-from actio.memory import TupleMemory
-from actio.memory_port import MemoryClosedError, MemoryEventConflict, MemoryFailureError
+from simple_actio.memory import TupleMemory
+from simple_actio.memory_port import MemoryClosedError, MemoryEventConflict, MemoryFailureError
 from factory.memory_translate import (
     FactoryMemoryFailureError, FactoryMemoryUnavailableError, MemoryTranslatingBackend, memory_role_backend,
 )
@@ -2250,14 +2250,14 @@ from simulator.realtime.backend_timeout import RoleMemoryFailureError, RoleMemor
 
 
 class _Instance:
-    """假的 Actio 实例:respond 抛给定异常或返回三元组;close 记次数,可抛。"""
+    """假的 SimpleActio 实例:respond 抛给定异常或返回三元组;close 记次数,可抛。"""
     def __init__(self, raises=None, close_raises=None):
         self.raises, self.close_raises, self.closed = raises, close_raises, 0
 
     def respond(self, persona, scenario, history, speaker_slot):
         if self.raises is not None:
             raise self.raises
-        return "u", None, {"schema": "actio.trace.v2"}
+        return "u", None, {"schema": "simple_actio.trace.v2"}
 
     def close(self):
         self.closed += 1
@@ -2295,7 +2295,7 @@ def test_non_memory_errors_pass_through_as_the_same_object(cause):
 def test_the_reply_passes_through_and_close_goes_to_the_instance():
     inst = _Instance()
     backend = MemoryTranslatingBackend(inst)
-    assert backend.respond(None, None, [], "b") == ("u", None, {"schema": "actio.trace.v2"})
+    assert backend.respond(None, None, [], "b") == ("u", None, {"schema": "simple_actio.trace.v2"})
     backend.close()
     assert inst.closed == 1 and backend.instance is inst
 
@@ -2306,11 +2306,11 @@ def test_a_memory_failure_while_closing_is_translated_too():
         MemoryTranslatingBackend(inst).close()
 
 
-def test_memory_role_backend_builds_an_actio_instance_that_writes_v2_traces():
+def test_memory_role_backend_builds_an_simple_actio_instance_that_writes_v2_traces():
     scripted = ScriptedBackend({"b": ["hi"]})
     backend = memory_role_backend(scripted, memory=TupleMemory(), episode_id="ep-x", interlocutors={"a": "pa"})
     utterance, _, trace = backend.respond(None, None, [], "b")
-    assert utterance == "hi" and trace["schema"] == "actio.trace.v2"
+    assert utterance == "hi" and trace["schema"] == "simple_actio.trace.v2"
     assert backend.instance.backend.inner is scripted       # 只有 respond 的底座被套了 IgnoreGuidance
 ```
 
@@ -2328,7 +2328,7 @@ Expected: FAIL,`ModuleNotFoundError: No module named 'factory.memory_translate'`
 
 - [ ] **Step 4: 跑测试确认通过,并跑相邻回归**
 
-Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_factory_memory_translate.py tests/test_actio_instance.py -q -p no:cacheprovider`
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_factory_memory_translate.py tests/test_simple_actio_instance.py -q -p no:cacheprovider`
 Expected: PASS
 
 - [ ] **Step 5: 提交**
@@ -2339,7 +2339,7 @@ git add tests/test_factory_memory_translate.py
 git commit -m "feat(factory): 新增记忆异常转换后端,按 transient 改抛 simulator 的两个记忆基类"
 ```
 
-### Task 17: 对手位一律是带记忆的 Actio 实例;外部对手后端每会话新造
+### Task 17: 对手位一律是带记忆的 SimpleActio 实例;外部对手后端每会话新造
 
 **Files:**
 - Modify: `src/factory/agent.py`(`AgentRuntime._backends`,经第 2 步 Task 12、Task 15 改过的版本;类 docstring 里"对手位的后端按各自绑定的驱动分派"一段)
@@ -2350,7 +2350,7 @@ git commit -m "feat(factory): 新增记忆异常转换后端,按 transient 改�
 **Interfaces:**
 - Consumes:
   - Task 16:`memory_role_backend(inner, *, memory, episode_id, interlocutors) -> MemoryTranslatingBackend`、`MemoryTranslatingBackend.instance`、`.close()`、`FactoryMemoryFailureError`。
-  - 第 1 步:`actio.memory.TupleMemory()`(空库;`close()` 之后任何调用抛 `MemoryClosedError`);`ActioInstance` 字段 `memory`、`episode_id`、`interlocutors`、`backend`(只有 `respond` 的底座被套成 `IgnoreGuidance`,其 `.inner` 是原后端)。
+  - 第 1 步:`simple_actio.memory.TupleMemory()`(空库;`close()` 之后任何调用抛 `MemoryClosedError`);`SimpleActioInstance` 字段 `memory`、`episode_id`、`interlocutors`、`backend`(只有 `respond` 的底座被套成 `IgnoreGuidance`,其 `.inner` 是原后端)。
   - 第 2 步:`simulator.realtime.resources.SessionInfo(scenario, assignment, personas, client_slot, session_id, episode_id)`、`SessionResources(backends, closers=())`;Task 12 的 `AgentRuntime._backends(self, info: SessionInfo) -> SessionResources`;Task 15 的 `AgentRuntime._session_runs` 与它放进 `closers` 的 `drop`。
 - Produces:
   - `AgentRuntime._backends(info)` 返回的 `backends[slot]` 一律是 `MemoryTranslatingBackend`;`closers` 是 `(*每个对手位的 backend.close, drop)`(`drop` 只在会话已登记时有,与 Task 15 相同)。
@@ -2371,8 +2371,8 @@ def _two_slots():
                        RoleBinding("b", "pb", "frozen_reference", model_ref="zengen-v1", driver="scripted"))
 
 
-def test_every_opponent_slot_is_an_actio_instance_with_its_own_empty_memory(store):
-    from actio.memory import TupleMemory
+def test_every_opponent_slot_is_an_simple_actio_instance_with_its_own_empty_memory(store):
+    from simple_actio.memory import TupleMemory
     from factory.memory_translate import MemoryTranslatingBackend
     runtime = AgentRuntime(store, ("全局",))
     runtime.register_session("s1", "run-1")
@@ -2395,12 +2395,12 @@ def test_the_opponent_lines_are_unchanged_and_each_turn_carries_a_v2_trace(store
     resources = runtime._backends(_info(_scenario_with({"b": ["剧本乙"]}), _two_slots()))
     utterance, thought, trace = resources.backends["b"].respond(None, _scenario_with(), [], "b")
     assert (utterance, thought) == ("剧本乙", None)
-    assert trace["schema"] == "actio.trace.v2" and trace["memory_hits"] == []
+    assert trace["schema"] == "simple_actio.trace.v2" and trace["memory_hits"] == []
     resources.close()
 
 
-def test_a_deployment_session_gets_actio_opponents_too_and_no_route(store):
-    """部署会话(没登记)的对手位也换成 Actio 实例,底座仍是原来的 ScriptedBackend(设计源 7.4 节)。"""
+def test_a_deployment_session_gets_simple_actio_opponents_too_and_no_route(store):
+    """部署会话(没登记)的对手位也换成 SimpleActio 实例,底座仍是原来的 ScriptedBackend(设计源 7.4 节)。"""
     from simulator.datamodel import RoleBinding
     from simulator.backends import ScriptedBackend
     runtime = AgentRuntime(store, ("全局甲", "全局乙"))
@@ -2471,12 +2471,12 @@ def test_each_session_gets_its_own_external_backend(world, tmp_path, stub):
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_factory_handlers.py tests/test_factory_interact_wire.py -q -p no:cacheprovider -k "actio_instance or v2_trace or deployment_session_gets or closes_every or already_built or its_own_external"`
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_factory_handlers.py tests/test_factory_interact_wire.py -q -p no:cacheprovider -k "simple_actio_instance or v2_trace or deployment_session_gets or closes_every or already_built or its_own_external"`
 Expected: FAIL,`backends["b"]` 是 `ScriptedBackend`,没有 `instance` 属性;外部后端用例 `first is second`
 
 - [ ] **Step 3: 实现**
 
-`AgentRuntime._backends(info)`:原来造后端的分派逻辑不变,得到底座 `base` 后改为 `backends[slot] = memory_role_backend(base, memory=TupleMemory(), episode_id=info.episode_id, interlocutors=interlocutors)`,`interlocutors = {b.slot_id: b.persona_id for b in info.assignment.bindings}`,对每个角色位都一样。训练会话的副本"从起点出发",替身没有种子,所以起点就是空库,与部署会话(每会话一份空 `TupleMemory`,设计源 7.4 节)在计划 A 里是同一行代码;计划 B 第 7 步才把训练会话换成从起点库 `backup_to` 出来的副本。`closers` 依次是每个已造后端的 `close`,最后是 Task 15 的 `drop`。造到一半抛异常时,先关已造好的后端(各自 `try`,关失败只 `logger.warning` 类名),再 `drop()`,再原样重抛。`from actio.memory import TupleMemory` 与 `from factory.memory_translate import memory_role_backend` 放模块顶部(`factory` 是组合根,允许导入 `actio`)。
+`AgentRuntime._backends(info)`:原来造后端的分派逻辑不变,得到底座 `base` 后改为 `backends[slot] = memory_role_backend(base, memory=TupleMemory(), episode_id=info.episode_id, interlocutors=interlocutors)`,`interlocutors = {b.slot_id: b.persona_id for b in info.assignment.bindings}`,对每个角色位都一样。训练会话的副本"从起点出发",替身没有种子,所以起点就是空库,与部署会话(每会话一份空 `TupleMemory`,设计源 7.4 节)在计划 A 里是同一行代码;计划 B 第 7 步才把训练会话换成从起点库 `backup_to` 出来的副本。`closers` 依次是每个已造后端的 `close`,最后是 Task 15 的 `drop`。造到一半抛异常时,先关已造好的后端(各自 `try`,关失败只 `logger.warning` 类名),再 `drop()`,再原样重抛。`from simple_actio.memory import TupleMemory` 与 `from factory.memory_translate import memory_role_backend` 放模块顶部(`factory` 是组合根,允许导入 `simple_actio`)。
 
 `_external_backend`:进入时照旧造一个,让凭证与配置错误照旧在进入时抛出(`OpponentCredentialError`、`DirectiveFailedError` 的既有用例不变);返回 `lambda: ExternalApiBackend(同一组参数)`。`_dispatching(vllm_make, make_external)` 在 `external_api` 分支调 `make_external()`。docstring 把"那唯一的外部后端"改为"每个会话新造一个"。
 
@@ -2492,7 +2492,7 @@ git add src/factory/agent.py
 git add src/factory/interact_policy.py
 git add tests/test_factory_handlers.py
 git add tests/test_factory_interact_wire.py
-git commit -m "feat(factory): 对手位一律包成带记忆的 Actio 实例,外部对手后端每会话新造"
+git commit -m "feat(factory): 对手位一律包成带记忆的 SimpleActio 实例,外部对手后端每会话新造"
 ```
 
 ### Task 18: `AgentRuntime.client_factory(*, deadline_s=None)` 与客户端的相邻消息上限
@@ -2619,7 +2619,7 @@ Expected: FAIL,`failed.status == "pending"`(异常落不进任何确定性分支
 
 - [ ] **Step 3: 实现**
 
-`orchestrator.py` 加 `from simulator.realtime.backend_timeout import RoleMemoryFailureError`(`mindtrainer` 已经导入 `simulator`,依赖方向不变,不导入 `actio`),`_DETERMINISTIC` 末尾加 `RoleMemoryFailureError`。注释补一句:训练位的记忆端口确定性失败经组合根的转换后端变成它的子类,同样的输入还会再失败。
+`orchestrator.py` 加 `from simulator.realtime.backend_timeout import RoleMemoryFailureError`(`mindtrainer` 已经导入 `simulator`,依赖方向不变,不导入 `simple_actio`),`_DETERMINISTIC` 末尾加 `RoleMemoryFailureError`。注释补一句:训练位的记忆端口确定性失败经组合根的转换后端变成它的子类,同样的输入还会再失败。
 
 - [ ] **Step 4: 跑测试确认通过,并跑相邻回归**
 
@@ -2707,12 +2707,12 @@ def test_a_three_tuple_reply_sends_its_trace_and_a_two_tuple_sends_none(store):
 
         def respond(self, persona, scenario, history, speaker_slot):
             self.n += 1
-            return ("a", None, {"schema": "actio.trace.v2", "n": str(self.n)}) if self.n % 2 else ("b", None)
+            return ("a", None, {"schema": "simple_actio.trace.v2", "n": str(self.n)}) if self.n % 2 else ("b", None)
 
     factory = _FakeFactory()
     InteractTrajectorySource(factory, _fixed(Traced()), store, _cfg(**_ONE_GROUP), run_id="run-1").collect()
     traces = factory.clients[0].traces
-    assert traces[0] == {"schema": "actio.trace.v2", "n": "1"} and traces[1] is None
+    assert traces[0] == {"schema": "simple_actio.trace.v2", "n": "1"} and traces[1] is None
 
 
 def test_a_reply_of_the_wrong_length_is_a_policy_bug_and_is_not_retried(store):
@@ -2819,7 +2819,7 @@ Expected: FAIL,`ImportError: cannot import name 'PER_TURN_DEADLINE_S' from 'mind
 - `_attempt` 结构:最外层 `with self._policy_for_rollout(episode_id) as policy:`,里面才是 `client = self._client_factory(deadline_s=self._cfg.max_turns_per_episode * PER_TURN_DEADLINE_S)` 与现有的 `try/finally`(abort)。这样先进上下文、再造客户端、再 `create_session`;失败时先 abort 客户端,再退出上下文。上下文进入时抛的异常不包装,原样上抛(工厂侧的确定性错误)。
 - `create_session(..., episode_id=episode_id)`;`except SessionRejectedError as exc` 改为 `_AttemptFailed(exc.reason, exc.detail, exc.reason in _TRANSIENT_REASONS)`,这样 Task 14 的名额与同 id 拒绝才会按条重跑(设计源第 10 节"现有两个客户端对创建被拒一律判不可重跑,要改")。
 - 回合循环:`reply = policy.respond(...)`。只捕获 `RoleMemoryUnavailableError`,改抛 `_AttemptFailed("role_memory_unavailable", type(exc).__name__, True)`(设计源第 10 节"训练位瞬态记忆失败按条重跑";detail 只写类名)。其余策略异常(含 `RoleMemoryFailureError`)照旧不接,原样穿出。`reply` 不是长度 2 或 3 的 tuple/list 时抛 `TypeError(f"policy for slot {slot!r} must return a 2- or 3-tuple, got {reply!r}")`,同样不接。三元组的第三项是 `dict` 时作为 `activation_trace=` 传给 `submit_turn`,二元组传 `None`;第三项不是 `dict` 也抛 `TypeError`(与 `simulator.runner._unpack_reply` 同一判法)。
-- 导入 `from contextlib import AbstractContextManager`,并从 `simulator.realtime.backend_timeout` 导入两个记忆基类。`mindtrainer` 仍不导入 `actio`。
+- 导入 `from contextlib import AbstractContextManager`,并从 `simulator.realtime.backend_timeout` 导入两个记忆基类。`mindtrainer` 仍不导入 `simple_actio`。
 - docstring 改三处:"policy 复用 ModelBackend 协议"改成"policy_for_rollout 每条 rollout 进出一次,交出 ModelBackend,二元组或三元组";T1 列举里加 `role_memory_unavailable` 与创建被拒的瞬态原因;再写明逻辑 id 的格式。
 
 `dispatch.py`:`_interact_sources(store, cfg, manifests, client_factory, policy_for_rollout, run_id)` 构造时传 `run_id=run_id`。第 357 行改为 `scope = nullcontext(lambda episode_id: nullcontext(policy)) if policy is not None else policy_factory(run_id, cfg)`,进入后得到的是 `policy_for_rollout`。docstring 写明"上下文进入时交出 `policy_for_rollout(episode_id)`,每条 rollout 进出一次"。
@@ -2833,7 +2833,7 @@ Expected: PASS(`tests/test_factory_interact_wire.py` 要到 Task 21 才跟上:�
 
 本任务的改动与 Task 21 一起提交(见 Task 21 开头的说明)。这里只确认 Step 4 列出的测试通过;`tests/test_factory_interact_wire.py` 此时预期失败,不要为它改代码。
 
-### Task 21: 策略工厂交出 `policy_for_rollout`,每条 rollout 一个包 `VllmPolicy` 的 Actio 实例
+### Task 21: 策略工厂交出 `policy_for_rollout`,每条 rollout 一个包 `VllmPolicy` 的 SimpleActio 实例
 
 > 注意:Task 20 与 Task 21 合成一次提交。Task 20 做完 Step 4 先不提交,接着做 Task 21;Task 21 的提交步把两任务的文件一起暂存。两者之间 `tests/test_factory_interact_wire.py` 会红,分开提交会违反"每个任务结束时全套仍绿"。
 
@@ -2847,15 +2847,15 @@ Expected: PASS(`tests/test_factory_interact_wire.py` 要到 Task 21 才跟上:�
   - Task 16:`memory_role_backend(inner, *, memory, episode_id, interlocutors) -> MemoryTranslatingBackend`。
   - Task 20:`mindtrainer.trajectory_source.PolicyForRollout`。
   - 第 2 步 Task 7:`VllmPolicy.respond_guided(persona, scenario, history, speaker_slot, guidance)`(实例因此把它当 `GuidedBackend`,指导语进 prompt)。
-  - 第 1 步:`TupleMemory()`、`ActioInstance.close()`。
+  - 第 1 步:`TupleMemory()`、`SimpleActioInstance.close()`。
 - Produces: `make_policy_factory(...) -> Callable[[str, TrainingConfig], AbstractContextManager[PolicyForRollout]]`;交出的 `policy_for_rollout(episode_id: str) -> AbstractContextManager[MemoryTranslatingBackend]`。每次进入用 `memory_role_backend(policy, memory=TupleMemory(), episode_id=episode_id, interlocutors={b.slot_id: b.persona_id for b in cfg.bindings})` 新造一个实例,退出时(正常与异常都一样)调它的 `close()`。
 
 - [ ] **Step 1: 写失败的测试**
 
 ```python
 # tests/test_factory_interact_wire.py
-def test_the_scope_yields_a_per_rollout_factory_of_actio_instances_around_the_vllm_policy(world, tmp_path, stub):
-    from actio.memory import TupleMemory
+def test_the_scope_yields_a_per_rollout_factory_of_simple_actio_instances_around_the_vllm_policy(world, tmp_path, stub):
+    from simple_actio.memory import TupleMemory
     from factory.memory_translate import MemoryTranslatingBackend
     from factory.vllm_policy import VllmPolicy
     _, _, factory, _ = _unit(world, tmp_path, stub)
@@ -2893,7 +2893,7 @@ def test_an_interact_directive_records_v2_traces_on_the_trained_slot(world, tmp_
     for path in _episode_ids(world):
         episode = read_episode(world, RUN, path.rsplit("/", 1)[-1].removesuffix(".yaml"))
         assert episode.id.startswith(f"{RUN}-grpo0-")
-        assert episode.turns and all(t.activation_trace["schema"] == "actio.trace.v2" for t in episode.turns)
+        assert episode.turns and all(t.activation_trace["schema"] == "simple_actio.trace.v2" for t in episode.turns)
 ```
 
 (`_episode_ids` 返回 `list_products` 的条目,是 `runs/<run>/episodes/<id>.yaml` 形式的相对路径,所以先取文件名再去后缀。)
@@ -2925,7 +2925,7 @@ git add tests/test_mt_dispatch.py
 git add tests/test_mt_dispatch_synthesis.py
 git add src/factory/interact_policy.py
 git add tests/test_factory_interact_wire.py
-git commit -m "feat(mindtrainer,factory): 轨迹源按 rollout 进出策略上下文、逻辑 episode id 上行;策略工厂交出 policy_for_rollout,每条 rollout 一个带记忆的 Actio 实例"
+git commit -m "feat(mindtrainer,factory): 轨迹源按 rollout 进出策略上下文、逻辑 episode id 上行;策略工厂交出 policy_for_rollout,每条 rollout 一个带记忆的 SimpleActio 实例"
 ```
 
 ### Task 22: `--interact` 的时间预算:服务端等提交 90 秒、客户端相邻消息 90 秒、策略 HTTP 60 秒
@@ -3119,7 +3119,7 @@ git commit -m "feat(controlplane): run_daemon 收 on_locked,取锁后第一个 t
 - Test: `tests/test_mt_config.py`
 
 **Interfaces:**
-- Consumes: 无(纯 mindtrainer,不导入 actio)。
+- Consumes: 无(纯 mindtrainer,不导入 simple_actio)。
 - Produces:
   - `TrainingConfig.memory: dict | None = None`,形状 `{"seed": str | None, "digests": dict[str, str], "runtime": dict}`;"未解析"是 `digests == {}` 且 `runtime == {}`。
   - `to_dict()` 只在 `memory is not None` 时写 `"memory"` 键(深拷贝);`from_dict` 读 `d.get("memory")` 并深拷贝。batch 配置与既有 interact 配置的 `to_dict` 逐字节不变。
@@ -3134,7 +3134,7 @@ from __future__ import annotations
 
 STAND_IN_RUNTIME = {
     "backend": "stand-in", "starling_version": None, "extraction": None, "embedding": None,
-    "trace_schema": "actio.trace.v2",
+    "trace_schema": "simple_actio.trace.v2",
 }
 
 def unresolved_memory(seed=None) -> dict:
@@ -3394,9 +3394,9 @@ git commit -m "feat(mindtrainer): 派发器经注入的 memory_resolver 解出�
 - Test: `tests/test_factory_memory_runtime.py`(新)、`tests/test_factory_interact_wire.py`
 
 **Interfaces:**
-- Consumes: 第 1 步 `actio.memory.TupleMemory`(`TupleMemory().digest()` 是空库摘要,`FileTupleStore` 对没有文件的人格给的也是它);Task 25 的 `make_mindtrainer_dispatcher(..., memory_resolver=...)` 与"解析器抛 `DirectiveFailedError` 时保留其 `reason`"。
+- Consumes: 第 1 步 `simple_actio.memory.TupleMemory`(`TupleMemory().digest()` 是空库摘要,`FileTupleStore` 对没有文件的人格给的也是它);Task 25 的 `make_mindtrainer_dispatcher(..., memory_resolver=...)` 与"解析器抛 `DirectiveFailedError` 时保留其 `reason`"。
 - Produces:
-  - `factory.memory_runtime.STAND_IN_MEMORY_RUNTIME: dict = {"backend": "stand-in", "starling_version": None, "extraction": None, "embedding": None, "trace_schema": "actio.trace.v2"}`(`trace_schema` 取第 1 步的 `actio.trace.TRACE_SCHEMA_V2`,不另写字面量)。
+  - `factory.memory_runtime.STAND_IN_MEMORY_RUNTIME: dict = {"backend": "stand-in", "starling_version": None, "extraction": None, "embedding": None, "trace_schema": "simple_actio.trace.v2"}`(`trace_schema` 取第 1 步的 `simple_actio.trace.TRACE_SCHEMA_V2`,不另写字面量)。
   - `factory.memory_runtime.stand_in_memory_resolver(seed: str | None, persona_ids: tuple[str, ...]) -> tuple[dict[str, str], dict]`:`seed is None` 时返回 `({p: TupleMemory().digest() for p in persona_ids}, copy.deepcopy(STAND_IN_MEMORY_RUNTIME))`;`seed` 非 null 抛 `DirectiveFailedError(f"memory.seed {seed!r} needs a memory config: set RISE_MEMORY_CONFIG (the stand-in memory has no seed libraries)")`。
   - `_interact_wiring(...)` 返回 `{"policy_factory": ..., "policy_endpoint": ..., "memory_resolver": stand_in_memory_resolver}`;装配时 `_log.info("memory backend: stand-in")`。
 
@@ -3406,7 +3406,7 @@ git commit -m "feat(mindtrainer): 派发器经注入的 memory_resolver 解出�
 # tests/test_factory_memory_runtime.py
 import pytest
 
-from actio.memory import TupleMemory
+from simple_actio.memory import TupleMemory
 from controlplane.daemon import DirectiveFailedError
 from factory.memory_runtime import STAND_IN_MEMORY_RUNTIME, stand_in_memory_resolver
 from memory_fixtures import STAND_IN_RUNTIME  # Task 24 的测试夹具先于本模块存在,这里钉住两份相等
@@ -3416,7 +3416,7 @@ def test_the_stand_in_runtime_identity_is_the_one_the_design_fixes():
     assert STAND_IN_MEMORY_RUNTIME == STAND_IN_RUNTIME
     assert STAND_IN_MEMORY_RUNTIME == {
         "backend": "stand-in", "starling_version": None, "extraction": None, "embedding": None,
-        "trace_schema": "actio.trace.v2",
+        "trace_schema": "simple_actio.trace.v2",
     }
 
 def test_every_persona_starts_from_the_empty_stand_in_library():
@@ -3437,7 +3437,7 @@ def test_a_seed_needs_a_memory_config():
 
 ```python
 # tests/test_factory_interact_wire.py
-from actio.memory import TupleMemory
+from simple_actio.memory import TupleMemory
 from factory.memory_runtime import STAND_IN_MEMORY_RUNTIME
 from memory_fixtures import unresolved_memory
 
@@ -3479,7 +3479,7 @@ Expected: FAIL,`ModuleNotFoundError: No module named 'factory.memory_runtime'`
 
 - [ ] **Step 3: 实现**
 
-- `src/factory/memory_runtime.py`:首条语句 `from __future__ import annotations`;导入 `copy`、`actio.memory.TupleMemory`、`actio.trace.TRACE_SCHEMA_V2`、`controlplane.daemon.DirectiveFailedError`。按 Produces 写两个名字。抛 `DirectiveFailedError` 而不是普通异常,是因为 Task 25 对普通异常只报类名,而 7.1 节要求原因写明"种子需要记忆配置";原因里只有种子 id 与变量名,不含路径。
+- `src/factory/memory_runtime.py`:首条语句 `from __future__ import annotations`;导入 `copy`、`simple_actio.memory.TupleMemory`、`simple_actio.trace.TRACE_SCHEMA_V2`、`controlplane.daemon.DirectiveFailedError`。按 Produces 写两个名字。抛 `DirectiveFailedError` 而不是普通异常,是因为 Task 25 对普通异常只报类名,而 7.1 节要求原因写明"种子需要记忆配置";原因里只有种子 id 与变量名,不含路径。
 - `wire.py` 的 `_interact_wiring`:在 `make_policy_factory(...)` 之后惰性导入 `from factory.memory_runtime import stand_in_memory_resolver`(与本函数其余惰性导入同一做法),返回字典加 `"memory_resolver": stand_in_memory_resolver`,返回前 `_log.info("memory backend: stand-in")`。`_dispatcher` 已经把 `**wiring` 原样交给 `make_mindtrainer_dispatcher`,两个装配点(`--interact` 单独用、与 `--enable` 同开)都经过 `_interact_wiring`,不用另改。不走 `--interact` 的三处 `make_mindtrainer_dispatcher(...)`(`wire.py` 约 231、326 行与 `mindtrainer/wire.py:32`)不注入:那里 interact 指令先因缺 `client_factory` 判 T2,原因已点名 `--interact`。
 - 启动日志用 `logging` 的 INFO,与 `factory.agent`、`controlplane.daemon` 同一做法。`RISE_MEMORY_CONFIG` 的判定在计划 B 第 7 步才有;本任务无条件用替身。
 
@@ -3822,7 +3822,7 @@ Expected: FAIL,`ImportError: cannot import name 'check_memory_library_empty' fro
 
 - [ ] **Step 3: 实现**
 
-`library.py`:删掉 `from actio.memory import MemoryEntry` 与读记忆的循环;docstring 改为只读 `skill_library/`,并写明设计二起记忆在树外的部署库(第 9 节"旧数据")。`check_memory_library_empty` 只列文件不读内容,所以坏文件也会被它点名。
+`library.py`:删掉 `from simple_actio.memory import MemoryEntry` 与读记忆的循环;docstring 改为只读 `skill_library/`,并写明设计二起记忆在树外的部署库(第 9 节"旧数据")。`check_memory_library_empty` 只列文件不读内容,所以坏文件也会被它点名。
 
 `handlers.py`:`_agent` 开头与 `admit_proposal` 的构造器(由 `lambda ctx: handle_admit_proposal` 改成具名函数 `_admit_proposal(ctx)`,Task 35 再改它的返回值)开头各调 `preflight("memory_library/", lambda: check_memory_library_empty(ctx.store))`;`preflight` 把 `MindAgentDataError` 转成 `FactoryConfigError`,命令行退出码 2,树里什么都不写(第 10 节"`memory_library/` 非空")。在 `admit` 构造器也查,是因为门② 的记忆提案也改走部署库(Task 34),旧条目留在树里会被误当成已收录。
 
@@ -3851,7 +3851,7 @@ git commit -m "feat(mindagent): load_library 不再读 memory_library,它非空�
 - Test: `tests/test_ma_memory_layout.py`(新)
 
 **Interfaces:**
-- Consumes: 第 1 步 `actio.memory_port.PERSONA_ID_PATTERN`(`re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")`)、`actio.errors.ActioDataError`
+- Consumes: 第 1 步 `simple_actio.memory_port.PERSONA_ID_PATTERN`(`re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")`)、`simple_actio.errors.SimpleActioDataError`
 - Produces:
   - `controlplane.lock.FileLockBusyError(Exception)`:`str(exc)` 是锁文件绝对路径
   - `controlplane.lock.hold_file_lock(path: Path) -> Iterator[None]`(`@contextmanager`):建父目录,`open(path, "a+b")`,非阻塞独占锁,被占抛 `FileLockBusyError`,退出时释放
@@ -3863,7 +3863,7 @@ git commit -m "feat(mindagent): load_library 不再读 memory_library,它非空�
     - `round_snapshots(round_id) -> list[Path]`:该轮次目录下以 `deploy-` 起头、以 `suffix` 结尾的文件,按名排序
     - `uncommitted_snapshots(persona_id) -> list[Path]`:`snapshots/*/` 下名字以 `deploy-` 起头、以 `f"-{persona_id}{suffix}"` 结尾的文件
     - `persona_lock(persona_id) -> AbstractContextManager[None]`:`hold_file_lock(self.deploy_lock(persona_id))`
-  - 每个收 `persona_id` 的方法先 `PERSONA_ID_PATTERN.fullmatch`,不合法抛 `ActioDataError(f"persona_id: {persona_id!r}")`;`round_id`、`episode_id` 不许含 `/` 且不许是 `.`、`..`,否则抛 `ValueError`(带轮次前缀的 `<round_id>/deploy-...` 只进事件 key,绝不拼路径)
+  - 每个收 `persona_id` 的方法先 `PERSONA_ID_PATTERN.fullmatch`,不合法抛 `SimpleActioDataError(f"persona_id: {persona_id!r}")`;`round_id`、`episode_id` 不许含 `/` 且不许是 `.`、`..`,否则抛 `ValueError`(带轮次前缀的 `<round_id>/deploy-...` 只进事件 key,绝不拼路径)
 
 替身下的根目录约定:`MemoryLayout(mem_root)` 与 `FileTupleStore(mem_root / "deploy")` 共用同一个 `mem_root`,于是部署库 `deploy/<persona_id>.json`、锁 `deploy/<persona_id>.lock`、起点副本 `snapshots/<round_id>/<episode_id>-<persona_id>.json`、验证快照 `snapshots/<round_id>/verify-<persona_id>.json`,与设计源 5.3 节的布局逐项对应,只是后缀是 `.json`。`FileTupleStore` 只读写 `<root>/<persona_id>.json`,同目录的 `.lock` 不干扰它。
 
@@ -3873,7 +3873,7 @@ git commit -m "feat(mindagent): load_library 不再读 memory_library,它非空�
 # tests/test_ma_memory_layout.py
 import pytest
 
-from actio.errors import ActioDataError
+from simple_actio.errors import SimpleActioDataError
 from controlplane.lock import FileLockBusyError, hold_file_lock
 from mindagent.memory_layout import MemoryLayout
 
@@ -3890,7 +3890,7 @@ def test_paths_follow_the_design_layout(tmp_path):
 
 @pytest.mark.parametrize("bad", ["", ".hidden", "a/b", "../x", "x" * 129])
 def test_persona_ids_are_checked_before_they_reach_a_path(tmp_path, bad):
-    with pytest.raises(ActioDataError):
+    with pytest.raises(SimpleActioDataError):
         MemoryLayout(tmp_path).deploy_lock(bad)
 
 
@@ -3933,7 +3933,7 @@ Expected: FAIL,`ImportError: cannot import name 'FileLockBusyError' from 'contro
 
 `hold_file_lock` 与 `acquire_repo_lock` 同一写法(先 `_try_lock`,`_BUSY` 转成 `FileLockBusyError`,`finally` 里 `_unlock` 再 `close`),只是锁文件路径由调用方给、并先 `path.parent.mkdir(parents=True, exist_ok=True)`。锁文件本身不删:删了会让另一个进程在新 inode 上拿到"同一把"锁。
 
-`memory_layout.py` 只导入标准库、`actio.memory_port.PERSONA_ID_PATTERN`、`actio.errors.ActioDataError` 与 `controlplane.lock.hold_file_lock`。`uncommitted_snapshots` 只按文件名匹配:人格 id 里允许 `-`,`deploy-m-s-1-x-pa.json` 对人格 `pa` 与 `x-pa` 都算命中。宁可多判:多判只让门② 多延后一次(Task 34),不会丢记忆。
+`memory_layout.py` 只导入标准库、`simple_actio.memory_port.PERSONA_ID_PATTERN`、`simple_actio.errors.SimpleActioDataError` 与 `controlplane.lock.hold_file_lock`。`uncommitted_snapshots` 只按文件名匹配:人格 id 里允许 `-`,`deploy-m-s-1-x-pa.json` 对人格 `pa` 与 `x-pa` 都算命中。宁可多判:多判只让门② 多延后一次(Task 34),不会丢记忆。
 
 - [ ] **Step 4: 跑测试确认通过,并跑相邻回归**
 
@@ -3961,7 +3961,7 @@ git commit -m "feat(mindagent): 部署记忆目录布局与人格库锁"
 
 **Interfaces:**
 - Consumes:
-  - 第 1 步:`actio.memory_port.MemoryBackend`、`DeploymentMemoryStore`(`open`、`abandon_event`、`pending_events`、`backup_to`、`restore_from`、`digest`)、`MemoryFailureError`(`transient`)、`MemoryEventConflict`;`actio.memory.FileTupleStore(root: Path, *, extraction_failure: Callable[[MemoryEvent], str | None] | None = None)`;`actio.instance.instantiate(..., memory=, episode_id=, interlocutors=)`、`ActioInstance.close()`(转发给端口,端口 `close()` 幂等);轨迹 v2 的 `trace["memory"]["digest_before"]`
+  - 第 1 步:`simple_actio.memory_port.MemoryBackend`、`DeploymentMemoryStore`(`open`、`abandon_event`、`pending_events`、`backup_to`、`restore_from`、`digest`)、`MemoryFailureError`(`transient`)、`MemoryEventConflict`;`simple_actio.memory.FileTupleStore(root: Path, *, extraction_failure: Callable[[MemoryEvent], str | None] | None = None)`;`simple_actio.instance.instantiate(..., memory=, episode_id=, interlocutors=)`、`SimpleActioInstance.close()`(转发给端口,端口 `close()` 幂等);轨迹 v2 的 `trace["memory"]["digest_before"]`
   - 第 2 步:`EnvironmentServiceClient.create_session(..., episode_id: str | None = None)`;`AgentRuntime.client_factory(*, deadline_s: float | None = None)`
   - Task 31:`mindagent.memory_layout.MemoryLayout`(`snapshot`)
 - Produces:
@@ -3976,8 +3976,8 @@ git commit -m "feat(mindagent): 部署记忆目录布局与人格库锁"
 
 ```python
 # tests/test_ma_deployment.py:夹具与辅助改写(其余既有 import 不变)
-from actio.memory import FileTupleStore
-from actio.memory_port import MemoryEventConflict
+from simple_actio.memory import FileTupleStore
+from simple_actio.memory_port import MemoryEventConflict
 from mindagent.errors import RestoreFailedError
 from mindagent.memory_layout import MemoryLayout
 
@@ -4159,7 +4159,7 @@ Expected: FAIL,`ImportError: cannot import name 'RestoreFailedError' from 'minda
 `deployment.py`:
 
 - `TRANSIENT_REASONS` 已由 Task 11 加了 `"role_memory_unavailable"`,不再改;`_attempt` 里创建被拒那一支(约 93 行)改为 `raise _AttemptFailed(exc.reason, exc.detail, exc.reason in TRANSIENT_REASONS)`(第 10 节:今天对创建被拒一律判不可重跑,改成按终止原因查瞬态集合)。
-- `_attempt(instance, client_factory, scenario, assignment, personas, agent_slot, *, episode_id: str, deadline_s: float | None)`:`client = client_factory() if deadline_s is None else client_factory(deadline_s=deadline_s)`;`create_session(..., episode_id=episode_id)`,这里的 `episode_id` 是**不带轮次**的部署 id。`instance.respond` 外面只接 `actio.memory_port.MemoryFailureError`,改抛 `_AttemptFailed("role_memory_unavailable" if exc.transient else "role_memory_failure", type(exc).__name__, exc.transient)`(第 10 节:MindAgent 自己造实例,直接接 `actio.MemoryFailureError`;信息只报类名);其余实例异常照旧原样上抛。
+- `_attempt(instance, client_factory, scenario, assignment, personas, agent_slot, *, episode_id: str, deadline_s: float | None)`:`client = client_factory() if deadline_s is None else client_factory(deadline_s=deadline_s)`;`create_session(..., episode_id=episode_id)`,这里的 `episode_id` 是**不带轮次**的部署 id。`instance.respond` 外面只接 `simple_actio.memory_port.MemoryFailureError`,改抛 `_AttemptFailed("role_memory_unavailable" if exc.transient else "role_memory_failure", type(exc).__name__, exc.transient)`(第 10 节:MindAgent 自己造实例,直接接 `simple_actio.MemoryFailureError`;信息只报类名);其余实例异常照旧原样上抛。
 - `_reusable(episode, agent_slot, skill_version, recorded_digest)`:有智能体轮次、`recorded_digest` 不是 `None`、每个智能体轮次的轨迹是 dict 且 `library_version["skill"] == skill_version`、首个智能体轮次的 `trace["memory"]["digest_before"] == recorded_digest`。不比较部署库当前摘要(第 9 节"episode 复用")。
 - `_restore(memory_store, persona_id, snap, expected, episode_id) -> str`:`restore_from` 抛 `MemoryFailureError` 或 `OSError` → `RestoreFailedError(f"restore {episode_id} for {persona_id}: {type(exc).__name__}", point="mindagent.deployment.restore")`;`expected` 不为 `None` 且返回的摘要不等 → `RestoreFailedError(f"restore {episode_id} for {persona_id}: digest mismatch", point=...)`。返回覆盖后的摘要。
 
@@ -4215,7 +4215,7 @@ snap.unlink()                                      # 提交点
 
 - [ ] **Step 4: 跑测试确认通过,并跑相邻回归**
 
-Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_ma_deployment.py tests/test_ma_memory_layout.py tests/test_actio_file_tuple_store.py -q -p no:cacheprovider`
+Run: `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest tests/test_ma_deployment.py tests/test_ma_memory_layout.py tests/test_simple_actio_file_tuple_store.py -q -p no:cacheprovider`
 Expected: PASS(`tests/test_ma_rounds.py`、`tests/test_ma_e2e.py` 此时因 `run_deployment_episodes` 签名变了而失败,Task 33 一起改)
 
 - [ ] **Step 5: 先不提交,接着做 Task 33**
@@ -4232,7 +4232,7 @@ Expected: PASS(`tests/test_ma_rounds.py`、`tests/test_ma_e2e.py` 此时因 `run
 - 随本任务改的既有测试:`tests/test_ma_rounds.py` 的 `_handler`(约 135-143 行)与约 274 行直接调 `make_start_round_handler` 的那处,都补 `memory_store`、`memory_layout`、`memory_runtime`、`scratch_store_factory`;该文件 `_FakeClient.create_session` 加 `episode_id=None`(约 60 行),`_Factory.__call__` 加 `**kw`(约 90 行);`tests/test_ma_e2e.py` 的 `world` 夹具(约 86 行)同样补四个参数。`tests/test_factory_interact_wire.py` 的 `handler_kwargs` 是收 `**kwargs` 的间谍,不用改
 
 **Interfaces:**
-- Consumes:Task 31 的 `MemoryLayout`(`persona_lock`、`snapshot`、`round_snapshots`、`verify_snapshot`、`verify_scratch`)与 `FileLockBusyError`;Task 32 的 `run_deployment_episodes(...)`、`RestoreFailedError`、`DeploymentFailedError`;第 1 步的 `DeploymentMemoryStore`、`MemoryFailureError`、`FileTupleStore`、`instantiate(..., memory=, episode_id=, interlocutors=, replay_read_only=)`、`ActioInstance.close()`;第 4 步的 `factory.memory_runtime.STAND_IN_MEMORY_RUNTIME`(只在测试里用作载荷值)
+- Consumes:Task 31 的 `MemoryLayout`(`persona_lock`、`snapshot`、`round_snapshots`、`verify_snapshot`、`verify_scratch`)与 `FileLockBusyError`;Task 32 的 `run_deployment_episodes(...)`、`RestoreFailedError`、`DeploymentFailedError`;第 1 步的 `DeploymentMemoryStore`、`MemoryFailureError`、`FileTupleStore`、`instantiate(..., memory=, episode_id=, interlocutors=, replay_read_only=)`、`SimpleActioInstance.close()`;第 4 步的 `factory.memory_runtime.STAND_IN_MEMORY_RUNTIME`(只在测试里用作载荷值)
 - Produces:
   - `make_start_round_handler(*, config, client_factory, backend_factory, personas_loader, memory_store: DeploymentMemoryStore, memory_layout: MemoryLayout, memory_runtime: dict, scratch_store_factory: Callable[[Path], DeploymentMemoryStore], bridge=None, stream_deadline_s: float | None = None) -> Handler`
   - `agent_round` 载荷新增 `memory_runtime: dict`(装配时给的运行时身份的深拷贝)与 `episode_digests: {部署 episode id: {persona_id: 起点摘要}}`
@@ -4241,7 +4241,7 @@ Expected: PASS(`tests/test_ma_rounds.py`、`tests/test_ma_e2e.py` 此时因 `run
 
 ```python
 # tests/test_ma_rounds.py:夹具补记忆(其余 import 不变)
-from actio.memory import FileTupleStore
+from simple_actio.memory import FileTupleStore
 from controlplane.lock import hold_file_lock
 from factory.memory_runtime import STAND_IN_MEMORY_RUNTIME
 from mindagent.memory_layout import MemoryLayout
@@ -4348,7 +4348,7 @@ Expected: FAIL,`TypeError: make_start_round_handler() got an unexpected keyword 
 - `_binding_payload(..., memory_runtime: dict)` 加 `"memory_runtime": copy.deepcopy(memory_runtime)`、`"episode_digests": {}`。
 - `handle`:`existing` 是 pending 时,新信封除 `created_at` 外还继承 `existing.payload.get("episode_digests", {})`。不继承的话重入时 `_reusable` 拿不到起点摘要,已提交的 episode 会按同一 id 重跑而撞上自己 committed 的 key(`test_a_pending_round_resumes_without_regenerating_persisted_episodes` 钉住这一点)。
 - 锁:`_check_inputs` 之后、`_run` 之前,`ExitStack` 按排序后的绑定人格 id 逐个 `memory_layout.persona_lock(pid)`;`FileLockBusyError` 改抛 `AgentRoundFailedError(f"persona library locked: {exc}", point="mindagent.rounds.lock")`(M20)。锁一直持到 `handle` 返回或抛出,所以下面的回滚也在锁里做。
-- T3 回滚:`_run` 外包一层 `try`;接到 `DeploymentFailedError`(`transient` 为假)、`ProposalParseError`、`BridgeError`、`MindAgentDataError`、`ActioDataError`、以及 `AgentRoundFailedError` 但**不是** `RestoreFailedError` 时,先 `_rollback(env.id)` 再重抛给既有的 `except` 链写失败记录。`_rollback` 运行时 `run_deployment_episodes` 已经返回或抛出,它每次尝试的 `finally` 已关掉实例与端口(Task 32),所以 `restore_from` 不会撞上打开的端口;`_rollback` 开头再断言一次该人格的打开端口数为 0,不为 0 就抛 `RestoreFailedError`("port still open"),不去覆盖。`_rollback` 对每个绑定人格,取 `memory_layout.round_snapshots(round_id)` 里以 `f"-{pid}{memory_layout.suffix}"` 结尾的副本,`memory_store.restore_from(pid, snap)` 后 `snap.unlink()`;`restore_from` 抛 `MemoryFailureError`/`OSError` 时改抛 `RestoreFailedError(..., point="mindagent.deployment.restore")`,副本与库都不动(第 9 节"覆盖失败时库与副本都保留")。瞬态的 `DeploymentFailedError` 与其余异常不回滚:轮次留 pending,重入时由 Task 32 的"副本在就先覆盖"处理。
+- T3 回滚:`_run` 外包一层 `try`;接到 `DeploymentFailedError`(`transient` 为假)、`ProposalParseError`、`BridgeError`、`MindAgentDataError`、`SimpleActioDataError`、以及 `AgentRoundFailedError` 但**不是** `RestoreFailedError` 时,先 `_rollback(env.id)` 再重抛给既有的 `except` 链写失败记录。`_rollback` 运行时 `run_deployment_episodes` 已经返回或抛出,它每次尝试的 `finally` 已关掉实例与端口(Task 32),所以 `restore_from` 不会撞上打开的端口;`_rollback` 开头再断言一次该人格的打开端口数为 0,不为 0 就抛 `RestoreFailedError`("port still open"),不去覆盖。`_rollback` 对每个绑定人格,取 `memory_layout.round_snapshots(round_id)` 里以 `f"-{pid}{memory_layout.suffix}"` 结尾的副本,`memory_store.restore_from(pid, snap)` 后 `snap.unlink()`;`restore_from` 抛 `MemoryFailureError`/`OSError` 时改抛 `RestoreFailedError(..., point="mindagent.deployment.restore")`,副本与库都不动(第 9 节"覆盖失败时库与副本都保留")。瞬态的 `DeploymentFailedError` 与其余异常不回滚:轮次留 pending,重入时由 Task 32 的"副本在就先覆盖"处理。
 - `_run`:
   - `interlocutors = {b.slot_id: b.persona_id for b in config.bindings}`;`make_instance(episode_id, memory)` = `instantiate(backend_factory(model_id, ckpt), skills=lib.skills, memory=memory, episode_id=episode_id, interlocutors=interlocutors, library_version=lib.version, profile={"model_id": model_id, "round_id": env.id})`。
   - `on_episode_start(eid, by_persona)`:`env.payload["episode_digests"][eid] = dict(by_persona)`,`store.write_product(agent_round_file(model_id), env, f"mindagent: {env.id} start {eid}")`(第 9 节"每条 episode 开始前写回一次")。
@@ -4387,8 +4387,8 @@ Expected: PASS
 # tests/test_ma_admit.py:夹具与辅助(其余 import 不变;删掉 MemoryEntry 导入)
 from types import SimpleNamespace
 
-from actio.memory import FileTupleStore
-from actio.memory_port import MemoryEventConflict
+from simple_actio.memory import FileTupleStore
+from simple_actio.memory_port import MemoryEventConflict
 from controlplane.deferred import DeferredError
 from controlplane.lock import hold_file_lock
 from mindagent.admit import make_admit_proposal_handler
@@ -4520,7 +4520,7 @@ def test_a_malformed_memory_definition_is_t2_and_touches_nothing(store, mem, def
     assert mem.store.digest("pa") == FileTupleStore(mem.layout.root / "empty").digest("pa")
 ```
 
-`MemoryEventConflict` 从 `actio.memory_port` 导入。
+`MemoryEventConflict` 从 `simple_actio.memory_port` 导入。
 
 - [ ] **Step 2: 跑测试确认失败**
 
@@ -4582,7 +4582,7 @@ Expected: PASS(`tests/test_ma_e2e.py`、`tests/test_factory_handlers.py` 仍导�
 # tests/test_factory_handlers.py 追加
 def test_round_and_admit_handlers_share_one_stand_in_deployment_memory(store, monkeypatch):
     import factory.handlers as fh
-    from actio.memory import FileTupleStore
+    from simple_actio.memory import FileTupleStore
     from controlplane.lock import git_dir
     from factory.memory_runtime import STAND_IN_MEMORY_RUNTIME
     seen = {}
@@ -4622,7 +4622,7 @@ Expected: FAIL,`ImportError: cannot import name 'git_dir' from 'controlplane.loc
 
 - `handlers.py`:`_agent(ctx)` 在 Task 30 的预检之后取 `mem = ctx.deployment_memory`,给 `make_start_round_handler` 补 `memory_store=mem.store, memory_layout=mem.layout, memory_runtime=mem.runtime, scratch_store_factory=mem.scratch_store_factory`,不传 `stream_deadline_s`;`_admit_proposal(ctx)` 返回 `make_admit_proposal_handler(memory_store=mem.store, memory_layout=mem.layout)`;`DEFAULT_BUILDERS["admit_proposal"] = _admit_proposal`;模块 docstring 的 `admit_proposal` 一行改成"计划 7 的处理器工厂,记忆增量写树外的部署库"。导入改为 `from mindagent.admit import make_admit_proposal_handler`。
 - `wire.py`:`assemble` 在构造 `BuildContext` 前,`keys & {"start_agent_round", "admit_proposal"}` 非空时 `deployment_memory = stand_in_deployment_memory(store.repo_root)`,否则 `None`;作为关键字传进 `BuildContext`。只造一次,两个构造器拿到同一个 `FileTupleStore` 实例:它的"打开着的端口数"是实例内状态,共用才能让 `restore_from` 的守卫看见轮次处理器开着的端口。
-- `memory_runtime.py`:导入 `actio.memory.FileTupleStore`、`mindagent.memory_layout.MemoryLayout`、`controlplane.lock.git_dir`;启动日志在造替身时写一行 `memory backend: stand-in`(设计源 5.1 节),用模块级 `logging.getLogger(__name__)`。
+- `memory_runtime.py`:导入 `simple_actio.memory.FileTupleStore`、`mindagent.memory_layout.MemoryLayout`、`controlplane.lock.git_dir`;启动日志在造替身时写一行 `memory backend: stand-in`(设计源 5.1 节),用模块级 `logging.getLogger(__name__)`。
 
 - [ ] **Step 4: 跑测试确认通过,并跑相邻回归**
 

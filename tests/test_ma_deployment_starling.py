@@ -12,8 +12,8 @@ from types import SimpleNamespace
 import pytest
 
 starling = pytest.importorskip("starling")
-from actio.memory_port import MemoryEventConflict  # noqa: E402
-from actio.memory_starling import StarlingDeploymentStore, copy_library  # noqa: E402
+from simple_actio.memory_port import MemoryEventConflict  # noqa: E402
+from simple_actio.memory_starling import StarlingDeploymentStore, copy_library  # noqa: E402
 from controlplane.deferred import DeferredError  # noqa: E402
 from controlplane.gitstore import GitStore  # noqa: E402
 from controlplane.paths import failure_record_file, library_state_file, proposal_file, run_dir, skill_file  # noqa: E402

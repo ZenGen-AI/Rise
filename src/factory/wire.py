@@ -29,7 +29,7 @@ from mindtrainer.data_producer import TemplateDataProducer
 from mindtrainer.dispatch import make_mindtrainer_dispatcher
 
 if TYPE_CHECKING:  # factory.agent 与 factory.memory_runtime 拖进 grpc 与 mindagent,只在类型检查时导入
-    from actio.memory_port import DeploymentMemoryStore
+    from simple_actio.memory_port import DeploymentMemoryStore
     from factory.agent import AgentRuntime
     from factory.interact_policy import OpponentSwitch
     from factory.memory_runtime import DeploymentMemory, MemoryWiring, TrainingWorlds

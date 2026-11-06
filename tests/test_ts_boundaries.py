@@ -2,7 +2,7 @@
 
 trainscheduler 允许导入的项目内模块(设计 §11):controlplane、recipestore(只经 recipes_port)、trainplanner、
 inference_bridge(只取 BridgeError)、mindtrainer.training_config 与 mindtrainer.data_spec。
-不导入 mindtrainer 的其他模块,不导入 diagnostic、simulator、actio、mindagent、factory。
+不导入 mindtrainer 的其他模块,不导入 diagnostic、simulator、simple_actio、mindagent、factory。
 反方向:controlplane、recipestore、trainplanner、mindtrainer、inference_bridge 都不导入 trainscheduler。
 """
 import ast
@@ -14,7 +14,7 @@ STDLIB_ALLOWED = {"__future__", "collections", "copy", "dataclasses", "hashlib",
                   "logging", "math", "re", "typing"}
 # mindtrainer 只允许这两个模块:不能把编排器、执行器、派发器拉进调度器
 ALLOWED_MINDTRAINER = {"mindtrainer.training_config", "mindtrainer.data_spec"}
-FORBIDDEN = {"diagnostic", "simulator", "actio", "mindagent", "factory"}
+FORBIDDEN = {"diagnostic", "simulator", "simple_actio", "mindagent", "factory"}
 
 
 def _imports(path: Path) -> set[str]:

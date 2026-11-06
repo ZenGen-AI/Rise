@@ -7,7 +7,7 @@ from simulator.datamodel import RoleBinding
 
 
 def agent_slot_of(bindings: list[RoleBinding] | tuple[RoleBinding, ...]) -> str:
-    """Actio 实例占的角色位:唯一一个 model_backend 为 self_play 的绑定(被部署的就是它)。"""
+    """SimpleActio 实例占的角色位:唯一一个 model_backend 为 self_play 的绑定(被部署的就是它)。"""
     slots = [b.slot_id for b in bindings if b.model_backend == "self_play"]
     if len(slots) != 1:
         raise ValueError(f"bindings must contain exactly one self_play binding (the agent), got {slots}")

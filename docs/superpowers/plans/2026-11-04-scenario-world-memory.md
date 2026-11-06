@@ -21,7 +21,7 @@
   - `snapshots/<round_id>/deploy-<episode_id><后缀>` 加同名 `.world` 旁注（内容是 `scenario_id`）：起点快照；
   - `snapshots/<round_id>/verify-<scenario_id><后缀>`：验证快照；`snapshots/<round_id>/verify/`：验证临时世界；
   - `seeds/<seed_id>/<scenario_id>.db`：种子世界；`runs/<run_id>/<逻辑 episode id>.db`：rollout 世界。
-- 只有 `src/actio/memory_starling.py` 导入 `starling`；`mindagent`、`mindtrainer`、`simulator` 不导入 `factory`（`tests/test_boundaries*.py` 的 ast 扫描守着）。
+- 只有 `src/simple_actio/memory_starling.py` 导入 `starling`；`mindagent`、`mindtrainer`、`simulator` 不导入 `factory`（`tests/test_boundaries*.py` 的 ast 扫描守着）。
 - 失败文字只报类名与 id，不含记忆根路径与端点地址。
 - 每个任务结束时，它 Step 4 列出的文件要通过：`uv run --offline pytest -q -m 'not slow' -p no:cacheprovider <文件>`。最后一个任务跑全量。基线是 `4596 passed, 3 skipped`；总数会变，但不许有失败。
 - Task 1、3、5 改了 `mindagent` 调用的管理面与布局接口。所以从 Task 1 起，`tests/test_ma_*.py` 与部署相关的 `tests/test_factory_handlers.py` 用例会失败，到 Task 6、7 结束时恢复。中间的任务不要为了让它们通过去加兼容层。
@@ -40,9 +40,9 @@
 ### Task 1: 替身账本带主体，端口绑定 (世界, 主体)
 
 **Files:**
-- Modify: `src/actio/memory.py`（`_Ledger`、`TupleMemory`、`FileTupleStore`、`_FilePort`）
-- Modify: `src/actio/memory_port.py:95-126`（`DeploymentMemoryStore`）
-- Test: `tests/test_actio_file_tuple_store.py`、`tests/test_actio_memory_port.py`、`tests/test_actio_memory_contract.py`
+- Modify: `src/simple_actio/memory.py`（`_Ledger`、`TupleMemory`、`FileTupleStore`、`_FilePort`）
+- Modify: `src/simple_actio/memory_port.py:95-126`（`DeploymentMemoryStore`）
+- Test: `tests/test_simple_actio_file_tuple_store.py`、`tests/test_simple_actio_memory_port.py`、`tests/test_simple_actio_memory_contract.py`
 
 **Interfaces:**
 - Produces:
@@ -52,7 +52,7 @@
   - `DeploymentMemoryStore`（协议）八个方法：`open(world_id, holder)`、`remember_event(world_id, holder, key, text, *, interlocutor)`、`abandon_event(world_id, key)`、`pending_events(world_id)`、`backup_to(world_id, path) -> str`、`restore_from(world_id, path) -> str`、`digest(world_id) -> str`、`wait_closed(world_id, timeout_s: float) -> bool`。
   - `FileTupleStore` 实现上述八个方法：文件 `<root>/<world_id>.json`；`_open: dict[world_id, int]` 由 `threading.Lock` 守护（端口会在服务端线程关）；`wait_closed` 用 `threading.Condition`，计数归零时 `notify_all`。
 
-- [x] **Step 1: 写失败的测试**（`tests/test_actio_file_tuple_store.py`，新增，旧的按人格用例同步改成按世界）
+- [x] **Step 1: 写失败的测试**（`tests/test_simple_actio_file_tuple_store.py`，新增，旧的按人格用例同步改成按世界）
 
 ```python
 def test_two_holders_in_one_world_recall_only_their_own(tmp_path):
@@ -99,17 +99,17 @@ def test_wait_closed_returns_when_a_port_closes_on_another_thread(tmp_path):
 def test_world_ids_and_holders_are_checked_before_any_path_is_built(tmp_path):
     store = FileTupleStore(tmp_path)
     for bad in ("", "../x", "a/b", ".hidden", "p1\n"):
-        with pytest.raises(ActioDataError):
+        with pytest.raises(SimpleActioDataError):
             store.open(bad, "pa")
-        with pytest.raises(ActioDataError):
+        with pytest.raises(SimpleActioDataError):
             store.open("s1", bad)
 ```
 
-`tests/test_actio_memory_port.py::test_both_protocols_are_checked_by_method_names` 改成断言协议含 `wait_closed`。`tests/test_actio_memory_contract.py` 的两个实现各加 `holder` 参数后照旧过。
+`tests/test_simple_actio_memory_port.py::test_both_protocols_are_checked_by_method_names` 改成断言协议含 `wait_closed`。`tests/test_simple_actio_memory_contract.py` 的两个实现各加 `holder` 参数后照旧过。
 
 - [x] **Step 2: 跑测试确认失败**
 
-Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_actio_file_tuple_store.py tests/test_actio_memory_port.py`
+Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_simple_actio_file_tuple_store.py tests/test_simple_actio_memory_port.py`
 Expected: FAIL（`open()` 参数个数不对、没有 `wait_closed`）
 
 - [x] **Step 3: 实现**
@@ -118,30 +118,30 @@ Expected: FAIL（`open()` 参数个数不对、没有 `wait_closed`）
 
 - [x] **Step 4: 跑测试确认通过**
 
-Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_actio_file_tuple_store.py tests/test_actio_memory_port.py tests/test_actio_memory_contract.py tests/test_actio_instance.py`
+Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_simple_actio_file_tuple_store.py tests/test_simple_actio_memory_port.py tests/test_simple_actio_memory_contract.py tests/test_simple_actio_instance.py`
 Expected: PASS
 
 - [x] **Step 5: 提交**
 
 ```bash
-git add src/actio/memory.py src/actio/memory_port.py tests/test_actio_file_tuple_store.py tests/test_actio_memory_port.py tests/test_actio_memory_contract.py
-git commit -m "feat(actio): 替身账本带主体,部署管理面按世界 id,加 wait_closed"
+git add src/simple_actio/memory.py src/simple_actio/memory_port.py tests/test_simple_actio_file_tuple_store.py tests/test_simple_actio_memory_port.py tests/test_simple_actio_memory_contract.py
+git commit -m "feat(simple_actio): 替身账本带主体,部署管理面按世界 id,加 wait_closed"
 ```
 
 ### Task 2: 事件 key 带主体
 
 **Files:**
-- Modify: `src/actio/instance.py:193-212`（`_remember_new`）、`instantiate`
+- Modify: `src/simple_actio/instance.py:193-212`（`_remember_new`）、`instantiate`
 - Modify: 三个调用方，传入它们已经知道的人格：
   - `src/factory/memory_translate.py:61-79`：`memory_role_backend` 加 keyword-only 参数 `holder: str`；
   - `src/factory/agent.py:309-312`：传 `binding.persona_id`；
   - `src/factory/interact_policy.py:376-378`：传 `interlocutors[cfg.trained_slot]`；
   - `src/mindagent/rounds.py` 里造 `make_instance` 的那个闭包：`MakeInstance` 的签名改成 `(episode_id, port, holder)`，部署驱动器传智能体位人格。
-- Test: `tests/test_actio_instance.py`、`tests/test_factory_memory_translate.py`
+- Test: `tests/test_simple_actio_instance.py`、`tests/test_factory_memory_translate.py`
 
 **Interfaces:**
 - Consumes: Task 1 的 `TupleMemory.world(holder)`。
-- Produces: `ActioInstance` 多一个 keyword-only 构造参数 `holder: str`（可写端口时必填，与 `episode_id` 同一处在 `instantiate` 校验，缺了抛 `ActioDataError`）；事件 key `f"{episode_id}#{turn_index}@{holder}"`。`instantiate(..., holder=...)` 透传。
+- Produces: `SimpleActioInstance` 多一个 keyword-only 构造参数 `holder: str`（可写端口时必填，与 `episode_id` 同一处在 `instantiate` 校验，缺了抛 `SimpleActioDataError`）；事件 key `f"{episode_id}#{turn_index}@{holder}"`。`instantiate(..., holder=...)` 透传。
 
 - [x] **Step 1: 写失败的测试**
 
@@ -164,7 +164,7 @@ def test_three_slots_write_the_same_turn_once_per_listener():
     assert world.world("pb").recall("预算", limit=3) and world.world("pc").recall("预算", limit=3)
 
 def test_a_writable_port_without_a_holder_is_refused():
-    with pytest.raises(ActioDataError):
+    with pytest.raises(SimpleActioDataError):
         instantiate(StubBackend(), memory=TupleMemory(), episode_id="ep", interlocutors={"a": "pa"})
 ```
 
@@ -172,52 +172,52 @@ def test_a_writable_port_without_a_holder_is_refused():
 
 - [x] **Step 2: 跑测试确认失败**
 
-Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_actio_instance.py`
+Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_simple_actio_instance.py`
 Expected: FAIL（`holder` 未知参数）
 
 - [x] **Step 3: 实现** 让 `instantiate` 接收 `holder` 参数，`_remember_new` 按新格式拼 key。`replay_read_only=True` 的实例不要求传 `holder`。三个调用方按上面的 Files 一节改。
 
 - [x] **Step 4: 跑测试确认通过**
 
-Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_actio_instance.py tests/test_actio_memory_experience.py tests/test_factory_memory_translate.py`
+Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_simple_actio_instance.py tests/test_simple_actio_memory_experience.py tests/test_factory_memory_translate.py`
 Expected: PASS
 
 - [x] **Step 5: 提交**
 
 ```bash
-git add src/actio/instance.py src/factory/memory_translate.py src/factory/agent.py src/factory/interact_policy.py src/mindagent/rounds.py src/mindagent/deployment.py tests/test_actio_instance.py tests/test_factory_memory_translate.py
-git commit -m "feat(actio): 事件 key 带写入方主体,可写端口必须给 holder"
+git add src/simple_actio/instance.py src/factory/memory_translate.py src/factory/agent.py src/factory/interact_policy.py src/mindagent/rounds.py src/mindagent/deployment.py tests/test_simple_actio_instance.py tests/test_factory_memory_translate.py
+git commit -m "feat(simple_actio): 事件 key 带写入方主体,可写端口必须给 holder"
 ```
 
 ### Task 3: Starling 部署管理面按世界
 
 **Files:**
-- Modify: `src/actio/memory_starling.py:344-500`（`StarlingDeploymentStore`），`StarlingMemory.open`（已有 `persona_id` 参数改名 `holder`，作 Starling 的 `agent=`）
-- Test: `tests/test_actio_starling_store.py`、`tests/test_actio_deployment_store_contract.py`
+- Modify: `src/simple_actio/memory_starling.py:344-500`（`StarlingDeploymentStore`），`StarlingMemory.open`（已有 `persona_id` 参数改名 `holder`，作 Starling 的 `agent=`）
+- Test: `tests/test_simple_actio_starling_store.py`、`tests/test_simple_actio_deployment_store_contract.py`
 
 **Interfaces:**
 - Consumes: Task 1 的协议签名。
 - Produces: `StarlingDeploymentStore` 的八个方法，签名同 Task 1；文件 `<root>/<world_id>.db`；`_open` 计数加锁、`wait_closed` 同 Task 1 的 `Condition` 写法；`remember_event(world_id, holder, ...)` 以 `agent=holder` 开短连接。
 
-- [x] **Step 1: 写失败的测试**：把 `tests/test_actio_deployment_store_contract.py` 的六个参数化用例改成按 `("s1", holder)` 调用，并加入 Task 1 Step 1 的前五条（同名，参数化到两个实现）。`tests/test_actio_starling_store.py` 里 `_lib(tmp_path, persona)` 改成 `_lib(tmp_path, world)`。
+- [x] **Step 1: 写失败的测试**：把 `tests/test_simple_actio_deployment_store_contract.py` 的六个参数化用例改成按 `("s1", holder)` 调用，并加入 Task 1 Step 1 的前五条（同名，参数化到两个实现）。`tests/test_simple_actio_starling_store.py` 里 `_lib(tmp_path, persona)` 改成 `_lib(tmp_path, world)`。
 
 - [x] **Step 2: 跑测试确认失败**
 
-Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_actio_deployment_store_contract.py tests/test_actio_starling_store.py`
+Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_simple_actio_deployment_store_contract.py tests/test_simple_actio_starling_store.py`
 Expected: FAIL（Starling 一侧签名不对）
 
 - [x] **Step 3: 实现**：照 Task 1 的语义改 `StarlingDeploymentStore`；`restore_from` 的守卫读 `_open[world_id]`；`digest(world_id)` 不存在时照旧 `empty_digest()`。
 
 - [x] **Step 4: 跑测试确认通过**
 
-Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_actio_deployment_store_contract.py tests/test_actio_starling_store.py tests/test_actio_memory_starling.py`
+Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_simple_actio_deployment_store_contract.py tests/test_simple_actio_starling_store.py tests/test_simple_actio_memory_starling.py`
 Expected: PASS（未装 Starling 时这些文件按现有 `importorskip` 跳过，本机已装）
 
 - [x] **Step 5: 提交**
 
 ```bash
-git add src/actio/memory_starling.py tests/test_actio_deployment_store_contract.py tests/test_actio_starling_store.py tests/test_actio_memory_starling.py
-git commit -m "feat(actio): Starling 部署管理面按世界 id,端口以 agent=<主体> 打开"
+git add src/simple_actio/memory_starling.py tests/test_simple_actio_deployment_store_contract.py tests/test_simple_actio_starling_store.py tests/test_simple_actio_memory_starling.py
+git commit -m "feat(simple_actio): Starling 部署管理面按世界 id,端口以 agent=<主体> 打开"
 ```
 
 ### Task 4: 同一人格占两个角色位拒绝
@@ -516,7 +516,7 @@ git commit -m "feat(mindagent): 门② 记忆增量带 scenario_id,校验绑定�
 - Modify: `src/factory/memory_runtime.py:144-394`（`StarlingLayout`、`TrainingCopies` → `TrainingWorlds`，加替身实现 `StandInTrainingWorlds`）
 - Modify: `src/factory/interact_policy.py:353-421`、`src/factory/agent.py:252-338`、`src/factory/wire.py`
 - Modify: `src/mindtrainer/trajectory_source.py:300-305`（`_attempt` 进入期的 `RoleMemoryUnavailableError`）、`src/mindtrainer/dispatch.py`（`PolicyForRollout` 的文档串）
-- Modify: `src/actio/memory_starling.py`（`StarlingMemory.open` 加 keyword-only 参数 `on_close: Callable[[], None] | None = None`，关库成功后调一次）
+- Modify: `src/simple_actio/memory_starling.py`（`StarlingMemory.open` 加 keyword-only 参数 `on_close: Callable[[], None] | None = None`，关库成功后调一次）
 - Test: `tests/test_factory_training_copies.py`（`git mv` 成 `tests/test_factory_training_worlds.py`）、`tests/test_factory_interact_wire.py`、`tests/test_mt_trajectory_interact.py`、`tests/test_mt_orchestrator.py`（这两个文件里的 `policy_for_rollout` 假实现改成收两个参数）
 
 **Interfaces:**
@@ -598,7 +598,7 @@ git commit -m "feat(factory): 训练一条 rollout 一个世界,客户端建删�
   - `MemoryResolver = Callable[[str | None, tuple[str, ...]], tuple[dict[str, str], dict]]`，第二个参数是 `scenario_ids`；`_resolve_memory` 传 `tuple(dict.fromkeys(cfg.scenario_ids))`。
   - `_validate_memory_against_bindings` 改名 `_validate_memory_against_scenarios`：`set(digests) == set(cfg.scenario_ids)`，原因 `memory.digests must name exactly the configured scenarios`。
   - `starling_memory_resolver` 读 `layout.seed(seed, scenario_id)`；`stand_in_memory_resolver` 给每个情境空世界摘要。
-  - `memory_wiring` 在 `claim_memory_root` 之后、导入 `actio.memory_starling` 之前调 `MemoryLayout(config.root, suffix).legacy_entries(known_scenarios=agent_scenarios)`；替身在 `stand_in_deployment_memory` 里做同样检查。非空 → `FactoryConfigError(f"memory root has the old per-persona layout ({entries[0]} and {len(entries) - 1} more); clear deploy/ and snapshots/ under the memory root")`。`agent_scenarios` 来自 `agent.yaml`（不在场时为空集，此时 `deploy/` 下任何库都算旧布局）。
+  - `memory_wiring` 在 `claim_memory_root` 之后、导入 `simple_actio.memory_starling` 之前调 `MemoryLayout(config.root, suffix).legacy_entries(known_scenarios=agent_scenarios)`；替身在 `stand_in_deployment_memory` 里做同样检查。非空 → `FactoryConfigError(f"memory root has the old per-persona layout ({entries[0]} and {len(entries) - 1} more); clear deploy/ and snapshots/ under the memory root")`。`agent_scenarios` 来自 `agent.yaml`（不在场时为空集，此时 `deploy/` 下任何库都算旧布局）。
   - `tests/memory_fixtures.py`：`resolved_memory(scenario_ids)`、`fake_memory_resolver` 返回 `{s: f"digest-{s}"}`。
 
 - [x] **Step 1: 写失败的测试**
@@ -637,7 +637,7 @@ git commit -m "feat: 起点摘要与种子按情境,memory.digests 键改为情�
 ### Task 11: 文档状态与全量验证
 
 **Files:**
-- Modify: `docs/design/00-overview.md`、`20-socialsimulator.md`、`30-mindtrainer.md`、`40-actio.md`、`50-mindagent.md`、`90-factory-and-cli.md`、`docs/design/_shared/context-block.md`
+- Modify: `docs/design/00-overview.md`、`20-socialsimulator.md`、`30-mindtrainer.md`、`40-simple-actio.md`、`50-mindagent.md`、`90-factory-and-cli.md`、`docs/design/_shared/context-block.md`
 - Modify: 本计划（勾选）
 
 - [x] **Step 1: 跑全量**

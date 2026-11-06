@@ -8,11 +8,11 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass, replace
 
-from actio.errors import ActioDataError
-from actio.signals import SignalRegistry, default_registry
-from actio.skills import Skill
-from actio.trace import validate_trace
-from actio.triggers import referenced_signals
+from simple_actio.errors import SimpleActioDataError
+from simple_actio.signals import SignalRegistry, default_registry
+from simple_actio.skills import Skill
+from simple_actio.trace import validate_trace
+from simple_actio.triggers import referenced_signals
 from mindagent.errors import MindAgentDataError
 from simulator.datamodel import Episode, TurnRecord
 
@@ -109,7 +109,7 @@ def analyze(
                 if trace is not None:
                     try:
                         validate_trace(trace)  # 计划 6:消费方读落盘 episode 时校验轨迹
-                    except ActioDataError as exc:
+                    except SimpleActioDataError as exc:
                         raise MindAgentDataError(f"episode {episode.id} turn {idx}: {exc}") from None
                 selected = trace["selected"] if trace is not None else None
                 if selected is None:

@@ -5,7 +5,7 @@
 `FactoryConfigError`(命令行译成退出码 2),不退回替身。报错只写键名、路径与变量名,不回显任何取值:
 端点地址可能带 `user:password@`。密钥不在这份文件里,只从 `OPENAI_API_KEY` 读。
 
-本模块不导入 `starling`(全仓库只有 `actio/memory_starling.py` 导入它),安装信息一律经
+本模块不导入 `starling`(全仓库只有 `simple_actio/memory_starling.py` 导入它),安装信息一律经
 `importlib.metadata` 读。
 """
 from __future__ import annotations

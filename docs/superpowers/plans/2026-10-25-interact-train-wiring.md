@@ -18,7 +18,7 @@
 - 凭证只从环境变量读,异常信息只报变量名,不回显取值。
 - 每个任务先写失败的测试,确认它失败,再实现。
 - 新增的 `[计划中]` 设计文档改完后必须 `check_docs` 与 `check_consistency` 都是 0 错误 0 告警。
-- 依赖方向:`simulator` 不得导入 `mindagent`、`mindtrainer`、`diagnostic`;`mindtrainer` 不得导入 `diagnostic`、`trainscheduler`;`trainscheduler` 不得导入 `simulator`、`actio`、`mindagent`、`factory`。
+- 依赖方向:`simulator` 不得导入 `mindagent`、`mindtrainer`、`diagnostic`;`mindtrainer` 不得导入 `diagnostic`、`trainscheduler`;`trainscheduler` 不得导入 `simulator`、`simple_actio`、`mindagent`、`factory`。
 - 不改生成图(`docs/design/diagrams/*.py` 与 `.svg`)。
 
 ## Review Focus

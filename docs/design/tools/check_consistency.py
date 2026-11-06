@@ -21,12 +21,12 @@ ROOT = Path(__file__).resolve().parent.parent
 REPO = ROOT.parent.parent
 BASELINE = "b826440"
 EXPECTED = ["00-overview.md", "10-controlplane.md", "20-socialsimulator.md", "21-diagnostic-evaluation.md",
-            "30-mindtrainer.md", "40-actio.md", "50-mindagent.md", "55-strategy-experience.md",
+            "30-mindtrainer.md", "40-simple-actio.md", "50-mindagent.md", "55-strategy-experience.md",
             "60-recipestore.md",
             "70-trainscheduler.md", "71-trainplanner.md", "80-inference-bridge.md", "90-factory-and-cli.md"]
 PREFIX = {"00": "SYS", "10": "CP", "20": "SS", "21": "DX", "30": "MT", "40": "AC", "50": "MA", "55": "SE",
           "60": "RS", "70": "TS", "71": "TP", "80": "BR", "90": "FC"}
-OWN_PKG = {"10": "controlplane", "20": "simulator", "21": "diagnostic", "30": "mindtrainer", "40": "actio",
+OWN_PKG = {"10": "controlplane", "20": "simulator", "21": "diagnostic", "30": "mindtrainer", "40": "simple_actio",
            "50": "mindagent", "55": "trainscheduler", "60": "recipestore", "70": "trainscheduler",
            "71": "trainplanner", "80": "inference_bridge", "90": "factory"}
 # 每篇头部「状态」行至少要出现哪些标记。九个工作包全部落地后,只有仍然推迟的东西留在
@@ -38,15 +38,15 @@ STATUS_REQUIRED = {"10": {"已落地"}, "20": {"已落地"}, "21": {"已落地"}
 # 总览 3.3 的依赖方向表。controlplane 对 simulator 的回指是骨架桩,总览已说明。
 ALLOWED_DEPS = {
     "controlplane": {"simulator"}, "simulator": {"controlplane"}, "diagnostic": {"controlplane", "simulator"},
-    "mindtrainer": {"controlplane", "simulator"}, "actio": {"simulator"}, "recipestore": {"controlplane"},
+    "mindtrainer": {"controlplane", "simulator"}, "simple_actio": {"simulator"}, "recipestore": {"controlplane"},
     "trainplanner": {"controlplane", "inference_bridge"},
     "trainscheduler": {"controlplane", "recipestore", "trainplanner", "mindtrainer", "inference_bridge"},
-    "mindagent": {"controlplane", "actio", "inference_bridge", "simulator"},
+    "mindagent": {"controlplane", "simple_actio", "inference_bridge", "simulator"},
     "inference_bridge": {"controlplane"}, "factory": set(),
 }
 NAME_TO_PKG = {"ControlPlane": "controlplane", "SocialSimulator": "simulator", "MindTrainer": "mindtrainer",
                "MindAgent": "mindagent", "RecipeStore": "recipestore", "TrainScheduler": "trainscheduler",
-               "TrainPlanner": "trainplanner", "Actio": "actio"}
+               "TrainPlanner": "trainplanner", "SimpleActio": "simple_actio"}
 ALL_PKGS = sorted(set(OWN_PKG.values()))
 HEADER_KEYS = ("一句话", "状态", "所在层", "代码位置", "基线提交", "依赖", "被依赖", "对应实施计划")
 DECISION_HEADING = {"00": r"^## 11\. 决策总表\s*$"}
@@ -108,7 +108,7 @@ _TEST_GROUPS = {
     "mt_": "mt", "diag_": "diag", "sim_": "sim", "realtime_": "realtime",
     "model_ref_and_isolation": "cross", "runner_stop_predicate.py": "sim",
     "se_": "se", "ts_": "ts", "tp_": "tp", "rs_": "rs", "ma_": "ma",
-    "actio_": "actio", "bridge_": "bridge", "factory_": "factory", "compute_": "compute",
+    "simple_actio_": "simple_actio", "bridge_": "bridge", "factory_": "factory", "compute_": "compute",
 }
 
 

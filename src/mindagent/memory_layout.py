@@ -24,7 +24,7 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
 
-from actio.memory_port import PERSONA_ID_PATTERN
+from simple_actio.memory_port import PERSONA_ID_PATTERN
 from controlplane.lock import hold_file_lock
 from mindagent.errors import MindAgentDataError
 

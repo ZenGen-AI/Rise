@@ -8,7 +8,7 @@
 | 代码位置 | `src/simulator`(诊断评测在 `src/diagnostic`,本文不展开) |
 | 基线提交 | `b826440`(2026-10-21) |
 | 依赖 | ControlPlane 的 `controlplane.envelope`、`controlplane.gitstore`、`controlplane.paths`;第三方 `grpcio`、`protobuf` |
-| 被依赖 | MindTrainer(`mindtrainer`)、诊断评测(`diagnostic`)、ControlPlane 骨架桩(`controlplane.daemon`);已落地:Actio、MindAgent、factory |
+| 被依赖 | MindTrainer(`mindtrainer`)、诊断评测(`diagnostic`)、ControlPlane 骨架桩(`controlplane.daemon`);已落地:SimpleActio、MindAgent、factory |
 | 对应实施计划 | 工作包 6(任务 70 至 72)[已落地];其余已落地部分无待施工任务;场景二接通在本篇的范围是 `opponent_script` 与对手三驱动,已随 `--interact` 接通落地 [已落地];记忆按情境世界组织在本篇的范围是对手位端口从哪个世界开、何时关,改动落在组合根 [已落地] |
 
 ## 0. 系统速览
@@ -28,7 +28,7 @@
 | TrainScheduler | 决策执行器:装配上下文、校验决策、构造训练指令、提名配方 | 控制层 | [已落地],含策略经验(默认关) |
 | TrainPlanner | 决策学习者:经可插拔后端给出下一轮训练决策 | 控制层 | [已落地],默认后端经桥接调用命令行模型 |
 
-共享基础设施有五个。**Actio** 是带技能库与显式记忆的智能体框架,每次响应附带激活轨迹;记忆由内嵌的 **Starling** 提供,可选 extra `memory`,一个模拟世界一个树外 SQLite 库,人格是其中的主体(部署一个情境一个世界,训练一条 rollout 一个世界)[已落地]。**外部推理桥接**用命令行调用外部强模型。**远端计算层** `compute` 经 SSH 在远端 GPU 主机上跑作业 [已落地]。**ROLL** 是分布式训练引擎,**vLLM** 是推理引擎。V1 经远端计算层接入 ROLL 的 LoRA SFT [已落地](由 `--executor roll` 装配,已在真实主机上从指令跑到候选一次)与 vLLM 推理服务 [已落地](命令拼装、SSH 隧道、服务生命周期;真机端到端待补)。已落地部分仍由确定性 mock 顶替。真实 GRPO 加 OPD 训练与真实 judge [推迟]。
+共享基础设施有五个。**SimpleActio** 是带技能库与显式记忆的智能体框架,每次响应附带激活轨迹;它是 Actio 的简化版,功能完备的正式版 Actio 完成后再接入 [计划中]。记忆由内嵌的 **Starling** 提供,可选 extra `memory`,一个模拟世界一个树外 SQLite 库,人格是其中的主体(部署一个情境一个世界,训练一条 rollout 一个世界)[已落地]。**外部推理桥接**用命令行调用外部强模型。**远端计算层** `compute` 经 SSH 在远端 GPU 主机上跑作业 [已落地]。**ROLL** 是分布式训练引擎,**vLLM** 是推理引擎。V1 经远端计算层接入 ROLL 的 LoRA SFT [已落地](由 `--executor roll` 装配,已在真实主机上从指令跑到候选一次)与 vLLM 推理服务 [已落地](命令拼装、SSH 隧道、服务生命周期;真机端到端待补)。已落地部分仍由确定性 mock 顶替。真实 GRPO 加 OPD 训练与真实 judge [推迟]。
 
 **状态标记。** **[已落地]** 表示代码在主干上且有测试。**[计划中]** 表示设计与实施计划已定,代码还没写。**[推迟]** 表示明确不在 V1 范围内。图只画目标系统,不标进展,进展只看正文的状态标记。
 
@@ -55,7 +55,7 @@
 | Scenario、Persona、RoleAssignment | 社会情境、人格模板,以及把角色位绑定到具体人格与模型后端的分配 |
 | Recipe(配方) | 验证有效的完整训练方案,分 batch、interact、agent_rsi 三类 |
 | DiagnosticReport | 诊断评测产出的报告:维度、分数、置信区间、错误类型、退化标记 |
-| Activation trace(激活轨迹) | Actio 每次响应附带的记录:命中的技能候选、选中的技能、命中的记忆 |
+| Activation trace(激活轨迹) | SimpleActio 每次响应附带的记录:命中的技能候选、选中的技能、命中的记忆 |
 | Evidence grade(证据等级) | 诊断报告的可信等级 `stub`、`mock`、`real`,决定它能否驱动规划与提名;缺标记一律判 `stub`,失败关闭 |
 <!-- shared:end context-block -->
 
@@ -68,7 +68,7 @@ SocialSimulator 的仿真部分是工厂的"社会情境发生器":它把情境�
 <!-- figure:begin 20-socialsimulator-context -->
 ![SocialSimulator 仿真部分的上下文](diagrams/20-socialsimulator-context.svg)
 
-**图 1　SocialSimulator 仿真部分的上下文**　仿真部分居中。MindTrainer 经清单读批量数据集,经接口①跑实时会话;诊断评测与 ControlPlane 骨架桩以库调用复用它;它把情境、人格、Episode 与清单写进产物树。MindAgent 经接口②连入会话,Actio 的激活轨迹随每轮回传。
+**图 1　SocialSimulator 仿真部分的上下文**　仿真部分居中。MindTrainer 经清单读批量数据集,经接口①跑实时会话;诊断评测与 ControlPlane 骨架桩以库调用复用它;它把情境、人格、Episode 与清单写进产物树。MindAgent 经接口②连入会话,SimpleActio 的激活轨迹随每轮回传。
 
 <details>
 <summary>文字版:图中的节点与连线</summary>
@@ -81,7 +81,7 @@ SocialSimulator 的仿真部分是工厂的"社会情境发生器":它把情境�
 - SocialSimulator 仿真部分:情境与人格 · 仿真运行器 / 批量数据集 · 实时环境服务
 - ControlPlane 骨架桩:simulator.stubs 调情境生成器
 - 产物树:scenarios/ · personas/ / runs/<run>/episodes/ / dataset_manifest_<阶段>
-- Actio:每轮附带激活轨迹
+- SimpleActio:每轮附带激活轨迹
 
 **连线**
 
@@ -90,12 +90,12 @@ SocialSimulator 的仿真部分是工厂的"社会情境发生器":它把情境�
 - 诊断评测 → SocialSimulator 仿真部分:库调用
 - ControlPlane 骨架桩 → SocialSimulator 仿真部分:库调用
 - SocialSimulator 仿真部分 ↔ 产物树:写入并读回
-- Actio → SocialSimulator 仿真部分:activation_trace
+- SimpleActio → SocialSimulator 仿真部分:activation_trace
 
 </details>
 <!-- figure:end 20-socialsimulator-context -->
 
-读图说明。MindTrainer 在 batch 模式下读数据集清单并逐条校验,在 interact 模式下经接口①作为客户端跑实时会话。诊断评测的动态轨与 ControlPlane 骨架桩以库调用复用它。它把情境、人格、Episode 与清单写进产物树。MindAgent 的接口② [已落地],Actio 的激活轨迹 [已落地]。
+读图说明。MindTrainer 在 batch 模式下读数据集清单并逐条校验,在 interact 模式下经接口①作为客户端跑实时会话。诊断评测的动态轨与 ControlPlane 骨架桩以库调用复用它。它把情境、人格、Episode 与清单写进产物树。MindAgent 的接口② [已落地],SimpleActio 的激活轨迹 [已落地]。
 
 ## 2. 目标、非目标与约束
 
@@ -224,10 +224,10 @@ SocialSimulator 的仿真部分是工厂的"社会情境发生器":它把情境�
 | 规则 | 内容 |
 |---|---|
 | 可以导入 | `controlplane` 的 `envelope`、`gitstore`、`paths`;`grpc`、`google.protobuf` |
-| 不得导入 | `mindtrainer`、`diagnostic`、`actio`、`mindagent` 及任何闭环新包 |
+| 不得导入 | `mindtrainer`、`diagnostic`、`simple_actio`、`mindagent` 及任何闭环新包 |
 | 核心无 IO | `datamodel`、`backends`、`runner`、`generators`、`validation`、`session` 不读写文件与网络 |
 | 已知回指 | `controlplane.daemon` 导入 `simulator.stubs`,包级循环,运行时不成环,骨架桩移出前保留 |
-| 对记忆世界保持不透明 [已落地] | 会话资源对它持有的每个智能体直接调可选 `close()`,只关本会话开的端口,不删世界:rollout 世界由客户端删,部署世界长期保留;模拟器不导入 `actio` 与 `starling`,不认识世界与主体 |
+| 对记忆世界保持不透明 [已落地] | 会话资源对它持有的每个智能体直接调可选 `close()`,只关本会话开的端口,不删世界:rollout 世界由客户端删,部署世界长期保留;模拟器不导入 `simple_actio` 与 `starling`,不认识世界与主体 |
 
 对手位的三种驱动 [已落地]。对手位后端由调用方按角色位传入,模拟器本身只认 `ModelBackend` 协议。不传 `--interact` 时组合根的 `AgentRuntime._backends` 仍一律给全局罐头台词的 `ScriptedBackend`;传了 `--interact`,同一个函数对登记给训练 run 的会话按角色位在三种驱动里选,实现全在组合根,模拟器不新增依赖。默认驱动来自 `model_backend`:`frozen_reference` 走站内 vLLM,`external_api` 走外部 API;固定对话只在角色位写了 `driver: scripted` 时才用。部署会话(没登记给训练 run 的)不判绑定,沿用原来的罐头后端,显式写了 `driver: scripted` 的除外。
 
@@ -239,9 +239,9 @@ SocialSimulator 的仿真部分是工厂的"社会情境发生器":它把情境�
 
 `model_ref` 在组合根里由 `resolve_model_ref` 解析成权重引用 [已落地]。解析不到,或指到的不是适配器导出,派发时确定性失败,不静默退回脚本台词。外部 API 客户端是一个极小的实现 [已落地],用标准库 `urllib`,与 `src/compute/tunnel.py` 的 HTTP 探测同一手法。凭证只从环境变量读,异常信息只报变量名。站内对手与训练位共用一个 vLLM 进程,最多挂两个 LoRA [已落地]。
 
-对手位包成带记忆的智能体 [已落地]。工厂为每个对手位返回一个智能体实例,里面包着原来的驱动后端,不套期限。期限由服务端拿到资源后套上。模拟器只认 `ModelBackend`,不导入 `actio`,也不知道里面有记忆。固定对话的台词与三种驱动的请求都不变。
+对手位包成带记忆的智能体 [已落地]。工厂为每个对手位返回一个智能体实例,里面包着原来的驱动后端,不套期限。期限由服务端拿到资源后套上。模拟器只认 `ModelBackend`,不导入 `simple_actio`,也不知道里面有记忆。固定对话的台词与三种驱动的请求都不变。
 
-记忆失败靠一层转换后端跨过包边界 [已落地]。组合根给每个 Actio 实例外套一层转换后端,把 actio 的记忆失败异常按 `transient` 标记改抛 RoleMemoryUnavailableError 或 RoleMemoryFailureError 的子类。这两个基类定义在 `backend_timeout.py`,驱动器只认它们,按它们分出两个终止原因,所以 simulator 与 mindtrainer 都不导入 actio。转换后端只接 actio 的记忆失败总基类一个类,它的子类也一并映射。
+记忆失败靠一层转换后端跨过包边界 [已落地]。组合根给每个 SimpleActio 实例外套一层转换后端,把 simple_actio 的记忆失败异常按 `transient` 标记改抛 RoleMemoryUnavailableError 或 RoleMemoryFailureError 的子类。这两个基类定义在 `backend_timeout.py`,驱动器只认它们,按它们分出两个终止原因,所以 simulator 与 mindtrainer 都不导入 simple_actio。转换后端只接 simple_actio 的记忆失败总基类一个类,它的子类也一并映射。
 
 `ExternalApiBackend` 每个会话新造一个,不共享同一个实例 [已落地]。部署会话的对手位同样包成智能体 [已落地]。对手位的激活轨迹随落盘的 episode 保存,下行时照旧抹掉(不变量 3)。
 
@@ -255,7 +255,7 @@ SocialSimulator 的仿真部分是工厂的"社会情境发生器":它把情境�
 
 部署对手位靠登记表拿到轮次 id [已落地]。`CreateSession.episode_id` 只许 `[A-Za-z0-9._-]`,装不下 `<round_id>/`。部署驱动器每次尝试开会话前经 `register_deployment_episode` 登记 episode id 到轮次 id,尝试结束在 `finally` 里经 `unregister_deployment_episode` 注销。工厂查到轮次 id,拼成 `<round_id>/<episode_id>` 作对手位实例的前缀。部署提交时按这个前缀放弃 pending 行,对手位留下的行一并放弃。
 
-事件 key 带主体 [已落地]。Actio 实例只写他人的发言,key 是 `<前缀>#<turn_index>@<主体>`,两个角色位时也加。角色位数没有上限,运行器按 `turn_index % n_roles` 轮流发言。三个及以上角色位时,同一世界的同一轮被两个主体各写一次,不带主体 key 会撞。
+事件 key 带主体 [已落地]。SimpleActio 实例只写他人的发言,key 是 `<前缀>#<turn_index>@<主体>`,两个角色位时也加。角色位数没有上限,运行器按 `turn_index % n_roles` 轮流发言。三个及以上角色位时,同一世界的同一轮被两个主体各写一次,不带主体 key 会撞。
 
 ## 4. 数据模型与状态机
 
@@ -462,11 +462,11 @@ SessionInfo、SessionResources、SessionClosingError 三个类型都放在 `src/
 | MindTrainer | 无 | batch:`read_manifest`、`verify_manifest`、`episode_group_id`;interact:`EnvironmentServiceClient`、`ModelBackend` 协议 | [已落地] |
 | 诊断评测 | 无 | 动态轨直接调 `run_episode` 并传 `stop_predicate` | [已落地] |
 | MindTrainer 数据合成 | 无 | `produce_grouped_dataset`、`TemplateGenerationBackend`;生产器 `TemplateDataProducer` 属工作包 2 [已落地] | [已落地] |
-| Actio | 无 | 运行器接受后端返回三元组,`SubmitTurn` 携带轨迹,工作包 6 [已落地] | [已落地] |
+| SimpleActio | 无 | 运行器接受后端返回三元组,`SubmitTurn` 携带轨迹,工作包 6 [已落地] | [已落地] |
 | MindAgent | 无 | 接口②,复用客户端"客户端后说"能力,工作包 7 [已落地] | [已落地] |
 | factory | 无 | 组合根调 `create_server` 并注入 `scenario_resolver`,工作包 9 [已落地] | [已落地] |
 | factory 组合根(场景二接通) | 无 | `Scenario.opponent_script` 与 `ModelBackend` 协议:组合根据此按角色位选对手驱动 [已落地] | [已落地] |
-| factory 组合根(会话资源) | 智能体的可选 `close()`:会话资源收尾时对它持有的每个智能体直接调用一次,不经 `TimeoutBackend` 转发,没有就跳过;工厂返回未套期限的会话资源,并保证自己抛异常时不留半开的库;工厂造资源时把 `session_id` 到 run id 的对应记进第二张登记表,终态删除,落盘只查它 | 新的工厂签名与 `on_session_closed` 带 `session_id`;组合根在取到仓库排他锁之后、起任何会话之前,只清扫记忆根目录下 `runs/` 的子项;`--interact` 装配给 `AgentRuntime` 传 `turn_timeout_s` 150 秒、`backend_timeout_s` 90 秒,并给每个 Actio 实例外套记忆异常转换后端 | [已落地] |
+| factory 组合根(会话资源) | 智能体的可选 `close()`:会话资源收尾时对它持有的每个智能体直接调用一次,不经 `TimeoutBackend` 转发,没有就跳过;工厂返回未套期限的会话资源,并保证自己抛异常时不留半开的库;工厂造资源时把 `session_id` 到 run id 的对应记进第二张登记表,终态删除,落盘只查它 | 新的工厂签名与 `on_session_closed` 带 `session_id`;组合根在取到仓库排他锁之后、起任何会话之前,只清扫记忆根目录下 `runs/` 的子项;`--interact` 装配给 `AgentRuntime` 传 `turn_timeout_s` 150 秒、`backend_timeout_s` 90 秒,并给每个 SimpleActio 实例外套记忆异常转换后端 | [已落地] |
 | MindTrainer 与 MindAgent 的客户端(会话身份) | 无 | `create_session` 的可选 `episode_id`;客户端相邻两条消息之间的等待上限 120 秒,由 `--interact` 装配的运行时给客户端;`role_memory_unavailable` 进各自的瞬态集合,`role_memory_failure` 不进;创建被拒按终止原因查各自的瞬态集合,不再一律判不可重跑,所以准入满与 `episode_id` 撞上活动会话的两种 `role_backend_unavailable` 会按条重跑 | [已落地] |
 | MindTrainer 派发器(场景二接通) | 无 | 生成器与 `write_scenario`、`write_persona`:生成路据此写入情境与人格,再回写指令 [已落地] | [已落地] |
 | factory 组合根(记忆世界) [已落地] | 工厂造资源时按会话类别开世界端口:训练会话经 `TrainingWorlds.join_rollout` 按 `info.episode_id` 加入,部署会话经部署记忆管理面开情境世界里本人格的端口;closers 只关端口 | `SessionInfo.episode_id` 就是客户端给的逻辑 episode id;会话终态必走 `SessionResources.close`;收尾 join 上限 60 秒不放宽 | [已落地] |
@@ -687,10 +687,10 @@ interact 会话前的准备 [已落地]。下表是派发器与组合根在起�
 | SS-15 | 点名的情境 `purpose` 必须是 `training`,人格不限 [已落地] | 不限 `purpose` | 默认部署素材的情境是 `deployment_simulation`,拿它们训练等于污染训练数据 | 部署素材不能顺手拿来训练 |
 | SS-16 | 对手位三种驱动:固定对话(角色位写 `driver: scripted`)、站内 vLLM、外部 OpenAI 兼容 API;驱动由组合根选,模拟器只认 `ModelBackend` [已落地] | 只做一种驱动 | 场景二要求三种都支持;驱动在组合根里选,模拟器协议不用改 | 三种驱动的失败分类与超时口径各要成立 |
 | SS-17 | 固定对话优先用情境自带的 `opponent_script`,情境没带时用全局台词;`Scenario` 加一个可选字段 [已落地] | 只有全局台词 | 固定对话要能按情境区分对手说什么 | `Scenario` 多一个可选字段;旧产物读回不变 |
-| SS-18 | 后端工厂改收 SessionInfo、返回 SessionResources;`ModelBackend` 协议不加方法 [已落地] | 给协议加会话参数;工厂签名不动 | Actio 实例本来就满足 `respond`;会话身份是服务端本来缺的,原先工厂拿不到 session id,落盘登记表只能按情境 id 索引 | 工厂签名改一次,`AgentRuntime` 与测试跟着改 |
+| SS-18 | 后端工厂改收 SessionInfo、返回 SessionResources;`ModelBackend` 协议不加方法 [已落地] | 给协议加会话参数;工厂签名不动 | SimpleActio 实例本来就满足 `respond`;会话身份是服务端本来缺的,原先工厂拿不到 session id,落盘登记表只能按情境 id 索引 | 工厂签名改一次,`AgentRuntime` 与测试跟着改 |
 | SS-19 | 每条会话一个 SessionResources,持有该会话全部对手位的后端;终态按 quiesce、join、close 收尾;join 超时的资源整个保留,占住一个会话名额,不关不删 [已落地] | 终态直接关库删目录;超时后强关 | 超时线程还在跑时关库或删库会写坏文件;daemon 线程杀不掉 | 挂死的后端永久占用会话名额,直到进程重启 |
 | SS-20 | 准入检查、会话登记、滞留计数在同一把锁里完成;工厂在锁外跑,失败时在同一把锁里撤销登记;`episode_id` 过白名单,同一时刻只许一个活动会话用它 [已落地] | 检查与登记分开加锁;信任客户端给的 id | 不在一把锁里,并发 `CreateSession` 会突破上限;客户端给的 id 会进目录名与主键 | 多一把锁 |
-| SS-21 | 记忆失败拆成 `role_memory_unavailable`(T1,按条重跑)与 `role_memory_failure`(T2,不重跑);驱动器只认两个异常基类并按它们分支,基类定义在 `backend_timeout.py`;组合根的转换后端接 actio 的记忆失败总基类,子类一并映射,按 `transient` 改抛继承这两个基类的异常 [已落地] | 并入 `role_backend_failure` | 并入后会被译成延后反复重试;记忆端点的网络抖动不该升人工;模拟器不导入 `actio`,只认异常基类 | 瞬态与确定性的映射由后端侧维护,新的瞬态类别出现前按 T2 处理 |
+| SS-21 | 记忆失败拆成 `role_memory_unavailable`(T1,按条重跑)与 `role_memory_failure`(T2,不重跑);驱动器只认两个异常基类并按它们分支,基类定义在 `backend_timeout.py`;组合根的转换后端接 simple_actio 的记忆失败总基类,子类一并映射,按 `transient` 改抛继承这两个基类的异常 [已落地] | 并入 `role_backend_failure` | 并入后会被译成延后反复重试;记忆端点的网络抖动不该升人工;模拟器不导入 `simple_actio`,只认异常基类 | 瞬态与确定性的映射由后端侧维护,新的瞬态类别出现前按 T2 处理 |
 | SS-22 | 对手位的记忆库是会话私有副本,路径含 `session_id`;每个库同一时刻只有一个写者:驱动器一个线程,每个角色位至多一次在途调用 | 同一人格的对手位共用一个库 | 两个会话或两个位同时写一个库,互相覆盖;个体隔离靠文件,不靠过滤 | 同一人格在两个位同时出现时开两份副本,磁盘多占;已由 SS-29 取代 |
 | SS-23 | 进程里的后端线程总数以会话名额约束:不超过 `max_workers × (len(bindings) + 1)`;滞留资源占名额,滞留数达到 `max_workers` 时拒绝所有新会话,日志每分钟报一次滞留数 [已落地] | 滞留不占名额;强杀线程 | Python 的 daemon 线程杀不掉,名额是能给出的最强上界 | 挂死的后端一直占名额,由人重启进程 |
 | SS-24 | `--interact` 的时间预算逐层递增:客户端等相邻两条消息 120 秒、服务端等客户端提交 150 秒(两者方向相反、互不嵌套)、服务端后端 90 秒、对手 HTTP 60 秒、记忆单次网络调用 4 秒、训练位策略 HTTP 120 秒;收尾 join 仍 60 秒 [已落地] | 客户端只有整条流的 deadline;保持 2026-11-02 之前的 90/90/60/25/60;在 system 里限发言长度 | 真机(eager、两个适配器)每轮 20 到 65 秒,原先训练位 60 秒的上限没有余量;放宽后训练位一轮最坏 140 秒低于 150 秒,对手一轮最坏 80 秒低于 90 秒。限发言长度会改训练数据的分布。没有相邻消息限时,服务端失联时客户端只能等整条流 deadline | 慢的真模型一轮若超时,判 T1 按条重跑,训练变慢;卡死的会话要多等才被发现,占名额更久 |
@@ -779,7 +779,7 @@ interact 会话前的准备 [已落地]。下表是派发器与组合根在起�
 | 回环集成 | 落盘钩子带 `session_id`,情境被注销后仍在跑的会话落到自己的 run [已落地] | 端口 0 的本机服务端 |
 | 回环集成 | 三类对手驱动各一条;外部 API 客户端的成功、超时、4xx、429 与 5xx 与连不上、形状不对、缺凭证只报变量名;真实服务端对着慢桩收尾为 `role_backend_timeout`、对着 404 桩收尾为 `role_backend_rejected`、对着 429 与 5xx 桩及关着的端口收尾为 `role_backend_unavailable`、对着坏回复桩收尾为 `role_backend_failure` [已落地] | 端口 0 的本机服务端,本地 HTTP 替身 |
 
-按世界组织的测试 [已落地]。用例落在 Actio、MindAgent 与组合根的测试文件里,模拟器的测试文件不变。
+按世界组织的测试 [已落地]。用例落在 SimpleActio、MindAgent 与组合根的测试文件里,模拟器的测试文件不变。
 
 | 层次 | 对象 | 替身 |
 |---|---|---|
@@ -790,7 +790,7 @@ interact 会话前的准备 [已落地]。下表是派发器与组合根在起�
 
 | 测试文件 | 用例数 | 状态 |
 |---|---|---|
-| `tests/test_actio_instance.py` | 81 | [已落地] |
+| `tests/test_simple_actio_instance.py` | 81 | [已落地] |
 | `tests/test_ma_deployment.py` | 79 | [已落地] |
 | `tests/test_factory_handlers.py` | 93 | [已落地] |
 | `tests/test_factory_training_worlds.py` | 55 | [已落地] |

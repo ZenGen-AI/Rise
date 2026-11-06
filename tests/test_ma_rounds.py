@@ -4,8 +4,8 @@ from types import SimpleNamespace
 import grpc
 import pytest
 
-from actio.memory import FileTupleStore
-from actio.skills import Skill
+from simple_actio.memory import FileTupleStore
+from simple_actio.skills import Skill
 from controlplane.envelope import BigRef, Envelope, OwnerRef
 from controlplane.gitstore import GitStore
 from controlplane.lock import hold_file_lock
@@ -346,7 +346,7 @@ def test_a_missing_scenario_fails_the_round_before_any_session(store, mem):
 def test_a_malformed_library_entry_fails_the_round(store, mem):
     _skill(store, dict(GOAL, level="huge"))
     _start(store, _handler(mem=mem))
-    _assert_failed(store, "mindagent.rounds", "ActioDataError")
+    _assert_failed(store, "mindagent.rounds", "SimpleActioDataError")
 
 
 def test_a_failed_round_is_terminal(store, mem):
@@ -569,7 +569,7 @@ def test_a_t3_round_rolls_back_the_in_flight_episode_and_drops_its_copy(store, m
 
 def test_a_data_error_mid_episode_is_rolled_back_by_the_round(store, mem):
     # 实例的数据错误不经驱动器覆盖(原样上抛);轮次判 T3 时由处理器用起点副本覆盖、再删副本
-    from actio.errors import ActioDataError
+    from simple_actio.errors import SimpleActioDataError
 
     class Spoiled(Echo):
         calls = 0
@@ -577,7 +577,7 @@ def test_a_data_error_mid_episode_is_rolled_back_by_the_round(store, mem):
         def respond_guided(self, *a):
             Spoiled.calls += 1
             if Spoiled.calls == 4:                                     # s2 的第二次回复:开场已记进部署库
-                raise ActioDataError("bad reply")
+                raise SimpleActioDataError("bad reply")
             return super().respond_guided(*a)
 
     backend = Spoiled()
@@ -585,7 +585,7 @@ def test_a_data_error_mid_episode_is_rolled_back_by_the_round(store, mem):
                                  personas_loader=_loader, memory_store=mem.store, memory_layout=mem.layout,
                                  memory_runtime=STAND_IN_MEMORY_RUNTIME, scratch_store_factory=FileTupleStore)
     env = _start(store, h)
-    _assert_failed(store, "mindagent.rounds", "ActioDataError")
+    _assert_failed(store, "mindagent.rounds", "SimpleActioDataError")
     assert mem.store.digest("s2") == env.payload["episode_digests"]["deploy-zengen-v1-s2-1"]
     assert mem.store.pending_events("s2") == []
     assert mem.layout.round_snapshots(ROUND) == []
@@ -893,7 +893,7 @@ def test_the_round_handler_forwards_the_episode_registration_hooks(store, mem):
 
 def test_a_verify_copy_that_cannot_be_restored_fails_the_round_t3(store, mem):
     # 验证重放的临时副本 restore_from 抛永久 MemoryFailureError:T3(失败点 mindagent.rounds.verify),只报类名
-    from actio.memory_port import MemoryFailureError
+    from simple_actio.memory_port import MemoryFailureError
 
     class BrokenScratch(FileTupleStore):
         def restore_from(self, world_id, path):
@@ -960,7 +960,7 @@ def _verify_handler(mem, scratch_factory):
 
 
 def test_a_transient_memory_failure_in_verification_replay_defers_the_round(store, mem):
-    from actio.memory_port import MemoryFailureError
+    from simple_actio.memory_port import MemoryFailureError
     from controlplane.deferred import DeferredError
     closes = []
     boom = MemoryFailureError("embed endpoint http://secret/v1 down", transient=True)
@@ -981,7 +981,7 @@ def test_a_transient_memory_failure_in_verification_replay_defers_the_round(stor
 
 
 def test_a_permanent_memory_failure_in_verification_replay_fails_the_round_t3(store, mem):
-    from actio.memory_port import MemoryFailureError
+    from simple_actio.memory_port import MemoryFailureError
     boom = MemoryFailureError("RuntimeError at /secret/db", transient=False)
     _skill(store, GOAL)
     _tick(store, _verify_handler(mem, lambda root: _RecallFailingScratch(root, exc=boom)))   # 不从 tick 逃出
@@ -991,7 +991,7 @@ def test_a_permanent_memory_failure_in_verification_replay_fails_the_round_t3(st
 
 
 def test_a_close_failure_in_verification_cleanup_does_not_change_the_round_result(store, mem, caplog):
-    from actio.memory_port import MemoryFailureError
+    from simple_actio.memory_port import MemoryFailureError
 
     class CloseFailingScratch(FileTupleStore):
         def open(self, world_id, holder):

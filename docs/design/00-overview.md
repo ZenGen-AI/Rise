@@ -5,12 +5,12 @@
 | 读者 | 人类架构师与 AI。只读本文即可建立对全系统的完整认识 |
 | 代码基线 | 主干提交 `b826440`(2026-10-21),3109 个 Python 测试 |
 | 状态标记 | **[已落地]** 代码在主干上且有测试。**[计划中]** 设计与施工计划已定,代码未写。**[推迟]** V1 明确不做 |
-| 状态 | 闭环、实时交互训练、技能自进化等主干 [已落地]。智能体记忆 [已落地]:场景二每个角色位都是带记忆的 Actio 智能体,记忆端口的生产实现是 Starling 适配器,替身是内存元组与落盘的 FileTupleStore。记忆按情境世界组织 [已落地]:一个情境一个部署世界,每条 rollout 一个世界,人格是世界里的主体。训练里每条 rollout 从同一起点出发。部署记忆持久累积。其中要真机或真端点才能核实的几项仍未核实,见风险表第 21 到 30 项 |
+| 状态 | 闭环、实时交互训练、技能自进化等主干 [已落地]。智能体记忆 [已落地]:场景二每个角色位都是带记忆的 SimpleActio 智能体,记忆端口的生产实现是 Starling 适配器,替身是内存元组与落盘的 FileTupleStore。记忆按情境世界组织 [已落地]:一个情境一个部署世界,每条 rollout 一个世界,人格是世界里的主体。训练里每条 rollout 从同一起点出发。部署记忆持久累积。其中要真机或真端点才能核实的几项仍未核实,见风险表第 21 到 30 项 |
 | 内容 | 目标与约束、架构、核心机制、端到端流程、部署、横切关注点、现状、路线图、风险、决策、术语 |
 
 ## 1. 一页读懂
 
-Rise(Recursive Interactive Social mind Evolution,递归交互式社会心智进化)是一套"AI 驱动的社会心智后训练工厂"。输入通用开源基础模型,输出社会心智能力显著增强的模型,代号 ZenGen。工厂把五件事串成一个闭环:社会情境仿真、权重级训练、诊断评测、训练配方沉淀、智能体技能与记忆自进化。每一轮由 AI 决定练什么,由人在三道审核门把关。Actio 的记忆由 Starling 提供,场景二里每个角色位都是带记忆的 Actio 智能体。
+Rise(Recursive Interactive Social mind Evolution,递归交互式社会心智进化)是一套"AI 驱动的社会心智后训练工厂"。输入通用开源基础模型,输出社会心智能力显著增强的模型,代号 ZenGen。工厂把五件事串成一个闭环:社会情境仿真、权重级训练、诊断评测、训练配方沉淀、智能体技能与记忆自进化。每一轮由 AI 决定练什么,由人在三道审核门把关。SimpleActio 的记忆由 Starling 提供,场景二里每个角色位都是带记忆的 SimpleActio 智能体。
 
 **五句话讲清工作原理**
 
@@ -33,13 +33,13 @@ Rise(Recursive Interactive Social mind Evolution,递归交互式社会心智进�
 | 远端计算层(经 SSH)、ROLL LoRA SFT 真实执行器与适配器导出转换器 | [已落地] | `factory run --executor roll` 装配它们(默认入口与 `run_controlplane.py` 仍用 mock);已在真实主机上从训练指令端到端跑到待审候选一次,只跑过单段两步,多段与续训未在真机上验证 |
 | vLLM 服务组件 | [已落地] | 命令拼装、SSH 隧道、服务生命周期;真机端到端待 GPU 空闲后补 |
 | 真实 SoMEval 运行器、SoMBench 题库导入、训练数据污染准入检查 | [已落地] | 由 `--evaluator someval` 启用,默认仍是 mock;真机只验证到预测阶段,判分与真实裁判未在真机上跑通 |
-| 智能体记忆:场景二每个角色位都是带记忆的 Actio 智能体,记忆由 Starling 提供 | [已落地] | 记忆端口加 Starling 适配器,库文件在仓库之外;训练路每条 rollout 从同一起点出发;部署记忆持久累积;会话资源有序关闭。分八步施工,前五步只用替身 |
+| 智能体记忆:场景二每个角色位都是带记忆的 SimpleActio 智能体,记忆由 Starling 提供 | [已落地] | 记忆端口加 Starling 适配器,库文件在仓库之外;训练路每条 rollout 从同一起点出发;部署记忆持久累积;会话资源有序关闭。分八步施工,前五步只用替身 |
 | 记忆按情境世界组织 | [已落地] | 一个情境一个部署世界,每条 rollout 一个平行世界,人格是世界里的主体;部署对手位也跨会话积累记忆;替身与 Starling 两个后端过同一套世界契约测试,Starling 一侧是真 Starling 加本机回环的假抽取与嵌入端点 |
 | 真实 GRPO 加 OPD 训练、真实 judge | [推迟] | 仍用确定性 mock,所以真实评测的报告等级仍是 mock |
 
 今天能跑通的端到端路径有两条。缺省入口:人工写一条 batch 训练指令,守护进程派发给 MindTrainer 派发器,mock 训练产出候选,占位诊断补齐证据,人工经命令行批准,守护进程晋级候选并写入 zengen 版本。闭环模式(`factory run --enable`,端到端测试盖的就是这条):同一轮之外还有规划、提名、配方入库、智能体轮次与技能记忆提案,决策由规划后端给出,诊断由注入的评估器写;训练与诊断仍可以是 mock,证据等级据此标 `mock`。
 
-设计二 [已落地] 把场景二换成带记忆的智能体。训练位包着正在训练的模型,对手位包着原来的三种驱动,每个角色位都是一个 Actio 实例。记忆库在仓库之外。每条 rollout 从同一份起点记忆出发,用完即弃;部署态的记忆持久累积。诊断评测的动态轨与批量数据集生产仍用裸后端 [推迟]。
+设计二 [已落地] 把场景二换成带记忆的智能体。训练位包着正在训练的模型,对手位包着原来的三种驱动,每个角色位都是一个 SimpleActio 实例。记忆库在仓库之外。每条 rollout 从同一份起点记忆出发,用完即弃;部署态的记忆持久累积。诊断评测的动态轨与批量数据集生产仍用裸后端 [推迟]。
 
 记忆按模拟世界组织 [已落地]。一个世界是一份 Starling 库或一份替身账本,人格是其中的主体。部署时一个情境一个世界,智能体位与对手位都在里面跨会话积累记忆。训练时每条 rollout 从该情境的种子世界复制出一个平行世界,没有种子时从空世界起。原因是同一情境的几个人在同一个世界里,一人一库会把他们拆进平行世界。
 
@@ -51,7 +51,7 @@ Rise(Recursive Interactive Social mind Evolution,递归交互式社会心智进�
 |---|---|---|
 | 社会情境仿真 | 情境生成、人格模拟、训练数据合成、交互式训练支持、交互式动态评测 | SocialSimulator |
 | 权重级后训练 | 交互式多轮训练,或单轮的 SFT、GRPO、OPD 流水线 | MindTrainer |
-| 智能体技能与记忆自进化 | 部署态智能体不改权重,提升技能库与记忆库 | MindAgent、Actio |
+| 智能体技能与记忆自进化 | 部署态智能体不改权重,提升技能库与记忆库 | MindAgent、SimpleActio |
 | 有效方案沉淀 | 把验证有效的完整训练配方版本化、可检索、可复用 | RecipeStore |
 
 "RSI"在本项目取广义:用 AI 决策训练过程。允许调用外部更强的闭源模型,经命令行决定每轮训练策略与数据合成方向。
@@ -70,7 +70,7 @@ Rise(Recursive Interactive Social mind Evolution,递归交互式社会心智进�
 | 真实 GRPO 加 OPD 训练、真实 judge、把适配器合并回完整权重 | [推迟] | 仍用 mock;LoRA SFT 之外的训练阶段拒绝与真实执行器混用 |
 | 共享感知:在场的人都记住同一句话 | [推迟] | 每个实例只写他人的发言,写在自己的主体名下 |
 | 同一人格跨情境共享记忆 | [推迟] | 同一人格在两个情境里是两个世界里的两个主体 |
-| 接 Starling 记忆服务 | [推迟] | 记忆仍内嵌在 Actio 实例的进程里;服务落地后只换后端实现,协议与调用方不动 |
+| 接 Starling 记忆服务 | [推迟] | 记忆仍内嵌在 SimpleActio 实例的进程里;服务落地后只换后端实现,协议与调用方不动 |
 
 ### 2.3 约束
 
@@ -91,7 +91,7 @@ Rise(Recursive Interactive Social mind Evolution,递归交互式社会心智进�
 <!-- figure:begin 00-architecture -->
 ![Rise 系统架构](diagrams/00-architecture.svg)
 
-**图 1　Rise 系统架构**　四层结构。控制层放决策与配方相关的四个组件。协调层 ControlPlane 配三道人工审核门。计算层放三个子系统。共享基础设施放 Actio、Starling 记忆库、远端计算层、训练与推理引擎。三个计算层子系统都使用 Actio 实例,MindTrainer 用的是训练位实例。所有子系统经 ControlPlane 读写产物,只有两条受限直连接口绕过它。
+**图 1　Rise 系统架构**　四层结构。控制层放决策与配方相关的四个组件。协调层 ControlPlane 配三道人工审核门。计算层放三个子系统。共享基础设施放 SimpleActio、Starling 记忆库、远端计算层、训练与推理引擎。三个计算层子系统都使用 SimpleActio 实例,MindTrainer 用的是训练位实例。所有子系统经 ControlPlane 读写产物,只有两条受限直连接口绕过它。
 
 <details>
 <summary>文字版:图中的节点与连线</summary>
@@ -109,7 +109,7 @@ Rise(Recursive Interactive Social mind Evolution,递归交互式社会心智进�
 - MindAgent:部署态智能体 / 技能与记忆自进化
 - 远端计算层 compute:经 SSH 在远端 GPU 主机上跑作业 / GPU 租约 · 预检 · 作业控制
 - ROLL · vLLM:分布式训练 · 推理引擎
-- Actio:带技能库与显式记忆的智能体框架 / 每次响应附带激活轨迹 / Starling 记忆
+- SimpleActio:带技能库与显式记忆的智能体框架 / 每次响应附带激活轨迹 / Starling 记忆
 - Starling:个体记忆 · 语句级抽取 · 语义召回 / SQLite 内嵌,一个世界一个库,人格是主体
 
 **连线**
@@ -128,10 +128,10 @@ Rise(Recursive Interactive Social mind Evolution,递归交互式社会心智进�
 - SocialSimulator ↔ MindAgent:②
 - MindTrainer → 远端计算层 compute
 - 远端计算层 compute → ROLL · vLLM:驱动
-- SocialSimulator → Actio
-- MindAgent → Actio
-- MindTrainer → Actio:训练位实例
-- Actio ↔ Starling:读写
+- SocialSimulator → SimpleActio
+- MindAgent → SimpleActio
+- MindTrainer → SimpleActio:训练位实例
+- SimpleActio ↔ Starling:读写
 
 </details>
 <!-- figure:end 00-architecture -->
@@ -143,11 +143,11 @@ Rise(Recursive Interactive Social mind Evolution,递归交互式社会心智进�
 | 控制层 | TrainScheduler、TrainPlanner、RecipeStore、外部推理桥接 | 决策、配方管理、调用外部强模型 | 本地开发机 |
 | 协调层 | ControlPlane | 产物树、状态机、调和循环、审核门 | 本地开发机 |
 | 计算层 | MindTrainer、SocialSimulator、MindAgent | 训练、仿真与评测、智能体自进化 | 远程 GPU 服务器 |
-| 共享基础设施 | Actio、Starling、远端计算层 `compute` [已落地]、ROLL、vLLM、外部推理桥接 | 多个子系统共用的运行支撑 | 随使用方;`compute` 在本地开发机,经 SSH 驱动远端 GPU 主机;Starling 内嵌在 Actio 实例的进程里,库文件与实例同机 |
+| 共享基础设施 | SimpleActio、Starling、远端计算层 `compute` [已落地]、ROLL、vLLM、外部推理桥接 | 多个子系统共用的运行支撑 | 随使用方;`compute` 在本地开发机,经 SSH 驱动远端 GPU 主机;Starling 内嵌在 SimpleActio 实例的进程里,库文件与实例同机 |
 
 外部推理桥接在概念上属共享基础设施(可被规划器、智能体等多个子系统调用),物理上运行在控制层所在的本地开发机,原因:命令行工具的登录态与网络出口绑定在本地。
 
-Starling 是内嵌的 SQLite 记忆库,属共享基础设施。它从源码构建,经可选 extra `memory` 安装。环境变量 `RISE_MEMORY_CONFIG` 未设时才用替身。设了而文件或依赖不合规(含 Starling 未装),装配期退出码 2。库文件在仓库之外,根目录由本机记忆配置给出。库必须和 Actio 实例同机,否则每轮召回都要跨机往返。
+Starling 是内嵌的 SQLite 记忆库,属共享基础设施。它从源码构建,经可选 extra `memory` 安装。环境变量 `RISE_MEMORY_CONFIG` 未设时才用替身。设了而文件或依赖不合规(含 Starling 未装),装配期退出码 2。库文件在仓库之外,根目录由本机记忆配置给出。库必须和 SimpleActio 实例同机,否则每轮召回都要跨机往返。
 
 ### 3.2 七个子系统
 
@@ -165,9 +165,9 @@ Starling 是内嵌的 SQLite 记忆库,属共享基础设施。它从源码构�
 
 训练决策这一环另外沉淀自己的经验:每轮把决策、结果与证据压成一条记录,同签名的记录聚合成条目,下一轮规划时把有效的几条渲染进提示。记录与条目都是树里的产物,评分信号只来自诊断报告,外部 agent 改不到——换后端、重跑、崩了重入都不影响这段记忆(见 `55-strategy-experience.md`)。
 
-Actio 不在上表里,它是各子系统共用的智能体框架。它的记忆经记忆端口访问:生产实现是 Starling,确定性替身是现有的内存元组 `MemoryEntry`。两种实现过同一套契约测试,所以替身路径与 Starling 路径的语义不分叉。记忆库是仓库之外的 Starling SQLite 文件,Starling 是可选 extra `memory`。记忆属于个体而不属于环境,所以它放在 Actio 内部,模拟器不知道它的存在。
+SimpleActio 不在上表里,它是各子系统共用的智能体框架。它是 Actio 的简化版:功能完备的正式版 Actio 在本仓库之外开发,完成后再接入 [计划中]。它的记忆经记忆端口访问:生产实现是 Starling,确定性替身是现有的内存元组 `MemoryEntry`。两种实现过同一套契约测试,所以替身路径与 Starling 路径的语义不分叉。记忆库是仓库之外的 Starling SQLite 文件,Starling 是可选 extra `memory`。记忆属于个体而不属于环境,所以它放在 SimpleActio 内部,模拟器不知道它的存在。
 
-部署记忆另有管理面 DeploymentMemoryStore,放在 Actio 内,按世界 id 打开端口、写事件、备份与恢复。MindAgent 只经它访问部署记忆,所以不导入 `starling`。实现有 Starling 版 StarlingDeploymentStore 与落盘 JSON 的 FileTupleStore,替身也有提交点。
+部署记忆另有管理面 DeploymentMemoryStore,放在 SimpleActio 内,按世界 id 打开端口、写事件、备份与恢复。MindAgent 只经它访问部署记忆,所以不导入 `starling`。实现有 Starling 版 StarlingDeploymentStore 与落盘 JSON 的 FileTupleStore,替身也有提交点。
 
 记忆按模拟世界组织 [已落地]。世界是记忆的单位,替身里是一份账本,Starling 里是一个库。世界里的主体(holder)就是人格 id,每条记忆与事件行都带主体。
 
@@ -200,20 +200,20 @@ class DeploymentMemoryStore(Protocol):  # 按世界寻址
 | 包 | 可以导入 | 不得导入 | 状态 |
 |---|---|---|---|
 | `src/controlplane` | 标准库、`simulator.stubs`(骨架桩) | 任何闭环新包 | [已落地] |
-| `src/simulator` | `controlplane` | `mindtrainer`、`diagnostic`、`actio`、`starling` | [已落地] |
+| `src/simulator` | `controlplane` | `mindtrainer`、`diagnostic`、`simple_actio`、`starling` | [已落地] |
 | `src/diagnostic` | `controlplane`、`simulator` | `mindtrainer` | [已落地] |
-| `src/mindtrainer` | `controlplane`、`simulator`,真实执行器另加 `compute` | `diagnostic`、`actio` | [已落地] |
+| `src/mindtrainer` | `controlplane`、`simulator`,真实执行器另加 `compute` | `diagnostic`、`simple_actio` | [已落地] |
 | `src/compute` | 标准库、`controlplane.deferred` | 其余一切业务包,含 `factory` | [已落地] |
-| `src/actio` | `simulator.datamodel`,`starling`(只限 `src/actio/memory_starling.py`,可选) | 其余业务包 | [已落地] |
+| `src/simple_actio` | `simulator.datamodel`,`starling`(只限 `src/simple_actio/memory_starling.py`,可选) | 其余业务包 | [已落地] |
 | `src/inference_bridge` | `controlplane` | 其余业务包 | [已落地] |
 | `src/recipestore`、`src/trainplanner` | `controlplane`,后者另加 `inference_bridge` | 其余业务包 | [已落地] |
-| `src/trainscheduler` | `controlplane`、`recipestore`、`trainplanner`、`mindtrainer` 的两个数据模块、`inference_bridge`(只取 `BridgeError`) | `diagnostic`、`simulator`、`actio`、`mindagent` | [已落地] |
-| `src/mindagent` | `controlplane`、`actio`、`inference_bridge`、`simulator`(只限 `datamodel`、`store_adapter`、`realtime.client`) | `diagnostic`、`mindtrainer`、`recipestore`、`trainplanner`、`trainscheduler`、`factory` | [已落地] |
+| `src/trainscheduler` | `controlplane`、`recipestore`、`trainplanner`、`mindtrainer` 的两个数据模块、`inference_bridge`(只取 `BridgeError`) | `diagnostic`、`simulator`、`simple_actio`、`mindagent` | [已落地] |
+| `src/mindagent` | `controlplane`、`simple_actio`、`inference_bridge`、`simulator`(只限 `datamodel`、`store_adapter`、`realtime.client`) | `diagnostic`、`mindtrainer`、`recipestore`、`trainplanner`、`trainscheduler`、`factory` | [已落地] |
 | `src/factory` | 任何包,含 `compute` | 无 | [已落地] |
 
 `factory` 是组合根,是唯一可以知道所有包的地方,任何包都不导入它。`mindtrainer` 不导入 `diagnostic`,因为系统只开了两处受限例外,没有 MindTrainer 与诊断评测之间的直连。OPD 是否失效由诊断侧的通用能力探针判定,MindTrainer 只如实记录系数与损失。受限的是子系统间的运行时调用,不是共享数据结构:Episode、人格等数据模型可以复用。表里的「可以导入」「不得导入」指直接导入,`trainscheduler` 经 `mindtrainer.training_config` 传递地用到 `simulator.datamodel` 是允许的。
 
-已落地的四个包今天满足这张表。`controlplane` 只有一处回指:守护进程的默认派发器与默认诊断器取自 `simulator.stubs`,形成包级循环依赖,运行时不成环,骨架桩移出之前保留。分层规则由基于语法树的导入检查测试强制 [已落地],在它落地之前靠约定和人工核对维持。表里 `simulator`、`mindtrainer` 不得导入 `actio`、`starling` 这两条今天成立,都有测试强制:分层规则的导入检查覆盖 `actio` 那条,另一条检查确认全 `src/` 只有 `src/actio/memory_starling.py` 导入 `starling`。
+已落地的四个包今天满足这张表。`controlplane` 只有一处回指:守护进程的默认派发器与默认诊断器取自 `simulator.stubs`,形成包级循环依赖,运行时不成环,骨架桩移出之前保留。分层规则由基于语法树的导入检查测试强制 [已落地],在它落地之前靠约定和人工核对维持。表里 `simulator`、`mindtrainer` 不得导入 `simple_actio`、`starling` 这两条今天成立,都有测试强制:分层规则的导入检查覆盖 `simple_actio` 那条,另一条检查确认全 `src/` 只有 `src/simple_actio/memory_starling.py` 导入 `starling`。
 
 ## 4. 核心机制
 
@@ -522,7 +522,7 @@ checkpoint 等大体量内容不进 git,只存引用 `{uri, sha256, size_bytes, 
 
 失败路径:`max_turns_per_episode` 超过服务端上限 200 时会话以 `invalid_session` 被拒,训练记录与指令当轮判 `failed`。超时、传输不可用这类瞬态原因按 `max_retries_per_episode` 重试。
 
-带记忆之后的场景二:训练位与对手位都是带记忆的 Actio 实例。训练位的实例在客户端,每条 rollout 新造一个。对手位的实例在服务端,每个会话新造一个。每条 rollout 一个平行世界,训练位与对手位都是其中的主体。所以同组 `group_size` 条 rollout 的起点相同,组内优势只反映策略。
+带记忆之后的场景二:训练位与对手位都是带记忆的 SimpleActio 实例。训练位的实例在客户端,每条 rollout 新造一个。对手位的实例在服务端,每个会话新造一个。每条 rollout 一个平行世界,训练位与对手位都是其中的主体。所以同组 `group_size` 条 rollout 的起点相同,组内优势只反映策略。
 
 每轮先召回,回复后写入对方的话,再只做嵌入,不做后台维护。新写的语句在 Starling 里是 `volatile`,只嵌入不巩固,所以召回要显式放宽到 `volatile` 行;代价是这些行没经回放去重,召回里可能有近重复。后台维护有随机性,同一起点会得到不同状态。起点记忆的摘要与记忆运行时身份一起进 `config_hash`。种子库、Starling 版本、抽取或嵌入模型任一变了,续训升 T3。本设计落地前写下的 pending interact 配置没有 `memory` 段,在派发器的配置校验处判 T2,要人工重开。
 
@@ -540,12 +540,12 @@ rollout 世界的建与删 [已落地]:客户端进入 `policy_for_rollout` 时�
 
 **场景三:不动参数的智能体演化。技能与记忆增量**
 
-模型晋级后,MindAgent 为最新 effective 模型开一个轮次:Actio 实例经受限直连接口②跑部署 episode,分析出路由缺口,生成技能提案,离线重放验证,经门②收录进技能库。模型权重全程不变。取自 `tests/test_ma_e2e.py` 的 `test_the_full_agent_rsi_loop_over_a_real_server`,它起真实的 loopback 服务端,跑三轮。
+模型晋级后,MindAgent 为最新 effective 模型开一个轮次:SimpleActio 实例经受限直连接口②跑部署 episode,分析出路由缺口,生成技能提案,离线重放验证,经门②收录进技能库。模型权重全程不变。取自 `tests/test_ma_e2e.py` 的 `test_the_full_agent_rsi_loop_over_a_real_server`,它起真实的 loopback 服务端,跑三轮。
 
 | 步 | 发生的事 | 产物与数值 |
 |---|---|---|
 | 1 | 调和循环看到最新 effective 模型没有轮次产物(或仍是 `pending`)就发 `start_agent_round`;它不看规划,也不等规划 | 轮次 `agent-round-zengen-v1` |
-| 2 | 部署:三个情境 `s1`、`s2`、`s3` 各一条,`max_turns = 4`,对手先说"我真的很生气!!"再说"好吧,你说说看";Actio 占客户端位,每句附激活轨迹,驱动器落盘 | 第一轮库为空,6 条智能体轨迹 `selected` 全为空;首轮信号 `[emotion_high, first_turn]` |
+| 2 | 部署:三个情境 `s1`、`s2`、`s3` 各一条,`max_turns = 4`,对手先说"我真的很生气!!"再说"好吧,你说说看";SimpleActio 占客户端位,每句附激活轨迹,驱动器落盘 | 第一轮库为空,6 条智能体轨迹 `selected` 全为空;首轮信号 `[emotion_high, first_turn]` |
 | 3 | 分析:选中技能为空的轮次不算路由错,所以第一轮零发现、零提案;这是预期行为,V1 不能从空库自举 | 轮次 `executed`,`findings` 与 `proposals` 都为空 |
 | 4 | 人放入一条不处理情绪的基线技能 `skill-goal`,库版本 `skill 1`;第二个模型晋级后开第二轮 | `library_version = {skill: "1", memory: "0"}` |
 | 5 | 分析:对手情绪高时选中的 `skill-goal` 不针对该信号,三条 episode 都受影响,过 `min_support = 3`、`min_ratio = 0.5` | 一条发现:信号 `emotion_high`,`support = 3`,`ratio = 1.0` |
@@ -711,7 +711,7 @@ V2 要做多租户、配方跨工厂流通、数据结构升级。这些无法�
 | simulator(含实时服务) | 247 |
 | trainplanner | 201 |
 | recipestore | 197 |
-| actio | 159 |
+| simple_actio | 159 |
 | mindagent | 152 |
 | compute | 127 |
 | diagnostic | 126 |
@@ -743,7 +743,7 @@ V2 要做多租户、配方跨工厂流通、数据结构升级。这些无法�
 | `cli/src` | TypeScript 命令行:`review`、`approve`、`reject`、`confirm`、`status` | 428 行 | [已落地] |
 | `scripts/run_controlplane.py` | 守护进程入口,接 MindTrainer 派发器 | 薄壳 | [已落地] |
 | `schemas/envelope.schema.json` | 信封的 JSON Schema | 1 个文件 | [已落地] |
-| `src/actio` | 技能、记忆、经验、实例、信号、激活轨迹;记忆端口、Starling 适配器 | 985 行 | [已落地] |
+| `src/simple_actio` | 技能、记忆、经验、实例、信号、激活轨迹;记忆端口、Starling 适配器 | 985 行 | [已落地] |
 | `src/recipestore` | 可复现性校验、检索、增益、战绩、生命周期、收录 | 931 行 | [已落地] |
 | `src/trainplanner` | 规划上下文、提示渲染、严格解析、三种决策后端 | 1196 行 | [已落地] |
 | `src/trainscheduler` | 装配、领域校验、动作解析、指令构造、提名、策略经验 | 2152 行 | [已落地] |
@@ -777,7 +777,7 @@ V2 要做多租户、配方跨工厂流通、数据结构升级。这些无法�
 | 3 | RecipeStore | 可复现性校验、检索、增益、战绩、生命周期、收录与战绩处理器 | 1 |
 | 4 | TrainPlanner | 规划上下文、提示渲染、严格解析、决策后端 | 1 |
 | 5 | TrainScheduler | 装配、领域校验、动作解析、指令构造、配方提名、两个处理器 | 2、3、4 |
-| 6 | Actio | 技能、记忆、经验、实例、信号、激活轨迹协议改动 | 无 |
+| 6 | SimpleActio | 技能、记忆、经验、实例、信号、激活轨迹协议改动 | 无 |
 | 7 | MindAgent | 部署驱动、分析、提案、验证、打包、轮次与收录处理器 | 1、6 |
 | 8 | 调和循环扩展 | 新视图与动作、规划等门③、晋级幂等与版本号、仓库文件锁与只带本文件提交、注入缝、真实诊断评估器、命令行泛化与 `confirm` | 1 |
 | 9 | 组合根与端到端 | `factory` 装配、入口取仓库文件锁、只读子命令、全闭环与 MindAgent 端到端、跨包一致性核对 | 1 至 8 |
@@ -800,7 +800,7 @@ V2 要做多租户、配方跨工厂流通、数据结构升级。这些无法�
 |---|---|---|
 | 1 | 记忆端口、契约测试、替身记忆与落盘的部署替身、实例改持端口、每轮读写、激活轨迹加记忆键 [已落地] | 否 |
 | 2 | 指导语进 prompt、后端工厂加会话身份、会话资源与在途线程登记、终态收尾、记忆失败终止原因 [已落地] | 否 |
-| 3 | 训练路换成 Actio:每条 rollout 一个实例、对手工厂包 Actio、轨迹上行、时间预算 [已落地] | 否 |
+| 3 | 训练路换成 SimpleActio:每条 rollout 一个实例、对手工厂包 SimpleActio、轨迹上行、时间预算 [已落地] | 否 |
 | 4 | 训练配置的记忆段、运行时身份、`config_hash`、训练记录的记忆块、副本清扫。TrainScheduler 的 interact 段严格解析要加 `memory`,resolve 把 `memory.seed` 带进指令 [已落地] | 否,用替身 |
 | 5 | MindAgent:部署记忆、轮次摘要、快照重放、门② 改路,先在落盘替身上跑通 [已落地] | 否,用替身 |
 | 6 | Starling 补公开接口并经 PR 合入 [已落地] | 是,在 Starling 仓库 |
@@ -890,7 +890,7 @@ R1 到 R21 是闭环集成阶段的细则裁决,在各子系统文档里就地�
 | SYS-23 | 资源暂时不可用走延后通道:`DeferredError` 由守护进程接住,不写树、按退避重试、连续延后有上限 [已落地] | 沿用「瞬态异常让守护进程退出」 | 验证主机上常有别人的服务,忙是常态;仓库没有监督脚本,退出等于停摆 | 上限偏小会过早退出,偏大发现得晚;树里没有任何写入,代价只是重启一次守护进程 |
 | SYS-24 | SoMBench 的 3481 道题(Q1 到 Q4)只用于训练后候选的诊断评测,不得参与训练。保证分四道防线:树内题库只存 id 与维度;SoMEval 的工作目录在树外;训练数据上传前过 20 字滑窗哈希准入检查;报告只带维度级聚合 | 只靠约定与人工检查 | 诊断一旦被训练集污染,分数就不再反映真实能力,RSI 闭环失去判据;而评测集最容易在被当成「好数据」时混进训练 | 逐字重叠之外的改写抓不到;基座预训练是否见过它不在我们控制内 |
 | SYS-25 | interact 在真实入口接通时,训练位接真推理,训练仍用 mock:真实执行器只支持 SFT,开不了 interact 的实时会话,所以候选由 mock 执行器产出,真模型只在会话里说话。训练记录新增 `policy_backend` 块,如实写明训练位与对手位各自用的是什么 [已落地] | 只做替身策略;只做推理验证入口;等真实 GRPO 落地再接通 | 设计目标是真模型进实时会话、发言落盘、奖励管线对真实发言成立,这三件事不必等 GRPO;当前只用本机 HTTP 替身验证过会话接线与发言落盘,奖励管线没对真实发言验证;GRPO 落地后接入工作原样复用,只换执行器。「谁在说话」决定数字怎么解读,所以写进记录 | 这一轮证明不了模型因此变好;闭环里的候选是 `mock://` 引用,训练位只能退回基座,不是上一轮的产出;GRPO 落地时要改装配开关 |
-| SYS-26 | 场景二的每个角色位都是带记忆的 Actio 智能体。训练位的实例包着正在训练的模型,对手位的实例包着原来的三种驱动:固定对话、站内 vLLM、外部 OpenAI 兼容 API。实例包哪个模型由角色位的后端决定,`simulator` 仍只认 `ModelBackend` | 只给训练位加记忆;对手位保持裸后端;记忆放进环境由模拟器持有 | 对手要靠记忆扮演某种人格的个体,它记得发生过的事、形成信念并据此回应;训练位的记忆让两边对称。Actio 实例本来就满足 `respond`,模拟器不必知道记忆 | 每轮多一次召回与一次写入,会话变慢;对手位的轨迹多一份记忆信息 |
+| SYS-26 | 场景二的每个角色位都是带记忆的 SimpleActio 智能体。训练位的实例包着正在训练的模型,对手位的实例包着原来的三种驱动:固定对话、站内 vLLM、外部 OpenAI 兼容 API。实例包哪个模型由角色位的后端决定,`simulator` 仍只认 `ModelBackend` | 只给训练位加记忆;对手位保持裸后端;记忆放进环境由模拟器持有 | 对手要靠记忆扮演某种人格的个体,它记得发生过的事、形成信念并据此回应;训练位的记忆让两边对称。SimpleActio 实例本来就满足 `respond`,模拟器不必知道记忆 | 每轮多一次召回与一次写入,会话变慢;对手位的轨迹多一份记忆信息 |
 | SYS-27 | 记忆属于个体:一个人格一个 Starling 库文件,库的 agent 与 holder 都是该人格;库在仓库之外,根目录由本机记忆配置给出 | 多个人格共用一个库、靠 holder 过滤;库放进产物树 | 个体隔离靠文件而不靠过滤条件,同时打开多个文件已实测互不干扰;原生 SQLite 带 WAL,不适合当 git 产物 | 文件数多;库不在产物树里,不能从树追溯,靠起点摘要补;已由 SYS-31 取代 |
 | SYS-28 | 起点记忆的逻辑摘要与记忆运行时身份一起进 `config_hash`;每条 rollout 在起点的私有副本上跑,用完即弃。摘要覆盖语句表、向量表、事件表的全部列,按排除清单去掉纯簿记列,与文件字节无关;interact 配置的记忆段必填,训练里每轮必写,没有关写的开关 | 摘要按包含清单列字段;rollout 之间共享一个库,记忆在 run 内累积;提供不写记忆的开关 | 库文件字节不稳定,所以哈希只能算逻辑内容;换 Starling、换抽取或嵌入模型行为也变,所以身份进哈希;同组 rollout 起点相同,组内优势只反映策略;不留绕开记忆的口子,实验才可比 | 记忆不在一条 run 内累积;落地前写下的 pending interact 配置在派发器校验处判 T2,要人工重开;摘要要读三张表,库加列要维护排除清单;摘要的键已由 SYS-36 改为情境 |
 | SYS-29 | Starling 作可选 extra `memory`,依赖钉 git 提交,未设记忆配置时用替身并显式报告,设了而依赖未装则装配期退出码 2;Starling 缺的公开接口在 Starling 里补,经 PR 合入,本仓库钉合并提交,不碰它的私有接口与表结构 | 把 Starling 列为必装依赖;本仓库直接读它的私有接口和表;在本仓库里复制一份门面 | Starling 要从源码构建且未上 PyPI,必装会挡住没有编译环境的开发者;私有接口一改就坏,补公开接口才稳 | 未装的环境只测替身路径;依赖 Starling 先合 PR,第 5 步是第 6、7 步的前置 |
@@ -920,17 +920,17 @@ R1 到 R21 是闭环集成阶段的细则裁决,在各子系统文档里就地�
 | ROLL、vLLM | 分布式训练引擎、推理引擎 |
 | SoMBench、SoMEval | 社会心智诊断基准、对接多个公开基准的评测执行工具 |
 | G 组探针 | 通用能力探针,不计入社会心智得分,只用于监控退化 |
-| Actio | 带技能库与显式记忆的智能体框架 |
-| 激活轨迹 | Actio 每次响应附带的记录:命中的技能候选、选中的技能、命中的记忆 |
+| SimpleActio | 带技能库与显式记忆的智能体框架 |
+| 激活轨迹 | SimpleActio 每次响应附带的记录:命中的技能候选、选中的技能、命中的记忆 |
 | 受限直连 | 绕过 ControlPlane 的两处高频实时接口 |
 | 证据等级 | 诊断报告的可信等级 `stub`、`mock`、`real` |
 | T1、T2、T3 | 瞬态、确定性、需人工三类失败 |
 | BigRef | 大体量产物引用 `{uri, sha256, size_bytes, fetch_hint}` |
 | Handler、Dispatcher | 注入调和循环的动作处理器、指令派发器 |
-| 记忆端口 | Actio 访问记忆的统一接口:召回、写入、只做嵌入、算摘要、关闭。一个端口实例只属于一个智能体。生产实现是 Starling,替身是内存元组。端口打开时绑定 (世界, 主体),召回只返回本主体名下的记忆 |
+| 记忆端口 | SimpleActio 访问记忆的统一接口:召回、写入、只做嵌入、算摘要、关闭。一个端口实例只属于一个智能体。生产实现是 Starling,替身是内存元组。端口打开时绑定 (世界, 主体),召回只返回本主体名下的记忆 |
 | 世界 | 记忆的单位:替身里是一份账本,Starling 里是一个库。部署世界与种子世界按情境,rollout 世界按逻辑 episode |
 | 主体 | 世界里的一个人格,代码里叫 holder;端口、记忆行与事件 key 都带它 |
-| 部署记忆管理面 | Actio 里按世界 id 管部署世界的接口:打开 (世界, 主体) 端口、写事件、备份、恢复、算摘要,`wait_closed` 等一个世界的端口关完。MindAgent 只经它访问,所以不导入 Starling。实现有 Starling 版与落盘 JSON 的替身 |
+| 部署记忆管理面 | SimpleActio 里按世界 id 管部署世界的接口:打开 (世界, 主体) 端口、写事件、备份、恢复、算摘要,`wait_closed` 等一个世界的端口关完。MindAgent 只经它访问,所以不导入 Starling。实现有 Starling 版与落盘 JSON 的替身 |
 | 内容 id | 记忆条目的标识:规范化语句行的哈希前缀,不含库内随机标识、簿记列与生命周期列(巩固状态、置信度等)。同样内容在任何库里得到同一个 id,所以它能安全地进 prompt 与激活轨迹 |
 | 逻辑摘要 | 记忆库状态的 sha256:读语句、向量、事件三张表的全部列,去掉纯簿记列后规范化再哈希,与文件字节无关。起点记忆靠它进 `config_hash`。替身记忆按召回实际看到的条目算(被取代的旧条目不进);Starling 按全行算(被取代的行仍是召回候选,`volatile` 与 `pending_review` 行影响后续写入的冲突探测)。一个世界一个摘要,覆盖全部主体 |
 | 记忆运行时身份 | 记录记忆后端、Starling 版本与安装来源、抽取与嵌入的端点和模型、重试与超时的字典。换其中任一项,记忆行为就变,所以它与逻辑摘要一起进 `config_hash` |

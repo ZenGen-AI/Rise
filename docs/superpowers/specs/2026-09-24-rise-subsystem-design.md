@@ -237,7 +237,7 @@ control-plane/                              # git仓库根
 
 动态轨的评测信号(区别于静态轨的"对错"):
 - 目标达成度(类 SOTOPIA-Eval 的多维度打分:目标完成、关系维护、社会规范遵守)
-- Actio 激活轨迹分析(若候选 checkpoint 已经过 MindAgent 包装,可检查技能路由是否合理——这是结构化技能表示带来的额外诊断能力,静态基准无法提供)
+- SimpleActio 激活轨迹分析(若候选 checkpoint 已经过 MindAgent 包装,可检查技能路由是否合理——这是结构化技能表示带来的额外诊断能力,静态基准无法提供)
 - 多轮一致性(同一人格设定下,前后轮次是否自相矛盾)
 
 动态轨打分同样落在打分器(LLM-as-judge,rubric 版本化)之下,产出格式与静态轨对齐后一并送入统一统计聚合与退化判定流程。
@@ -367,7 +367,7 @@ gRPC 双向流是一条连接上双向独立收发,不是"一问一答"。五类
 
 #### 2.6.3 激活轨迹字段:协议层强制项
 
-呼应补充 A.3 定义的 ActivationTrace——若 TurnUpdate 消息不为它专门留一个结构化、强类型的字段,而只是塞进自由文本备注,MindAgent 的经验分析器就无法可靠解析,归因分析会退化成猜测。协议层明确:**当该轮说话角色由完整 Actio 实例扮演时,TurnUpdate 必须携带结构化的 activation_trace 字段**(触发的技能候选、最终选中技能、检索到的记忆条目);当角色是裸模型(冻结参考模型/外部API)时,该字段为空——协议层需能区分"没有激活轨迹"和"激活轨迹为空列表"两种语义。
+呼应补充 A.3 定义的 ActivationTrace——若 TurnUpdate 消息不为它专门留一个结构化、强类型的字段,而只是塞进自由文本备注,MindAgent 的经验分析器就无法可靠解析,归因分析会退化成猜测。协议层明确:**当该轮说话角色由完整 SimpleActio 实例扮演时,TurnUpdate 必须携带结构化的 activation_trace 字段**(触发的技能候选、最终选中技能、检索到的记忆条目);当角色是裸模型(冻结参考模型/外部API)时,该字段为空——协议层需能区分"没有激活轨迹"和"激活轨迹为空列表"两种语义。
 
 #### 2.6.4 并发会话隔离
 
@@ -488,13 +488,13 @@ FAILED 会话的恢复策略(整 episode 重跑而非会话级续接,以及 T1/T
 ControlPlane("checkpoint已晋级"事件)
        ↓ 自主订阅,自动触发
 ┌──────────────────┐
-│ Actio实例管理器   │  绑定最新晋级checkpoint + 当前技能/记忆库状态
+│ SimpleActio实例管理器   │  绑定最新晋级checkpoint + 当前技能/记忆库状态
 │ (新版本到来→中止重启)│
 └────────┬─────────┘
          ↓
 ┌──────────────────┐
 │ 模拟部署驱动器   │──→ 受限接口②: SocialSimulator实时环境服务网关
-└────────┬─────────┘    (MindAgent自身角色由完整Actio实例扮演,
+└────────┬─────────┘    (MindAgent自身角色由完整SimpleActio实例扮演,
          ↓              SocialSimulator提供对手人格)
 ┌──────────────────┐
 │ 经验分析器       │  跨episode聚合,识别行为模式/能力缺口
@@ -524,13 +524,13 @@ ControlPlane("checkpoint已晋级"事件)
 
 ### 4.2 各模块职责
 
-**Actio实例管理器**:管理活跃Actio智能体实例生命周期。MindAgent的Actio实例是**长期存活**的(跨多个episode持续积累经验),与SocialSimulator里**单个episode即用即弃**的仿真人格语义不同——两者共用同一套Actio基础设施但生命周期语义不同。
+**SimpleActio实例管理器**:管理活跃SimpleActio智能体实例生命周期。MindAgent的SimpleActio实例是**长期存活**的(跨多个episode持续积累经验),与SocialSimulator里**单个episode即用即弃**的仿真人格语义不同——两者共用同一套SimpleActio基础设施但生命周期语义不同。
 
 **触发机制**:MindAgent自主订阅ControlPlane的"checkpoint已晋级"事件自动启动——不由TrainScheduler主动调度。
 
 **版本绑定策略(v1)**:始终对齐最新晋级checkpoint;新版本晋级时当前轮次直接中止重启。已知的v2+优化方向:若浪费工作量显著,可升级为"标注版本+降级为需重新验证"的精细策略。
 
-**模拟部署驱动器**:驱动一批部署交互episode。通过受限接口②调用SocialSimulator实时环境服务网关。调用时MindAgent自身角色由**完整Actio实例**(技能库+显式记忆+路由逻辑全部生效)扮演,不是裸模型——这是观察技能/记忆脚手架表现的必要条件。SocialSimulator提供对手人格(临时实例化的仿真人格)。
+**模拟部署驱动器**:驱动一批部署交互episode。通过受限接口②调用SocialSimulator实时环境服务网关。调用时MindAgent自身角色由**完整SimpleActio实例**(技能库+显式记忆+路由逻辑全部生效)扮演,不是裸模型——这是观察技能/记忆脚手架表现的必要条件。SocialSimulator提供对手人格(临时实例化的仿真人格)。
 
 **经验来源(扩展点,v1不实现)**:当前仅"模拟部署交互";未来可扩展为"模拟+真实生产交互日志"两路输入,接口预留可扩展性。
 
@@ -556,7 +556,7 @@ ControlPlane("checkpoint已晋级"事件)
 
 - 交互路径:唯一一条——MindAgent作为客户端调用受限接口②
 - 复用层次:复用**模板层**(情境/人格模板从共享模板池按purpose标记筛选);不复用**episode层**(对话内容永远实时生成,不可替代一次live会话)
-- 调用目的:经验采集(观察Actio脚手架表现),与MindTrainer的训练rollout目的不同,数据流完全隔离
+- 调用目的:经验采集(观察SimpleActio脚手架表现),与MindTrainer的训练rollout目的不同,数据流完全隔离
 
 ---
 
@@ -890,10 +890,10 @@ flowchart TD
     subgraph CALC["计算层 (远程 GPU 服务器)"]
         A["MindAgent\nActio实例管理器\n绑定 zengen-v3\n加载当前技能库:\n  意图推断路由\n  信念状态追踪"]
         B["模拟部署驱动器\n通过受限接口②\n跑 80 个 episode\n日常情感支持+家庭冲突场景"]
-        SS["SocialSimulator\n实时环境服务网关\n实例化对手人格(临时)\nMindAgent 自身=完整 Actio 实例\n(技能库全部生效,不是裸模型)"]
+        SS["SocialSimulator\n实时环境服务网关\n实例化对手人格(临时)\nMindAgent 自身=完整 SimpleActio 实例\n(技能库全部生效,不是裸模型)"]
         C["经验分析器\n跨 80 个 episode 聚合\n发现稳定模式:\n  情绪高激活时(但是/你不理解)\n  意图推断路由→目标冲突处理\n  忽略情绪状态识别\n  67% episode 受影响\n→ BehaviorFinding"]
         D["技能提案生成器\n调用外部推理桥接(Claude Code)\n生成候选技能:\n  情绪激活检测器\n  在意图路由前检测情绪信号\n  切换 情绪先于目标 策略"]
-        E["提案验证器\n回放 15 个代表性 episode\n加载候选技能\n重新驱动 Actio 实例\n结果:情绪高激活轮次\n对话质量+23%\n无负向影响"]
+        E["提案验证器\n回放 15 个代表性 episode\n加载候选技能\n重新驱动 SimpleActio 实例\n结果:情绪高激活轮次\n对话质量+23%\n无负向影响"]
         F["提案打包器\n打包 IncrementProposal:\n  BehaviorFinding(67%,80 episode)\n  候选技能定义\n  验证结果(+23%,15 episode)\n  触发 episode 引用列表"]
 
         A --> B
@@ -924,7 +924,7 @@ flowchart TD
 技能提案生成器调用外部推理桥接(Claude Code)生成候选技能:"情绪激活检测器"——在意图推断路由之前检测高情绪激活信号,若检测到则切换"情绪先于目标"响应策略。
 
 **Step 3:提案验证器**
-回放 15 个代表性 episode,加载候选技能,重新驱动 Actio 实例。验证结果:情绪高激活轮次后续对话质量平均提升 23%,无负向影响。
+回放 15 个代表性 episode,加载候选技能,重新驱动 SimpleActio 实例。验证结果:情绪高激活轮次后续对话质量平均提升 23%,无负向影响。
 
 **⚠️ 已知局限**:验证器回放的是"触发提案的同批数据",有过拟合风险。应对:审核门②后续轮次 MindAgent 经验采集会用新 episode 持续验证,战绩追踪器记录后续表现。审核门是第一道关,不是最后一道。🔶 局限已知,架构设计一致。
 
@@ -972,9 +972,9 @@ TrainScheduler 配方提名器打包 AgentRSI 类型配方:锁定 zengen-v3 版�
 
 本节补充此前架构设计时有意延后的技术选型与实现细节,这些决策会直接影响后续实施计划的制定。补充 A/B/C 是三个子系统局部的技术选型,补充 D–G 是贯穿全系统的横切关注点(可观测性与成本记账、失败处理与断点恢复、面向 V2 的扩展性设计、配置体系与凭证边界)。
 
-### 补充 A:Actio 模块详细设计
+### 补充 A:SimpleActio 模块详细设计
 
-Actio 是共享基础设施层的核心组件,为 SocialSimulator 和 MindAgent 提供统一的"带技能库/记忆库的智能体实例"执行引擎。
+SimpleActio 是共享基础设施层的核心组件,为 SocialSimulator 和 MindAgent 提供统一的"带技能库/记忆库的智能体实例"执行引擎。
 
 #### A.1 内部模块划分
 
@@ -998,7 +998,7 @@ Actio 是共享基础设施层的核心组件,为 SocialSimulator 和 MindAgent 
 │   RoleAssignment 最终解析到的就是这一层                 │
 └─────────────────────────────────────────────────────┘
               ↓
-      ActioInstance(实例)
+      SimpleActioInstance(实例)
       instantiate(model_backend_ref, skill_library_version,
                    memory_library_version, profile)
       → respond(dialogue_history) → (utterance, activation_trace)
@@ -1021,9 +1021,9 @@ Actio 是共享基础设施层的核心组件,为 SocialSimulator 和 MindAgent 
 
 #### A.3 激活轨迹(ActivationTrace)——关键补充接口
 
-之前 MindAgent 设计里的**经验分析器**要"跨episode聚合分析行为模式",但如果 Actio 只吐出最终回复,分析器根本无法知道"这句回复是哪个技能路由决定的、是否检索了某条记忆"——没有这层信息,归因分析就是空中楼阁。
+之前 MindAgent 设计里的**经验分析器**要"跨episode聚合分析行为模式",但如果 SimpleActio 只吐出最终回复,分析器根本无法知道"这句回复是哪个技能路由决定的、是否检索了某条记忆"——没有这层信息,归因分析就是空中楼阁。
 
-**因此 ActioInstance 每次响应都必须同时返回一份激活轨迹**:
+**因此 SimpleActioInstance 每次响应都必须同时返回一份激活轨迹**:
 - 本轮触发了哪些技能候选
 - 路由器最终选中了哪个技能
 - 是否检索了记忆库(检索到了什么条目)
@@ -1031,13 +1031,13 @@ Actio 是共享基础设施层的核心组件,为 SocialSimulator 和 MindAgent 
 
 经验分析器的行为发现(BehaviorFinding)会直接引用这份轨迹——这也让场景三里"意图推断路由忽略情绪状态"这类发现,从"猜测"变成"有据可查"。
 
-#### A.4 Actio 的关键边界:自身无状态,绑定的版本由调用方决定
+#### A.4 SimpleActio 的关键边界:自身无状态,绑定的版本由调用方决定
 
-Actio 本身不决定"用哪个版本的技能库/记忆库"——这是调用方的职责:
+SimpleActio 本身不决定"用哪个版本的技能库/记忆库"——这是调用方的职责:
 - **SocialSimulator** 每次实例化都绑定一次性的人格快照,用完即弃,不产生长期更新
 - **MindAgent** 绑定当前最新批准的技能/记忆库版本,是唯一能够**提案更新**这些版本的角色(通过它自己的分析-生成-验证流程)
 
-Actio 只是执行引擎:给定绑定的版本快照,忠实地路由技能、检索记忆、调用模型后端、产出响应+激活轨迹。
+SimpleActio 只是执行引擎:给定绑定的版本快照,忠实地路由技能、检索记忆、调用模型后端、产出响应+激活轨迹。
 
 #### A.5 数据模型
 
@@ -1046,7 +1046,7 @@ Actio 只是执行引擎:给定绑定的版本快照,忠实地路由技能、检
 | **Skill(技能)** | 触发条件(结构化谓词)、响应策略(结构化指令)、层级(宏观/微观)、版本 |
 | **MemoryEntry(记忆条目)** | 主体、信念/事实内容、时间戳、来源episode引用、置信度、版本 |
 | **ReasoningExperience(推理经验)** | 提炼后的可复用推理模式、三级回退激活优先级 |
-| **ActioInstance(智能体实例)** | 绑定的模型后端引用+技能库版本+记忆库版本+人格/agent画像 |
+| **SimpleActioInstance(智能体实例)** | 绑定的模型后端引用+技能库版本+记忆库版本+人格/agent画像 |
 | **ActivationTrace(激活轨迹)** | 本轮响应实际触发的技能候选、最终选中的技能、检索到的记忆条目列表 |
 
 ---

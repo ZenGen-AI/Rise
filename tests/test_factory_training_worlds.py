@@ -11,8 +11,8 @@ from dataclasses import dataclass
 
 import pytest
 
-from actio.memory import TupleMemory
-from actio.memory_port import MemoryClosedError, MemoryEvent, MemoryFailureError
+from simple_actio.memory import TupleMemory
+from simple_actio.memory_port import MemoryClosedError, MemoryEvent, MemoryFailureError
 from factory.memory_runtime import StandInTrainingWorlds, StarlingLayout
 
 EP = "run-1-grpo0-s1-r0"
@@ -37,7 +37,7 @@ def case(request, tmp_path):
         yield Case(worlds, TupleMemory().digest(), None, None)
         return
     pytest.importorskip("starling")
-    from actio.memory_starling import StarlingDeploymentStore, empty_digest
+    from simple_actio.memory_starling import StarlingDeploymentStore, empty_digest
     from factory.memory_runtime import StarlingTrainingWorlds
     from starling_fakes import FakeOpenAI, offline_api_key
 
@@ -258,7 +258,7 @@ def test_the_rollout_world_is_one_file_under_runs_and_goes_after_close(starling)
 
 
 def test_a_scenario_without_a_seed_file_starts_empty(starling):
-    from actio.memory_starling import empty_digest
+    from simple_actio.memory_starling import empty_digest
     a = starling.worlds.open_rollout("run-1", "s2", "run-1-grpo0-s2-r0", "pa")
     assert a.digest() == empty_digest()
     starling.worlds.close_rollout("run-1-grpo0-s2-r0", [a], wait_s=1.0)
@@ -293,7 +293,7 @@ def test_a_world_that_cannot_be_made_is_a_permanent_failure_and_leaves_nothing(s
         dst.write_bytes(b"half")
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr("actio.memory_starling.copy_library", full)
+    monkeypatch.setattr("simple_actio.memory_starling.copy_library", full)
     with pytest.raises(MemoryFailureError) as caught:
         worlds.open_rollout("run-1", "s1", EP, "pa")
     assert caught.value.transient is False and "OSError" in str(caught.value)

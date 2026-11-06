@@ -14,9 +14,9 @@
 `StarlingTrainingWorlds` 的世界是 `runs/<run_id>/<episode_id>.db`,从 `seeds/<seed>/<scenario>.db` 复制起点;
 `StandInTrainingWorlds` 的世界是内存里的一份 `TupleMemory`,从空世界起,不落盘。
 
-本模块不导入 `starling`(全仓库只有 `actio/memory_starling.py` 导入它),没装 Starling 时 `import factory.memory_runtime`
-照常成功,替身路径照常起得来。Starling 的版本与抽取提示摘要由调用方从 `actio.memory_starling` 取来传进
-`starling_memory_runtime`;`starling_memory_resolver` 在被调用时才延迟导入 `actio.memory_starling`,所以缺依赖
+本模块不导入 `starling`(全仓库只有 `simple_actio/memory_starling.py` 导入它),没装 Starling 时 `import factory.memory_runtime`
+照常成功,替身路径照常起得来。Starling 的版本与抽取提示摘要由调用方从 `simple_actio.memory_starling` 取来传进
+`starling_memory_runtime`;`starling_memory_resolver` 在被调用时才延迟导入 `simple_actio.memory_starling`,所以缺依赖
 在装配期响,不拖到派发时。`StarlingTrainingWorlds` 同理:`StarlingMemory`、`copy_library` 在方法内才导入,没装 Starling
 时类本身可以导入,只是造不出世界。
 
@@ -42,8 +42,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
-from actio.memory import FileTupleStore, TupleMemory
-from actio.memory_port import (
+from simple_actio.memory import FileTupleStore, TupleMemory
+from simple_actio.memory_port import (
     PERSONA_ID_PATTERN,
     DeploymentMemoryStore,
     MemoryBackend,
@@ -52,7 +52,7 @@ from actio.memory_port import (
     MemoryHit,
     RememberOutcome,
 )
-from actio.trace import TRACE_SCHEMA_V2
+from simple_actio.trace import TRACE_SCHEMA_V2
 from controlplane.daemon import DirectiveFailedError
 from controlplane.gitstore import GitStore
 from controlplane.lock import git_dir
@@ -70,8 +70,8 @@ from mindagent.errors import MindAgentDataError
 from mindagent.memory_layout import MemoryLayout, _tag_path
 from simulator.realtime.validation import validate_episode_id
 
-if TYPE_CHECKING:       # 只给类型注解用:运行时不导入 actio.memory_starling(它导入 starling)
-    from actio.memory_starling import StarlingEndpoints
+if TYPE_CHECKING:       # 只给类型注解用:运行时不导入 simple_actio.memory_starling(它导入 starling)
+    from simple_actio.memory_starling import StarlingEndpoints
 
 _log = logging.getLogger(__name__)
 
@@ -175,7 +175,7 @@ def starling_memory_runtime(config: MemoryConfig, *, version: str, install_sourc
 
     `version` 是 `starling.__version__`,它区分不了同版本号的两个提交,所以后面拼上安装来源
     (`factory.memory_config.starling_install_source()` 的 `git:` 或 `record:` 串)。`prompts_digest` 是
-    `actio.memory_starling.extraction_prompts_digest()`。两个端点地址用配置里已规范化的值(不带 userinfo)。
+    `simple_actio.memory_starling.extraction_prompts_digest()`。两个端点地址用配置里已规范化的值(不带 userinfo)。
     `config.root` 不进身份:位置不是实验的一部分。密钥更不在这里,它只在环境变量里。
     每次返回一份新字典。"""
     return {
@@ -256,8 +256,8 @@ def starling_memory_resolver(
     悬空的符号链接与读不了的目录都不算。
 
     `runtime` 在这里拷一份,每次返回再拷一份:调用方改返回值、装配方事后改原字典,都不影响解出的身份。
-    `actio.memory_starling` 在本函数里才导入(它导入 `starling`),所以没装 Starling 时装配期就抛 ImportError。"""
-    from actio.memory_starling import empty_digest, library_digest
+    `simple_actio.memory_starling` 在本函数里才导入(它导入 `starling`),所以没装 Starling 时装配期就抛 ImportError。"""
+    from simple_actio.memory_starling import empty_digest, library_digest
 
     identity = copy.deepcopy(runtime)
 
@@ -600,7 +600,7 @@ class StarlingTrainingWorlds(_RolloutWorlds):
     """Starling 的 rollout 世界(设计 5.1 节):世界是 `runs/<run_id>/<episode_id>.db`,各主体用 `StarlingMemory.open`
     在同一个库上开端口(holder 作 Starling 的 agent 名),`on_close` 减计数。
 
-    起点:绑了种子且 `seeds/<seed>/<scenario>.db` 在就**用文件复制**取世界(`actio.memory_starling.copy_library`),
+    起点:绑了种子且 `seeds/<seed>/<scenario>.db` 在就**用文件复制**取世界(`simple_actio.memory_starling.copy_library`),
     没有就新建空库。不用 `backup_to`:它要先把种子打开,`Memory.open` 会建 -wal、-shm 并跑迁移,种子目录与文件只读时
     失败。种子没有写者,复制 `.db` 加 `-wal` 是一致的。同一组 rollout 因此从同一个起点出发,又彼此看不见对方写的东西。
     只有 lstat 报 `FileNotFoundError`(确实没有这个文件)才从空库起,悬空的符号链接交给复制去报错。
@@ -616,7 +616,7 @@ class StarlingTrainingWorlds(_RolloutWorlds):
         self._close_timeout_s = close_timeout_s
 
     def _create(self, run_id: str, scenario_id: str, episode_id: str, seed: str | None) -> Path:
-        from actio.memory_starling import copy_library, translate_failure
+        from simple_actio.memory_starling import copy_library, translate_failure
 
         path = self._layout.rollout_world(run_id, episode_id)      # 名字不合法在这里抛 ValueError
         source = None if seed is None else self._layout.seed(seed, scenario_id)
@@ -639,7 +639,7 @@ class StarlingTrainingWorlds(_RolloutWorlds):
         return path
 
     def _port(self, world: object, holder: str, release: Callable[[], None]) -> MemoryBackend:
-        from actio.memory_starling import StarlingMemory
+        from simple_actio.memory_starling import StarlingMemory
 
         return StarlingMemory.open(world, holder=holder, endpoints=self._endpoints,
                                    close_timeout_s=self._close_timeout_s, on_close=release)
@@ -716,9 +716,9 @@ def memory_wiring(repo_root: Path, env: Mapping[str, str], *, deployment: bool) 
     """读 RISE_MEMORY_CONFIG 选后端,只在这里记一次启动日志。日志与异常文字都不含记忆根目录与端点地址(第 10 节)。
 
     - 没设(或空串):替身。`deployment` 为真才造替身的部署记忆。
-    - 设了,按序:Starling 的安装来源(未安装、editable 在这里拒绝,先于任何对 `actio.memory_starling` 的导入与对记忆
+    - 设了,按序:Starling 的安装来源(未安装、editable 在这里拒绝,先于任何对 `simple_actio.memory_starling` 的导入与对记忆
       根目录的写)、`OPENAI_API_KEY` 非空、`runs/` 不是符号链接也不是文件、认领记忆根目录(被另一个仓库占用就拒绝)、
-      记忆根不是旧布局且 `.world` 旁注都完好(`check_memory_layout`,后缀 `.db`)、导入 `actio.memory_starling`。
+      记忆根不是旧布局且 `.world` 旁注都完好(`check_memory_layout`,后缀 `.db`)、导入 `simple_actio.memory_starling`。
       替身的同一项检查在 `stand_in_deployment_memory` 里,只在造部署记忆时做。
       装了包但 C++ 扩展载不进来(`ImportError`)译成与「没装」同一条安装提示的 `FactoryConfigError`。"""
     config = read_memory_config(env=env, repo_root=repo_root)
@@ -735,7 +735,7 @@ def memory_wiring(repo_root: Path, env: Mapping[str, str], *, deployment: bool) 
     memory_layout = MemoryLayout(config.root, suffix=".db")
     check_memory_layout(memory_layout, repo_root)
     try:
-        from actio.memory_starling import (
+        from simple_actio.memory_starling import (
             StarlingDeploymentStore,
             StarlingEndpoints,
             extraction_prompts_digest,

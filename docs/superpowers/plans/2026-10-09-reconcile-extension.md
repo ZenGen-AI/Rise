@@ -169,7 +169,7 @@ TypeScript 命令行与 Python 只经 git 树里的文件通信。下表每一�
 | 诊断载荷 `dimension_scores[].{dimension, level, score, ci_low, ci_high, sample_size, track_provenance}`、`regression_flags.flags`、`benchmark_version`、`run_tier`、`sampling_k`、`candidate_ref` | `diagnostic/datamodel.py` `DiagnosticReport.to_dict` | `summarizeDiagnostic`(既有) |
 | 配方候选载荷 `recipe_type, dimension, source_run_id, eval_anchor{...}, result{gain, baseline_ref, candidate_ref, promoted}, repro{errors, warnings}, nondeterministic` | 设计 §4.2;写方是计划 5 `build_recipe_candidate`,`repro` 来自计划 3 `validate_reproducibility` | `summarizeRecipeCandidate`;`approve` 的证据规则见下一行 |
 | 审核门③"证据在场":`payload.repro` 是对象,且 `repro.errors`、`repro.warnings` 都是列表(可为空);`repro` 缺失、为 `null`、为数组或标量,或 `errors`/`warnings` 任一不是列表(例如是字典或字符串),都算缺证据;`errors` 非空仍允许批准 | `recipestore/admit.py` 的 `has_repro_evidence`(计划 3 任务 45,收录处理器用它兜底) | `commands.ts` 的 `hasReproEvidence`(`approve` 调它;注释指向 Python 一侧) |
-| 提案载荷 `round_id, finding{id, pattern, support, ratio, episode_refs}, increments[{kind, definition}], verification{method, episodes, fired_on_motivating, fired_elsewhere, notes}` | 设计 §4.2;写方是计划 7 `package`。`increments[].definition` 为 `actio` 的 `Skill.to_dict()` / `MemoryEntry.to_dict()`(计划 6「对外契约:技能、记忆、推理经验的字典形状」),技能 id 以 `skill-` 开头、记忆 id 以 `mem-` 开头 | `summarizeProposal`;`approve` 要求 `verification` 是非空对象 |
+| 提案载荷 `round_id, finding{id, pattern, support, ratio, episode_refs}, increments[{kind, definition}], verification{method, episodes, fired_on_motivating, fired_elsewhere, notes}` | 设计 §4.2;写方是计划 7 `package`。`increments[].definition` 为 `simple_actio` 的 `Skill.to_dict()` / `MemoryEntry.to_dict()`(计划 6「对外契约:技能、记忆、推理经验的字典形状」),技能 id 以 `skill-` 开头、记忆 id 以 `mem-` 开头 | `summarizeProposal`;`approve` 要求 `verification` 是非空对象 |
 | 驳回原因 `payload.reject_reason` | 计划 5 的上下文装配读它(`PlanningContext.candidate.reject_reason`) | `reject`(既有,三类产物通用) |
 
 ## Rulings
@@ -2808,7 +2808,7 @@ const RECIPE_PAYLOAD = {
 const PROPOSAL_PAYLOAD = {
   round_id: "agent-round-zengen-v1",
   finding: { id: "f-1", pattern: "emotion_high ignored", support: 6, ratio: 0.83, episode_refs: ["e1", "e2"] },
-  // definition 是 actio 的 Skill.to_dict()(计划 6「对外契约:技能、记忆、推理经验的字典形状」),键顺序照抄
+  // definition 是 simple_actio 的 Skill.to_dict()(计划 6「对外契约:技能、记忆、推理经验的字典形状」),键顺序照抄
   increments: [{
     kind: "skill",
     definition: {
@@ -4664,7 +4664,7 @@ Expected: 恰好 24 个文件,都在 File Structure 表里(在 `main@0385004` �
 
 - [ ] **Step 4: 依赖方向**
 
-Run: `grep -rnE "^(from|import) (diagnostic|mindtrainer|recipestore|trainplanner|trainscheduler|mindagent|actio|inference_bridge|factory)" src/controlplane; grep -rnE "^(from|import) mindtrainer" src/diagnostic`
+Run: `grep -rnE "^(from|import) (diagnostic|mindtrainer|recipestore|trainplanner|trainscheduler|mindagent|simple_actio|inference_bridge|factory)" src/controlplane; grep -rnE "^(from|import) mindtrainer" src/diagnostic`
 Expected: 无输出。
 
 - [ ] **Step 5: `from __future__` 检查**

@@ -38,10 +38,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from actio.text import tokens
+from simple_actio.text import tokens
 
 if TYPE_CHECKING:  # 只给类型注解用;运行时不导入 starling,没装 memory extra 也能导入本模块
-    from actio.memory_starling import StarlingEndpoints
+    from simple_actio.memory_starling import StarlingEndpoints
 
 # Starling python/starling/extractor/prompts.py 里信念抽取提示词的开头
 _BELIEF_PROMPT_HEAD = "You are an extractor for a Statement-based memory system."
@@ -335,7 +335,7 @@ class FakeOpenAI:
     def endpoints(self, *, timeout_ms: int = 2000, max_retries: int = 0) -> "StarlingEndpoints":
         """指向本假端点的抽取与嵌入配置。max_retries 默认 0:Starling 的 C++ 默认重试 3 次,
         失败路径的用例一次调用会拖到约 21 秒。"""
-        from actio.memory_starling import StarlingEndpoints  # 延迟导入:它导入 starling
+        from simple_actio.memory_starling import StarlingEndpoints  # 延迟导入:它导入 starling
 
         return StarlingEndpoints(
             extraction_base_url=self.base_url, extraction_model="fake-extract",

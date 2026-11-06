@@ -14,7 +14,7 @@
 - **控制层**：放 RecipeStore、TrainScheduler、TrainPlanner 与外部推理桥接，负责沉淀配方、规划下一轮。规划可以经桥接交给更强的外部模型。
 - **协调层**：ControlPlane 管产物树、状态机与调和循环，配三道人工审核门。
 - **计算层**：MindTrainer 改权重；SocialSimulator 做情境仿真、实时环境服务与诊断评测；MindAgent 让部署态智能体自进化技能与记忆。
-- **共享基础设施**：每个角色位都是一个 Actio 智能体，记忆由 Starling 提供。真实训练与推理经远端计算层 compute 下发到 GPU 主机上的 ROLL 与 vLLM。
+- **共享基础设施**：每个角色位都是一个 SimpleActio 智能体，记忆由 Starling 提供。SimpleActio 是 Actio 的简化版，功能完备的正式版 Actio 还在开发，完成后再接入。真实训练与推理经远端计算层 compute 下发到 GPU 主机上的 ROLL 与 vLLM。
 
 子系统之间不直接调用，只经 ControlPlane 读写产物。例外只有两条橙色的受限直连，都连到 SocialSimulator：① 来自 MindTrainer，承载 InteractTrain 的 rollout；② 来自 MindAgent，承载部署经验采集。
 
@@ -44,7 +44,7 @@
 | `src/simulator` | 情境与人格、仿真运行器、批量数据集、实时环境服务（gRPC 双向流） |
 | `src/diagnostic` | 诊断评测：编排、SoMEval 运行器、退化判定、污染准入检查 |
 | `src/mindtrainer` | 训练：batch 与 interact 轨迹源、奖励管线、续训、ROLL 执行器 |
-| `src/actio` | 智能体框架：技能、记忆端口（替身与 Starling）、激活轨迹 |
+| `src/simple_actio` | 智能体框架：技能、记忆端口（替身与 Starling）、激活轨迹 |
 | `src/mindagent` | 部署态智能体自进化：部署轮次、经验分析、提案、离线验证 |
 | `src/recipestore` | 训练配方的可复现性校验、检索、战绩 |
 | `src/trainscheduler`、`src/trainplanner` | 装配规划上下文、生成并校验下一轮决策、构造指令 |
@@ -146,7 +146,7 @@ ls /tmp/rise-demo/control-plane/models/      # zengen-v1.yaml
 
 ## 智能体记忆（可选）
 
-Actio 的记忆按"模拟世界"组织：部署时一个情境一个世界，训练时每条 rollout 一个平行世界，人格是世界里的主体。
+SimpleActio 的记忆按"模拟世界"组织：部署时一个情境一个世界，训练时每条 rollout 一个平行世界，人格是世界里的主体。
 
 - **替身**：不设 `RISE_MEMORY_CONFIG` 时用确定性替身，部署记忆落在控制面仓库的 `.git/rise-memory` 下。
 - **Starling**：生产实现，要先装 `--extra memory`。然后写一份仓库外、权限 0600 的记忆配置，用 `RISE_MEMORY_CONFIG` 指向它：

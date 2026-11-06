@@ -1,4 +1,4 @@
-# 闭环集成设计:把 RecipeStore、TrainScheduler、TrainPlanner、Actio、MindAgent 接进调和循环
+# 闭环集成设计:把 RecipeStore、TrainScheduler、TrainPlanner、SimpleActio、MindAgent 接进调和循环
 
 > 状态:设计稿。日期 2026-10-09。基线:`main` 在 `0385004`,全量测试 820 通过。
 > 上游设计:`2026-09-22-rise-architecture-design.md`、`2026-09-24-rise-subsystem-design.md`、`2026-10-03-mindtrainer-design.md`。
@@ -6,7 +6,7 @@
 
 ## 0. 这份文档做什么
 
-七个子系统的详细设计已经写完。ControlPlane、SocialSimulator(含诊断评测与实时服务)、MindTrainer 已落地,MindTrainer 也已接进调和循环。RecipeStore、TrainScheduler、TrainPlanner、MindAgent,以及它们依赖的共享组件 Actio 与外部推理桥接,既没有计划,也没有代码。
+七个子系统的详细设计已经写完。ControlPlane、SocialSimulator(含诊断评测与实时服务)、MindTrainer 已落地,MindTrainer 也已接进调和循环。RecipeStore、TrainScheduler、TrainPlanner、MindAgent,以及它们依赖的共享组件 SimpleActio 与外部推理桥接,既没有计划,也没有代码。
 
 本文不重写旧设计。它只做三件事:
 
@@ -24,13 +24,13 @@
 | SocialSimulator | 已落地。批量模块、实时 gRPC 服务、诊断评测编排器 | `src/simulator`、`src/diagnostic` |
 | MindTrainer | 已落地并接线,batch 端到端可跑 | `src/mindtrainer`、`scripts/run_controlplane.py` |
 | 外部推理桥接 | 只有配置加载与脱敏函数,没有桥接本身 | `src/controlplane/config.py` |
-| Actio | 没有。`activation_trace` 字段在协议里,runner 写死 `None` | `src/simulator/runner.py` |
+| SimpleActio | 没有。`activation_trace` 字段在协议里,runner 写死 `None` | `src/simulator/runner.py` |
 | MindAgent、RecipeStore、TrainScheduler、TrainPlanner | 没有 | 仓库内无对应包 |
 
 ### 1.2 缺口
 
 - **G1 没有"事件"。** 调和循环只轮询,纯函数 `reconcile` 只认 directive 与候选 checkpoint。MindAgent 的"晋级事件订阅"、TrainScheduler 的"诊断报告触发"、配方提名的"轮次结果触发"都没有载体。
-- **G2 激活轨迹没有通路。** 协议里 `SubmitTurn` 只有 `utterance` 与 `inner_thought`,runner 对所有轮次写 `activation_trace=None`。完整 Actio 扮演的角色,其技能路由信息进不了落盘的 episode,经验分析器就没有输入。
+- **G2 激活轨迹没有通路。** 协议里 `SubmitTurn` 只有 `utterance` 与 `inner_thought`,runner 对所有轮次写 `activation_trace=None`。完整 SimpleActio 扮演的角色,其技能路由信息进不了落盘的 episode,经验分析器就没有输入。
 - **G3 正式技能/记忆库没有存放位置。** 目录树只有 `skill_memory_proposals/`,没有"已纳入的库"。
 - **G4 指令确认态不存在。** 非审核类状态机只有 `pending / executed / consumed / failed`,旧设计 6.3 要求的"待确认"没有对应状态。
 - **G5 审核命令只认候选 checkpoint。** 命令行用 `candidate_checkpoint.yaml` 的路径模式找产物,技能提案与配方候选无法审核。
@@ -355,9 +355,9 @@ make_nominate_handler(*, config_loader, accept_mock_evidence=None, repo_commit=N
 - **规划处理器的流程**:装配上下文 → 规划 → 校验 → 先写 `planner_decision(pending, next_run_id)` → 解析(`resolve_action` 与 `construct_directive`)→ 写指令(`confirm_directives` 为真则 `awaiting_confirmation`,否则 `pending`)→ 决策置 `executed`。解析放在写出 pending 决策之后,是为了让崩在解析或构造阶段的那一轮也用同一条重入路径续写(计划 5 的 Ruling 14 记了后果:失败决策可能带着已分配但没用的 `next_run_id`)。
 - **规划是同步的**。外部推理期间调和循环被阻塞,与派发器同属已知限制。
 
-## 8. Actio 与 MindAgent
+## 8. SimpleActio 与 MindAgent
 
-### 8.1 Actio(新增顶层包 `actio`,只依赖 `simulator.datamodel`)
+### 8.1 SimpleActio(新增顶层包 `simple_actio`,只依赖 `simulator.datamodel`)
 
 ```python
 instance = instantiate(model_backend, *, skills, memories, library_version, profile)   # 完整签名以计划 6 为准:另有 keyword-only 的 experiences=()、registry=None、memory_limit=3
@@ -373,7 +373,7 @@ utterance, inner_thought, trace = instance.respond(persona, scenario, history, s
 - **激活轨迹**:
 
 ```python
-{"schema": "actio.trace.v1",
+{"schema": "simple_actio.trace.v1",
  "signals": [signal_name, ...],                 # 此刻为真的已注册信号,按名字升序
  "candidates": [skill_id, ...],                 # 命中的技能,按路由次序
  "selected": skill_id | None,                   # == candidates[0];没有命中为 None
@@ -393,7 +393,7 @@ utterance, inner_thought, trace = instance.respond(persona, scenario, history, s
 - 服务端回显客户端自己那一轮时保留轨迹;对手轮次的轨迹仍然被抹掉,规则不变。
 - 用 `scripts/gen_realtime_proto.sh` 重新生成三个生成文件并入库。
 
-### 8.3 MindAgent(新增顶层包 `mindagent`,依赖 `actio`、`inference_bridge`、实时客户端)
+### 8.3 MindAgent(新增顶层包 `mindagent`,依赖 `simple_actio`、`inference_bridge`、实时客户端)
 
 ```python
 # 完整签名以计划 7 为准;这里只列设计层面的形状,以及计划 7 比最初草图多出的 keyword-only 参数。
@@ -411,12 +411,12 @@ AgentConfig(scenario_ids, bindings, max_turns=6, episodes_per_scenario=1, max_re
             min_support=3, min_ratio=0.5, min_fired_on_motivating=0.8, max_fired_elsewhere=0.2, max_parse_retries=2)   # 数据类,构造时校验;计划 9 的 agent.yaml 读它
 ```
 
-- **部署驱动器**:`purpose` 固定为 `deployment_simulation`,Actio 实例占客户端位,每轮 `respond` 后带轨迹提交。episode 落在产生它所绑定模型的那个 run 下,id 以 `deploy-<model>-` 开头。
+- **部署驱动器**:`purpose` 固定为 `deployment_simulation`,SimpleActio 实例占客户端位,每轮 `respond` 后带轨迹提交。episode 落在产生它所绑定模型的那个 run 下,id 以 `deploy-<model>-` 开头。
 - **经验分析器**:对每个已注册信号,统计"对方最后一句触发了该信号,而被选中的技能并不针对该信号"的 episode 比例。episode 数不足 `min_support` 或比例低于 `min_ratio` 不产生发现,体现"不基于单一个案"。
 - **技能提案生成器**:默认规则模板(信号 → 一条"先处理该信号"的技能);传入桥接时,让外部模型生成策略文本。解析耗尽在生成器层是 T2(`ProposalParseError`);轮次处理器遇到它按 R18 把轮次置 `failed`、记 T3(见 §11 的失败类别约定)。
 - **提案验证器(R13)**:用保存下来的对方原话离线重放动机 episode,分别用基线实例和加载候选技能后的实例驱动,度量候选技能在动机轮次上的命中比例,以及在其余轮次上的误触发比例。它**不**度量对话质量。可选传入桥接 judge 做质量评分,结果单列。验证用的是触发提案的同一批数据,过拟合风险写进提案的 `notes`,与旧设计一致。
 - **轮次处理器**:开始前,把模型已不是最新的 `pending` 轮次置 `failed`(原因 superseded);再绑定最新的有效模型和当前库版本,跑部署 episode、分析、提案、验证,写提案产物,最后把轮次置 `executed`。
-- **收录处理器**:提案 `approved` 时,把技能与记忆写进正式库,更新 `library_state`,提案置 `effective`。`library_state` 里技能库与记忆库的版本一律存成字符串,与激活轨迹里的 `library_version` 同型;交给 Actio 实例前经 `actio` 的 `normalize_library_version` 规范化。没有任何技能时,第一轮"沉默"是预期行为。
+- **收录处理器**:提案 `approved` 时,把技能与记忆写进正式库,更新 `library_state`,提案置 `effective`。`library_state` 里技能库与记忆库的版本一律存成字符串,与激活轨迹里的 `library_version` 同型;交给 SimpleActio 实例前经 `simple_actio` 的 `normalize_library_version` 规范化。没有任何技能时,第一轮"沉默"是预期行为。
 
 ## 9. 数据合成接线(R14、G9)
 
@@ -458,16 +458,16 @@ data_spec: {scenario_count: 4, seed: 0, purpose: training, stages: {sft: {group_
 
 ```
 controlplane  ←  inference_bridge, recipestore, trainplanner(只用纯数据), trainscheduler, mindagent, factory
-simulator     ←  actio(datamodel 部分), mindagent, mindtrainer(已有)
+simulator     ←  simple_actio(datamodel 部分), mindagent, mindtrainer(已有)
 recipestore   ←  trainscheduler, factory
 trainplanner  ←  trainscheduler, factory
-actio         ←  mindagent, factory
+simple_actio         ←  mindagent, factory
 inference_bridge ← trainplanner, trainscheduler(只取 `BridgeError`), mindagent, factory
 mindtrainer.data_spec, mindtrainer.training_config ← trainscheduler      # 只限这两个模块
 ```
 
 - `factory` 是组合根:可以导入任何包(装配派发器要用 `mindtrainer.dispatch` 与 `mindtrainer.data_producer`,装配评估器要用 `diagnostic` 与 `simulator`),任何包都不导入 `factory`。
-- `controlplane` 不导入上述任何新包(计划 9 任务 109 有一条统一测试强制)。`mindtrainer` 不导入 `diagnostic`。`actio` 只依赖 `simulator.datamodel`。`trainscheduler` 只从 `mindtrainer` 导入 `data_spec`(`required_stages`、`parse_data_spec`、`DataSpec` 等,完整名单以计划 5 的依赖声明为准)与 `training_config`(`TrainingConfig`、`validate_training_config`、`load_config_from_directive`,构造指令与校验要用),不导入 `mindtrainer` 的其他模块,也不导入 `diagnostic`、`simulator`、`actio`、`mindagent`、`factory`。
+- `controlplane` 不导入上述任何新包(计划 9 任务 109 有一条统一测试强制)。`mindtrainer` 不导入 `diagnostic`。`simple_actio` 只依赖 `simulator.datamodel`。`trainscheduler` 只从 `mindtrainer` 导入 `data_spec`(`required_stages`、`parse_data_spec`、`DataSpec` 等,完整名单以计划 5 的依赖声明为准)与 `training_config`(`TrainingConfig`、`validate_training_config`、`load_config_from_directive`,构造指令与校验要用),不导入 `mindtrainer` 的其他模块,也不导入 `diagnostic`、`simulator`、`simple_actio`、`mindagent`、`factory`。
 - **计划 1 一次性定义全部新增路径函数、`SUBDIRS`、状态机改动、`ledger`、桥接**。后续计划只消费,不得再改这些文件(除非计划文本明确写出)。
 - 新增顶层包必须加进 `pyproject.toml` 的 wheel 包列表,`test_mt_packaging` 会强制检查。
 - 路径函数的名字(计划 1 产出):`recipe_candidate_file(run_id)`、`recipe_dir(run_id)`、`recipe_file(run_id)`、`recipe_lineage_file(run_id)`、`recipe_track_file(run_id)`、`proposal_file(proposal_id)`、`skill_file(skill_id)`、`memory_file(mem_id)`、`library_state_file()`、`agent_round_file(model_id)`、`planner_decision_file(run_id)`、`nomination_file(run_id)`、`recipe_track_note_file(run_id)`、`run_trace_file(run_id)`、`failure_record_file(run_id, task_id)`、`scheduler_config_file()`、`training_defaults_file()`、`planner_prompt_file(version)`。
@@ -489,7 +489,7 @@ mindtrainer.data_spec, mindtrainer.training_config ← trainscheduler      # 只
 | 3 | `2026-10-09-recipestore.md` | 40 | 校验器、检索、`compute_gain`、战绩、生命周期、收录与战绩处理器 | 计划 1 |
 | 4 | `2026-10-09-trainplanner.md` | 50 | 上下文、提示渲染、解析、后端、`plan` | 计划 1 |
 | 5 | `2026-10-09-trainscheduler.md` | 60 | 装配、校验、解析、构造、提名、两个处理器 | 计划 2、3、4 |
-| 6 | `2026-10-09-actio.md` | 70 | 技能、记忆、经验、实例、信号、协议改动 | 无(协议改动独立) |
+| 6 | `2026-10-09-simple-actio.md` | 70 | 技能、记忆、经验、实例、信号、协议改动 | 无(协议改动独立) |
 | 7 | `2026-10-09-mindagent.md` | 80 | 驱动器、分析、提案、验证、打包、两个处理器 | 计划 1、6 |
 | 8 | `2026-10-09-reconcile-extension.md` | 90 | `reconcile` 扩展、注入缝、真实诊断评估器、命令行泛化与 `confirm` | 计划 1 |
 | 9 | `2026-10-09-factory-and-e2e.md` | 100 | `factory` 组合根、只读子命令、全闭环与 MindAgent 端到端、跨计划一致性核对 | 计划 1 至 8 |

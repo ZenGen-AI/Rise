@@ -1,0 +1,5 @@
+{
+ "title": "激活轨迹如何经协议落盘",
+ "desc": "客户端把 respond 产出的轨迹放进 SubmitTurn 的 Struct 字段。服务端解出字典,经驱动器与客户端驱动后端交给 runner,runner 写进 TurnRecord,会话结束时整份 episode 落盘。逐轮回显时只抹掉对手轮次的轨迹与内心推理,客户端自己的轮次原样回显。",
+ "describe": "**节点**\n\n- SimpleActioInstance.respond:返回三元组 / 轨迹叶子没有数字\n- client.submit_turn:activation_trace 关键字参数 / SetInParent 后 update\n- 客户端本地历史:自己的轮次带轨迹 / 下一轮作 history\n- EnvironmentServicer:HasField 才 MessageToDict / 得 dict,否则传 None\n- SessionDriver:submit_turn 原样转交轨迹\n- ClientDrivenBackend:带轨迹时返回三元组 / 不带时仍是二元组\n- run_episode:_unpack_reply 收二元组或三元组 / 深拷贝写进 TurnRecord\n- episode 落盘:会话结束时写入完整记录 / 对手轮次的轨迹也在\n- _drain_ready_events:逐轮事件:对手轮次抹掉两项 / 自己的轮次原样回显\n\n**连线**\n\n- SimpleActioInstance.respond → client.submit_turn\n- client.submit_turn → EnvironmentServicer:SubmitTurn.activation_trace\n- EnvironmentServicer → SessionDriver\n- SessionDriver → ClientDrivenBackend\n- ClientDrivenBackend → run_episode:三元组\n- run_episode → episode 落盘\n- run_episode → _drain_ready_events\n- _drain_ready_events → 客户端本地历史:TurnUpdate"
+}

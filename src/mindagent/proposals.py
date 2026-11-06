@@ -10,8 +10,8 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-from actio.errors import ActioDataError
-from actio.skills import Skill
+from simple_actio.errors import SimpleActioDataError
+from simple_actio.skills import Skill
 from mindagent.analysis import BehaviorFinding
 from mindagent.errors import MindAgentDataError, ProposalParseError
 
@@ -53,7 +53,7 @@ def _skill_definition(finding: BehaviorFinding, instructions: list[str], descrip
         "policy": {"instructions": list(instructions)},
         "description": description,
     }
-    Skill.from_dict(definition)  # 必须能被 Actio 读回,否则是生成器的 bug
+    Skill.from_dict(definition)  # 必须能被 SimpleActio 读回,否则是生成器的 bug
     return definition
 
 
@@ -136,7 +136,7 @@ def propose(
             generator = BRIDGE_GENERATOR
         try:
             definition = _skill_definition(finding, instructions, description)
-        except ActioDataError as exc:
+        except SimpleActioDataError as exc:
             raise ProposalParseError(f"finding {finding.id}: {exc}", attempts=1) from None
         drafts.append(ProposalDraft(
             finding_id=finding.id,

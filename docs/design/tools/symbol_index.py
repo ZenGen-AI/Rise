@@ -16,7 +16,7 @@ import re
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[3]
-PKGS = {"controlplane", "simulator", "diagnostic", "mindtrainer", "actio", "recipestore", "trainplanner",
+PKGS = {"controlplane", "simulator", "diagnostic", "mindtrainer", "simple_actio", "recipestore", "trainplanner",
         "trainscheduler", "mindagent", "inference_bridge", "factory"}
 # 项目专有名词与外部名称:不是代码符号,不核对
 ALLOW = set(dir(builtins)) | {

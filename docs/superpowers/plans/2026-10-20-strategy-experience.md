@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - 每个源文件首条语句是 `from __future__ import annotations`（有测试强制）。
-- 依赖方向：`trainscheduler` 不得导入 `actio`、`mindagent`、`diagnostic`、`simulator`、`factory`；对 RecipeStore 的导入只经 `recipes_port`。
+- 依赖方向：`trainscheduler` 不得导入 `simple_actio`、`mindagent`、`diagnostic`、`simulator`、`factory`；对 RecipeStore 的导入只经 `recipes_port`。
 - 证据等级只经 `controlplane.evidence.diagnostic_grade` 判定，不另写一份；增益只经 `compute_gain`，不另写一份。
 - 产物一律是标准信封（`id`、`type`、`version`、`created_at`、`created_by`、`status`、`schema_version`、`links`、`payload`），写入只经 `GitStore.write_product`。
 - 新增产物目录追加在 `SUBDIRS` 末尾，顺序固定。
@@ -1926,7 +1926,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 FILES = [REPO / "src/trainscheduler/experience.py", REPO / "src/trainscheduler/experience_port.py"]
-FORBIDDEN = {"actio", "mindagent", "diagnostic", "simulator", "factory", "inference_bridge",
+FORBIDDEN = {"simple_actio", "mindagent", "diagnostic", "simulator", "factory", "inference_bridge",
              "trainplanner"}
 
 

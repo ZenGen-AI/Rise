@@ -32,7 +32,7 @@ class RoleMemoryUnavailableError(Exception):
     （抽取/嵌入端点超时、连不上）。过一会儿可能就好，是 T1。驱动器把它归终止原因
     role_memory_unavailable，轨迹源与部署按条重跑。
 
-    simulator 不认识 actio.MemoryFailureError（依赖方向不允许导入 actio）。组合根给每个 Actio 实例
+    simulator 不认识 simple_actio.MemoryFailureError（依赖方向不允许导入 simple_actio）。组合根给每个 SimpleActio 实例
     外面套一层转换后端，接住 MemoryFailureError，按 transient 改抛本类的子类；simulator 只认这个基类。
     与三个 RoleBackend*Error 互不继承，与 RoleMemoryFailureError 也互不继承。"""
 

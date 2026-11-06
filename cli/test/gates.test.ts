@@ -51,7 +51,7 @@ const RECIPE_PAYLOAD = {
 const PROPOSAL_PAYLOAD = {
   round_id: "agent-round-zengen-v1",
   finding: { id: "f-1", pattern: "emotion_high ignored", support: 6, ratio: 0.83, episode_refs: ["e1", "e2"] },
-  // definition 是 actio 的 Skill.to_dict()(计划 6「对外契约:技能、记忆、推理经验的字典形状」),键顺序照抄
+  // definition 是 simple_actio 的 Skill.to_dict()(计划 6「对外契约:技能、记忆、推理经验的字典形状」),键顺序照抄
   increments: [{
     kind: "skill",
     definition: {

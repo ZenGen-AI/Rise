@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from actio.memory import TupleMemory
-from actio.memory_port import MemoryClosedError, MemoryEventConflict, MemoryFailureError
+from simple_actio.memory import TupleMemory
+from simple_actio.memory_port import MemoryClosedError, MemoryEventConflict, MemoryFailureError
 from factory.memory_translate import (
     FactoryMemoryFailureError, FactoryMemoryUnavailableError, MemoryTranslatingBackend, memory_role_backend,
 )
@@ -14,14 +14,14 @@ from simulator.realtime.backend_timeout import RoleMemoryFailureError, RoleMemor
 
 
 class _Instance:
-    """假的 Actio 实例:respond 抛给定异常或返回三元组;close 记次数,可抛。"""
+    """假的 SimpleActio 实例:respond 抛给定异常或返回三元组;close 记次数,可抛。"""
     def __init__(self, raises=None, close_raises=None):
         self.raises, self.close_raises, self.closed = raises, close_raises, 0
 
     def respond(self, persona, scenario, history, speaker_slot):
         if self.raises is not None:
             raise self.raises
-        return "u", None, {"schema": "actio.trace.v2"}
+        return "u", None, {"schema": "simple_actio.trace.v2"}
 
     def close(self):
         self.closed += 1
@@ -59,7 +59,7 @@ def test_non_memory_errors_pass_through_as_the_same_object(cause):
 def test_the_reply_passes_through_and_close_goes_to_the_instance():
     inst = _Instance()
     backend = MemoryTranslatingBackend(inst)
-    assert backend.respond(None, None, [], "b") == ("u", None, {"schema": "actio.trace.v2"})
+    assert backend.respond(None, None, [], "b") == ("u", None, {"schema": "simple_actio.trace.v2"})
     backend.close()
     assert inst.closed == 1 and backend.instance is inst
 
@@ -70,13 +70,13 @@ def test_a_memory_failure_while_closing_is_translated_too():
         MemoryTranslatingBackend(inst).close()
 
 
-def test_memory_role_backend_builds_an_actio_instance_that_writes_v2_traces():
+def test_memory_role_backend_builds_an_simple_actio_instance_that_writes_v2_traces():
     scripted = ScriptedBackend({"b": ["hi"]})
     backend = memory_role_backend(
         scripted, memory=TupleMemory(), episode_id="ep-x", interlocutors={"a": "pa"}, holder="pb",
     )
     utterance, _, trace = backend.respond(None, None, [], "b")
-    assert utterance == "hi" and trace["schema"] == "actio.trace.v2"
+    assert utterance == "hi" and trace["schema"] == "simple_actio.trace.v2"
     assert backend.instance.backend.inner is scripted       # 只有 respond 的底座被套了 IgnoreGuidance
 
 

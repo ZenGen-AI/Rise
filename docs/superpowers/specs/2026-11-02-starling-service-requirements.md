@@ -4,7 +4,7 @@
 
 ## 1. 为什么要改
 
-rise（Rise）现在在自己的进程里直接 `starling.Memory.open(db_path)`，每个人格一个 `.db`，散落在本机的记忆根目录下。代码在 `src/actio/memory_starling.py`（全仓库只有这一个文件导入 `starling`）。
+rise（Rise）现在在自己的进程里直接 `starling.Memory.open(db_path)`，每个人格一个 `.db`，散落在本机的记忆根目录下。代码在 `src/simple_actio/memory_starling.py`（全仓库只有这一个文件导入 `starling`）。
 
 这样有两个问题：
 
@@ -145,7 +145,7 @@ rise 识别的异常：`RecallDegradedError`（瞬态）、`EventConflict`、`Me
 
 - 对一个世界拍快照，返回快照的摘要。只做世界这一级，不需要按 holder 拍（见 5.2）。
 - 从快照恢复，返回恢复后的摘要，等于拍快照时的摘要。
-- 这个世界还有打开着的句柄或在途调用时，恢复要拒绝，并返回能区分的错误码。别的世界开着句柄，不影响这个世界的恢复（rise 今天按 `restore_from: persona has an open port` 处理，见 `src/actio/memory_starling.py` 的 `restore_from`）。
+- 这个世界还有打开着的句柄或在途调用时，恢复要拒绝，并返回能区分的错误码。别的世界开着句柄，不影响这个世界的恢复（rise 今天按 `restore_from: persona has an open port` 处理，见 `src/simple_actio/memory_starling.py` 的 `restore_from`）。
 - 崩溃安全：恢复过程中进程被杀，世界要么还是原样，要么已经完整恢复，不能留下半新半旧的状态。rise 现在为此自己处理了 `-wal`、`-shm` 和 `VACUUM INTO` 的顺序，以后应该由 Starling 负责。
 - Starling 已有的世界快照和回滚（PR #111，语义 A）如果满足这几条，可以直接用。
 - **rise 拍的快照归调用方所有，不参与"保留 5 份"的修剪。** 部署轮次里，每个情境世界的每个 episode 拍一份，验证时再拍一份；数量事先不确定，由 rise 在轮次收尾时显式删除。修剪如果删掉了 rise 还要用的回滚点，回滚就会悄悄失效。

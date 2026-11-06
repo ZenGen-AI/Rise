@@ -161,7 +161,7 @@ class SessionDriver:
             return
         except RoleMemoryUnavailableError:
             # 角色位的记忆暂时不可用（Starling 抽取/嵌入端点超时、连不上，T1）：调用方可以按条重跑。
-            # simulator 不认 actio.MemoryFailureError（依赖方向不允许），组合根的转换后端改抛本基类的子类，
+            # simulator 不认 simple_actio.MemoryFailureError（依赖方向不允许），组合根的转换后端改抛本基类的子类，
             # 这里按 isinstance 落进来；必须在下方通用 Exception 之前，否则会被吞成 role_backend_failure。
             assert_transition(self.state, SessionState.FAILED)
             self.state = SessionState.FAILED

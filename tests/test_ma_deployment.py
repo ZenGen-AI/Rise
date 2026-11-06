@@ -6,11 +6,11 @@ from types import SimpleNamespace
 import grpc
 import pytest
 
-from actio.instance import instantiate
-from actio.memory import FileTupleStore
-from actio.memory_port import MemoryEvent, MemoryEventConflict, MemoryFailureError
-from actio.skills import Skill
-from actio.trace import validate_trace
+from simple_actio.instance import instantiate
+from simple_actio.memory import FileTupleStore
+from simple_actio.memory_port import MemoryEvent, MemoryEventConflict, MemoryFailureError
+from simple_actio.skills import Skill
+from simple_actio.trace import validate_trace
 from controlplane.deferred import DeferredError
 from controlplane.gitstore import GitStore
 from controlplane.paths import episode_file, episodes_dir
@@ -45,7 +45,7 @@ RUN = "run-003"
 MODEL = "zengen-v1"
 AGENT = RoleBinding("a", "pa", "self_play")
 OPP = RoleBinding("b", "pb", "frozen_reference", model_ref="zengen-v1")
-BINDINGS = (OPP, AGENT)  # 对手先说,Actio 实例后说
+BINDINGS = (OPP, AGENT)  # 对手先说,SimpleActio 实例后说
 ROUND = "agent-round-zengen-v1"
 EID = "deploy-zengen-v1-s1-1"
 KEY0 = f"{ROUND}/{EID}#0@pa"       # 智能体记下对手开场那句的事件 key:轮次前缀 + 部署 id + 轮次序号 + 写入方主体
@@ -827,7 +827,7 @@ def test_a_close_failure_does_not_mask_the_original_exception(store, tmp_path, c
 
 class _WorldClient:
     """替身客户端连同替身服务端的对手位(设计三 4.5 节):对手位按 register_episode 登记的 round_id,在情境世界里开
-    (世界, 对手人格) 端口;每次开口前把自己上次开口之后别人说的话记进世界,key 与 Actio 实例同一套
+    (世界, 对手人格) 端口;每次开口前把自己上次开口之后别人说的话记进世界,key 与 SimpleActio 实例同一套
     (<round_id>/<部署 id>#<turn>@<主体>)。order 是发言顺序。会话结束(到 max_turns 或 abort)时对每个对手端口调
     release(port),缺省立即关;测试拿它推迟关(另一条线程)或干脆不关。"""
 

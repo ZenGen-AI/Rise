@@ -2,16 +2,16 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 新增顶层包 `mindagent`,把 AgentRSI 路径接成两个可注入的处理器:`start_agent_round` 的处理器绑定最新晋级模型与当前正式库,让完整 Actio 实例经实时环境服务跑一批部署 episode,跨 episode 分析出行为缺口,生成技能提案,离线重放验证,打包成待审核的 `skill_memory_proposal`;`admit_proposal` 的处理器把人工批准的提案收录进正式技能库与记忆库,并递增库版本。调和循环一侧的触发与注入归计划 8,本计划的处理器可以脱离调和循环直接调用。
+**Goal:** 新增顶层包 `mindagent`,把 AgentRSI 路径接成两个可注入的处理器:`start_agent_round` 的处理器绑定最新晋级模型与当前正式库,让完整 SimpleActio 实例经实时环境服务跑一批部署 episode,跨 episode 分析出行为缺口,生成技能提案,离线重放验证,打包成待审核的 `skill_memory_proposal`;`admit_proposal` 的处理器把人工批准的提案收录进正式技能库与记忆库,并递增库版本。调和循环一侧的触发与注入归计划 8,本计划的处理器可以脱离调和循环直接调用。
 
-**Architecture:** 依赖方向 `mindagent → controlplane、actio、inference_bridge、simulator(datamodel、store_adapter、realtime.client)`;`controlplane` 不导入 `mindagent`(有测试)。部署驱动器复用 `EnvironmentServiceClient` 的"客户端后说"能力(Actio 实例占 `self_play` 角色位,排在对手之后),每轮用 `instance.respond` 取三元组,经计划 6 的 `submit_turn(..., activation_trace=...)` 提交;会话结束时用客户端重建的 Episode 以 `deploy-<model>-<scenario>-<k>` 为 id 写进绑定模型所在 run 的 `episodes/` 目录。分析器、提案生成器、验证器是纯函数(验证器只调罐头后端,不起服务端);打包器、两个处理器读写都走 `GitStore` + `Envelope`。确定性失败写轮次 `failed` 并经 `controlplane.ledger.record_failure` 留一条 T3 记录;非桥接的瞬态异常原样上抛,轮次保持 `pending`,按 R19 由调和循环在下一个 tick 重新触发,处理器重入幂等。
+**Architecture:** 依赖方向 `mindagent → controlplane、simple_actio、inference_bridge、simulator(datamodel、store_adapter、realtime.client)`;`controlplane` 不导入 `mindagent`(有测试)。部署驱动器复用 `EnvironmentServiceClient` 的"客户端后说"能力(SimpleActio 实例占 `self_play` 角色位,排在对手之后),每轮用 `instance.respond` 取三元组,经计划 6 的 `submit_turn(..., activation_trace=...)` 提交;会话结束时用客户端重建的 Episode 以 `deploy-<model>-<scenario>-<k>` 为 id 写进绑定模型所在 run 的 `episodes/` 目录。分析器、提案生成器、验证器是纯函数(验证器只调罐头后端,不起服务端);打包器、两个处理器读写都走 `GitStore` + `Envelope`。确定性失败写轮次 `failed` 并经 `controlplane.ledger.record_failure` 留一条 T3 记录;非桥接的瞬态异常原样上抛,轮次保持 `pending`,按 R19 由调和循环在下一个 tick 重新触发,处理器重入幂等。
 
 **Tech Stack:** Python 3.11+ / uv / pytest;**无新增第三方依赖**。gRPC 测试用真实 loopback 服务端(`127.0.0.1`,`port=0`);桥接一律用 `ScriptedBridge`。
 
 **Spec:**
 - `docs/superpowers/specs/2026-10-09-closed-loop-integration-design.md`:§3.2(`start_agent_round`、`admit_proposal` 两行)、§4.1(`agent_round`、`skill_memory_proposal`、`skill`、`memory`、`library_state` 五类产物)、§4.2(技能提案载荷)、§5(桥接与 `ledger`)、§8.3(本计划主体)、§11(契约,名字逐字照用)、R11、R13、R18、R19。R1 至 R21 已定,本计划不推翻。
-- 上游:`docs/superpowers/specs/2026-09-24-rise-subsystem-design.md` §4(MindAgent)、补充 A(Actio)、补充 E.4(失败会话整条重跑)、场景三(AgentRSI 路径)。
-- 前置计划:**计划 1** `2026-10-09-bridge-and-foundations.md`(路径函数、`ledger`、`inference_bridge`)与 **计划 6** `2026-10-09-actio.md`(`actio` 包、`SubmitTurn.activation_trace`、runner 三元组)必须已合并。计划 2 至 5 是否已合并不影响本计划,只影响基线测试数 B(见 Global Constraints)。
+- 上游:`docs/superpowers/specs/2026-09-24-rise-subsystem-design.md` §4(MindAgent)、补充 A(SimpleActio)、补充 E.4(失败会话整条重跑)、场景三(AgentRSI 路径)。
+- 前置计划:**计划 1** `2026-10-09-bridge-and-foundations.md`(路径函数、`ledger`、`inference_bridge`)与 **计划 6** `2026-10-09-simple-actio.md`(`simple_actio` 包、`SubmitTurn.activation_trace`、runner 三元组)必须已合并。计划 2 至 5 是否已合并不影响本计划,只影响基线测试数 B(见 Global Constraints)。
 
 **依赖已有产出的名字(撰写时逐个读源码核实)**
 
@@ -24,7 +24,7 @@
 | `controlplane.envelope` / `gitstore` | `Envelope`、`OwnerRef`、`BigRef`;`GitStore.exists / read_product / write_product / list_products / _git`(写入内容不变时不提交) |
 | `controlplane.daemon.promote_candidate` | 写 `models/zengen-v<N>.yaml`:`links == [候选 id, run id]`,`payload.checkpoint_ref` 来自候选(候选没有时不写) |
 | `inference_bridge`(计划 1) | `BridgeError(category, reason="", *, attempts=0, log_ref=None)`(`category ∈ {T1, T2}`)、`BridgeResult.text`、`ScriptedBridge(script, *, model="scripted", store=None)`(`.calls`、`.remaining`;传了 `store` 时每次成功调用记一条 `external_inference`) |
-| `actio`(计划 6) | 见下文"对外契约:对计划 6 的假设" |
+| `simple_actio`(计划 6) | 见下文"对外契约:对计划 6 的假设" |
 | `simulator.realtime.client` | `EnvironmentServiceClient`:`create_session(*, scenario_id, role_assignment, personas, purpose, client_driven_slot)`、`turns`(深拷贝)、`closed`、`submit_turn(utterance, inner_thought=None, *, activation_trace=None)`(计划 6)、`drain_until_end()`、`abort()`;`SessionRejectedError(reason, detail)` |
 | `simulator.realtime.server` | `create_server(backends_factory, *, port, turn_timeout_s, on_session_closed=None, scenario_resolver=None, ...)`(只在测试里用) |
 | `simulator.store_adapter` | `write_episode(store, run_id, episode)`(id 即文件名,`links=[run_id, scenario_id]`)、`read_episode`、`read_scenario`、`read_persona`、`write_scenario`、`write_persona` |
@@ -46,7 +46,7 @@
 | 调和循环里的触发、`handlers` 注入、组合根 | 不做:计划 8(`reconcile` 扩展)与计划 9(`factory`) |
 | 树内持久化的 agent 配置 | 不做:`AgentConfig` 注入处理器工厂(Ruling 3) |
 | AgentRSI 配方的提名 | 不做(设计 §15)。轮次产物记下配方需要的锚定字段,供日后人工写配方候选 |
-| Actio 实例"长期存活、新版本到来中止重启" | 部分:每轮重新 `instantiate`;新模型晋级时旧的 `pending` 轮次置 `failed`(superseded)。正在跑的轮次不会被中途打断(同步执行) |
+| SimpleActio 实例"长期存活、新版本到来中止重启" | 部分:每轮重新 `instantiate`;新模型晋级时旧的 `pending` 轮次置 `failed`(superseded)。正在跑的轮次不会被中途打断(同步执行) |
 
 **已核实的事实(实现者不要再猜)**
 
@@ -55,9 +55,9 @@
 - **服务端落盘的 episode id 是 `ep-<session_id>`**(`servicer` 构造 `SessionDriver(episode_id=f"ep-{session_id}")`),客户端 `_build_episode` 用同一个 id 重建。所以 `deploy-<model>-...` 的 id 只能由调用方改写。服务端的 `on_session_closed` 钩子拿不到模型 id、情境内序号与 run id,改写只能在客户端一侧做(Ruling 1)。
 - **客户端重建的 episode 与服务端记录逐轮相同,只差对手的内心独白与轨迹**:服务端回显客户端自己那一轮时原样带回 `inner_thought` 与 `activation_trace`,对手轮次两者都被抹掉(`servicer._drain_ready_events`)。任务 81 的 `test_the_server_side_ep_copy_is_left_to_the_caller_and_the_deploy_copy_matches_it` 断言两者 `to_dict()` 逐轮相等(对手是不产生内心独白的 `ScriptedBackend`)。
 - **激活轨迹经 gRPC 往返后逐字段相等**:计划 6 的轨迹模式没有数字,`library_version` 是两个字符串。所以落盘轨迹里的 `library_version` 可以直接与 `instance.library_version`(`normalize_library_version` 规范化过)用 `==` 比较。
-- **`EnvironmentServiceClient.create_session` 在客户端后说时已把对手开场轮收进 `turns`**;Actio 实例第一次 `respond` 时 `history` 里已有对手第一句(任务 81 的 `test_the_agent_sees_the_opponents_opening_turn`)。
+- **`EnvironmentServiceClient.create_session` 在客户端后说时已把对手开场轮收进 `turns`**;SimpleActio 实例第一次 `respond` 时 `history` 里已有对手第一句(任务 81 的 `test_the_agent_sees_the_opponents_opening_turn`)。
 - **计划 6 的 `Skill.from_dict` 要求 id 以 `skill-` 开头、`MemoryEntry.from_dict` 要求以 `mem-` 开头**,前缀后非空。候选技能的 id 因此用 `skill-candidate-<signal>`,收录后的 id 用 `skill-<提案 id 去掉 proposal->-<k>`。
-- **`actio.triggers.referenced_signals` 只算偶数层 `not` 之下的信号**:`{"not": {"signal": "emotion_high"}}` 不算"针对 `emotion_high`"(任务 82 有测试)。
+- **`simple_actio.triggers.referenced_signals` 只算偶数层 `not` 之下的信号**:`{"not": {"signal": "emotion_high"}}` 不算"针对 `emotion_high`"(任务 82 有测试)。
 - **`no_new_information` 在对方把同一句话说两遍时也为真**:同一 episode 里对方重复怒语,两个信号都会触发(任务 82 的测试因此对单信号用例显式传 `signals=("emotion_high",)`)。
 - **`record_failure` 同一 `(run_id, task_id)` 只写一次**:同一模型的轮次第二次失败不会覆盖第一份记录(轮次 `failed` 是终态,不会有第二次)。
 - **`GitStore.write_product` 内容不变时不提交**:重入的"空操作"可以用 `git rev-parse HEAD` 前后相等来断言。
@@ -70,8 +70,8 @@
 1. **Ruling: 部署 episode 由驱动器落盘,不由服务端的 `on_session_closed` 钩子落盘。驱动器在会话结束后,用客户端 `drain_until_end()` 重建的 Episode 换上 `deploy-<model>-<scenario>-<k>` 的 id(`k` 从 1 起,是该情境内的序号),经 `write_episode` 写到 `runs/<产生绑定模型的 run>/episodes/`。服务端若另配了落盘钩子,它写的 `ep-<session>` 副本与本计划无关。** —— 原因:钩子只收到 `Episode`,拿不到模型 id、情境内序号与目标 run,要它改名就得在服务端与 MindAgent 之间另建一条按 `session_id` 对账的通道;而客户端重建的 Episode 与服务端记录逐轮相同(自己轮次是服务端回显,带激活轨迹),只差对手的内心独白与轨迹——那两项本来就不该进 MindAgent 的分析(对手不是被观察对象)。确定性的 id 还给了重入一个天然的幂等键。 —— 判错的代价:落盘的部署 episode 里看不到对手的内心独白(对手是外部 API 时它本来也没有);如果以后要它,得改成在服务端钩子里按 `session_id` 关联,重写 `deployment.py` 的落盘段。
 2. **Ruling: 已落盘的部署 episode 只在"每个 agent 轮次都带着与当前实例相同 `library_version` 的轨迹"时复用;否则按同一个 id 重新生成并覆盖。** —— 原因:设计要求 pending 轮次重入时不重复生成;但轮次绑定的库版本是在重入时重读的,若两次之间有提案被收录,旧 episode 用的是旧库,拿来分析会把"已修好的缺口"再报一遍。 —— 判错的代价:库在轮次中途变化时会多跑一遍部署;库不变时零额外开销。
 3. **Ruling: MindAgent 的配置(情境清单、角色绑定、每情境 episode 数、重跑上限、分析阈值、验证阈值、解析重试上限)是冻结数据类 `AgentConfig`,由组合根注入 `make_start_round_handler`,不落进 git 树;实际用到的值逐项写进轮次产物的载荷(`scenario_ids`、`persona_ids`、`bindings`、`analyzer_config`、`verifier_config`、`generator_version`、`uses_bridge`、`prompt_template_version`)。** —— 原因:补充契约规定配置文件一律走 `read_config` / `write_config`,而路径函数全部由计划 1 产出、本计划不得新增;计划 1 没有 agent 配置的路径。把用过的值写进轮次产物,配方复现(计划 3 的 agent_rsi 校验)所需的锚定字段仍然在树里。 —— 判错的代价:改阈值要重启守护进程;以后要树内配置,由计划 1 补一个路径函数,再在组合根里 `read_config` 后构造 `AgentConfig`,本包不用改。
-4. **Ruling: `run_deployment_episodes` 在设计签名之外加 keyword-only 的 `model_id`、`max_turns`、`episodes_per_scenario=1`、`max_retries_per_episode=1`;Actio 实例占的角色位是 `bindings` 里唯一一个 `model_backend == "self_play"` 的绑定,不满足就抛 `ValueError`。** —— 原因:设计签名推不出 episode id 里的模型、每条会话的轮数与重跑上限;"被部署的就是 self_play 那一位"沿用 `RoleBinding` 现有语义(`self_play` 不得带 `model_ref`,校验器已强制),不必再加一个"客户端角色位"参数。 —— 判错的代价:想让 Actio 扮演 `frozen_reference` 位要改 `agent_slot_of`。
-5. **Ruling: 部署会话的失败分类照搬 `InteractTrajectorySource`(本包不导入 `mindtrainer`,判定在 `mindagent.deployment` 里另写一份):终止原因 `max_turns`、`goal_reached` 接受;`timeout`、`role_backend_timeout`、传输层 `UNAVAILABLE` 是 T1,整条重跑,上限 `max_retries_per_episode`;其余(`invalid_session`、`role_backend_failure`、`client_disconnected`、其他 gRPC 状态码、协议错乱)不重跑。两类都以 `DeploymentFailedError(episode_id, reason, detail, attempts, transient, failed_attempts)` 结束;轮次处理器对 `transient=True` 原样上抛(轮次保持 `pending`),对 `False` 判 T3。Actio 实例自己的异常不在任何 `except` 里:会话先 `abort()`(服务端判 FAILED、不落盘),原异常原样上抛,不重跑、不包装。** —— 原因:补充 E.4;`role_backend_failure` 分不出 T1/T2,与 MindTrainer 同样保守。 —— 判错的代价:两份分类表要同步维护;服务端偶发的 `role_backend_failure` 会让整轮 `failed`。
+4. **Ruling: `run_deployment_episodes` 在设计签名之外加 keyword-only 的 `model_id`、`max_turns`、`episodes_per_scenario=1`、`max_retries_per_episode=1`;SimpleActio 实例占的角色位是 `bindings` 里唯一一个 `model_backend == "self_play"` 的绑定,不满足就抛 `ValueError`。** —— 原因:设计签名推不出 episode id 里的模型、每条会话的轮数与重跑上限;"被部署的就是 self_play 那一位"沿用 `RoleBinding` 现有语义(`self_play` 不得带 `model_ref`,校验器已强制),不必再加一个"客户端角色位"参数。 —— 判错的代价:想让 SimpleActio 扮演 `frozen_reference` 位要改 `agent_slot_of`。
+5. **Ruling: 部署会话的失败分类照搬 `InteractTrajectorySource`(本包不导入 `mindtrainer`,判定在 `mindagent.deployment` 里另写一份):终止原因 `max_turns`、`goal_reached` 接受;`timeout`、`role_backend_timeout`、传输层 `UNAVAILABLE` 是 T1,整条重跑,上限 `max_retries_per_episode`;其余(`invalid_session`、`role_backend_failure`、`client_disconnected`、其他 gRPC 状态码、协议错乱)不重跑。两类都以 `DeploymentFailedError(episode_id, reason, detail, attempts, transient, failed_attempts)` 结束;轮次处理器对 `transient=True` 原样上抛(轮次保持 `pending`),对 `False` 判 T3。SimpleActio 实例自己的异常不在任何 `except` 里:会话先 `abort()`(服务端判 FAILED、不落盘),原异常原样上抛,不重跑、不包装。** —— 原因:补充 E.4;`role_backend_failure` 分不出 T1/T2,与 MindTrainer 同样保守。 —— 判错的代价:两份分类表要同步维护;服务端偶发的 `role_backend_failure` 会让整轮 `failed`。
 6. **Ruling: "对方最后一句触发了该信号"按 agent 每次发言前、它能看到的历史求信号(与 runner 给后端的 `history` 同一条抹除规则);默认只看读对方话语的两个内置信号 `emotion_high`、`no_new_information`,`first_turn` 不在其列。一个 episode 受影响 = 至少有一个 agent 轮次信号为真、且轨迹里 `selected` 非空、且 `referenced_signals(选中技能.trigger)` 不含该信号;`ratio = 受影响数 / 有 agent 轮次的 episode 数`;`support < min_support` 或 `ratio < min_ratio` 不产生发现(两个阈值都含等号)。轨迹为 `None`(裸模型)或 `selected` 为 `None`(库里没有命中的技能)的轮次不算受影响。`analyze` 加 keyword-only 的 `skills`(这批 episode 所用的技能库,用来查选中技能的触发条件)、`registry`、`signals`;轨迹选中了 `skills` 里没有的技能抛 `MindAgentDataError`。对每个非 `None` 的轨迹先调用计划 6 的 `validate_trace`,不合模式转成 `MindAgentDataError`(信息带 episode id 与轮次)。** —— 原因:计划 6 要求消费方读落盘 episode 时校验轨迹;信号要用分析时的注册表重新求值,不读轨迹里的 `signals` 键,这样 `analyze` 对任何来源的 episode 都给同一个答案;`selected` 为空表示"没有路由",谈不上"路由错了",所以第一轮空库必然零发现,与设计"第一轮沉默是预期"一致。 —— 判错的代价:空库永远不会自己长出第一条技能,第一条技能要人手放(任务 88 正是这么做的);想让空库也产出"缺一条处理 X 的技能",把 `selected is None` 也算受影响即可(`analysis.py` 一行)。
 7. **Ruling: `BehaviorFinding` 在任务说明的字段之外多一个 `signal`;`id = "finding-<signal>-" + sha256("<signal>\n" + 排序后的 episode id 逐行)[:12]`。提案载荷的 `finding` 只写设计 §4.2 的五个键(`id、pattern、support、ratio、episode_refs`),不写 `signal`。** —— 原因:提案生成器要知道发现是哪个信号,从 `pattern` 文本里解析太脆;`id` 由信号与 episode 集合推出,同一批数据重跑得到同一 id。 —— 判错的代价:无。
 8. **Ruling: 规则模板的候选技能 = `{"id": "skill-candidate-<signal>", "version": 1, "level": "micro", "priority": 100, "trigger": {"signal": <signal>}, "policy": {"instructions": [模板文本]}, "description": ...}`;用桥接时外部模型只写 `instructions` 与 `description`,触发条件、层级、优先级仍由发现决定。外部模型必须只输出 `{"instructions": [非空字符串...], "description": 字符串}` 一个对象,多一个键也算不合格;不合格带着错误信息重新提问,总次数 `1 + max_parse_retries`,耗尽抛 `ProposalParseError`。第 i 条发现的第 n 次尝试用 `task_id = "<task_id>-<i>-attempt<n>"`(`attempt_task_id`,照计划 4 的做法),所以每次尝试各记一条成本。传了桥接时 `run_id` 必须非空,否则在调用桥接之前抛 `MindAgentDataError`;`verify` 传了 judge 时同理。不用桥接的路径 `run_id` 可以保持缺省 `""`。** —— 原因:计划 1 的账本对同一 `(task_id, cost_type)` 只记一次,复用 task_id 会把重试的成本静默丢掉;账本还拒绝空的、含分隔符的、`.`/`..` 的 `run_id`,在入口挡住比在记账处抛错清楚。计划 6 的 `Skill.from_dict` 要求 `skill-` 前缀;优先级 100 让候选在路由里压过现有的默认优先级 0 的技能,验证器才能看到它被选中;让外部模型改触发条件会让"候选是否针对这个信号"无法保证。 —— 判错的代价:库里已有优先级高于 100 的技能时,候选在验证里不会被选中、会被筛掉(任务 87 的 `test_dropped_drafts_are_recorded_in_the_round` 正是这种情形),要人调优先级。
@@ -91,7 +91,7 @@
 14. **Ruling: 轮次产物 `agent_round`:id `agent-round-<model>`,`type: agent_round`,`links = [model_id, run_id]`,载荷键 `model_id、model_version、run_id、checkpoint_ref(模型有时)、library_version{skill, memory}、scenario_ids、persona_ids、bindings、analyzer_config{min_support, min_ratio}、verifier_config{method, min_fired_on_motivating, max_fired_elsewhere}、generator_version、uses_bridge、prompt_template_version(仅用桥接时)、episode_ids、findings、proposals、dropped、failure`。重入时整份按当前绑定重写(保留首次的 `created_at`)。** —— 原因:设计 §4.2 的 agent_rsi 配方键(`bound_model_id、scenario_ids、persona_ids、analyzer_config、verifier_config、generator_version、prompt_template_version`)与计划 3 Ruling 9 新增的 `uses_bridge` 都能从轮次产物里取到,日后写 agent_rsi 配方候选不用回头猜。 —— 判错的代价:无。
 15. **Ruling: 正式库:`load_library(store) -> LibraryState(skills, memories, version)` 读 `skill_library/`、`memory_library/` 下状态为 `effective` 的条目(按 id 排序),版本取 `library_state` 的 `skill_version`、`memory_version`,经计划 6 的 `normalize_library_version` 规范成字符串;`library_state` 不存在时是 `{"skill": "0", "memory": "0"}`。`library_state` 产物:id `library-state`,`type: library_state`,状态 `executed`,载荷 `{skill_version: str, memory_version: str, admitted: [{proposal_id, skill_version, memory_version, entries: [条目 id...]}]}`,信封 `version` 每次收录加一,`links = [最近一次收录的提案 id]`。** **正式库的两个版本必须是十进制数字串**(`"0"`、`"12"`;手写的非负整数也接受并规范成字符串):`read_library_versions` 校验,不合法(如计划 6 允许的 `"lib-3"`、空串、`"3.0"`、全角数字、`bool`、负数)抛 `MindAgentDataError`。收录处理器把它当作确定性失败走现有路径(写 `admit-<提案 id>` 失败记录、提案留在 `approved`),`ValueError` 不会逃出处理器;轮次处理器把它判 T3。 —— 原因:设计 §8.3 修订后规定库版本一律存成字符串,与激活轨迹同型;收录要把它按整数加一,非数字的标识无法递增,不在处理器入口挡住就会在 `int()` 处抛出,让守护进程每个 tick 都崩。`admitted` 既是"记录来源提案 id",也是收录的幂等键。 —— 判错的代价:想用 `lib-2026-10-09` 这类非数字库版本标识的人,要改 `read_library_versions` 与收录的递增规则。手写的整数版本也能读,但收录写回时变成字符串。
 16. **Ruling: 收录处理器:提案不是 `approved` 时空操作。先把全部增量校验一遍(不合法则什么库条目都不写);再按增量顺序写条目——技能 id `skill_id_for(提案 id, k)` = `skill-<提案 id 去掉 proposal- 前缀>-<k>`,记忆 id `mem-<同上>-<k>`(`k` 是增量在列表里的位置,从 1 起),定义里的 `id` 被替换成它,状态 `effective`,`links = [提案 id]`,已存在就不重写;然后若 `admitted` 里还没有该提案,技能库版本在有技能增量时 +1、记忆库版本在有记忆增量时 +1,追加一条 `admitted`;最后提案 `approved → effective`。增量不合法时:审核类状态机里 `approved` 只能去 `effective`,无处可放"失败",所以经 Ruling 21 的守卫记一次 **T2** 失败记录(`task_id = admit-<提案 id>`,挂在提案载荷的 `run_id` 下),提案原样留在 `approved` 等人处理;此后每个 tick 重入只读不写。类别按设计 §11 的约定:T3 表示闭环因此停在 `failed`、等人处理(规划决策、agent 轮次);T2 表示确定性数据错误、处理器空操作并只记一次(收录处理器,与计划 3 的配方收录一致)。轮次层面的失败仍是 T3。** —— 原因:三步之间崩溃,重跑时条目已在就跳过、`admitted` 已记就不再递增,所以收敛且不重复计数(任务 86 对每个崩溃点都有故障注入测试);两个收录处理器同类错误记同一个类别,读失败记录的人不必区分来源。 —— 判错的代价:一条坏提案会让 `admit_proposal` 每个 tick 都被调和循环产生一次(处理器空转,不写任何东西),直到人把提案改好或改状态。T2 与 T3 只是留痕分类,不改变任何行为:处理器怎么走、写什么,都与类别无关。
-17. **Ruling: 部署时 Actio 实例的 `profile` 是 `{"model_id", "round_id"}`;模型后端由注入的 `backend_factory(model_id, checkpoint_ref)` 每次新建(部署一份、验证时基线与候选各一份);人格由注入的 `personas_loader(store, persona_ids)` 提供;情境从树里读。** —— 原因:真实后端如何从 checkpoint 加载属于计算层,不在本期;测试注入回显指导语的罐头后端。 —— 判错的代价:无。
+17. **Ruling: 部署时 SimpleActio 实例的 `profile` 是 `{"model_id", "round_id"}`;模型后端由注入的 `backend_factory(model_id, checkpoint_ref)` 每次新建(部署一份、验证时基线与候选各一份);人格由注入的 `personas_loader(store, persona_ids)` 提供;情境从树里读。** —— 原因:真实后端如何从 checkpoint 加载属于计算层,不在本期;测试注入回显指导语的罐头后端。 —— 判错的代价:无。
 18. **Ruling: 本包的处理器类型写成字面的 `Callable[[GitStore, Action], None]`(`mindagent.rounds.Handler` 只是本模块内的别名),不从 `controlplane.daemon` 导入。** —— 原因:设计 §11 修订:`Handler` 别名由计划 8 定义,计划 7 排在它之前执行。 —— 判错的代价:无。
 19. **Ruling: 与设计 §8.3 签名的三处偏差:**
     - **`verify(draft, findings, episodes, *, base_instance_factory)` 加 keyword-only 的 `personas`、`scenarios`、`judge=None`、`run_id=""`、`task_id="mindagent-judge"`。** 原因:重放要调 `instance.respond(persona, scenario, ...)`,两者都不在 episode 里(episode 只有 id);judge 是设计里"可选传入桥接做质量评分"的入口;`run_id`、`task_id` 是桥接记账必需的。判错的代价:调用方多传两个字典;按设计签名调用会报缺参。
@@ -102,21 +102,21 @@
 
 ## 对外契约:对计划 6 的假设
 
-本计划用到的每个 `actio` 名字与激活轨迹字段如下。撰写结束时已与 `docs/superpowers/plans/2026-10-09-actio.md` 的最终文本逐条核对(把该计划的全部代码块原样抽出、按其任务顺序应用到拷贝里,再跑本计划的全部测试),**全部一致**;核对出的一处差异(id 前缀规则)已在本计划里改正,见下表末行。
+本计划用到的每个 `simple_actio` 名字与激活轨迹字段如下。撰写结束时已与 `docs/superpowers/plans/2026-10-09-simple-actio.md` 的最终文本逐条核对(把该计划的全部代码块原样抽出、按其任务顺序应用到拷贝里,再跑本计划的全部测试),**全部一致**;核对出的一处差异(id 前缀规则)已在本计划里改正,见下表末行。
 
 | 名字 / 字段 | 本计划怎么用 | 核对 |
 |---|---|---|
-| `actio.instance.instantiate(model_backend, *, skills, memories, library_version, profile, experiences=(), registry=None, memory_limit=3) -> ActioInstance` | 部署与验证时建实例 | 一致 |
-| `ActioInstance.respond(persona, scenario, history, speaker_slot) -> (utterance, inner_thought, trace)` | 部署驱动器每轮调用;验证器重放 | 一致 |
-| `ActioInstance.library_version`(规范化后的 `{"skill": str, "memory": str}`)、`ActioInstance.registry` | 部署 episode 复用判定;验证器求信号 | 一致 |
+| `simple_actio.instance.instantiate(model_backend, *, skills, memories, library_version, profile, experiences=(), registry=None, memory_limit=3) -> SimpleActioInstance` | 部署与验证时建实例 | 一致 |
+| `SimpleActioInstance.respond(persona, scenario, history, speaker_slot) -> (utterance, inner_thought, trace)` | 部署驱动器每轮调用;验证器重放 | 一致 |
+| `SimpleActioInstance.library_version`(规范化后的 `{"skill": str, "memory": str}`)、`SimpleActioInstance.registry` | 部署 episode 复用判定;验证器求信号 | 一致 |
 | `GuidedBackend.respond_guided(persona, scenario, history, speaker_slot, guidance) -> (utterance, inner_thought)`;只有 `respond` 的后端被 `IgnoreGuidance` 包装 | 测试的罐头后端回显指导语 | 一致 |
-| `actio.skills.Skill`(`id、version、level、trigger、policy_instructions、priority、description`;`to_dict` / `from_dict` 形状见计划 6"对外契约") | 候选技能定义、收录、读库 | 一致 |
-| `actio.memory.MemoryEntry`(`from_dict` 必填 `id、version、subject、content、timestamp、confidence`,可选 `keywords、source_episode`) | 收录记忆增量、读库 | 一致 |
-| `actio.errors.ActioDataError(ValueError)` | 读库、收录、生成器的确定性错误 | 一致 |
-| `actio.signals.default_registry()`、`SignalRegistry.get(name)`、`in` | 分析器与验证器重新求信号 | 一致 |
+| `simple_actio.skills.Skill`(`id、version、level、trigger、policy_instructions、priority、description`;`to_dict` / `from_dict` 形状见计划 6"对外契约") | 候选技能定义、收录、读库 | 一致 |
+| `simple_actio.memory.MemoryEntry`(`from_dict` 必填 `id、version、subject、content、timestamp、confidence`,可选 `keywords、source_episode`) | 收录记忆增量、读库 | 一致 |
+| `simple_actio.errors.SimpleActioDataError(ValueError)` | 读库、收录、生成器的确定性错误 | 一致 |
+| `simple_actio.signals.default_registry()`、`SignalRegistry.get(name)`、`in` | 分析器与验证器重新求信号 | 一致 |
 | 内置信号 `emotion_high`、`no_new_information`、`first_turn`,签名 `(history, speaker_slot) -> bool` | 分析器默认看前两个 | 一致 |
-| `actio.triggers.referenced_signals(trigger) -> frozenset[str]`(偶数层 `not` 之下) | "技能是否针对某信号" | 一致 |
-| `actio.trace.validate_trace(trace)`、`normalize_library_version(lv)` | 测试校验落盘轨迹;读库时规范化版本 | 一致 |
+| `simple_actio.triggers.referenced_signals(trigger) -> frozenset[str]`(偶数层 `not` 之下) | "技能是否针对某信号" | 一致 |
+| `simple_actio.trace.validate_trace(trace)`、`normalize_library_version(lv)` | 测试校验落盘轨迹;读库时规范化版本 | 一致 |
 | 轨迹键 `schema、signals、candidates、selected、conflict、memory_hits、experience、library_version`;`selected == candidates[0]` 或 `None`;`library_version` 是两个字符串;没有数字 | 分析器只读 `selected`;复用判定读 `library_version`;端到端断言 `candidates`、`conflict` | 一致 |
 | "没有轨迹"= `TurnRecord.activation_trace is None`;对手轮次落盘恒为 `None` | 分析器把 `None` 当裸模型 | 一致 |
 | `EnvironmentServiceClient.submit_turn(utterance, inner_thought=None, *, activation_trace=None)`;服务端回显客户端自己的轮次时保留轨迹 | 部署驱动器 | 一致 |
@@ -155,10 +155,10 @@
 
 - **`src/` 下每个源文件以 `from __future__ import annotations` 开头**(模块 docstring 之后的第一条语句也算;任务 80 有静态测试对 `src/mindagent/*.py` 强制)。
 - **不引入新第三方依赖。** `pyproject.toml` 只改 wheel 包列表一行:加 `src/mindagent`(`tests/test_mt_packaging.py` 强制检查)。
-- **依赖方向:** `mindagent` 只导入 `controlplane`、`actio`、`inference_bridge`、`simulator`(`datamodel`、`store_adapter`、`realtime.client`)、`grpc`、`yaml`(已有依赖,`failures.py` 用它判读取异常)与标准库;不导入 `mindtrainer`、`diagnostic`;`controlplane` 不导入 `mindagent`(任务 80 有测试)。
+- **依赖方向:** `mindagent` 只导入 `controlplane`、`simple_actio`、`inference_bridge`、`simulator`(`datamodel`、`store_adapter`、`realtime.client`)、`grpc`、`yaml`(已有依赖,`failures.py` 用它判读取异常)与标准库;不导入 `mindtrainer`、`diagnostic`;`controlplane` 不导入 `mindagent`(任务 80 有测试)。
 - **凭证绝不进 git 树。** 本计划不读写任何凭证;桥接只经注入的对象调用。
 - **读写产物走 `GitStore` + `Envelope`。** 不直接碰文件系统读写产物。
-- **不改的文件:** `src/controlplane/`、`src/simulator/`、`src/actio/`、`src/inference_bridge/`、`src/mindtrainer/`、`src/diagnostic/` 下的一切;`schemas/`;既有测试;`cli/` 下的一切,尤其 **不要碰** `cli/package.json`、`cli/package-lock.json`。
+- **不改的文件:** `src/controlplane/`、`src/simulator/`、`src/simple_actio/`、`src/inference_bridge/`、`src/mindtrainer/`、`src/diagnostic/` 下的一切;`schemas/`;既有测试;`cli/` 下的一切,尤其 **不要碰** `cli/package.json`、`cli/package-lock.json`。
 - **`git add` 逐个文件**,不用 `git add .` / `-A`。
 - **提交信息不加 `Co-Authored-By` 行**(用户明确要求)。
 - **测试命令**一律是 `PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -q -p no:cacheprovider --color=no -W error`(下文简写为"全量命令";单文件时在其后加文件路径)。
@@ -193,7 +193,7 @@
 | `tests/test_ma_e2e.py` | 新建(1 个用例) | 88 | 真实 loopback 服务端上的完整 AgentRSI 环路 |
 | `docs/superpowers/plans/2026-10-09-mindagent.md` | 新建 | — | 本计划 |
 
-**打包说明:** `pyproject.toml` 只改 wheel 包列表一行。计划 1、计划 6 已经把 `src/inference_bridge`、`src/actio` 加进列表;本计划在列表末尾追加 `"src/mindagent"`。
+**打包说明:** `pyproject.toml` 只改 wheel 包列表一行。计划 1、计划 6 已经把 `src/inference_bridge`、`src/simple_actio` 加进列表;本计划在列表末尾追加 `"src/mindagent"`。
 
 ---
 
@@ -205,7 +205,7 @@
 - Test: `tests/test_ma_config_library.py`
 
 **Interfaces:**
-- Consumes: `actio.skills.Skill.from_dict`、`actio.memory.MemoryEntry.from_dict`、`actio.trace.normalize_library_version`;`controlplane.paths.library_state_file`、`CONTROL_PLANE_ROOT`;`simulator.datamodel.RoleBinding`。
+- Consumes: `simple_actio.skills.Skill.from_dict`、`simple_actio.memory.MemoryEntry.from_dict`、`simple_actio.trace.normalize_library_version`;`controlplane.paths.library_state_file`、`CONTROL_PLANE_ROOT`;`simulator.datamodel.RoleBinding`。
 - Produces(任务 81 至 88 依赖):
   - `MindAgentDataError(ValueError)`、`ProposalParseError(reason, *, attempts)`(`MindAgentDataError` 的子类)、`AgentRoundFailedError(reason, *, point)`。
   - `AgentConfig(scenario_ids, bindings, max_turns=6, episodes_per_scenario=1, max_retries_per_episode=1, min_support=3, min_ratio=0.5, min_fired_on_motivating=0.8, max_fired_elsewhere=0.2, max_parse_retries=2)`(冻结,`agent_slot` 属性);`agent_slot_of(bindings) -> str`。
@@ -221,7 +221,7 @@
 - [ ] **Step 0: 前置检查(计划 1、计划 6 已合并)**
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 uv run --extra dev python -c "import inspect; from actio.instance import instantiate; from actio.skills import Skill, SKILL_ID_PREFIX; from actio.memory import MemoryEntry, MEMORY_ID_PREFIX; from actio.trace import validate_trace, normalize_library_version; from actio.triggers import referenced_signals; from actio.signals import default_registry; from inference_bridge import BridgeError, ScriptedBridge; from controlplane.paths import agent_round_file, proposal_file, skill_file, memory_file, library_state_file, failure_record_file; from controlplane.ledger import record_failure; from simulator.realtime.client import EnvironmentServiceClient; assert 'activation_trace' in inspect.signature(EnvironmentServiceClient.submit_turn).parameters; assert SKILL_ID_PREFIX == 'skill-' and MEMORY_ID_PREFIX == 'mem-'; print('prereqs ok')"
+PYTHONDONTWRITEBYTECODE=1 uv run --extra dev python -c "import inspect; from simple_actio.instance import instantiate; from simple_actio.skills import Skill, SKILL_ID_PREFIX; from simple_actio.memory import MemoryEntry, MEMORY_ID_PREFIX; from simple_actio.trace import validate_trace, normalize_library_version; from simple_actio.triggers import referenced_signals; from simple_actio.signals import default_registry; from inference_bridge import BridgeError, ScriptedBridge; from controlplane.paths import agent_round_file, proposal_file, skill_file, memory_file, library_state_file, failure_record_file; from controlplane.ledger import record_failure; from simulator.realtime.client import EnvironmentServiceClient; assert 'activation_trace' in inspect.signature(EnvironmentServiceClient.submit_turn).parameters; assert SKILL_ID_PREFIX == 'skill-' and MEMORY_ID_PREFIX == 'mem-'; print('prereqs ok')"
 ```
 
 Expected: 最后一行 `prereqs ok`。任何 `ImportError`、`AttributeError` 或 `AssertionError` 都说明计划 1 或计划 6 没有按其文本合并:**停下**,把报错原样报告,不要往下做。
@@ -244,7 +244,7 @@ from pathlib import Path
 
 import pytest
 
-from actio.skills import Skill
+from simple_actio.skills import Skill
 from controlplane.envelope import Envelope, OwnerRef
 from controlplane.gitstore import GitStore
 from controlplane.paths import library_state_file, memory_file, skill_file
@@ -407,7 +407,7 @@ Expected: `grep` 输出的那一行以 `"src/mindagent"]` 结尾(前面有哪些
 
 ```python
 """MindAgent:部署驱动、经验分析、技能提案、提案验证、打包,以及轮次与收录两个处理器
-(闭环集成设计 §8.3)。依赖 controlplane、actio、inference_bridge 与 simulator 的实时客户端;
+(闭环集成设计 §8.3)。依赖 controlplane、simple_actio、inference_bridge 与 simulator 的实时客户端;
 controlplane 不导入本包。"""
 from __future__ import annotations
 ```
@@ -453,7 +453,7 @@ from simulator.datamodel import RoleBinding
 
 
 def agent_slot_of(bindings: list[RoleBinding] | tuple[RoleBinding, ...]) -> str:
-    """Actio 实例占的角色位:唯一一个 model_backend 为 self_play 的绑定(被部署的就是它)。"""
+    """SimpleActio 实例占的角色位:唯一一个 model_backend 为 self_play 的绑定(被部署的就是它)。"""
     slots = [b.slot_id for b in bindings if b.model_backend == "self_play"]
     if len(slots) != 1:
         raise ValueError(f"bindings must contain exactly one self_play binding (the agent), got {slots}")
@@ -510,9 +510,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from actio.memory import MemoryEntry
-from actio.skills import Skill
-from actio.trace import normalize_library_version
+from simple_actio.memory import MemoryEntry
+from simple_actio.skills import Skill
+from simple_actio.trace import normalize_library_version
 from controlplane.gitstore import GitStore
 from controlplane.paths import CONTROL_PLANE_ROOT, library_state_file
 from mindagent.errors import MindAgentDataError
@@ -555,7 +555,7 @@ def read_library_versions(store: GitStore) -> dict:
 
 def load_library(store: GitStore) -> LibraryState:
     """读当前正式库:skill_library/、memory_library/ 下状态为 effective 的条目,按 id 排序;
-    版本取自 library_state。条目结构不合法抛 actio 的 ActioDataError(确定性错误)。"""
+    版本取自 library_state。条目结构不合法抛 simple_actio 的 SimpleActioDataError(确定性错误)。"""
     skills = []
     for rel in store.list_products(f"{CONTROL_PLANE_ROOT}/skill_library"):
         env = store.read_product(rel)
@@ -570,7 +570,7 @@ def load_library(store: GitStore) -> LibraryState:
     return LibraryState(
         skills=tuple(sorted(skills, key=lambda s: s.id)),
         memories=tuple(sorted(memories, key=lambda m: m.id)),
-        # 设计 §8.3:版本一律是字符串,经 actio 的 normalize_library_version 规范化(整数 3 → "3")
+        # 设计 §8.3:版本一律是字符串,经 simple_actio 的 normalize_library_version 规范化(整数 3 → "3")
         version=normalize_library_version({"skill": state["skill_version"], "memory": state["memory_version"]}),
     )
 
@@ -622,14 +622,14 @@ git commit -m "feat: mindagent package skeleton (AgentConfig, formal library rea
 - Test: `tests/test_ma_deployment.py`
 
 **Interfaces:**
-- Consumes: `EnvironmentServiceClient`(`create_session`、`turns`、`closed`、`submit_turn(..., *, activation_trace=...)`、`drain_until_end`、`abort`)、`SessionRejectedError`;`simulator.store_adapter.write_episode / read_episode / read_scenario`;`controlplane.paths.episode_file`;`mindagent.config.agent_slot_of`;Actio 实例的 `respond` 与 `library_version`。
+- Consumes: `EnvironmentServiceClient`(`create_session`、`turns`、`closed`、`submit_turn(..., *, activation_trace=...)`、`drain_until_end`、`abort`)、`SessionRejectedError`;`simulator.store_adapter.write_episode / read_episode / read_scenario`;`controlplane.paths.episode_file`;`mindagent.config.agent_slot_of`;SimpleActio 实例的 `respond` 与 `library_version`。
 - Produces(任务 87 依赖):
   - `run_deployment_episodes(store, instance, client_factory, *, run_id, scenario_ids, personas, bindings, model_id, max_turns, episodes_per_scenario=1, max_retries_per_episode=1) -> list[Episode]`。
   - `DeploymentFailedError`(属性 `episode_id、reason、detail、attempts、transient、failed_attempts`)。
   - `deployment_episode_id(model_id, scenario_id, k) -> "deploy-<model>-<scenario>-<k>"`;`PURPOSE = "deployment_simulation"`;`ACCEPTED_REASONS`、`TRANSIENT_REASONS`。
 
 **设计要点:**
-- `purpose` 固定为 `deployment_simulation`;Actio 实例占 `self_play` 位(Ruling 4)。客户端后说时,`create_session` 返回前对手开场已在 `client.turns` 里,循环直接从 `respond` 开始。
+- `purpose` 固定为 `deployment_simulation`;SimpleActio 实例占 `self_play` 位(Ruling 4)。客户端后说时,`create_session` 返回前对手开场已在 `client.turns` 里,循环直接从 `respond` 开始。
 - 每轮 `instance.respond(persona, scenario, client.turns, slot)` 取三元组,`submit_turn(utterance, thought, activation_trace=trace)` 提交。
 - 落盘归驱动器(Ruling 1):会话正常结束后,把客户端重建的 Episode 换上 `deploy-…` 的 id 写进 `runs/<run_id>/episodes/`;测试证明落盘 episode 里 agent 轮次的轨迹全部通过 `validate_trace`、对手轮次的轨迹与内心独白都是 `None`,且服务端自己记录的 `ep-<session>` 版本逐轮相同。
 - 重入(Ruling 2):已落盘、且 agent 轮次轨迹的 `library_version` 与当前实例一致的 episode 直接复用,不新建客户端;不一致就按同 id 重跑覆盖。
@@ -638,7 +638,7 @@ git commit -m "feat: mindagent package skeleton (AgentConfig, formal library rea
 - [ ] **Step 0: 前置检查(计划 1、计划 6 已合并)**
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 uv run --extra dev python -c "import inspect; from actio.instance import instantiate; from actio.skills import Skill, SKILL_ID_PREFIX; from actio.memory import MemoryEntry, MEMORY_ID_PREFIX; from actio.trace import validate_trace, normalize_library_version; from actio.triggers import referenced_signals; from actio.signals import default_registry; from inference_bridge import BridgeError, ScriptedBridge; from controlplane.paths import agent_round_file, proposal_file, skill_file, memory_file, library_state_file, failure_record_file; from controlplane.ledger import record_failure; from simulator.realtime.client import EnvironmentServiceClient; assert 'activation_trace' in inspect.signature(EnvironmentServiceClient.submit_turn).parameters; assert SKILL_ID_PREFIX == 'skill-' and MEMORY_ID_PREFIX == 'mem-'; print('prereqs ok')"
+PYTHONDONTWRITEBYTECODE=1 uv run --extra dev python -c "import inspect; from simple_actio.instance import instantiate; from simple_actio.skills import Skill, SKILL_ID_PREFIX; from simple_actio.memory import MemoryEntry, MEMORY_ID_PREFIX; from simple_actio.trace import validate_trace, normalize_library_version; from simple_actio.triggers import referenced_signals; from simple_actio.signals import default_registry; from inference_bridge import BridgeError, ScriptedBridge; from controlplane.paths import agent_round_file, proposal_file, skill_file, memory_file, library_state_file, failure_record_file; from controlplane.ledger import record_failure; from simulator.realtime.client import EnvironmentServiceClient; assert 'activation_trace' in inspect.signature(EnvironmentServiceClient.submit_turn).parameters; assert SKILL_ID_PREFIX == 'skill-' and MEMORY_ID_PREFIX == 'mem-'; print('prereqs ok')"
 ```
 
 Expected: 最后一行 `prereqs ok`。任何 `ImportError`、`AttributeError` 或 `AssertionError` 都说明计划 1 或计划 6 没有按其文本合并:**停下**,把报错原样报告,不要往下做。
@@ -654,9 +654,9 @@ from types import SimpleNamespace
 import grpc
 import pytest
 
-from actio.instance import instantiate
-from actio.skills import Skill
-from actio.trace import validate_trace
+from simple_actio.instance import instantiate
+from simple_actio.skills import Skill
+from simple_actio.trace import validate_trace
 from controlplane.gitstore import GitStore
 from controlplane.paths import episode_file, episodes_dir
 from mindagent.deployment import (
@@ -686,7 +686,7 @@ RUN = "run-003"
 MODEL = "zengen-v1"
 AGENT = RoleBinding("a", "pa", "self_play")
 OPP = RoleBinding("b", "pb", "frozen_reference", model_ref="zengen-v1")
-BINDINGS = (OPP, AGENT)  # 对手先说,Actio 实例后说
+BINDINGS = (OPP, AGENT)  # 对手先说,SimpleActio 实例后说
 
 
 class Echo:
@@ -1018,7 +1018,7 @@ Expected: 收集阶段报错 `ModuleNotFoundError: No module named 'mindagent.de
 新建 `src/mindagent/deployment.py`:
 
 ```python
-"""部署驱动器:Actio 实例占客户端角色位,经实时环境服务跑部署 episode 并落盘(闭环集成设计 §8.3)。
+"""部署驱动器:SimpleActio 实例占客户端角色位,经实时环境服务跑部署 episode 并落盘(闭环集成设计 §8.3)。
 
 落盘归驱动器,不归服务端钩子:客户端在会话结束时重建的 Episode(自己轮次是服务端回显,
 带激活轨迹;对手轮次的内心独白与轨迹按协议已被抹掉)以 deploy-<model>-<scenario>-<k> 为 id
@@ -1113,7 +1113,7 @@ def _attempt(instance, client_factory, scenario, assignment, personas, agent_slo
         except (grpc.RpcError, RuntimeError) as exc:
             raise _classify_client_error(exc) from exc
         while not client.closed:
-            # 策略(Actio 实例)的异常不在任何 except 里:穿过下面的 finally(先 abort)原样上抛
+            # 策略(SimpleActio 实例)的异常不在任何 except 里:穿过下面的 finally(先 abort)原样上抛
             utterance, thought, trace = instance.respond(persona, scenario, client.turns, agent_slot)
             try:
                 client.submit_turn(utterance, thought, activation_trace=trace)
@@ -1216,7 +1216,7 @@ Expected: `B+46 passed`(B 为开工时的基线),无警告。再跑 `git status 
 ```bash
 git add src/mindagent/deployment.py
 git add tests/test_ma_deployment.py
-git commit -m "feat: mindagent deployment driver (Actio instance as the client slot, traces submitted, deploy-<model> episodes persisted under the bound run, whole-session reruns)"
+git commit -m "feat: mindagent deployment driver (SimpleActio instance as the client slot, traces submitted, deploy-<model> episodes persisted under the bound run, whole-session reruns)"
 ```
 
 ---
@@ -1228,7 +1228,7 @@ git commit -m "feat: mindagent deployment driver (Actio instance as the client s
 - Test: `tests/test_ma_analysis.py`
 
 **Interfaces:**
-- Consumes: `actio.signals.default_registry`、`SignalRegistry.get`;`actio.triggers.referenced_signals`;`actio.skills.Skill`;`simulator.datamodel.Episode`、`TurnRecord`。
+- Consumes: `simple_actio.signals.default_registry`、`SignalRegistry.get`;`simple_actio.triggers.referenced_signals`;`simple_actio.skills.Skill`;`simulator.datamodel.Episode`、`TurnRecord`。
 - Produces(任务 83、84、87 依赖):
   - `analyze(episodes, *, min_support, min_ratio, skills=(), registry=None, signals=None) -> list[BehaviorFinding]`(纯函数,按信号名排序)。
   - `BehaviorFinding(id, signal, pattern, support, ratio, episode_refs)`(冻结,`to_dict()`);`finding_id(signal, episode_refs)`。
@@ -1243,7 +1243,7 @@ git commit -m "feat: mindagent deployment driver (Actio instance as the client s
 - [ ] **Step 0: 前置检查(计划 1、计划 6 已合并)**
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 uv run --extra dev python -c "import inspect; from actio.instance import instantiate; from actio.skills import Skill, SKILL_ID_PREFIX; from actio.memory import MemoryEntry, MEMORY_ID_PREFIX; from actio.trace import validate_trace, normalize_library_version; from actio.triggers import referenced_signals; from actio.signals import default_registry; from inference_bridge import BridgeError, ScriptedBridge; from controlplane.paths import agent_round_file, proposal_file, skill_file, memory_file, library_state_file, failure_record_file; from controlplane.ledger import record_failure; from simulator.realtime.client import EnvironmentServiceClient; assert 'activation_trace' in inspect.signature(EnvironmentServiceClient.submit_turn).parameters; assert SKILL_ID_PREFIX == 'skill-' and MEMORY_ID_PREFIX == 'mem-'; print('prereqs ok')"
+PYTHONDONTWRITEBYTECODE=1 uv run --extra dev python -c "import inspect; from simple_actio.instance import instantiate; from simple_actio.skills import Skill, SKILL_ID_PREFIX; from simple_actio.memory import MemoryEntry, MEMORY_ID_PREFIX; from simple_actio.trace import validate_trace, normalize_library_version; from simple_actio.triggers import referenced_signals; from simple_actio.signals import default_registry; from inference_bridge import BridgeError, ScriptedBridge; from controlplane.paths import agent_round_file, proposal_file, skill_file, memory_file, library_state_file, failure_record_file; from controlplane.ledger import record_failure; from simulator.realtime.client import EnvironmentServiceClient; assert 'activation_trace' in inspect.signature(EnvironmentServiceClient.submit_turn).parameters; assert SKILL_ID_PREFIX == 'skill-' and MEMORY_ID_PREFIX == 'mem-'; print('prereqs ok')"
 ```
 
 Expected: 最后一行 `prereqs ok`。任何 `ImportError`、`AttributeError` 或 `AssertionError` 都说明计划 1 或计划 6 没有按其文本合并:**停下**,把报错原样报告,不要往下做。
@@ -1255,11 +1255,11 @@ Expected: 最后一行 `prereqs ok`。任何 `ImportError`、`AttributeError` �
 ```python
 import pytest
 
-from actio.skills import Skill
-from actio.trace import build_trace
+from simple_actio.skills import Skill
+from simple_actio.trace import build_trace
 from mindagent.analysis import BehaviorFinding, analyze, finding_id, signal_turns
 from mindagent.errors import MindAgentDataError
-from actio.signals import default_registry
+from simple_actio.signals import default_registry
 from simulator.datamodel import Episode, RoleAssignment, RoleBinding, TurnRecord
 
 LV = {"skill": "1", "memory": "0"}
@@ -1418,11 +1418,11 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass, replace
 
-from actio.errors import ActioDataError
-from actio.signals import SignalRegistry, default_registry
-from actio.skills import Skill
-from actio.trace import validate_trace
-from actio.triggers import referenced_signals
+from simple_actio.errors import SimpleActioDataError
+from simple_actio.signals import SignalRegistry, default_registry
+from simple_actio.skills import Skill
+from simple_actio.trace import validate_trace
+from simple_actio.triggers import referenced_signals
 from mindagent.errors import MindAgentDataError
 from simulator.datamodel import Episode, TurnRecord
 
@@ -1519,7 +1519,7 @@ def analyze(
                 if trace is not None:
                     try:
                         validate_trace(trace)  # 计划 6:消费方读落盘 episode 时校验轨迹
-                    except ActioDataError as exc:
+                    except SimpleActioDataError as exc:
                         raise MindAgentDataError(f"episode {episode.id} turn {idx}: {exc}") from None
                 selected = trace["selected"] if trace is not None else None
                 if selected is None:
@@ -1576,7 +1576,7 @@ git commit -m "feat: mindagent experience analyzer (cross-episode signal-vs-sele
 - Test: `tests/test_ma_proposals.py`
 
 **Interfaces:**
-- Consumes: `mindagent.analysis.BehaviorFinding`;`actio.skills.Skill.from_dict`;注入的桥接(`complete(prompt, *, run_id, task_id) -> BridgeResult`)。
+- Consumes: `mindagent.analysis.BehaviorFinding`;`simple_actio.skills.Skill.from_dict`;注入的桥接(`complete(prompt, *, run_id, task_id) -> BridgeResult`)。
 - Produces(任务 84、85、87 依赖):
   - `propose(findings, *, bridge=None, run_id="", task_id="mindagent-propose", max_parse_retries=2) -> list[ProposalDraft]`(偏差见 Ruling 19)。
   - `attempt_task_id(task_id, attempt) -> "<task_id>-attempt<n>"`。
@@ -1592,7 +1592,7 @@ git commit -m "feat: mindagent experience analyzer (cross-episode signal-vs-sele
 - [ ] **Step 0: 前置检查(计划 1、计划 6 已合并)**
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 uv run --extra dev python -c "import inspect; from actio.instance import instantiate; from actio.skills import Skill, SKILL_ID_PREFIX; from actio.memory import MemoryEntry, MEMORY_ID_PREFIX; from actio.trace import validate_trace, normalize_library_version; from actio.triggers import referenced_signals; from actio.signals import default_registry; from inference_bridge import BridgeError, ScriptedBridge; from controlplane.paths import agent_round_file, proposal_file, skill_file, memory_file, library_state_file, failure_record_file; from controlplane.ledger import record_failure; from simulator.realtime.client import EnvironmentServiceClient; assert 'activation_trace' in inspect.signature(EnvironmentServiceClient.submit_turn).parameters; assert SKILL_ID_PREFIX == 'skill-' and MEMORY_ID_PREFIX == 'mem-'; print('prereqs ok')"
+PYTHONDONTWRITEBYTECODE=1 uv run --extra dev python -c "import inspect; from simple_actio.instance import instantiate; from simple_actio.skills import Skill, SKILL_ID_PREFIX; from simple_actio.memory import MemoryEntry, MEMORY_ID_PREFIX; from simple_actio.trace import validate_trace, normalize_library_version; from simple_actio.triggers import referenced_signals; from simple_actio.signals import default_registry; from inference_bridge import BridgeError, ScriptedBridge; from controlplane.paths import agent_round_file, proposal_file, skill_file, memory_file, library_state_file, failure_record_file; from controlplane.ledger import record_failure; from simulator.realtime.client import EnvironmentServiceClient; assert 'activation_trace' in inspect.signature(EnvironmentServiceClient.submit_turn).parameters; assert SKILL_ID_PREFIX == 'skill-' and MEMORY_ID_PREFIX == 'mem-'; print('prereqs ok')"
 ```
 
 Expected: 最后一行 `prereqs ok`。任何 `ImportError`、`AttributeError` 或 `AssertionError` 都说明计划 1 或计划 6 没有按其文本合并:**停下**,把报错原样报告,不要往下做。
@@ -1606,7 +1606,7 @@ import json
 
 import pytest
 
-from actio.skills import Skill
+from simple_actio.skills import Skill
 from controlplane.gitstore import GitStore
 from controlplane.paths import run_trace_file
 from inference_bridge import BridgeError, ScriptedBridge
@@ -1763,8 +1763,8 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-from actio.errors import ActioDataError
-from actio.skills import Skill
+from simple_actio.errors import SimpleActioDataError
+from simple_actio.skills import Skill
 from mindagent.analysis import BehaviorFinding
 from mindagent.errors import MindAgentDataError, ProposalParseError
 
@@ -1806,7 +1806,7 @@ def _skill_definition(finding: BehaviorFinding, instructions: list[str], descrip
         "policy": {"instructions": list(instructions)},
         "description": description,
     }
-    Skill.from_dict(definition)  # 必须能被 Actio 读回,否则是生成器的 bug
+    Skill.from_dict(definition)  # 必须能被 SimpleActio 读回,否则是生成器的 bug
     return definition
 
 
@@ -1889,7 +1889,7 @@ def propose(
             generator = BRIDGE_GENERATOR
         try:
             definition = _skill_definition(finding, instructions, description)
-        except ActioDataError as exc:
+        except SimpleActioDataError as exc:
             raise ProposalParseError(f"finding {finding.id}: {exc}", attempts=1) from None
         drafts.append(ProposalDraft(
             finding_id=finding.id,
@@ -1926,7 +1926,7 @@ git commit -m "feat: mindagent skill proposal generator (rule template by defaul
 - Test: `tests/test_ma_verify.py`
 
 **Interfaces:**
-- Consumes: `mindagent.analysis`(`BehaviorFinding`、`agent_slot_of_episode`、`visible_history`);`mindagent.proposals.ProposalDraft`;`actio.skills.Skill`;实例的 `respond` 与 `registry`。
+- Consumes: `mindagent.analysis`(`BehaviorFinding`、`agent_slot_of_episode`、`visible_history`);`mindagent.proposals.ProposalDraft`;`simple_actio.skills.Skill`;实例的 `respond` 与 `registry`。
 - Produces(任务 85、87 依赖):
   - `verify(draft, findings, episodes, *, base_instance_factory, personas, scenarios, judge=None, run_id="", task_id="mindagent-judge") -> Verification`;`base_instance_factory(extra_skills: tuple[Skill, ...])` 每次返回新实例。
   - `Verification(method, episodes, fired_on_motivating, fired_elsewhere, notes, quality_notes=None)`(`to_dict()` 与设计 §4.2 的 `verification` 载荷同键;`quality_notes` 仅在有值时出现)。
@@ -1940,7 +1940,7 @@ git commit -m "feat: mindagent skill proposal generator (rule template by defaul
 - [ ] **Step 0: 前置检查(计划 1、计划 6 已合并)**
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 uv run --extra dev python -c "import inspect; from actio.instance import instantiate; from actio.skills import Skill, SKILL_ID_PREFIX; from actio.memory import MemoryEntry, MEMORY_ID_PREFIX; from actio.trace import validate_trace, normalize_library_version; from actio.triggers import referenced_signals; from actio.signals import default_registry; from inference_bridge import BridgeError, ScriptedBridge; from controlplane.paths import agent_round_file, proposal_file, skill_file, memory_file, library_state_file, failure_record_file; from controlplane.ledger import record_failure; from simulator.realtime.client import EnvironmentServiceClient; assert 'activation_trace' in inspect.signature(EnvironmentServiceClient.submit_turn).parameters; assert SKILL_ID_PREFIX == 'skill-' and MEMORY_ID_PREFIX == 'mem-'; print('prereqs ok')"
+PYTHONDONTWRITEBYTECODE=1 uv run --extra dev python -c "import inspect; from simple_actio.instance import instantiate; from simple_actio.skills import Skill, SKILL_ID_PREFIX; from simple_actio.memory import MemoryEntry, MEMORY_ID_PREFIX; from simple_actio.trace import validate_trace, normalize_library_version; from simple_actio.triggers import referenced_signals; from simple_actio.signals import default_registry; from inference_bridge import BridgeError, ScriptedBridge; from controlplane.paths import agent_round_file, proposal_file, skill_file, memory_file, library_state_file, failure_record_file; from controlplane.ledger import record_failure; from simulator.realtime.client import EnvironmentServiceClient; assert 'activation_trace' in inspect.signature(EnvironmentServiceClient.submit_turn).parameters; assert SKILL_ID_PREFIX == 'skill-' and MEMORY_ID_PREFIX == 'mem-'; print('prereqs ok')"
 ```
 
 Expected: 最后一行 `prereqs ok`。任何 `ImportError`、`AttributeError` 或 `AssertionError` 都说明计划 1 或计划 6 没有按其文本合并:**停下**,把报错原样报告,不要往下做。
@@ -1952,9 +1952,9 @@ Expected: 最后一行 `prereqs ok`。任何 `ImportError`、`AttributeError` �
 ```python
 import pytest
 
-from actio.instance import instantiate
-from actio.skills import Skill
-from actio.trace import build_trace
+from simple_actio.instance import instantiate
+from simple_actio.skills import Skill
+from simple_actio.trace import build_trace
 from inference_bridge import ScriptedBridge
 from mindagent.analysis import BehaviorFinding, analyze
 from mindagent.errors import MindAgentDataError
@@ -2104,7 +2104,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from actio.skills import Skill
+from simple_actio.skills import Skill
 from mindagent.analysis import BehaviorFinding, agent_slot_of_episode, visible_history
 from mindagent.errors import MindAgentDataError
 from mindagent.proposals import ProposalDraft
@@ -2268,7 +2268,7 @@ git commit -m "feat: mindagent proposal verifier (offline replay of motivating e
 - [ ] **Step 0: 前置检查(计划 1、计划 6 已合并)**
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 uv run --extra dev python -c "import inspect; from actio.instance import instantiate; from actio.skills import Skill, SKILL_ID_PREFIX; from actio.memory import MemoryEntry, MEMORY_ID_PREFIX; from actio.trace import validate_trace, normalize_library_version; from actio.triggers import referenced_signals; from actio.signals import default_registry; from inference_bridge import BridgeError, ScriptedBridge; from controlplane.paths import agent_round_file, proposal_file, skill_file, memory_file, library_state_file, failure_record_file; from controlplane.ledger import record_failure; from simulator.realtime.client import EnvironmentServiceClient; assert 'activation_trace' in inspect.signature(EnvironmentServiceClient.submit_turn).parameters; assert SKILL_ID_PREFIX == 'skill-' and MEMORY_ID_PREFIX == 'mem-'; print('prereqs ok')"
+PYTHONDONTWRITEBYTECODE=1 uv run --extra dev python -c "import inspect; from simple_actio.instance import instantiate; from simple_actio.skills import Skill, SKILL_ID_PREFIX; from simple_actio.memory import MemoryEntry, MEMORY_ID_PREFIX; from simple_actio.trace import validate_trace, normalize_library_version; from simple_actio.triggers import referenced_signals; from simple_actio.signals import default_registry; from inference_bridge import BridgeError, ScriptedBridge; from controlplane.paths import agent_round_file, proposal_file, skill_file, memory_file, library_state_file, failure_record_file; from controlplane.ledger import record_failure; from simulator.realtime.client import EnvironmentServiceClient; assert 'activation_trace' in inspect.signature(EnvironmentServiceClient.submit_turn).parameters; assert SKILL_ID_PREFIX == 'skill-' and MEMORY_ID_PREFIX == 'mem-'; print('prereqs ok')"
 ```
 
 Expected: 最后一行 `prereqs ok`。任何 `ImportError`、`AttributeError` 或 `AssertionError` 都说明计划 1 或计划 6 没有按其文本合并:**停下**,把报错原样报告,不要往下做。
@@ -2566,7 +2566,7 @@ git commit -m "feat: mindagent proposal packager (pending_review skill_memory_pr
 - Test: `tests/test_ma_admit.py`
 
 **Interfaces:**
-- Consumes: `controlplane.paths`(`proposal_file`、`skill_file`、`memory_file`、`library_state_file`、`failure_record_file`、`run_dir`);`controlplane.ledger.record_failure`(只经 `fail_once` 调);`controlplane.validate.EnvelopeValidationError`、`controlplane.migration.UnknownSchemaVersionError`;`controlplane.states.assert_transition`;`controlplane.reconcile.Action`;`actio.skills.Skill`、`actio.memory.MemoryEntry`;`mindagent.library`(`LIBRARY_STATE_ID`、`read_library_versions`、`skill_id_for`、`memory_id_for`)。
+- Consumes: `controlplane.paths`(`proposal_file`、`skill_file`、`memory_file`、`library_state_file`、`failure_record_file`、`run_dir`);`controlplane.ledger.record_failure`(只经 `fail_once` 调);`controlplane.validate.EnvelopeValidationError`、`controlplane.migration.UnknownSchemaVersionError`;`controlplane.states.assert_transition`;`controlplane.reconcile.Action`;`simple_actio.skills.Skill`、`simple_actio.memory.MemoryEntry`;`mindagent.library`(`LIBRARY_STATE_ID`、`read_library_versions`、`skill_id_for`、`memory_id_for`)。
 - Produces(计划 8 / 9 把它注册为 `admit_proposal` 的处理器):`handle_admit_proposal(store, action) -> None`,形状 `Callable[[GitStore, Action], None]`;`action.target_id` 是提案 id。
 - Produces(任务 87 依赖):`mindagent.failures` 的 `UNREADABLE`、`read_or_none(store, rel) -> Envelope | None`、`_single_segment(run_id) -> bool`、`fail_once(store, run_id, *, task_id, category, point, retries, reason) -> bool`(Ruling 20、21)。
 
@@ -2580,7 +2580,7 @@ git commit -m "feat: mindagent proposal packager (pending_review skill_memory_pr
 - [ ] **Step 0: 前置检查(计划 1、计划 6 已合并)**
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 uv run --extra dev python -c "import inspect; from actio.instance import instantiate; from actio.skills import Skill, SKILL_ID_PREFIX; from actio.memory import MemoryEntry, MEMORY_ID_PREFIX; from actio.trace import validate_trace, normalize_library_version; from actio.triggers import referenced_signals; from actio.signals import default_registry; from inference_bridge import BridgeError, ScriptedBridge; from controlplane.paths import agent_round_file, proposal_file, skill_file, memory_file, library_state_file, failure_record_file; from controlplane.ledger import record_failure; from simulator.realtime.client import EnvironmentServiceClient; assert 'activation_trace' in inspect.signature(EnvironmentServiceClient.submit_turn).parameters; assert SKILL_ID_PREFIX == 'skill-' and MEMORY_ID_PREFIX == 'mem-'; print('prereqs ok')"
+PYTHONDONTWRITEBYTECODE=1 uv run --extra dev python -c "import inspect; from simple_actio.instance import instantiate; from simple_actio.skills import Skill, SKILL_ID_PREFIX; from simple_actio.memory import MemoryEntry, MEMORY_ID_PREFIX; from simple_actio.trace import validate_trace, normalize_library_version; from simple_actio.triggers import referenced_signals; from simple_actio.signals import default_registry; from inference_bridge import BridgeError, ScriptedBridge; from controlplane.paths import agent_round_file, proposal_file, skill_file, memory_file, library_state_file, failure_record_file; from controlplane.ledger import record_failure; from simulator.realtime.client import EnvironmentServiceClient; assert 'activation_trace' in inspect.signature(EnvironmentServiceClient.submit_turn).parameters; assert SKILL_ID_PREFIX == 'skill-' and MEMORY_ID_PREFIX == 'mem-'; print('prereqs ok')"
 ```
 
 Expected: 最后一行 `prereqs ok`。任何 `ImportError`、`AttributeError` 或 `AssertionError` 都说明计划 1 或计划 6 没有按其文本合并:**停下**,把报错原样报告,不要往下做。
@@ -2592,8 +2592,8 @@ Expected: 最后一行 `prereqs ok`。任何 `ImportError`、`AttributeError` �
 ```python
 import pytest
 
-from actio.memory import MemoryEntry
-from actio.skills import Skill
+from simple_actio.memory import MemoryEntry
+from simple_actio.skills import Skill
 from controlplane.envelope import Envelope, OwnerRef
 from controlplane.gitstore import GitStore
 from controlplane.paths import (
@@ -2861,9 +2861,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from actio.errors import ActioDataError
-from actio.memory import MemoryEntry
-from actio.skills import Skill
+from simple_actio.errors import SimpleActioDataError
+from simple_actio.memory import MemoryEntry
+from simple_actio.skills import Skill
 from controlplane.envelope import Envelope, OwnerRef
 from controlplane.gitstore import GitStore
 from controlplane.paths import library_state_file, memory_file, proposal_file, skill_file
@@ -2897,7 +2897,7 @@ def _entries(proposal_id: str, increments: object) -> list[tuple[str, str, dict]
                 out.append(("memory", definition["id"], MemoryEntry.from_dict(definition).to_dict()))
             else:
                 raise ValueError(f"increment {k}: unknown kind {kind!r}")
-        except ActioDataError as exc:
+        except SimpleActioDataError as exc:
             raise ValueError(f"increment {k}: {exc}") from None
     return out
 
@@ -2989,7 +2989,7 @@ git commit -m "feat: mindagent admit_proposal handler (approved increments into 
 - Test: `tests/test_ma_rounds.py`
 
 **Interfaces:**
-- Consumes: 任务 80 至 85 的全部产出;`actio.instance.instantiate`;`controlplane.paths`(`agent_round_file`、`model_file`、`scenario_file`、`persona_file`、`CONTROL_PLANE_ROOT`);`controlplane.ledger.record_failure`;`controlplane.states.assert_transition`;`inference_bridge.BridgeError`;`simulator.store_adapter.read_scenario`。
+- Consumes: 任务 80 至 85 的全部产出;`simple_actio.instance.instantiate`;`controlplane.paths`(`agent_round_file`、`model_file`、`scenario_file`、`persona_file`、`CONTROL_PLANE_ROOT`);`controlplane.ledger.record_failure`;`controlplane.states.assert_transition`;`inference_bridge.BridgeError`;`simulator.store_adapter.read_scenario`。
 - Produces(计划 8 / 9 把返回值注册为 `start_agent_round` 的处理器):
   - `make_start_round_handler(*, config: AgentConfig, client_factory, backend_factory, personas_loader, bridge=None) -> Callable[[GitStore, Action], None]`;`action.target_id` 是模型 id(`zengen-vN`)。工厂形式见 Ruling 19;名字与位置是计划 9 的契约,不改。
   - `backend_factory(model_id: str, checkpoint_ref: BigRef | None) -> 模型后端`;`personas_loader(store, persona_ids: list[str]) -> dict[str, Persona]`。
@@ -3008,7 +3008,7 @@ git commit -m "feat: mindagent admit_proposal handler (approved increments into 
 - [ ] **Step 0: 前置检查(计划 1、计划 6 已合并)**
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 uv run --extra dev python -c "import inspect; from actio.instance import instantiate; from actio.skills import Skill, SKILL_ID_PREFIX; from actio.memory import MemoryEntry, MEMORY_ID_PREFIX; from actio.trace import validate_trace, normalize_library_version; from actio.triggers import referenced_signals; from actio.signals import default_registry; from inference_bridge import BridgeError, ScriptedBridge; from controlplane.paths import agent_round_file, proposal_file, skill_file, memory_file, library_state_file, failure_record_file; from controlplane.ledger import record_failure; from simulator.realtime.client import EnvironmentServiceClient; assert 'activation_trace' in inspect.signature(EnvironmentServiceClient.submit_turn).parameters; assert SKILL_ID_PREFIX == 'skill-' and MEMORY_ID_PREFIX == 'mem-'; print('prereqs ok')"
+PYTHONDONTWRITEBYTECODE=1 uv run --extra dev python -c "import inspect; from simple_actio.instance import instantiate; from simple_actio.skills import Skill, SKILL_ID_PREFIX; from simple_actio.memory import MemoryEntry, MEMORY_ID_PREFIX; from simple_actio.trace import validate_trace, normalize_library_version; from simple_actio.triggers import referenced_signals; from simple_actio.signals import default_registry; from inference_bridge import BridgeError, ScriptedBridge; from controlplane.paths import agent_round_file, proposal_file, skill_file, memory_file, library_state_file, failure_record_file; from controlplane.ledger import record_failure; from simulator.realtime.client import EnvironmentServiceClient; assert 'activation_trace' in inspect.signature(EnvironmentServiceClient.submit_turn).parameters; assert SKILL_ID_PREFIX == 'skill-' and MEMORY_ID_PREFIX == 'mem-'; print('prereqs ok')"
 ```
 
 Expected: 最后一行 `prereqs ok`。任何 `ImportError`、`AttributeError` 或 `AssertionError` 都说明计划 1 或计划 6 没有按其文本合并:**停下**,把报错原样报告,不要往下做。
@@ -3023,7 +3023,7 @@ import json
 import grpc
 import pytest
 
-from actio.skills import Skill
+from simple_actio.skills import Skill
 from controlplane.envelope import BigRef, Envelope, OwnerRef
 from controlplane.gitstore import GitStore
 from controlplane.paths import (
@@ -3345,7 +3345,7 @@ def test_a_missing_scenario_fails_the_round_before_any_session(store):
 def test_a_malformed_library_entry_fails_the_round(store):
     _skill(store, dict(GOAL, level="huge"))
     _start(store, _handler())
-    _assert_failed(store, "mindagent.rounds", "ActioDataError")
+    _assert_failed(store, "mindagent.rounds", "SimpleActioDataError")
 
 
 def test_a_failed_round_is_terminal(store):
@@ -3526,9 +3526,9 @@ import re
 from collections.abc import Callable
 from datetime import datetime, timezone
 
-from actio.errors import ActioDataError
-from actio.instance import instantiate
-from actio.skills import Skill
+from simple_actio.errors import SimpleActioDataError
+from simple_actio.instance import instantiate
+from simple_actio.skills import Skill
 from controlplane.envelope import BigRef, Envelope, OwnerRef
 from controlplane.gitstore import GitStore
 from controlplane.paths import CONTROL_PLANE_ROOT, agent_round_file, model_file, persona_file, scenario_file
@@ -3735,7 +3735,7 @@ def make_start_round_handler(
                     "mindagent.proposals", max(exc.attempts - 1, 0))
         except AgentRoundFailedError as exc:
             _record(store, rel, run_id, model_id, exc.reason, exc.point, 0)
-        except (MindAgentDataError, ActioDataError) as exc:
+        except (MindAgentDataError, SimpleActioDataError) as exc:
             _record(store, rel, run_id, model_id, f"{type(exc).__name__}: {exc}", "mindagent.rounds", 0)
 
     def _run(store: GitStore, env: Envelope, lib: LibraryState, run_id: str, model_id: str,
@@ -3841,7 +3841,7 @@ git commit -m "feat: mindagent start_agent_round handler (bind latest model and 
 - [ ] **Step 0: 前置检查(计划 1、计划 6 已合并)**
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 uv run --extra dev python -c "import inspect; from actio.instance import instantiate; from actio.skills import Skill, SKILL_ID_PREFIX; from actio.memory import MemoryEntry, MEMORY_ID_PREFIX; from actio.trace import validate_trace, normalize_library_version; from actio.triggers import referenced_signals; from actio.signals import default_registry; from inference_bridge import BridgeError, ScriptedBridge; from controlplane.paths import agent_round_file, proposal_file, skill_file, memory_file, library_state_file, failure_record_file; from controlplane.ledger import record_failure; from simulator.realtime.client import EnvironmentServiceClient; assert 'activation_trace' in inspect.signature(EnvironmentServiceClient.submit_turn).parameters; assert SKILL_ID_PREFIX == 'skill-' and MEMORY_ID_PREFIX == 'mem-'; print('prereqs ok')"
+PYTHONDONTWRITEBYTECODE=1 uv run --extra dev python -c "import inspect; from simple_actio.instance import instantiate; from simple_actio.skills import Skill, SKILL_ID_PREFIX; from simple_actio.memory import MemoryEntry, MEMORY_ID_PREFIX; from simple_actio.trace import validate_trace, normalize_library_version; from simple_actio.triggers import referenced_signals; from simple_actio.signals import default_registry; from inference_bridge import BridgeError, ScriptedBridge; from controlplane.paths import agent_round_file, proposal_file, skill_file, memory_file, library_state_file, failure_record_file; from controlplane.ledger import record_failure; from simulator.realtime.client import EnvironmentServiceClient; assert 'activation_trace' in inspect.signature(EnvironmentServiceClient.submit_turn).parameters; assert SKILL_ID_PREFIX == 'skill-' and MEMORY_ID_PREFIX == 'mem-'; print('prereqs ok')"
 ```
 
 Expected: 最后一行 `prereqs ok`。任何 `ImportError`、`AttributeError` 或 `AssertionError` 都说明计划 1 或计划 6 没有按其文本合并:**停下**,把报错原样报告,不要往下做。
@@ -3858,7 +3858,7 @@ Expected: 最后一行 `prereqs ok`。任何 `ImportError`、`AttributeError` �
 import grpc
 import pytest
 
-from actio.trace import validate_trace
+from simple_actio.trace import validate_trace
 from controlplane.envelope import BigRef, Envelope, OwnerRef
 from controlplane.gitstore import GitStore
 from controlplane.paths import agent_round_file, library_state_file, model_file, proposal_file, skill_file
@@ -4095,7 +4095,7 @@ Expected(顺序为 git 的字母序):
 再确认三件事:
 
 ```bash
-git diff --name-only "$BASE"..HEAD -- cli schemas src/controlplane src/simulator src/actio src/inference_bridge src/mindtrainer src/diagnostic
+git diff --name-only "$BASE"..HEAD -- cli schemas src/controlplane src/simulator src/simple_actio src/inference_bridge src/mindtrainer src/diagnostic
 grep -rn "mindagent" src/controlplane || echo "controlplane clean"
 git status --short cli
 ```

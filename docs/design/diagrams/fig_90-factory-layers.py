@@ -16,7 +16,7 @@ def build() -> Canvas:
     sim = c.box(320, 80, 200, "simulator", "仿真 · 实时服务", kind="compute", h=64)
     mt = c.box(320, 220, 200, "mindtrainer", "训练 · 派发器", kind="compute", h=64)
     dg = c.box(320, 360, 200, "diagnostic", "诊断评测", kind="compute", h=64)
-    new = c.box(580, 440, 220, "闭环新包", "recipestore · trainplanner\ntrainscheduler · actio\nmindagent · inference_bridge",
+    new = c.box(580, 440, 220, "闭环新包", "recipestore · trainplanner\ntrainscheduler · simple_actio\nmindagent · inference_bridge",
                 kind="neutral", h=92)
 
     c.edge(sim, cp, "left", "top", b_f=0.5, label="导入")

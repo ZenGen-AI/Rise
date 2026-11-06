@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from actio.skills import Skill
+from simple_actio.skills import Skill
 from controlplane.envelope import Envelope, OwnerRef
 from controlplane.gitstore import GitStore
 from controlplane.paths import library_state_file, memory_file, skill_file
@@ -151,7 +151,7 @@ def test_every_mindagent_source_starts_with_future_annotations_and_controlplane_
 ], ids=["skill-conflict", "skill-bad-envelope"])
 def test_an_unreadable_library_file_is_a_mindagent_data_error_naming_it(store, which, text):
     """库文件不在调和循环的视图里,CP-17 的暂停规则管不到它;轮次处理器只接 MindAgentDataError
-    与 ActioDataError(轮次 failed),别的异常会从处理器漏出去打崩守护进程。"""
+    与 SimpleActioDataError(轮次 failed),别的异常会从处理器漏出去打崩守护进程。"""
     rel = skill_file("skill-a")
     path = store.repo_root / rel
     path.parent.mkdir(parents=True, exist_ok=True)

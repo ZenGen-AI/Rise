@@ -2,9 +2,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from actio.memory import FileTupleStore
-from actio.memory_port import MemoryEventConflict, MemoryFailureError
-from actio.skills import Skill
+from simple_actio.memory import FileTupleStore
+from simple_actio.memory_port import MemoryEventConflict, MemoryFailureError
+from simple_actio.skills import Skill
 from controlplane.deferred import DeferredError
 from controlplane.envelope import Envelope, OwnerRef
 from controlplane.gitstore import GitStore
@@ -472,7 +472,7 @@ def test_an_in_flight_round_of_another_world_still_defers_a_memory_increment_thr
 
 
 def test_an_empty_interlocutor_passes_validation_but_the_stand_in_refusal_is_t2_and_does_not_escape(store, mem):
-    # 设计源:interlocutor 空串表示一般事实,校验放行;替身库要求它非空、在登记之前就以 ActioDataError 拒收。
+    # 设计源:interlocutor 空串表示一般事实,校验放行;替身库要求它非空、在登记之前就以 SimpleActioDataError 拒收。
     # 处理器把它当 T2 记下(只报类名),提案留在 approved,库不动,守护进程不崩
     _put(store, increments=[{"kind": "memory", "definition": dict(MEMORY, interlocutor="")}])
     before = mem.store.digest("s1")
@@ -480,7 +480,7 @@ def test_an_empty_interlocutor_passes_validation_but_the_stand_in_refusal_is_t2_
     assert store.read_product(proposal_file(PID)).status == "approved"
     fr = store.read_product(failure_record_file("run-003", f"admit-{PID}"))
     reason = fr.payload["reason"]
-    assert fr.payload["category"] == "T2" and reason.startswith(f"remember {KEY}: ActioDataError")
+    assert fr.payload["category"] == "T2" and reason.startswith(f"remember {KEY}: SimpleActioDataError")
     # 终审 M-6:点明替身收不了一般事实,否则人看不出提案为什么一直停在 approved;不带任何正文
     assert "general fact" in reason and "interlocutor" in reason
     assert MEMORY["text"] not in reason

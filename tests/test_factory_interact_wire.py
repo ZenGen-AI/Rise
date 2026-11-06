@@ -320,8 +320,8 @@ from controlplane.envelope import BigRef, Envelope, OwnerRef
 from controlplane.paths import (
     candidate_checkpoint_file, episodes_dir, model_file, run_dir, scheduler_config_file, training_defaults_file,
 )
-from actio.memory import TupleMemory
-from actio.memory_port import MemoryEvent, MemoryFailureError
+from simple_actio.memory import TupleMemory
+from simple_actio.memory_port import MemoryEvent, MemoryFailureError
 from factory.agent import AgentRuntime
 from factory.interact_policy import OpponentSwitch, make_policy_factory
 from factory.memory_runtime import StandInTrainingWorlds
@@ -703,8 +703,8 @@ def test_a_training_scope_leaves_the_runtime_deadline_to_deployment_sessions(wor
         assert runtime.interact_deadline_s == before
 
 
-def test_the_scope_yields_a_per_rollout_factory_of_actio_instances_around_the_vllm_policy(world, tmp_path, stub):
-    from actio.memory import TupleMemory
+def test_the_scope_yields_a_per_rollout_factory_of_simple_actio_instances_around_the_vllm_policy(world, tmp_path, stub):
+    from simple_actio.memory import TupleMemory
     from factory.memory_translate import MemoryTranslatingBackend
     from factory.vllm_policy import VllmPolicy
     _, _, factory, _ = _unit(world, tmp_path, stub)
@@ -835,7 +835,7 @@ def test_a_rollout_that_raises_still_removes_its_world_and_the_scope_unbinds_on_
 def test_the_scope_binds_the_configured_seed_and_the_rollout_world_starts_from_the_scenario_seed(
         world, tmp_path, stub):
     pytest.importorskip("starling")
-    from actio.memory_starling import StarlingDeploymentStore, empty_digest
+    from simple_actio.memory_starling import StarlingDeploymentStore, empty_digest
     from factory.memory_runtime import StarlingLayout, StarlingTrainingWorlds
     from starling_fakes import FakeOpenAI, offline_api_key
 
@@ -946,7 +946,7 @@ def test_an_interact_directive_records_v2_traces_on_the_trained_slot(world, tmp_
     for path in _episode_ids(world):
         episode = read_episode(world, RUN, path.rsplit("/", 1)[-1].removesuffix(".yaml"))
         assert episode.id.startswith(f"{RUN}-grpo0-")
-        assert episode.turns and all(t.activation_trace["schema"] == "actio.trace.v2" for t in episode.turns)
+        assert episode.turns and all(t.activation_trace["schema"] == "simple_actio.trace.v2" for t in episode.turns)
 
 
 def test_a_training_exception_still_unregisters_and_restores_the_deadline(world, tmp_path, stub):

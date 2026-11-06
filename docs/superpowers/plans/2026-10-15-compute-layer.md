@@ -53,7 +53,7 @@
 每个任务的要求都隐含包含本节。
 
 - `src/compute/` 与 `src/factory/compute_config.py` 的每个源文件以 `from __future__ import annotations` 开头(模块 docstring 之后的第一条语句也算);`job_tool.py` 同样,Task 1 的 `tests/test_compute_scaffold.py` 与既有的 `tests/test_factory_boundaries.py` 强制检查。
-- **依赖方向:** `src/compute/*.py` 只导入标准库、`compute.*`、`controlplane.deferred`;`job_tool.py` 只导入标准库。`controlplane`、`simulator`、`inference_bridge`、`recipestore`、`trainplanner`、`trainscheduler`、`actio`、`mindagent` 不导入 `compute`。`compute` 不导入 `factory`、`mindtrainer`、`diagnostic`。
+- **依赖方向:** `src/compute/*.py` 只导入标准库、`compute.*`、`controlplane.deferred`;`job_tool.py` 只导入标准库。`controlplane`、`simulator`、`inference_bridge`、`recipestore`、`trainplanner`、`trainscheduler`、`simple_actio`、`mindagent` 不导入 `compute`。`compute` 不导入 `factory`、`mindtrainer`、`diagnostic`。
 - **不引入新第三方依赖**;`pyproject.toml` 只改两处:wheel 包列表追加 `src/compute`(Task 1,追加式脚本)、`[tool.pytest.ini_options]` 新增 `markers`(Task 7 Step 5)。
 - **凭证绝不进 git 树、命令行或日志。** 密钥只走 stdin;`TransportError` 的 `reason` 只含 stderr 尾巴与退出码,不含请求内容;配置错误只写键名与路径,不回显取值。
 - **绝不终止非本任务启动的进程。** `stop` 只对 `proc.json` 记录且启动标记仍匹配的进程组发信号。
@@ -242,7 +242,7 @@ PY
 `compute` 不在里面,所以 Global Constraints 的依赖方向这一条现在没有测试守着:
 
 ```python
-NEW_PACKAGES = ("inference_bridge", "recipestore", "trainplanner", "trainscheduler", "actio", "mindagent", "factory",
+NEW_PACKAGES = ("inference_bridge", "recipestore", "trainplanner", "trainscheduler", "simple_actio", "mindagent", "factory",
                 "compute")
 ```
 

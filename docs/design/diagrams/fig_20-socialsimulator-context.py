@@ -9,7 +9,7 @@ def build() -> Canvas:
         1080, 560, title="SocialSimulator 仿真部分的上下文",
         desc="仿真部分居中。MindTrainer 经清单读批量数据集,经接口①跑实时会话;"
              "诊断评测与 ControlPlane 骨架桩以库调用复用它;它把情境、人格、Episode 与清单写进产物树。"
-             "MindAgent 经接口②连入会话,Actio 的激活轨迹随每轮回传。")
+             "MindAgent 经接口②连入会话,SimpleActio 的激活轨迹随每轮回传。")
     c.lane(14, 44, 300, 470, "调用方(计算层)", kind="compute")
     c.lane(766, 44, 300, 470, "存储与共享基础设施", kind="infra", label_align="end")
 
@@ -21,7 +21,7 @@ def build() -> Canvas:
     cp = c.box(415, 72, 250, "ControlPlane 骨架桩", "simulator.stubs 调情境生成器", kind="control", h=64)
 
     st = c.store(800, 186, 240, "产物树", "scenarios/ · personas/\nruns/<run>/episodes/\ndataset_manifest_<阶段>", h=124)
-    ac = c.box(800, 392, 240, "Actio", "每轮附带激活轨迹", kind="infra", h=64)
+    ac = c.box(800, 392, 240, "SimpleActio", "每轮附带激活轨迹", kind="infra", h=64)
 
     c.edge(mt, ss, "right", "left", a_f=0.65, b_f=0.3, label="① gRPC 会话", tail=True, color=ORANGE, width=2.2)
     c.edge(ma, ss, "right", "left", b_f=0.6, label="② gRPC 会话", tail=True, color=ORANGE, width=2.2)

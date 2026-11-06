@@ -22,7 +22,7 @@ build-backend = "hatchling.build"
 allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/controlplane", "src/simulator", "src/diagnostic", "src/mindtrainer", "src/inference_bridge", "src/recipestore", "src/trainplanner", "src/trainscheduler", "src/actio", "src/mindagent", "src/factory", "src/compute"]
+packages = ["src/controlplane", "src/simulator", "src/diagnostic", "src/mindtrainer", "src/inference_bridge", "src/recipestore", "src/trainplanner", "src/trainscheduler", "src/simple_actio", "src/mindagent", "src/factory", "src/compute"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

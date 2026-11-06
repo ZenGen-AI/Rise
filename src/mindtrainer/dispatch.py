@@ -267,7 +267,7 @@ def _is_adapter_export(ref: BigRef) -> bool:
 
 
 # 注入的记忆解析器:(种子, 情境 id 元组) -> (情境 id -> 起点世界摘要, 运行时身份)。
-# 派发器不知道记忆库长什么样,也不得导入 actio、factory;由装配方(组合根)注入。
+# 派发器不知道记忆库长什么样,也不得导入 simple_actio、factory;由装配方(组合根)注入。
 MemoryResolver = Callable[[str | None, tuple[str, ...]], tuple[dict[str, str], dict]]
 
 

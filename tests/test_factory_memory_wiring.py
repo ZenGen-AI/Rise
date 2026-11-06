@@ -85,10 +85,10 @@ def test_an_empty_api_key_is_refused_by_name(tmp_path, monkeypatch, store):
 
 
 def test_a_starling_that_cannot_be_loaded_is_the_same_install_hint(tmp_path, monkeypatch, store):
-    """装了包但 C++ 扩展载不进来:导入 actio.memory_starling 抛 ImportError,译成同一条安装提示,不带根目录与端点。"""
+    """装了包但 C++ 扩展载不进来:导入 simple_actio.memory_starling 抛 ImportError,译成同一条安装提示,不带根目录与端点。"""
     import factory.memory_runtime as mr
     monkeypatch.setattr(mr, "starling_install_source", lambda: "git:abc")
-    monkeypatch.setitem(sys.modules, "actio.memory_starling", None)          # `from ... import` 抛 ImportError
+    monkeypatch.setitem(sys.modules, "simple_actio.memory_starling", None)          # `from ... import` 抛 ImportError
     with pytest.raises(FactoryConfigError) as caught:
         memory_wiring(store.repo_root, _memory_env(tmp_path), deployment=True)
     text = str(caught.value)
@@ -120,7 +120,7 @@ def test_the_starling_wiring_logs_only_its_backend_name(tmp_path, store, caplog)
 
 def test_with_starling_the_round_handler_gets_starling_memory_and_a_40s_budget(tmp_path, store, monkeypatch):
     pytest.importorskip("starling")
-    from actio.memory_starling import StarlingDeploymentStore
+    from simple_actio.memory_starling import StarlingDeploymentStore
     import factory.handlers as fh
     seen = {}
     monkeypatch.setattr(fh, "make_start_round_handler", lambda **kw: seen.setdefault("round", kw) and None or (lambda s, a: None))
@@ -154,7 +154,7 @@ def test_the_stand_in_round_handler_keeps_the_defaults(store, monkeypatch):
 def test_a_context_without_a_shared_runtime_gets_the_starling_budget_too(store, monkeypatch):
     """手工拼的 BuildContext(runtime 为 None)时 _agent 自己造运行时:Starling 一样等 40 秒、整条流 max_turns × 40。"""
     import factory.handlers as fh
-    from actio.memory import FileTupleStore
+    from simple_actio.memory import FileTupleStore
     from factory.wire import BuildContext
     from mindagent.memory_layout import MemoryLayout
     from factory.memory_runtime import DeploymentMemory
@@ -321,7 +321,7 @@ def test_a_memory_call_budget_over_four_seconds_is_exit_code_2(store, tmp_path, 
 # ---------------- 旧布局拒绝启动(设计三 4.8 节):记忆根是按人格建库的旧样子,退出码 2 ----------------
 
 def _starling_env(tmp_path, monkeypatch):
-    """装没装 Starling 都走到旧布局检查:把安装检查打桩成通过(旧布局检查排在导入 actio.memory_starling 之前)。"""
+    """装没装 Starling 都走到旧布局检查:把安装检查打桩成通过(旧布局检查排在导入 simple_actio.memory_starling 之前)。"""
     import factory.memory_runtime as mr
     monkeypatch.setattr(mr, "starling_install_source", lambda: "git:abc")
     return _memory_env(tmp_path)
@@ -440,7 +440,7 @@ def test_a_broken_agent_yaml_propagates_as_its_own_config_error(tmp_path, store,
 def test_the_old_layout_check_runs_after_the_owner_claim_and_before_the_starling_import(tmp_path, store, monkeypatch):
     env = _starling_env(tmp_path, monkeypatch)
     _touch(tmp_path / "mem", "deploy/pa.db")
-    monkeypatch.setitem(sys.modules, "actio.memory_starling", None)          # 导入会抛 ImportError:要是先导入就是安装提示
+    monkeypatch.setitem(sys.modules, "simple_actio.memory_starling", None)          # 导入会抛 ImportError:要是先导入就是安装提示
     with pytest.raises(FactoryConfigError, match="old per-persona layout"):
         memory_wiring(store.repo_root, env, deployment=True)
     assert (tmp_path / "mem" / ".owner").exists()                              # 认领在前

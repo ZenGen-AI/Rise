@@ -129,7 +129,7 @@ def test_bad_agent_yaml_is_an_assembly_error(store, change, match):
 @pytest.mark.parametrize("bad", ["张三", "p/../x", ".hidden", "a" * 129, 123, None])
 def test_a_bound_persona_id_the_memory_layout_refuses_exits_2_at_assembly(store, capsys, bad):
     """人格 id 拼进部署库与锁的文件名(PERSONA_ID_PATTERN):不合法的在装配期就判 FactoryConfigError、
-    退出码 2,而不是让轮次处理器在取锁时抛 ActioDataError、守护进程每次重启都在同一处退出(终审 I-2)。"""
+    退出码 2,而不是让轮次处理器在取锁时抛 SimpleActioDataError、守护进程每次重启都在同一处退出(终审 I-2)。"""
     from factory.cli import main
     payload = dict(DEFAULT_AGENT_CONFIG)
     payload["bindings"] = [dict(b) for b in payload["bindings"]]
@@ -547,8 +547,8 @@ def _two_slots():
                        RoleBinding("b", "pb", "frozen_reference", model_ref="zengen-v1", driver="scripted"))
 
 
-def test_every_opponent_slot_is_an_actio_instance_with_its_own_empty_memory(store):
-    from actio.memory import TupleMemory
+def test_every_opponent_slot_is_an_simple_actio_instance_with_its_own_empty_memory(store):
+    from simple_actio.memory import TupleMemory
     from factory.memory_translate import MemoryTranslatingBackend
     runtime = AgentRuntime(store, ("全局",))
     runtime.register_session("s1", "run-1")
@@ -571,12 +571,12 @@ def test_the_opponent_lines_are_unchanged_and_each_turn_carries_a_v2_trace(store
     resources = runtime._backends(_slot_info(_scenario_with({"b": ["剧本乙"]}), _two_slots()))
     utterance, thought, trace = resources.backends["b"].respond(None, _scenario_with(), [], "b")
     assert (utterance, thought) == ("剧本乙", None)
-    assert trace["schema"] == "actio.trace.v2" and trace["memory_hits"] == []
+    assert trace["schema"] == "simple_actio.trace.v2" and trace["memory_hits"] == []
     resources.close()
 
 
-def test_a_deployment_session_gets_actio_opponents_too_and_no_route(store):
-    """部署会话(没登记)的对手位也换成 Actio 实例,底座仍是原来的 ScriptedBackend(设计源 7.4 节)。"""
+def test_a_deployment_session_gets_simple_actio_opponents_too_and_no_route(store):
+    """部署会话(没登记)的对手位也换成 SimpleActio 实例,底座仍是原来的 ScriptedBackend(设计源 7.4 节)。"""
     from simulator.datamodel import RoleBinding
     runtime = AgentRuntime(store, ("全局甲", "全局乙"))
     bindings = [RoleBinding("a", "p", "self_play"), RoleBinding("b", "p", "frozen_reference", model_ref="x")]
@@ -644,7 +644,7 @@ def _three_slots():
 
 
 def test_a_registered_deployment_session_opens_opponents_in_the_scenario_world(store, tmp_path):
-    from actio.memory import FileTupleStore
+    from simple_actio.memory import FileTupleStore
     from simulator.datamodel import TurnRecord
     deploy = FileTupleStore(tmp_path / "deploy")
     runtime = AgentRuntime(store, ("嗯",), deployment_store=deploy)
@@ -662,7 +662,7 @@ def test_a_registered_deployment_session_opens_opponents_in_the_scenario_world(s
 
 def test_each_deployment_opponent_writes_under_its_own_persona(store, tmp_path):
     """同一轮被两个对手位各记一次:key 以各自位上的人格 id 结尾、记在各自名下,不是槽位 id,也不互换。"""
-    from actio.memory import FileTupleStore
+    from simple_actio.memory import FileTupleStore
     from simulator.datamodel import TurnRecord
     deploy = FileTupleStore(tmp_path / "deploy")
     runtime = AgentRuntime(store, ("嗯",), deployment_store=deploy)
@@ -681,7 +681,7 @@ def test_each_deployment_opponent_writes_under_its_own_persona(store, tmp_path):
 
 def test_an_unregistered_deployment_session_keeps_empty_opponents_and_warns(store, tmp_path, caplog):
     import logging
-    from actio.memory import FileTupleStore, TupleMemory
+    from simple_actio.memory import FileTupleStore, TupleMemory
     from simulator.datamodel import TurnRecord
     deploy = FileTupleStore(tmp_path / "deploy")
     runtime = AgentRuntime(store, ("嗯",), deployment_store=deploy)
@@ -697,7 +697,7 @@ def test_an_unregistered_deployment_session_keeps_empty_opponents_and_warns(stor
 
 
 def test_unregistering_a_deployment_episode_sends_later_sessions_back_to_an_empty_memory(store, tmp_path):
-    from actio.memory import FileTupleStore, TupleMemory
+    from simple_actio.memory import FileTupleStore, TupleMemory
     deploy = FileTupleStore(tmp_path / "deploy")
     runtime = AgentRuntime(store, ("嗯",), deployment_store=deploy)
     runtime.register_deployment_episode("deploy-m-s1-1", "agent-round-m")
@@ -710,7 +710,7 @@ def test_unregistering_a_deployment_episode_sends_later_sessions_back_to_an_empt
 
 def test_a_training_session_never_opens_deployment_ports(store, tmp_path):
     """会话登记给了训练 run 就走训练路,哪怕它的 episode id 也在部署登记表里。"""
-    from actio.memory import FileTupleStore, TupleMemory
+    from simple_actio.memory import FileTupleStore, TupleMemory
     deploy = FileTupleStore(tmp_path / "deploy")
     runtime = AgentRuntime(store, ("嗯",), deployment_store=deploy)
     runtime.register_session("s1", "run-1")
@@ -723,7 +723,7 @@ def test_a_training_session_never_opens_deployment_ports(store, tmp_path):
 
 def test_a_failure_after_opening_a_deployment_port_closes_it_before_reraising(store, tmp_path, monkeypatch):
     import factory.agent as agent_mod
-    from actio.memory import FileTupleStore
+    from simple_actio.memory import FileTupleStore
     deploy = FileTupleStore(tmp_path / "deploy")
     real = agent_mod.memory_role_backend
     calls = []
@@ -744,8 +744,8 @@ def test_a_failure_after_opening_a_deployment_port_closes_it_before_reraising(st
 
 
 def test_a_failing_port_open_closes_the_ports_already_opened(store, tmp_path, monkeypatch):
-    from actio.memory import FileTupleStore
-    from actio.memory_port import MemoryFailureError
+    from simple_actio.memory import FileTupleStore
+    from simple_actio.memory_port import MemoryFailureError
     deploy = FileTupleStore(tmp_path / "deploy")
     real = deploy.open
 
@@ -764,7 +764,7 @@ def test_a_failing_port_open_closes_the_ports_already_opened(store, tmp_path, mo
 
 def test_the_deployment_table_is_kept_without_the_runtime_lock(store, tmp_path):
     """登记与注销只取 _routes_lock:驱动器在 finally 里注销时,close() 可能正持着 _lock 等处理器退出。"""
-    from actio.memory import FileTupleStore
+    from simple_actio.memory import FileTupleStore
     runtime = AgentRuntime(store, ("嗯",), deployment_store=FileTupleStore(tmp_path / "deploy"))
     done = threading.Event()
 
@@ -1130,7 +1130,7 @@ def test_a_non_empty_memory_library_exits_2_at_assembly(store, capsys, switch):
 
 def test_round_and_admit_handlers_and_the_runtime_share_one_management_plane(store, monkeypatch):
     import factory.handlers as fh
-    from actio.memory import FileTupleStore
+    from simple_actio.memory import FileTupleStore
     from controlplane.lock import git_dir
     from factory.memory_runtime import STAND_IN_MEMORY_RUNTIME
     seen = {}

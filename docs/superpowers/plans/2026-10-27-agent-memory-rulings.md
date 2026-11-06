@@ -1,12 +1,12 @@
 # 计划拼接时的裁定
 
 ## 第 1 步(写作者交回 2026-10-27)
-- R1 接受新增公开名 `actio.memory.content_id(subject, content) -> str`、私有 `_Ledger`、`FileTupleStore(root, *, extraction_failure=None)` 故障注入口。
+- R1 接受新增公开名 `simple_actio.memory.content_id(subject, content) -> str`、私有 `_Ledger`、`FileTupleStore(root, *, extraction_failure=None)` 故障注入口。
 - R2 接受 `TupleMemory.recall` 按 (重叠降序, 置信度降序, content_id 升序) 排序并按 content_id 去重,不直接调 `retrieve`。
 - R3 接受查询词为空串时实例不调 `recall`(与今天 `retrieve` 对空查询无命中一致)。
 - R4 接受 `episode_id` 必填按"会写库"判断(`replay_read_only` 为假即要求)。
 - R5 接受实例把端口抛出的非 `MemoryFailureError` 异常包成 `MemoryFailureError(类名, transient=False)`:未知异常判确定性失败,宁可 T2 不无限重试;已知的瞬态异常由各适配器自己映射(计划 B 的 StarlingMemory 穷举映射)。
-- R6 人格 id 字符集统一为 `PERSONA_ID_PATTERN = ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`,定义在 `actio/memory_port.py`,FileTupleStore 与 StarlingDeploymentStore 拼路径前都校验,不合法抛 `ActioDataError`。写作者原拟的 `[A-Za-z0-9][A-Za-z0-9_-]*` 改为此式(与 episode_id 白名单同形,允许点号,首字符排除 `.`)。仓库没有人格 id 的现成校验,生成路的实际格式未核对,列入 Review Focus。
+- R6 人格 id 字符集统一为 `PERSONA_ID_PATTERN = ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`,定义在 `simple_actio/memory_port.py`,FileTupleStore 与 StarlingDeploymentStore 拼路径前都校验,不合法抛 `SimpleActioDataError`。写作者原拟的 `[A-Za-z0-9][A-Za-z0-9_-]*` 改为此式(与 episode_id 白名单同形,允许点号,首字符排除 `.`)。仓库没有人格 id 的现成校验,生成路的实际格式未核对,列入 Review Focus。
 - R7 接受端口 `close()` 幂等、替身不加锁(MindAgent 在人格库锁下单线程用,训练副本每会话一份)。
 - R8 `TupleMemory.digest()` 改为对 `snapshot(entries)` 的结果算,不对原始条目列表:写作者指出的缺口成立(两库去 id 后多重集相同、版本归属不同时召回不同而摘要相同)。已改 step-1.md 并加钉住测试,设计源 4.5 节同步。
 - R9 `TRACE_SCHEMA` 改名 `TRACE_SCHEMA_V1` 不留别名(只有两处引用);导入白名单另加 `pathlib`、`datetime`。
@@ -32,7 +32,7 @@
 
 ## 第 3 步(写作者交回 2026-10-27)
 - R23 接受 `InteractTrajectorySource(..., *, run_id: str)` 由派发器传入;逻辑 id `logical_episode_id(run_id, step, scenario_id, k) = f"{run_id}-grpo{step}-{scenario_id}-r{k}"`:同一情境在不同 GRPO step 反复出现,只写阶段名会撞。同一 step 内 `groups_per_step <= len(scenario_ids)` 已由校验保证不重复情境,组内 k 区分 rollout。续训从同一 step 重跑时 id 与上次相同,同名 episode 文件被覆盖,批的 `episode_ids` 只指向本次产出,这是要的语义(批只认本次);上一次失败尝试的 episode 本来就不落盘。
-- R24 角色位 Actio 实例的 `library_version` 取 `{"skill": "0", "memory": "0"}`(训练路不读技能库,7.4 节)。
+- R24 角色位 SimpleActio 实例的 `library_version` 取 `{"skill": "0", "memory": "0"}`(训练路不读技能库,7.4 节)。
 - R25 训练位副本 `close()` 失败按 7.2 节判 `role_memory_failure`、不重试,即使 rollout 本身已结束:close 失败说明副本库状态不可信,第 7 步还要删它。
 - R26 删 `factory.interact_policy.PER_TURN_DEADLINE_S` 与它对运行时 `interact_deadline_s` 的改写,流 deadline 由轨迹源 `mindtrainer.trajectory_source.PER_TURN_DEADLINE_S = 90.0` 算、经 `client_factory(deadline_s=)` 传:原改写会让同开时的部署会话借用训练的 deadline,与 6.4 节相反。合同里的 `PER_TURN_DEADLINE_S=90` 指的就是这个新常量。
 - R27a S3-5 与 S3-6 合成一次提交:两者之间 `test_factory_interact_wire.py` 会红,违反"每个任务结束时全套仍绿"。拼接时把 S3-6 的实现步并进 S3-5,S3-6 只留它自己的新测试。

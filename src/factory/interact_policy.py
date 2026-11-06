@@ -10,7 +10,7 @@
 5. 起 vLLM 服务(`policy_context`),在同一服务上造 vLLM 对手工厂;
 6. 把每个情境 id 登记到运行时(落盘钩子据此把 episode 写进本 run),交出 `policy_for_rollout`:
    `policy_for_rollout(episode_id, scenario_id)` 是上下文管理器,每条 rollout 进出一次。进入时建这条 rollout 的世界
-   (`TrainingWorlds.open_rollout`,从种子里该情境的世界复制起点),在 `VllmPolicy` 外面新造一个带记忆的 Actio 实例
+   (`TrainingWorlds.open_rollout`,从种子里该情境的世界复制起点),在 `VllmPolicy` 外面新造一个带记忆的 SimpleActio 实例
    (`memory_role_backend`,端口是训练位人格在这个世界里的端口);服务端随后按 episode id 加入同一个世界开对手位端口。
    退出时(正常、异常都一样)`close_rollout`:关训练位端口,等服务端端口关完再删世界。
 退出时(正常、训练抛异常都一样)先注销情境,再由 `policy_context` 停服务放租约。
@@ -40,7 +40,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, ExitStack, contextmanager
 from typing import TYPE_CHECKING
 
-from actio.memory_port import MemoryFailureError
+from simple_actio.memory_port import MemoryFailureError
 from compute.client import ComputeClient
 from compute.endpoint import ComputeEndpoint
 from compute.errors import ComputeError, ServeStopError
@@ -304,7 +304,7 @@ def make_policy_factory(
 ) -> Callable[[str, TrainingConfig], AbstractContextManager[PolicyForRollout]]:
     """派发器要的 `policy_factory(run_id, cfg)`。serve 可注入,测试里不连 SSH。
     上下文交出的是 `policy_for_rollout(episode_id, scenario_id)`,不是后端:轨迹源每条 rollout 进出一次,拿到该条
-    rollout 自己的、包着同一个 `VllmPolicy` 的 Actio 实例。
+    rollout 自己的、包着同一个 `VllmPolicy` 的 SimpleActio 实例。
     外部对手的地址与模型不在这里传:每次进入上下文时从 `store` 里的 training_defaults.yaml 读(见 _opponent_section)。
     opponent_timeout_s 同时是站内 vLLM 对手与外部 API 对手的单次 HTTP 上限。
     training_worlds 必须是 `runtime` 手里的同一个对象(组合根只造一个,替身或 Starling):客户端在这里建 rollout 世界,
@@ -356,7 +356,7 @@ def make_policy_factory(
                 @contextmanager
                 def policy_for_rollout(episode_id: str, scenario_id: str) -> Iterator[MemoryTranslatingBackend]:
                     # 训练位与对手位同一写法:底座(VllmPolicy 有 respond_guided,不套 IgnoreGuidance)外面包带记忆的
-                    # Actio 实例。记忆是这条 rollout 的世界里训练位人格的端口:open_rollout 先删后建,重试也从起点出发;
+                    # SimpleActio 实例。记忆是这条 rollout 的世界里训练位人格的端口:open_rollout 先删后建,重试也从起点出发;
                     # 服务端开会话时按 episode id 加入同一个世界开对手位端口。退出时(正常、异常都一样)close_rollout:
                     # 关训练位端口,等服务端端口关完再删世界,等不到就留给保留表与启动清扫,这条 rollout 照常结束。
                     # 训练位端口关不上时 close_rollout 重抛 FactoryMemoryFailureError(转换后端 close 译的)不接:

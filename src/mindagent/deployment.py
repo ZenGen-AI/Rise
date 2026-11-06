@@ -1,4 +1,4 @@
-"""部署驱动器:Actio 实例占客户端角色位,经实时环境服务跑部署 episode 并落盘(闭环集成设计 §8.3,
+"""部署驱动器:SimpleActio 实例占客户端角色位,经实时环境服务跑部署 episode 并落盘(闭环集成设计 §8.3,
 设计二第 9 节)。
 
 落盘归驱动器,不归服务端钩子:客户端在会话结束时重建的 Episode(自己轮次是服务端回显,
@@ -25,8 +25,8 @@ from typing import TypeVar
 
 import grpc
 
-from actio.memory_port import DeploymentMemoryStore, MemoryBackend, MemoryFailureError
-from actio.trace import normalize_library_version
+from simple_actio.memory_port import DeploymentMemoryStore, MemoryBackend, MemoryFailureError
+from simple_actio.trace import normalize_library_version
 from controlplane.deferred import DeferredError
 from controlplane.gitstore import GitStore
 from controlplane.paths import episode_file
@@ -58,7 +58,7 @@ SESSION_CLOSE_WAIT_S = 70.0
 
 
 # make_instance(带轮次前缀的 episode id, (情境世界, 智能体位人格) 新开的端口, 智能体位人格 id 即写入方主体)
-# -> ActioInstance;每次尝试调一次。
+# -> SimpleActioInstance;每次尝试调一次。
 MakeInstance = Callable[[str, MemoryBackend, str], object]
 
 
@@ -246,7 +246,7 @@ def _attempt(instance, client_factory, scenario, assignment, personas, agent_slo
                            deadline_s=deadline_s, admission_wait_s=admission_wait_s, sleep=sleep, clock=clock)
     try:
         while not client.closed:
-            # 记忆端口的失败按 transient 分两个终止原因,信息只报类名(第 10 节);策略(Actio 实例)的
+            # 记忆端口的失败按 transient 分两个终止原因,信息只报类名(第 10 节);策略(SimpleActio 实例)的
             # 其余异常不在任何 except 里:穿过下面的 finally(先 abort)原样上抛
             try:
                 utterance, thought, trace = instance.respond(persona, scenario, client.turns, agent_slot)

@@ -9,7 +9,7 @@ def build() -> Canvas:
         1080, 640, title="MindAgent 上下文",
         desc="调和循环产生 start_agent_round 与 admit_proposal 两个动作,交给组合根注册的 MindAgent 处理器。"
              "MindAgent 读模型与正式库、写轮次与提案,经受限直连②向实时环境服务采集部署经验,"
-             "用 Actio 建实例,可选经外部推理桥接生成技能策略。门②由人工批准提案。")
+             "用 SimpleActio 建实例,可选经外部推理桥接生成技能策略。门②由人工批准提案。")
     fac = c.box(24, 70, 180, "factory 组合根", "注册两个处理器\n注入配置与工厂", kind="neutral",
                 h=80)
     cp = c.box(330, 70, 400, "ControlPlane", "调和循环 · 产物树\n动作 start_agent_round · admit_proposal", kind="control",
@@ -19,7 +19,7 @@ def build() -> Canvas:
     ma = c.box(330, 270, 400, "MindAgent", "轮次处理器 · 收录处理器\n部署 · 分析 · 提案 · 验证 · 打包", kind="compute", h=90)
     ss = c.box(856, 275, 200, "实时环境服务", "SocialSimulator\ngRPC 双向流 · 对手人格", kind="compute", h=80)
 
-    ac = c.box(330, 470, 200, "Actio", "技能库 · 显式记忆\n每次响应附激活轨迹", kind="infra", h=80)
+    ac = c.box(330, 470, 200, "SimpleActio", "技能库 · 显式记忆\n每次响应附激活轨迹", kind="infra", h=80)
     br = c.box(550, 470, 200, "外部推理桥接", "可选:生成技能策略", kind="infra", h=80)
 
     c.edge(fac, cp, label="注册处理器")

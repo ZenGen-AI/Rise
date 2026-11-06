@@ -4,7 +4,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 FILES = [REPO / "src/trainscheduler/experience.py", REPO / "src/trainscheduler/experience_port.py"]
-FORBIDDEN = {"actio", "mindagent", "diagnostic", "simulator", "factory", "inference_bridge",
+FORBIDDEN = {"simple_actio", "mindagent", "diagnostic", "simulator", "factory", "inference_bridge",
              "trainplanner"}
 
 

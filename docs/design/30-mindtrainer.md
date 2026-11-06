@@ -9,7 +9,7 @@
 | 基线提交 | `b826440`(2026-10-21) |
 | 依赖 | ControlPlane(`controlplane` 的信封、GitStore、路径、状态机、派发缝);SocialSimulator(`simulator` 的数据模型、数据集清单、实时环境服务客户端);真实执行器另依赖远端计算层(`compute`) |
 | 被依赖 | ControlPlane 调和循环经注入的派发器调用它;`scripts/run_controlplane.py`;factory 与 TrainScheduler |
-| 对应实施计划 | 工作包 2(任务 30 至 34);真实执行器与转换器另由计算层计划交付;带记忆的场景二另有两个施工步:训练路换成 Actio 实例、训练配置的 `memory` 块与哈希 [已落地];记忆按情境世界组织另有一个施工单元:训练路一条 rollout 一个世界、起点摘要按情境、拒绝同一人格占两个角色位 [已落地] |
+| 对应实施计划 | 工作包 2(任务 30 至 34);真实执行器与转换器另由计算层计划交付;带记忆的场景二另有两个施工步:训练路换成 SimpleActio 实例、训练配置的 `memory` 块与哈希 [已落地];记忆按情境世界组织另有一个施工单元:训练路一条 rollout 一个世界、起点摘要按情境、拒绝同一人格占两个角色位 [已落地] |
 
 ## 0. 系统速览
 
@@ -28,7 +28,7 @@
 | TrainScheduler | 决策执行器:装配上下文、校验决策、构造训练指令、提名配方 | 控制层 | [已落地],含策略经验(默认关) |
 | TrainPlanner | 决策学习者:经可插拔后端给出下一轮训练决策 | 控制层 | [已落地],默认后端经桥接调用命令行模型 |
 
-共享基础设施有五个。**Actio** 是带技能库与显式记忆的智能体框架,每次响应附带激活轨迹;记忆由内嵌的 **Starling** 提供,可选 extra `memory`,一个模拟世界一个树外 SQLite 库,人格是其中的主体(部署一个情境一个世界,训练一条 rollout 一个世界)[已落地]。**外部推理桥接**用命令行调用外部强模型。**远端计算层** `compute` 经 SSH 在远端 GPU 主机上跑作业 [已落地]。**ROLL** 是分布式训练引擎,**vLLM** 是推理引擎。V1 经远端计算层接入 ROLL 的 LoRA SFT [已落地](由 `--executor roll` 装配,已在真实主机上从指令跑到候选一次)与 vLLM 推理服务 [已落地](命令拼装、SSH 隧道、服务生命周期;真机端到端待补)。已落地部分仍由确定性 mock 顶替。真实 GRPO 加 OPD 训练与真实 judge [推迟]。
+共享基础设施有五个。**SimpleActio** 是带技能库与显式记忆的智能体框架,每次响应附带激活轨迹;它是 Actio 的简化版,功能完备的正式版 Actio 完成后再接入 [计划中]。记忆由内嵌的 **Starling** 提供,可选 extra `memory`,一个模拟世界一个树外 SQLite 库,人格是其中的主体(部署一个情境一个世界,训练一条 rollout 一个世界)[已落地]。**外部推理桥接**用命令行调用外部强模型。**远端计算层** `compute` 经 SSH 在远端 GPU 主机上跑作业 [已落地]。**ROLL** 是分布式训练引擎,**vLLM** 是推理引擎。V1 经远端计算层接入 ROLL 的 LoRA SFT [已落地](由 `--executor roll` 装配,已在真实主机上从指令跑到候选一次)与 vLLM 推理服务 [已落地](命令拼装、SSH 隧道、服务生命周期;真机端到端待补)。已落地部分仍由确定性 mock 顶替。真实 GRPO 加 OPD 训练与真实 judge [推迟]。
 
 **状态标记。** **[已落地]** 表示代码在主干上且有测试。**[计划中]** 表示设计与实施计划已定,代码还没写。**[推迟]** 表示明确不在 V1 范围内。图只画目标系统,不标进展,进展只看正文的状态标记。
 
@@ -55,7 +55,7 @@
 | Scenario、Persona、RoleAssignment | 社会情境、人格模板,以及把角色位绑定到具体人格与模型后端的分配 |
 | Recipe(配方) | 验证有效的完整训练方案,分 batch、interact、agent_rsi 三类 |
 | DiagnosticReport | 诊断评测产出的报告:维度、分数、置信区间、错误类型、退化标记 |
-| Activation trace(激活轨迹) | Actio 每次响应附带的记录:命中的技能候选、选中的技能、命中的记忆 |
+| Activation trace(激活轨迹) | SimpleActio 每次响应附带的记录:命中的技能候选、选中的技能、命中的记忆 |
 | Evidence grade(证据等级) | 诊断报告的可信等级 `stub`、`mock`、`real`,决定它能否驱动规划与提名;缺标记一律判 `stub`,失败关闭 |
 <!-- shared:end context-block -->
 
@@ -98,7 +98,7 @@ MindTrainer 把一条 `pending` 的训练指令变成一个 `pending_review` 的
 </details>
 <!-- figure:end 30-mindtrainer-context -->
 
-调和循环发现 `pending` 指令,调用注入的 MindTrainer 派发器。MindTrainer 从产物树读数据集清单与 episode,InteractTrain 经受限直连接口①向实时环境服务要 rollout。训练由 `TrainingExecutor` 协议完成,今天是 mock;ROLL 的 LoRA SFT 真实执行器经远端计算层在远端 GPU 主机上跑 [已落地]。结果以训练记录与候选 checkpoint 写回产物树,之后的审核与晋级不归 MindTrainer。带记忆的场景二 [已落地]:训练位是带记忆的 Actio 实例,MindTrainer 把起点记忆的摘要钉进 `config_hash`。记忆按世界分库:一条 rollout 一个世界,各位的人格是其中的主体 [已落地]。
+调和循环发现 `pending` 指令,调用注入的 MindTrainer 派发器。MindTrainer 从产物树读数据集清单与 episode,InteractTrain 经受限直连接口①向实时环境服务要 rollout。训练由 `TrainingExecutor` 协议完成,今天是 mock;ROLL 的 LoRA SFT 真实执行器经远端计算层在远端 GPU 主机上跑 [已落地]。结果以训练记录与候选 checkpoint 写回产物树,之后的审核与晋级不归 MindTrainer。带记忆的场景二 [已落地]:训练位是带记忆的 SimpleActio 实例,MindTrainer 把起点记忆的摘要钉进 `config_hash`。记忆按世界分库:一条 rollout 一个世界,各位的人格是其中的主体 [已落地]。
 
 ## 2. 目标、非目标与约束
 
@@ -133,7 +133,7 @@ MindTrainer 把一条 `pending` 的训练指令变成一个 `pending_review` 的
 
 | 约束 | 内容 | 影响 |
 |---|---|---|
-| 分层 | `mindtrainer` 可导入 `controlplane` 与 `simulator`,不导入 `diagnostic`、`actio` 与 `starling`;`controlplane` 不导入 `mindtrainer` | 派发器住在 `mindtrainer` 侧,调和循环只见到一个 Callable;训练位的记忆实例由组合根造好交进来,`mindtrainer` 只认 `ModelBackend` |
+| 分层 | `mindtrainer` 可导入 `controlplane` 与 `simulator`,不导入 `diagnostic`、`simple_actio` 与 `starling`;`controlplane` 不导入 `mindtrainer` | 派发器住在 `mindtrainer` 侧,调和循环只见到一个 Callable;训练位的记忆实例由组合根造好交进来,`mindtrainer` 只认 `ModelBackend` |
 | 产物读写 | 一律经 `GitStore` 与信封;大体量内容只存 `BigRef` | checkpoint 不进 git,只进引用 |
 | 时间戳 | 记录与候选的 `created_at` 固定为 `2026-10-03T00:00:00Z` | 产物是输入的纯函数,重放写入是空操作 |
 | 可测性 | 不依赖 GPU 与外部服务 | 执行器、转换器、judge 都有确定性 mock |
@@ -209,7 +209,7 @@ MindTrainer 分两层:入口与编排一层决定"从哪跑、跑不跑",模式�
 
 - `mindtrainer` 可以导入 `controlplane` 与 `simulator`。复用 `Episode`、`RoleBinding` 等数据结构是允许的,受限的是子系统间的运行时调用。真实执行器与转换器另可导入 `compute`;`compute` 反过来不认识训练,只导入标准库与 `controlplane.deferred`。
 - interact 的 vLLM 服务上下文由组合根持有:组合根注入一个返回上下文管理器的可调用对象,`mindtrainer` 只把它当上下文管理器用,不导入 `compute`、也不决定端点 [已落地]。`model_ref` 的解析在策略工厂里、起服务之前完成,失败判 T2;放进运行时的后端工厂会被服务端归成 `role_backend_failure`,不按条重跑,整条训练延后、续训次数用尽后升 T3,也不会变好 [已落地]。
-- `mindtrainer` 不导入 `diagnostic`。系统没有 MindTrainer 与诊断评测之间的直连;OPD 是否失效由诊断侧判定。另不导入 `actio` 与 `starling`。起点记忆的解析和训练位的记忆实例由组合根注入。训练位的记忆失败经 simulator 的两个异常基类到达轨迹源。基类 RoleMemoryUnavailableError(瞬态)与 RoleMemoryFailureError(确定性)定义在 `src/simulator/realtime/backend_timeout.py`,组合根的转换后端按 `transient` 改抛它们的子类 [已落地]。
+- `mindtrainer` 不导入 `diagnostic`。系统没有 MindTrainer 与诊断评测之间的直连;OPD 是否失效由诊断侧判定。另不导入 `simple_actio` 与 `starling`。起点记忆的解析和训练位的记忆实例由组合根注入。训练位的记忆失败经 simulator 的两个异常基类到达轨迹源。基类 RoleMemoryUnavailableError(瞬态)与 RoleMemoryFailureError(确定性)定义在 `src/simulator/realtime/backend_timeout.py`,组合根的转换后端按 `transient` 改抛它们的子类 [已落地]。
 - 编排器只调下层纯函数和协议,不含判定逻辑。续训判定在 `resume.py`,失败到类别的映射在 `dispatch.py`。
 - TrainScheduler 只可导入 `mindtrainer.data_spec` 与 `mindtrainer.training_config` 两个模块。factory 可以导入 `mindtrainer.dispatch` 与 `mindtrainer.data_producer`。
 
@@ -439,9 +439,9 @@ GRPO 与 OPD 只有一个方法,因为两者在同一个训练 step 里联合更
 | SocialSimulator 实时服务 | 一条流一次会话;终止原因;`on_session_closed` 落盘 episode;流 deadline 由轨迹源按 `max_turns_per_episode × 150 秒` 算 [已落地];`--interact` 下服务端等提交 150 秒、单次后端调用 90 秒、客户端等相邻两条服务端消息 120 秒,`CreateSession` 带可选 `episode_id`;创建被拒的终止原因在瞬态集合里就按条重跑(准入满额,或逻辑 episode id 撞上活动会话,都是 `role_backend_unavailable`) [已落地];服务端按 `episode_id` 加入客户端建好的 rollout 世界,会话终态时关掉对手位端口 [已落地] | 客户端放弃会话时调用 `abort()`,不发 EndSession;客户端先建世界再 `create_session` [已落地] |
 | 审核门①与晋级 | 候选进入 `pending_review` 后由人审核 | `latest_promoted_checkpoint` 从晋级版本解析下一轮的 `base_checkpoint_ref` |
 | TrainScheduler | 按 `dsm-<run>-<阶段>` 写 `stage_manifest_refs` 与 `data_spec` | `validate_training_config`、`load_config_from_directive` 与 `data_spec` 解析 |
-| factory | 无 | 用 `make_mindtrainer_dispatcher` 组装,并注入数据生产器;`--interact` 时另注入 `client_factory` 与 `policy_factory`;造训练位 Actio 实例并外套记忆异常转换后端,注入 `memory_resolver`;清扫记忆根目录下 `runs/` 的子项,不碰 `deploy/`、`seeds/`、`snapshots/`:`reconcile` 在锁内、装配之后、第一个动作之前清扫,`run` 在 `run_daemon` 取锁之后、第一个 tick 之前的启动钩子里清扫 [已落地] |
+| factory | 无 | 用 `make_mindtrainer_dispatcher` 组装,并注入数据生产器;`--interact` 时另注入 `client_factory` 与 `policy_factory`;造训练位 SimpleActio 实例并外套记忆异常转换后端,注入 `memory_resolver`;清扫记忆根目录下 `runs/` 的子项,不碰 `deploy/`、`seeds/`、`snapshots/`:`reconcile` 在锁内、装配之后、第一个动作之前清扫,`run` 在 `run_daemon` 取锁之后、第一个 tick 之前的启动钩子里清扫 [已落地] |
 | 远端计算层 `compute` | `serve` 起停 vLLM 服务;租约被占的 `ComputeBusyError` 与起服务失败的 `ServeStartupError` 都是 `DeferredError` [已落地] | 无 |
-| Actio 与 Starling [已落地] | 无导入依赖:训练位的记忆实例由组合根造好,经 `policy_for_rollout` 交进来;记忆失败经 simulator 的两个异常基类到达 | `policy_for_rollout` 把逻辑 episode id 传给 `instantiate` 的 keyword-only 参数 `episode_id`,作事件 key 的前缀;key 末尾是 `@<主体>` [已落地] |
+| SimpleActio 与 Starling [已落地] | 无导入依赖:训练位的记忆实例由组合根造好,经 `policy_for_rollout` 交进来;记忆失败经 simulator 的两个异常基类到达 | `policy_for_rollout` 把逻辑 episode id 传给 `instantiate` 的 keyword-only 参数 `episode_id`,作事件 key 的前缀;key 末尾是 `@<主体>` [已落地] |
 
 数据合成接线:`make_mindtrainer_dispatcher` 末尾有 keyword-only 的 `data_producer=None`,不传时行为与接线前逐字节相同;factory 的组合根传 `TemplateDataProducer()`。
 
@@ -515,8 +515,8 @@ class TrainingWorlds(Protocol):
 | 工厂拿不到的 | `resolve_action` 算出的 `base_model_id` 不进指令载荷;需要时由引用反查模型产物 |
 | 实现方与旧参数 | 组合根(`src/factory/interact_policy.py`)构造并注入,`mindtrainer` 只认这个可调用对象。只给 `policy=` 时行为与加这个参数之前相同;两者同给是调用方的错,构造时 `ValueError`。固定后端由派发器用 `nullcontext` 包成 `policy_for_rollout` 再交给轨迹源 |
 | 都没注入 [已落地] | interact 指令判 `failed`(T2),原因是 `interact mode needs a client_factory and a policy or policy_factory; start factory run or factory reconcile with --interact to run interact directives`:原文之后追加一句点名 `--interact`,告诉操作者该用哪个开关重启。冻结入口(`mindtrainer.wire`)与 factory 不带 `--interact` 的路径用的是同一个无参派发器,两边写出的文字相同,逐字节相同的保证(G1)不受影响 |
-| 交出什么与轨迹源 [已落地] | run 级上下文照旧:起 vLLM、登记会话、退出时收尾。进入后交出 `policy_for_rollout`(上方代码块里的别名)。每条 rollout 进入一次,以逻辑 episode id 与情境 id 调用,建这条 rollout 的世界并造一个训练位 Actio 实例。退出时关实例并删世界,关实例最多等 60 秒。`InteractTrajectorySource` 的参数名是 `policy_for_rollout`,不保留旧名 `policy`。`_attempt` 在 `create_session` 之前进入它,随 `with` 块退出,异常也一样。世界因此按逻辑 episode id 命名,此时还没有 session id。策略返回三元组时,第三项作为 `activation_trace` 随 `submit_turn` 上行,二元组照旧。续训不变:`make_sources(start)` 每次构造轨迹源,`policy_for_rollout` 在每条 rollout 内进出,与 `start` 无关。测试里的固定后端用 `nullcontext` 包一层传入。训练位实例不读技能库,库版本取 `{"skill": "0", "memory": "0"}` |
-| 起点记忆解析 [已落地] | `mindtrainer` 不导入 `actio` 与 `starling`,开库与算摘要由组合根注入的 `memory_resolver` 做。派发器在生成路回写并复校之后调它,入参是 `memory.seed` 与按配置顺序去重的 `scenario_ids`。种子文件是 `seeds/<seed_id>/<scenario_id>.db`,没有这个文件的情境从空世界起;以人格命名的旧种子库不会被读到。配了种子却一个情境都对不上、种子目录里又有库文件时抛 `DirectiveFailedError`(T2),原因写种子 id 与至多 5 个文件主名;种子只覆盖部分情境仍合法。生成路的情境 id 在回写之后才齐,所以调用在回写之后。返回的摘要与身份只进本次派发的 `cfg`(`memory.digests`、`memory.runtime`),不回写指令;训练记录的 `policy_backend.memory` 记下它们。interact 指令没注入它时判 T2,原因点名 `--interact`;它抛 `DirectiveFailedError` 时保留它自己的原因(替身拒绝种子要说清原因),其余异常只报类名,一律 T2 |
+| 交出什么与轨迹源 [已落地] | run 级上下文照旧:起 vLLM、登记会话、退出时收尾。进入后交出 `policy_for_rollout`(上方代码块里的别名)。每条 rollout 进入一次,以逻辑 episode id 与情境 id 调用,建这条 rollout 的世界并造一个训练位 SimpleActio 实例。退出时关实例并删世界,关实例最多等 60 秒。`InteractTrajectorySource` 的参数名是 `policy_for_rollout`,不保留旧名 `policy`。`_attempt` 在 `create_session` 之前进入它,随 `with` 块退出,异常也一样。世界因此按逻辑 episode id 命名,此时还没有 session id。策略返回三元组时,第三项作为 `activation_trace` 随 `submit_turn` 上行,二元组照旧。续训不变:`make_sources(start)` 每次构造轨迹源,`policy_for_rollout` 在每条 rollout 内进出,与 `start` 无关。测试里的固定后端用 `nullcontext` 包一层传入。训练位实例不读技能库,库版本取 `{"skill": "0", "memory": "0"}` |
+| 起点记忆解析 [已落地] | `mindtrainer` 不导入 `simple_actio` 与 `starling`,开库与算摘要由组合根注入的 `memory_resolver` 做。派发器在生成路回写并复校之后调它,入参是 `memory.seed` 与按配置顺序去重的 `scenario_ids`。种子文件是 `seeds/<seed_id>/<scenario_id>.db`,没有这个文件的情境从空世界起;以人格命名的旧种子库不会被读到。配了种子却一个情境都对不上、种子目录里又有库文件时抛 `DirectiveFailedError`(T2),原因写种子 id 与至多 5 个文件主名;种子只覆盖部分情境仍合法。生成路的情境 id 在回写之后才齐,所以调用在回写之后。返回的摘要与身份只进本次派发的 `cfg`(`memory.digests`、`memory.runtime`),不回写指令;训练记录的 `policy_backend.memory` 记下它们。interact 指令没注入它时判 T2,原因点名 `--interact`;它抛 `DirectiveFailedError` 时保留它自己的原因(替身拒绝种子要说清原因),其余异常只报类名,一律 T2 |
 | rollout 世界 [已落地] | 进入 `policy_for_rollout` 时,组合根的 `open_rollout` 从情境的种子世界复制出世界,登记进进程内的 `episode_id → 世界` 表,开训练位端口。服务端造会话资源时按 `episode_id` 用 `join_rollout` 开对手位端口,查不到就造后端失败、会话被拒。退出时 `close_rollout` 先关训练位端口,再等服务端端口全关(上限 `SESSION_CLOSE_WAIT_S`,70 秒),然后摘表、删世界文件。等不到时世界进保留表:端口还开着时同名重试先有界等待(默认 70 秒)端口关上,仍没关上才判瞬态,端口全关后同名重试先删后建;没有同名重试的,文件留给启动清扫,这条 rollout 照常结束。替身也走这条路:每条 rollout 一个内存世界,不落盘,起点是空世界 |
 | 事件 key [已落地] | `<逻辑 episode id>#<turn_index>@<主体>`:三个及以上角色位时,同一轮会被两个主体各写一次,不带主体就撞键 |
 | 逻辑 episode id [已落地] | 训练位是 `{run_id}-grpo{step}-{scenario_id}-r{k}`,同一条 rollout 的重试不变;同一情境在不同 GRPO step 反复出现,只写阶段名会撞。续训从同一 step 重跑时 id 与上次相同,同名 episode 文件被覆盖,批只认本次产出的 id。Starling 下训练位与对手位共用一个世界文件,即记忆根目录下的 `runs/<run_id>/<逻辑 episode id>.db`,在产物树之外,rollout 结束即删。逻辑 episode id 只用 `[A-Za-z0-9._-]`,是单段名,直接拼进路径。轨迹源经 `create_session` 的可选字段 `episode_id` 交给服务端,服务端落盘的 episode 也用它当 id;服务端原先用的 `ep-<session_id>` 每次重试都变 |
@@ -757,7 +757,7 @@ interact 的生成路多一条「生成、写树、回写、复校」的链路 [
 | MT-21 | interact 的起点记忆摘要与记忆运行时身份写进本次派发配置的 `memory` 块,与配置一起进 `config_hash`;interact 配置的 `memory` 必填,没有关掉记忆或关掉写入的开关;本设计落地前写下的 pending interact run 没有该块,在派发器的配置校验处判 T2,原因点名缺 `memory` [已落地] | `memory` 可选,缺省不用记忆;只哈希种子 id,不哈希摘要;缺 `memory` 的旧配置退回无记忆路径或判 T3 | 记忆变了行为就变,换 Starling 或换抽取模型行为也变,同一个哈希必须对应同一个起点;每个 interact 角色位都是带记忆的实例、每轮读写,可选字段会留出不用记忆的出口。派发器在进入编排器之前先校验,所以旧 run 到不了编排器里的哈希比较;旧 run 的 rollout 没有记忆,续上去的有,不是同一个实验 | 摘要在派发时算,起点库打不开就判 T2;同名模型在外部端点上换了向量,摘要会变,续训升 T3,旧向量不能复现;旧 run 要人工重开 |
 | MT-22 | 每条 rollout 的每个角色位在起点库的私有副本上跑,用完即弃;同组 `group_size` 条 rollout 从同一份记忆出发 | 一个 run 共用一个库,记忆在 run 内累积 | 同组 rollout 的起点相同,组内优势才只反映策略;累积会让后一条 rollout 的起点依赖前一条,续训也无法复现 | 记忆不在一条 run 内累积;每条 rollout 多一次开库、备份、删除,对一步总时长的影响未核实。"每位一份副本"已由 MT-27 取代 |
 | MT-23 | 训练位的副本目录与事件 key 用逻辑 episode id,经 `CreateSession` 的可选字段 `episode_id` 传给服务端;`InteractTrajectorySource` 的参数 `policy` 因此改名 `policy_for_rollout`,入参是逻辑 episode id,不保留旧参数名,`_attempt` 在 `create_session` 之前进入它、随 `with` 块退出,固定后端用 `nullcontext` 包一层 | 用服务端的 `session_id`;同时接受 `policy` 与 `policy_for_rollout` | 重试会换 `session_id`,而副本目录要在 `create_session` 之前确定;逻辑 id 在重试间不变,事件 key 才稳定。两个入口并存,调用方一不小心就让训练位绕过每条 rollout 的记忆副本,而且不报错 | 客户端给的 id 会进目录名与事件主键,服务端校验字符、长度并拒绝同一 id 的第二个活动会话;传固定后端的调用点都用 `nullcontext` 包一层。副本目录的部分已由 MT-28 取代;`PolicyForRollout` 的入参另加情境 id |
-| MT-24 | 训练位的记忆失败经 simulator 的两个异常基类 RoleMemoryUnavailableError 与 RoleMemoryFailureError 到达轨迹源;组合根给训练位 Actio 实例外套一层转换后端,按 `transient` 改抛;瞬态的按条重跑,确定性的判 T2、不延后 [已落地] | `mindtrainer` 导入 `actio` 的异常类;把记忆失败并进 `role_backend_failure` | 分层不许 `mindtrainer` 导入 `actio`;并进 `role_backend_failure` 会被策略上下文译成延后,确定性的记忆故障反复重试直到升 T3,抽取端点的网络抖动又不该升人工 | 组合根多一层转换后端;分类依赖 Starling 的类别名,它改名要跟着改 |
+| MT-24 | 训练位的记忆失败经 simulator 的两个异常基类 RoleMemoryUnavailableError 与 RoleMemoryFailureError 到达轨迹源;组合根给训练位 SimpleActio 实例外套一层转换后端,按 `transient` 改抛;瞬态的按条重跑,确定性的判 T2、不延后 [已落地] | `mindtrainer` 导入 `simple_actio` 的异常类;把记忆失败并进 `role_backend_failure` | 分层不许 `mindtrainer` 导入 `simple_actio`;并进 `role_backend_failure` 会被策略上下文译成延后,确定性的记忆故障反复重试直到升 T3,抽取端点的网络抖动又不该升人工 | 组合根多一层转换后端;分类依赖 Starling 的类别名,它改名要跟着改 |
 | MT-25 | 轨迹源对 `create_session` 被拒,按终止原因查瞬态集合,不再一律判不可重跑;瞬态集合加 `role_memory_unavailable` [已落地] | 保持一律不可重跑 | 轨迹源此前对 `SessionRejectedError` 一律判不可重跑。服务端准入检查满额时以 `role_backend_unavailable` 拒绝创建,它是 T1;客户端若一律不重跑,这条 T1 实际变成整条失败 | 轨迹源的瞬态集合与部署侧的副本要保持相等,由现有的一致性测试钉住 |
 | MT-26 | `--interact` 下服务端等客户端提交一轮 150 秒、客户端等相邻两条服务端消息 120 秒、服务端单次后端调用 90 秒;训练位策略 HTTP 上限 120 秒、对手 60 秒;记忆单次网络调用 4 秒、不重试 [已落地] | 沿用 30 秒;只放宽一个方向;保持 2026-11-02 之前的 90/90/60/60/25;在 system 里限发言长度 | 真机(eager、两个适配器)每轮 20 到 65 秒,原先训练位 60 秒的上限没有余量;训练位一轮最坏约 140 秒(HTTP 120 秒加记忆 20 秒),对手约 80 秒(HTTP 60 秒加记忆 20 秒);外层上限高于内层最坏耗时,内层先超时,外层才看得到分类过的失败。限发言长度会改训练数据的分布 | 慢策略要等到 150 秒才被判超时,T1 重跑的单次代价变大;卡死的会话占名额更久 |
 | MT-27 | 一条 rollout 一个记忆世界,训练位与各对手位的人格都是其中的主体,各自只召回自己名下的记忆;世界从情境的种子世界复制,用完即删;事件 key 带 `@<主体>` | 保持每位一份副本;同组 rollout 共用一个世界 | 同一情境里的几个人在同一个世界里,才有地方表达在场与共识,看板也能按世界看一条 rollout 的全貌。同组共用一个世界会让组内起点不同。三个及以上角色位时同一轮被两个主体各写一次,key 不带主体就撞 | 主体之间互不召回,召回结果与每位一份副本相同,没有新的训练信号;key 格式与历史轨迹不同 |
@@ -837,8 +837,8 @@ interact 的 `config_hash` 覆盖配置层的东西 [已落地]:情境 id、人�
 | 派发与接线(带记忆) | 起点摘要与运行时身份在进入策略上下文之前写进本次派发的配置,哈希覆盖它们,改种子、任一摘要或身份的任一键,哈希即变;interact 缺 `memory` 与 batch 带 `memory` 都由 `validate_training_config` 给出原因;续训时种子或模型变了升 T3;起点库打不开判 T2 且不起服务;本设计落地前写下的 pending interact 指令在派发器判 T2,原因点名缺 `memory`;同组 rollout 的起点摘要相同 | 临时 git 仓库、替身记忆(元组加词面检索) |
 | 端到端 | 候选走完未修改的调和循环到晋级,再成为下一轮基座 | 占位诊断 |
 | 端到端 [已落地] | `factory reconcile --once --interact` 走到候选 `pending_review`,episode 都在产物树里 | 假 vLLM(本地 HTTP 回固定文本)、mock 执行器 |
-| 端到端(带记忆) | `factory reconcile --once --interact` 与装配出的派发器各跑一条 run:训练位与对手位都是带记忆的 Actio,episode 每轮带激活轨迹,训练记录的 `policy_backend` 带 `memory` 块 | 假 vLLM(本地 HTTP 回固定文本)、替身记忆、mock 执行器 |
-| rollout 世界 [已落地] | 训练世界的替身实现与 Starling 实现过同一套契约(`tests/test_factory_training_worlds.py`):同一 rollout 的训练位与对手位在同一世界、互不召回;同组两条 rollout 起点相同、互不可见;服务端找不到世界时是非瞬态记忆失败,会话被拒;客户端在服务端端口关完之后才删世界;三个角色位的同一轮被两个主体各写一次,key 不撞(`tests/test_actio_instance.py`) | 本进程的实时环境服务端、替身记忆;Starling 一侧是真 Starling 加本机回环的假抽取与嵌入端点 |
+| 端到端(带记忆) | `factory reconcile --once --interact` 与装配出的派发器各跑一条 run:训练位与对手位都是带记忆的 SimpleActio,episode 每轮带激活轨迹,训练记录的 `policy_backend` 带 `memory` 块 | 假 vLLM(本地 HTTP 回固定文本)、替身记忆、mock 执行器 |
+| rollout 世界 [已落地] | 训练世界的替身实现与 Starling 实现过同一套契约(`tests/test_factory_training_worlds.py`):同一 rollout 的训练位与对手位在同一世界、互不召回;同组两条 rollout 起点相同、互不可见;服务端找不到世界时是非瞬态记忆失败,会话被拒;客户端在服务端端口关完之后才删世界;三个角色位的同一轮被两个主体各写一次,key 不撞(`tests/test_simple_actio_instance.py`) | 本进程的实时环境服务端、替身记忆;Starling 一侧是真 Starling 加本机回环的假抽取与嵌入端点 |
 | 配置(世界) [已落地] | `bindings` 人格重复判 T2;`memory.digests` 的键必须恰好是情境集合;进入 `policy_for_rollout` 时的瞬态记忆失败按条重跑,每次都失败时重试耗尽 | 无 |
 
 默认测试套件不依赖的外部服务:ROLL、vLLM、真实 LLM judge、远程 GPU、SSH。真实后端的测试用假传输和假客户端,远端助手脚本在本机真跑 [已落地];真起子进程的那个文件标 `slow`,`-m 'not slow'` 可跳。连真实主机的冒烟用例标 `remote`、默认跳过 [计划中]:这个标记还没有注册,也还没有这样的用例。
@@ -882,7 +882,7 @@ interact 的 `config_hash` 覆盖配置层的东西 [已落地]:情境 id、人�
 | ROLL LoRA SFT 真实执行器、适配器导出转换器、阶段协议 | [已落地] | 远端计算层 `compute` 是它们的前置,已先于执行器与转换器落地;已在真实主机上各跑通一次,多段与续训、端到端调和循环仍待验证 |
 | interact 在真实入口跑通:策略工厂、一个 vLLM 进程挂最多两个 LoRA、按指令起停、超时口径、`policy_backend` 记录 | [已落地] | 真推理加 mock 训练;目前用本机 HTTP 替身代替 vLLM 验证了推理链路的接线与发言落盘,奖励管线未对真实发言验证,真机没跑过,不证明模型变好 |
 | 真实 GRPO 加 OPD 训练、适配器合并回完整权重 | [推迟] | |
-| 带记忆的 interact:训练位 Actio 实例、`memory` 块与哈希、`policy_for_rollout`、三元组上行、记忆失败分类、创建被拒按终止原因重跑、新时间预算 | [已落地] | 缺省走替身记忆,设了记忆配置才装配 Starling;训练记录带 `memory` 块。真端点延迟与每会话开库的耗时未核实,见下方未核实项 |
+| 带记忆的 interact:训练位 SimpleActio 实例、`memory` 块与哈希、`policy_for_rollout`、三元组上行、记忆失败分类、创建被拒按终止原因重跑、新时间预算 | [已落地] | 缺省走替身记忆,设了记忆配置才装配 Starling;训练记录带 `memory` 块。真端点延迟与每会话开库的耗时未核实,见下方未核实项 |
 | 记忆按情境世界组织:一条 rollout 一个世界、事件 key 带主体、起点摘要按情境、拒绝人格重复、重试撞上被占世界判瞬态 | [已落地] | 替身也走 rollout 世界,世界在内存里,从空世界起,不落盘 |
 
 | 已知局限 | 影响 | 缓解 |

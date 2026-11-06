@@ -1,7 +1,7 @@
 """记忆异常的转换后端(场景二记忆设计 §10)。
 
-simulator 不认识 actio.MemoryFailureError(依赖方向不允许导入 actio),只认 backend_timeout 里的两个
-记忆基类。组合根给每个 Actio 实例外面套一层本模块的转换后端:接住 MemoryFailureError,按 transient
+simulator 不认识 simple_actio.MemoryFailureError(依赖方向不允许导入 simple_actio),只认 backend_timeout 里的两个
+记忆基类。组合根给每个 SimpleActio 实例外面套一层本模块的转换后端:接住 MemoryFailureError,按 transient
 改抛 FactoryMemoryUnavailableError(T1)或 FactoryMemoryFailureError(T2),驱动器据此归
 role_memory_unavailable 与 role_memory_failure。
 
@@ -12,8 +12,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from actio.instance import ActioInstance, instantiate
-from actio.memory_port import MemoryBackend, MemoryFailureError
+from simple_actio.instance import SimpleActioInstance, instantiate
+from simple_actio.memory_port import MemoryBackend, MemoryFailureError
 from simulator.datamodel import Persona, Scenario, TurnRecord
 from simulator.realtime.backend_timeout import RoleMemoryFailureError, RoleMemoryUnavailableError
 
@@ -30,11 +30,11 @@ class FactoryMemoryFailureError(RoleMemoryFailureError):
 
 
 class MemoryTranslatingBackend:
-    """包一个 ActioInstance:respond 与 close 里的 MemoryFailureError 按 transient 改抛 simulator 的记忆基类。
+    """包一个 SimpleActioInstance:respond 与 close 里的 MemoryFailureError 按 transient 改抛 simulator 的记忆基类。
 
     不实现 respond_guided:它是角色位最外层,服务端与轨迹源只调 respond。"""
 
-    def __init__(self, instance: ActioInstance) -> None:
+    def __init__(self, instance: SimpleActioInstance) -> None:
         self.instance = instance
 
     def respond(
@@ -61,7 +61,7 @@ class MemoryTranslatingBackend:
 def memory_role_backend(
     inner: object, *, memory: MemoryBackend, episode_id: str, interlocutors: Mapping[str, str], holder: str,
 ) -> MemoryTranslatingBackend:
-    """在给定记忆端口上造一个角色位的 Actio 实例,外套转换后端。对手位与训练位都只经它造实例。
+    """在给定记忆端口上造一个角色位的 SimpleActio 实例,外套转换后端。对手位与训练位都只经它造实例。
     holder 是这个位的人格 id:事件 key 的 @ 后缀,要与 memory 端口绑定的主体一致。"""
     instance = instantiate(
         inner,

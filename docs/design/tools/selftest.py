@@ -49,7 +49,7 @@ CASES = [
     ("Mermaid", GOOD + "\n```mermaid\ngraph TD\n```\n", lambda e, w: has(e, "Mermaid")),
     ("ASCII 框图", GOOD + "\n┌──┐\n", lambda e, w: has(e, "ASCII")),
     ("不存在的路径", GOOD + "\n见 `src/nonexistent/foo.py`。\n", lambda e, w: has(e, "路径不存在")),
-    ("计划中的路径", GOOD + "\n`src/actio/skills.py` [计划中]\n", lambda e, w: not e),
+    ("计划中的路径", GOOD + "\n`src/simple_actio/skills.py` [计划中]\n", lambda e, w: not e),
     ("存在的路径", GOOD + "\n`src/controlplane/daemon.py` 是守护进程\n", lambda e, w: not e),
     ("图占位", GOOD + "\n<!-- figure:begin 00-states -->\n<!-- figure:end 00-states -->\n", lambda e, w: not e),
     ("缺图文件", GOOD + "\n<!-- figure:begin 99-nope -->\n<!-- figure:end 99-nope -->\n", lambda e, w: has(e, "缺图")),
