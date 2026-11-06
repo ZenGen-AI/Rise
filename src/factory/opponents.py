@@ -31,6 +31,10 @@ from simulator.realtime.backend_timeout import (
 # 回复体上限:一句对手发言用不了这么多,挡住对端发来没完没了的响应
 MAX_REPLY_BYTES = 1 << 20
 
+# 4xx 里重发可能就好的几个:408 对端等请求超时、425 对端嫌请求来得太早、429 限流。归暂时不可用(T1),
+# 其余 4xx 是对端明确拒绝(T2)。
+_TRANSIENT_4XX = frozenset({408, 425, 429})
+
 
 class ModelRefError(Exception):
     """model_ref 解析不到可加载的适配器导出:id 形状不对、模型产物不在或读不出、checkpoint_ref 缺失或不合规、
@@ -55,17 +59,17 @@ class OpponentTimeoutError(OpponentApiError, RoleBackendTimeoutError):
 
 
 class OpponentRejectedError(OpponentApiError, RoleBackendRejectedError):
-    """对手 API(外部 API 或站内 vLLM,共用 post_chat)明确拒绝了这次请求:4xx,429 除外(400、401、403、404 等)。
+    """对手 API(外部 API 或站内 vLLM,共用 post_chat)明确拒绝了这次请求:4xx,408、425、429 除外(400、401、403、404 等)。
     同样的请求再发还是同样的回答,重试无益。
 
     同时是两样东西,各有用处:是 RoleBackendRejectedError,所以服务端驱动把对手位的拒绝归 role_backend_rejected
     (T2,轨迹源不重跑、编排器把训练记录写 failed),而不是被通用异常分支吞成 role_backend_failure;
     仍是 OpponentApiError,所以训练位策略撞上时,策略上下文照旧把它译成延后(理由见 interact_policy)。
-    429、5xx、回复形状不对不是它。信息里绝不含密钥值。"""
+    408、425、429、5xx、回复形状不对不是它。信息里绝不含密钥值。"""
 
 
 class OpponentUnavailableError(OpponentApiError, RoleBackendUnavailableError):
-    """对手 API(外部 API 或站内 vLLM,共用 post_chat)暂时不可用:429、5xx、连不上(非超时)、连接中途被断开、
+    """对手 API(外部 API 或站内 vLLM,共用 post_chat)暂时不可用:408、425、429、5xx、连不上(非超时)、连接中途被断开、
     状态行不合规。过一会儿可能就好,是 T1。
 
     同时是两样东西,各有用处:是 RoleBackendUnavailableError,所以服务端驱动把对手位的这类失败归
@@ -221,19 +225,19 @@ def post_chat(
     外部 API 与 vLLM 服务共用这一处:不重试(重试与降级是调用方的事),不跟随重定向,回复体有上限。
     失败一律抛 OpponentApiError,信息只含状态码、host_label、异常类型名,不含响应体;密钥若出现在
     信息里会被抹掉,且切断异常链(from None),回溯里没有携带请求头的原异常。子类按失败的性质分:
-    超时 OpponentTimeoutError(T1);暂时不可用 OpponentUnavailableError(429、5xx、连不上、中途断开;T1);
-    对端明确拒绝 OpponentRejectedError(4xx,429 除外;T2);回复不是约定的形状(及其余非 200)是普通的 OpponentApiError。
+    超时 OpponentTimeoutError(T1);暂时不可用 OpponentUnavailableError(408、425、429、5xx、连不上、中途断开;T1);
+    对端明确拒绝 OpponentRejectedError(4xx,408、425、429 除外;T2);回复不是约定的形状(及其余非 200)是普通的 OpponentApiError。
     host_label 是写进错误信息的"对端是谁"(外部 API 用 host:port,vLLM 用服务名)。
     extra_body 是并进请求体的额外字段,只给认得它们的对端用(vLLM 的 VLLM_CHAT_EXTRA);外部 API 不传。"""
     require_http_url(base_url)
     timeout = require_timeout(timeout_s)
 
     def fail_status(code: int) -> OpponentApiError:
-        """非 200 的状态码。4xx(429 除外)是对端明确拒绝(T2);429 与 5xx 是暂时不可用(T1);
+        """非 200 的状态码。4xx(408、425、429 除外)是对端明确拒绝(T2);408、425、429 与 5xx 是暂时不可用(T1);
         其余(1xx、2xx 不是 200、3xx 重定向)我们读不懂,是普通的 OpponentApiError。"""
-        if 400 <= code < 500 and code != 429:
+        if 400 <= code < 500 and code not in _TRANSIENT_4XX:
             return fail(f"HTTP {code} from {host_label}", OpponentRejectedError)
-        if code == 429 or 500 <= code < 600:
+        if code in _TRANSIENT_4XX or 500 <= code < 600:
             return fail(f"HTTP {code} from {host_label}", OpponentUnavailableError)
         return fail(f"HTTP {code} from {host_label}")
 

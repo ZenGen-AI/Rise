@@ -579,7 +579,7 @@ vLLM 服务按指令起停,不常驻。一条 interact 指令派发时起服务,
 
 等提交的 150 秒与等相邻消息的 120 秒方向相反,互不嵌套。服务端等的是客户端的一次提交。客户端等的是相邻两条服务端消息的间隔。每条对手发言都是一条消息,所以一轮里有几个对手都不叠加。外层上限高于内层最坏耗时,内层先超时,外层才看得到分类过的失败。
 
-单次后端调用超时归 `role_backend_timeout`,是 T1,整条重跑,至多 `1 + max_retries_per_episode` 次。两次尝试之间指数退避:第 k 次重跑前等 `RETRY_FIRST_BACKOFF_S × 2^(k-1)` 秒(2 秒起),单次至多 `RETRY_MAX_BACKOFF_S`(16 秒),最后一次失败后不等,缺省两次重跑共多等 6 秒;确定性失败不等 [已落地]。对手 API 回 429、5xx 或连不上归 `role_backend_unavailable`,同样是 T1、同样重跑;回其余 4xx 归 `role_backend_rejected`,是 T2,不重跑、训练记录写 `failed`;回复形状不对仍归 `role_backend_failure`,不重跑、记录保持 `pending` [已落地]。对手位的记忆失败另有两个终止原因 [已落地]:瞬态的归 `role_memory_unavailable`(T1,按条重跑),确定性的归 `role_memory_failure`(T2,不重跑),见第 8 章。真机延迟已测过一次(见本节开头),上面的值据此定;会话轮数或上下文明显变长时要重测。第 5.1 至 5.4 节的签名、参数形状与默认值已按代码核实。
+单次后端调用超时归 `role_backend_timeout`,是 T1,整条重跑,至多 `1 + max_retries_per_episode` 次。两次尝试之间指数退避:第 k 次重跑前等 `RETRY_FIRST_BACKOFF_S × 2^(k-1)` 秒(2 秒起),单次至多 `RETRY_MAX_BACKOFF_S`(16 秒),最后一次失败后不等,缺省两次重跑共多等 6 秒;确定性失败不等 [已落地]。对手 API 回 408、425、429、5xx 或连不上归 `role_backend_unavailable`,同样是 T1、同样重跑;回其余 4xx 归 `role_backend_rejected`,是 T2,不重跑、训练记录写 `failed`;回复形状不对仍归 `role_backend_failure`,不重跑、记录保持 `pending` [已落地]。对手位的记忆失败另有两个终止原因 [已落地]:瞬态的归 `role_memory_unavailable`(T1,按条重跑),确定性的归 `role_memory_failure`(T2,不重跑),见第 8 章。真机延迟已测过一次(见本节开头),上面的值据此定;会话轮数或上下文明显变长时要重测。第 5.1 至 5.4 节的签名、参数形状与默认值已按代码核实。
 
 ## 6. 关键流程
 
@@ -742,7 +742,7 @@ interact 的生成路多一条「生成、写树、回写、复校」的链路 [
 | MT-8 | 从未存点的 pending 记录判 restart,不判 T3 | 一律 T3 | 什么都没丢,从头跑等价于新运行 | 一条在第一次存点前反复崩溃的指令,靠 `resume_attempts` 上限挡住 |
 | MT-9 | `resume_attempts` 先加一并落盘,再加载权重 | 训练成功后再计数 | load 本身反复失败也会触顶升级 | 无 |
 | MT-10 | 曲线摘要只在存点时快照 | 每步写入 | 续训后摘要与一次跑完相同,不重复计入 | 崩溃前多跑的步在摘要里看不到 |
-| MT-11 | `role_backend_failure` 不重试 | 按 T1 重试 | 服务端用它同时表示后端抛说不清的异常和工厂故障,分不出 T1 与 T2。对手 API 的 429、5xx、连不上已单列为 `role_backend_unavailable`(T1,重跑),4xx 单列为 `role_backend_rejected`(T2,写 `failed`) | 剩下的真瞬态后端故障(如后端抛的非对手 API 异常)仍会让本次 collect 失败 |
+| MT-11 | `role_backend_failure` 不重试 | 按 T1 重试 | 服务端用它同时表示后端抛说不清的异常和工厂故障,分不出 T1 与 T2。对手 API 的 408、425、429、5xx、连不上已单列为 `role_backend_unavailable`(T1,重跑),4xx 单列为 `role_backend_rejected`(T2,写 `failed`) | 剩下的真瞬态后端故障(如后端抛的非对手 API 异常)仍会让本次 collect 失败 |
 | MT-12 | judge 与被训模型相同或互为前缀时构造即拒绝 | 只在诊断侧防自评 | 训练会被直接优化去讨好自己的 judge | 前缀匹配不是真正的血缘判断,漏判与误判都有 |
 | MT-13 | `allow_resume` 与 `max_resume_attempts` 计入 `config_hash` | 只哈希影响训练产物的字段 | 原设计未记录理由,代码表现为整份配置一起哈希 | 两项一旦改动,同一个 run 判"配置变了",无法续训,只能重跑;要支持放宽后续训,须把它们移出 `config_hash` |
 | MT-14 | SFT 只以训练位的 `utterance` 为目标,不训练 `inner_thought` | 同时训练内心推理 | 原设计未记录理由,是实现者的选择 | 被训模型学不到内心推理 |
@@ -794,8 +794,8 @@ interact 的生成路多一条「生成、写树、回写、复校」的链路 [
 | 远端作业非零退出 `RemoteJobFailedError` | 延后 | 同上;它是真失败,计入 `resume_attempts`,耗尽后升级为 T3 | 训练记录 `resume_attempts` |
 | 远端作业成功但指标解析不出 `MetricsMissingError` | T1 | 记录保持 `pending`,计入 `resume_attempts`;重试时作业命中已成功退出的那次尝试,只重新解析,不重训 | 训练记录 `resume_attempts` |
 | 执行器崩溃、转换器故障、读清单时 `OSError` | T1 | 原样上抛,记录与指令保持 `pending`,下一次派发续训 | 训练记录的存点进度 |
-| interact 的 `timeout`、`role_backend_timeout`、`role_backend_unavailable`(对手 API 回 429、5xx,或连不上)、`persistence_failed`、传输层 UNAVAILABLE | T1 | 原地重跑,至多 `1 + max_retries_per_episode` 次,两次尝试之间指数退避(2 秒起、单次至多 16 秒);耗尽后上抛,记录保持 `pending`(经 `--interact` 入口时的去向见下方「真推理的 rollout 失败」一行) | `curve_summary["failed_rollout_attempts"]` |
-| interact 的 `role_backend_rejected`(对手 API 回 4xx,429 除外) [已落地] | T2 | 不重试,记录写 `failed`(category T2)并重抛,当轮把指令判 `failed`;与 `invalid_session` 同属编排器的 `_DETERMINISTIC_ROLLOUT_REASONS` | 训练记录 `failure`;指令 `payload["failure"]` |
+| interact 的 `timeout`、`role_backend_timeout`、`role_backend_unavailable`(对手 API 回 408、425、429、5xx,或连不上)、`persistence_failed`、传输层 UNAVAILABLE | T1 | 原地重跑,至多 `1 + max_retries_per_episode` 次,两次尝试之间指数退避(2 秒起、单次至多 16 秒);耗尽后上抛,记录保持 `pending`(经 `--interact` 入口时的去向见下方「真推理的 rollout 失败」一行) | `curve_summary["failed_rollout_attempts"]` |
+| interact 的 `role_backend_rejected`(对手 API 回 4xx,408、425、429 除外) [已落地] | T2 | 不重试,记录写 `failed`(category T2)并重抛,当轮把指令判 `failed`;与 `invalid_session` 同属编排器的 `_DETERMINISTIC_ROLLOUT_REASONS` | 训练记录 `failure`;指令 `payload["failure"]` |
 | interact 的 `role_memory_unavailable`(对手位记忆失败,瞬态类别)与 `role_memory_failure`(其余类别) [已落地] | 前者 T1,后者 T2 | 前者在轨迹源的瞬态集合里,原地重跑,次数与耗尽后的去向同 `role_backend_timeout`;后者在 `_DETERMINISTIC_ROLLOUT_REASONS`(编排器与策略上下文共用)里:不重跑,记录写 `failed`,指令判 `failed`,不延后 | 前者 `curve_summary["failed_rollout_attempts"]`;后者训练记录 `failure` 与指令 `payload["failure"]` |
 | 训练位的 recall 或 embed_pending 失败、remember 抛出的异常,瞬态类别(转换后端改抛 RoleMemoryUnavailableError;`remember` 的 `failure_category` 只计数、不按它分类) [已落地] | T1 | 轨迹源在 `_attempt` 里接住,译成瞬态的失败尝试,会话 abort,原地重跑。remember 返回 failed(含 timeout)只计数、不抛,不进这一行与下一行 | `curve_summary["failed_rollout_attempts"]` |
 | 训练位的记忆失败,其余类别(改抛 RoleMemoryFailureError) [已落地] | T2 | 会话 abort。编排器把训练记录写 `failed` 后重抛,策略上下文原样放行,派发器见记录已 `failed` 就判 `DirectiveFailedError`,不延后。副本 close 超过 60 秒(等 Starling 工作线程)同样判这一类,不重试,同名目录留给下次清扫 | 训练记录 `failure`、指令 `payload["failure"]` |

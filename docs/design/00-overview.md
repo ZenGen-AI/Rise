@@ -362,7 +362,7 @@ checkpoint 等大体量内容不进 git,只存引用 `{uri, sha256, size_bytes, 
 
 终止原因共十三种 [已落地]:`max_turns`、`goal_reached`、`client_terminated`、`role_backend_failure`、`role_backend_timeout`、`role_backend_unavailable`、`role_backend_rejected`、`timeout`、`invalid_session`、`client_disconnected`、`persistence_failed`,以及 `role_memory_unavailable`(记忆调用瞬态失败,T1,客户端按条重跑)与 `role_memory_failure`(记忆调用确定性失败,T2,不重跑,指令判 `failed`)。训练位的记忆失败在客户端按同一分类处理。
 
-`persistence_failed` 表示会话跑完了但落盘钩子失败,客户端按瞬态失败整条重跑,不收下这条 episode [已落地]。`role_backend_unavailable` 表示对手 API 暂时不可用(429、5xx、连不上),是 T1,客户端整条重跑;`role_backend_rejected` 表示对手 API 明确拒绝(4xx,429 除外),是 T2,不重跑,训练记录写 `failed` [已落地]。其中 `goal_reached` 只出现在批量路径,实时会话的停止判定只看客户端是否请求结束。
+`persistence_failed` 表示会话跑完了但落盘钩子失败,客户端按瞬态失败整条重跑,不收下这条 episode [已落地]。`role_backend_unavailable` 表示对手 API 暂时不可用(408、425、429、5xx、连不上),是 T1,客户端整条重跑;`role_backend_rejected` 表示对手 API 明确拒绝(4xx,408、425、429 除外),是 T2,不重跑,训练记录写 `failed` [已落地]。其中 `goal_reached` 只出现在批量路径,实时会话的停止判定只看客户端是否请求结束。
 
 服务端默认值:单会话最多 200 轮,等待创建 10 秒,客户端提交一轮最多等 30 秒,后端单次调用最多 60 秒。
 

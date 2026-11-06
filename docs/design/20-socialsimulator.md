@@ -357,8 +357,8 @@ manifest_hash: <64 位十六进制>   # 对排序后的 episode_refs 规范化 J
 | `client_terminated` | CLOSED | 客户端发 `EndSession` | 正常 |
 | `timeout` | FAILED | 客户端超时未提交:`--interact` 下服务端等 150 秒;或客户端等相邻两条服务端消息超过 120 秒,由客户端本地判定 | T1 |
 | `role_backend_timeout` | FAILED | 服务端后端 60 秒未返回(`--interact` 下 90 秒) | T1 |
-| `role_backend_unavailable` | FAILED;准入已满或逻辑 episode_id 撞上活动会话时创建被拒 | 对手 API 暂时不可用:429、5xx、连不上、连接中途断开;准入时活动加滞留会话数已达上限、同 `episode_id` 已有活动会话 | T1 [已落地] |
-| `role_backend_rejected` | FAILED | 对手 API 明确拒绝:4xx,429 除外 | T2 [已落地] |
+| `role_backend_unavailable` | FAILED;准入已满或逻辑 episode_id 撞上活动会话时创建被拒 | 对手 API 暂时不可用:408、425、429、5xx、连不上、连接中途断开;准入时活动加滞留会话数已达上限、同 `episode_id` 已有活动会话 | T1 [已落地] |
+| `role_backend_rejected` | FAILED | 对手 API 明确拒绝:4xx,408、425、429 除外 | T2 [已落地] |
 | `role_backend_failure` | FAILED 或创建被拒 | 后端抛其余异常(含对手 API 的回复形状不对;记忆异常已分出去 [已落地]),或工厂、解析器故障 | T1 或 T2,协议上不区分 |
 | `role_memory_unavailable` | FAILED | 对手位后端抛出瞬态的记忆失败:调用超时、传输失败 | T1 [已落地] |
 | `role_memory_failure` | FAILED | 对手位后端抛出确定性的记忆失败:瞬态以外的一切 | T2 [已落地] |
@@ -560,7 +560,7 @@ SessionInfo、SessionResources、SessionClosingError 三个类型都放在 `src/
 | 对手位后端抛出瞬态的记忆失败 [已落地] | FAILED,不落盘 | `EndSession(role_memory_unavailable)` | 整条重跑,有上限;用尽后抛 `RolloutFailedError` |
 | 对手位后端抛出确定性的记忆失败 [已落地] | FAILED,不落盘 | `EndSession(role_memory_failure)` | 不重跑,抛 `RolloutFailedError`;MindTrainer 把指令判 `failed`,不进延后通道 |
 | 客户端相邻两条服务端消息的间隔超过 120 秒(`--interact`) [已落地] | 客户端 abort 后,服务端按断连判 FAILED | 客户端自判 `timeout` | 整条重跑,有上限 |
-| 对手 API 回 429、5xx,或连不上、连接中途断开 | FAILED | `EndSession(role_backend_unavailable)` | 整条重跑,有上限;用尽后抛 `RolloutFailedError` |
+| 对手 API 回 408、425、429、5xx,或连不上、连接中途断开 | FAILED | `EndSession(role_backend_unavailable)` | 整条重跑,有上限;用尽后抛 `RolloutFailedError` |
 | 对手 API 回其余 4xx | FAILED | `EndSession(role_backend_rejected)` | 不重跑,抛 `RolloutFailedError`;MindTrainer 把训练记录写 `failed` |
 | 对手后端抛其余异常(含回复形状不对) | FAILED | `EndSession(role_backend_failure)` | MindTrainer 不重试,抛 `RolloutFailedError` |
 | 客户端断连或 `abort()` | `request_abort`,FAILED | 无 | 不落盘;半截 episode 不污染数据 |
@@ -743,8 +743,8 @@ interact 会话前的准备 [已落地]。下表是派发器与组合根在起�
 | 生成路合成情境或人格失败 [已落地] | T2 | 指令 `failed`,不留半套情境与人格 | 失败记录 |
 | 回写 `training_config` 失败 [已落地] | T1 | 上抛,指令仍 `pending`;重跑内容相同不提交 | 无 |
 | 外部 API 对手单次调用超时 [已落地] | T1 | `post_chat` 的两处超时分支抛 `OpponentTimeoutError`(`src/factory/opponents.py`),它同时是 `OpponentApiError` 与 `RoleBackendTimeoutError`;驱动在通用异常之前先接后者,归 `role_backend_timeout`,轨迹源按 `max_retries_per_episode` 整条重跑,有上限。站内 vLLM 对手与外部 API 共用 `post_chat`,一并归到这里。训练位策略超时时它仍是 `OpponentApiError`,策略上下文照旧译成延后 | `EndSession` 的 `reason` |
-| 外部 API 对手返回 4xx(429 除外),如 400、401、403、404 [已落地] | T2 | `post_chat` 抛 `OpponentRejectedError`(`src/factory/opponents.py`),它同时是 `OpponentApiError` 与 `RoleBackendRejectedError`;驱动在通用异常之前先接后者,归 `role_backend_rejected`。轨迹源不重跑(它不在瞬态集合里),抛 `RolloutFailedError`;编排器把训练记录写 `failed`(category T2),策略上下文原样放行,派发器把指令判 `failed`(T2),不进延后通道。部署同样不重跑。训练位策略自己撞上时它仍是 `OpponentApiError`,策略上下文译成延后:训练位是本 run 自己起的 vLLM,4xx 多半是服务配置坏了,但这和起服务的瞬态失败区分不开,先按延后处理 | `EndSession(role_backend_rejected)` |
-| 外部 API 对手返回 429 或 5xx,连不上(非超时),连接中途断开 [已落地] | T1 | `post_chat` 抛 `OpponentUnavailableError`,它同时是 `OpponentApiError` 与 `RoleBackendUnavailableError`;驱动先接后者,归 `role_backend_unavailable`,轨迹源按 `max_retries_per_episode` 整条重跑,有上限(与超时同路)。重跑用尽后抛 `RolloutFailedError`,策略上下文译成 `RolloutDeferredError`,指令保持 `pending` 按退避重试;续训次数到 `max_resume_attempts` 后升 T3 | `EndSession(role_backend_unavailable)` |
+| 外部 API 对手返回 4xx(408、425、429 除外),如 400、401、403、404 [已落地] | T2 | `post_chat` 抛 `OpponentRejectedError`(`src/factory/opponents.py`),它同时是 `OpponentApiError` 与 `RoleBackendRejectedError`;驱动在通用异常之前先接后者,归 `role_backend_rejected`。轨迹源不重跑(它不在瞬态集合里),抛 `RolloutFailedError`;编排器把训练记录写 `failed`(category T2),策略上下文原样放行,派发器把指令判 `failed`(T2),不进延后通道。部署同样不重跑。训练位策略自己撞上时它仍是 `OpponentApiError`,策略上下文译成延后:训练位是本 run 自己起的 vLLM,4xx 多半是服务配置坏了,但这和起服务的瞬态失败区分不开,先按延后处理 | `EndSession(role_backend_rejected)` |
+| 外部 API 对手返回 408、425、429 或 5xx,连不上(非超时),连接中途断开 [已落地] | T1 | `post_chat` 抛 `OpponentUnavailableError`,它同时是 `OpponentApiError` 与 `RoleBackendUnavailableError`;驱动先接后者,归 `role_backend_unavailable`,轨迹源按 `max_retries_per_episode` 整条重跑,有上限(与超时同路)。重跑用尽后抛 `RolloutFailedError`,策略上下文译成 `RolloutDeferredError`,指令保持 `pending` 按退避重试;续训次数到 `max_resume_attempts` 后升 T3 | `EndSession(role_backend_unavailable)` |
 | 外部 API 对手的回复不是约定的形状:非 JSON、缺字段、超长,或 3xx、204 之类读不懂的状态码 [已落地] | T1 或 T2,协议上不区分 | `post_chat` 抛普通的 `OpponentApiError`,归 `role_backend_failure`;轨迹源不按条重跑(`role_backend_failure` 不在它的瞬态集合里),抛 `RolloutFailedError`,策略上下文译成 `RolloutDeferredError`,指令保持 `pending` 按退避重试;续训次数到 `max_resume_attempts` 后升 T3 | `EndSession(role_backend_failure)` |
 | 外部 API 对手缺凭证 [已落地] | 配置错误,装配期 | 不进会话:factory 的 `--interact` 装配期解析凭证,缺则退出码 2,异常只报环境变量名 | 一行 `factory: error: ...` |
 
@@ -831,7 +831,7 @@ interact 会话前的准备 [已落地]。下表是派发器与组合根在起�
 
 ## 10. 现状、局限与未核实项
 
-结论:批量与实时两条路径、激活轨迹都已落地并有测试;外部生成后端与按目标维度生成是空白;场景二接通需要的两路来源与对手三驱动也已落地并有测试;外部 API 对手的单次调用超时已归 `role_backend_timeout`(整条重跑),非 200 分三类:4xx 归 `role_backend_rejected`(T2,不重跑)、429 与 5xx 与连不上归 `role_backend_unavailable`(T1,按条重跑)、形状不对归 `role_backend_failure`,处理链都有测试钉住 [已落地];会话资源与会话身份 [已落地],含资源对象、有序收尾、准入与滞留、逻辑 episode id、两个记忆失败原因、客户端逐轮限时;对手位的记忆在记忆世界里 [已落地];要真机或真端点才能核实的几项仍是 [计划中],见下面的未核实项。
+结论:批量与实时两条路径、激活轨迹都已落地并有测试;外部生成后端与按目标维度生成是空白;场景二接通需要的两路来源与对手三驱动也已落地并有测试;外部 API 对手的单次调用超时已归 `role_backend_timeout`(整条重跑),非 200 分三类:4xx(408、425、429 除外)归 `role_backend_rejected`(T2,不重跑)、408、425、429 与 5xx 与连不上归 `role_backend_unavailable`(T1,按条重跑)、形状不对归 `role_backend_failure`,处理链都有测试钉住 [已落地];会话资源与会话身份 [已落地],含资源对象、有序收尾、准入与滞留、逻辑 episode id、两个记忆失败原因、客户端逐轮限时;对手位的记忆在记忆世界里 [已落地];要真机或真端点才能核实的几项仍是 [计划中],见下面的未核实项。
 
 | 能力 | 状态 | 说明 |
 |---|---|---|

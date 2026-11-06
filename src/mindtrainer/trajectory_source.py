@@ -85,7 +85,7 @@ class BatchTrajectorySource:
 
 # 只有这两种终止原因的 episode 进 batch。超时、后端失败、断连产生的半截 episode 一律不进。
 _ACCEPTED_REASONS = frozenset({"max_turns", "goal_reached"})
-# T1 瞬态:服务端报告的两种超时、对手 API 暂时不可用(role_backend_unavailable:429、5xx、连不上)、
+# T1 瞬态:服务端报告的两种超时、对手 API 暂时不可用(role_backend_unavailable:408、425、429、5xx、连不上)、
 # 对手位记忆暂时不可用(role_memory_unavailable),加上传输层 UNAVAILABLE(见 _classify_client_error)。
 # role_memory_failure 是确定性的(T2),不在这里。
 # persistence_failed:会话跑完了,但服务端落盘钩子失败,树里没有这条 episode。整条重跑。
@@ -200,7 +200,7 @@ class InteractTrajectorySource:
       退避重建(见 ADMISSION_WAIT_S),不计入重试次数、不记 failed_attempts;预算用完仍被拒才按上一条算瞬态失败。
       sleep 与 clock 只为测试注入。
     - 其余(invalid_session、role_backend_rejected、role_memory_failure、role_backend_failure 等)不重试,抛 RolloutFailedError。
-      role_backend_rejected 是对手 API 明确拒绝(4xx,429 除外),确定性,T2:重试无益,编排器据此写 failed。
+      role_backend_rejected 是对手 API 明确拒绝(4xx,408、425、429 除外),确定性,T2:重试无益,编排器据此写 failed。
       role_memory_failure 是对手位记忆的确定性失败,同样是 T2,编排器同样据此写 failed。
       role_backend_failure 在服务端同时覆盖"后端确定性异常"和"工厂/解析器故障",
       光看 reason 分不出 T1 还是 T2,所以保守地不重试。

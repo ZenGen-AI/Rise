@@ -1287,7 +1287,7 @@ def test_an_external_opponent_that_keeps_answering_503_defers_the_directive_once
 
 def test_an_external_opponent_answering_404_fails_the_directive_with_role_backend_rejected(
         world, tmp_path, stub, fake_serve, external_api):
-    """对手 API 明确拒绝(4xx,429 除外)是确定性的:服务端 role_backend_rejected -> 轨迹源不重跑 -> 编排器把
+    """对手 API 明确拒绝(4xx,408、425、429 除外)是确定性的:服务端 role_backend_rejected -> 轨迹源不重跑 -> 编排器把
     training_run 写 failed -> 策略上下文原样放行 -> 派发器判指令 failed(T2),不进延后通道。"""
     server = external_api([(404, 0.0)] * 50)
     _use_external_opponent(world, server)

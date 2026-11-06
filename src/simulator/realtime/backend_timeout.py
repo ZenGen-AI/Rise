@@ -14,14 +14,14 @@ class RoleBackendTimeoutError(Exception):
 
 
 class RoleBackendRejectedError(Exception):
-    """服务端角色后端（外部 API）的对端明确拒绝了这次请求（4xx，429 除外：密钥不对、模型名不存在、请求体不合规）。
+    """服务端角色后端（外部 API）的对端明确拒绝了这次请求（4xx，408、425、429 除外：密钥不对、模型名不存在、请求体不合规）。
     同样的请求再发还是同样的回答，重试无益，是 T2。驱动把它归 role_backend_rejected，与"后端抛了说不清的
     异常"的 role_backend_failure 分开：后者在服务端同时覆盖工厂/解析器故障，轨迹源分不出 T1 与 T2，
     所以保守地不重跑；这一个则能确定，轨迹源不重跑，编排器把训练记录写成 failed。"""
 
 
 class RoleBackendUnavailableError(Exception):
-    """服务端角色后端（外部 API）的对端暂时不可用：限流（429）、对端自己的毛病（5xx）、连不上、中途断开。
+    """服务端角色后端（外部 API）的对端暂时不可用：请求超时（408）、来得太早（425）、限流（429）、对端自己的毛病（5xx）、连不上、中途断开。
     过一会儿可能就好，是 T1。驱动把它归 role_backend_unavailable，轨迹源据此按条重跑。
     与 role_backend_failure 分开：后者在服务端同时覆盖"后端抛了说不清的异常"和"工厂/解析器故障"，
     轨迹源分不出 T1 与 T2，所以保守地不重跑；这一个则能确定是瞬态。"""

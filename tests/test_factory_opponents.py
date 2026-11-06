@@ -378,7 +378,7 @@ def test_a_non_200_status_is_an_api_error_naming_the_status(stub, status):
 
 
 @pytest.mark.parametrize("status", [400, 401, 403, 404, 422])
-def test_a_4xx_other_than_429_is_a_rejection_the_peer_will_repeat(stub, status):
+def test_a_4xx_other_than_408_425_and_429_is_a_rejection_the_peer_will_repeat(stub, status):
     """对端明确拒绝了请求(密钥不对、模型名不存在、请求体不合规):重试无益,归 OpponentRejectedError(T2)。
     它仍是 OpponentApiError,训练位策略撞上时策略上下文照旧把它译成延后。"""
     stub.script.append((status, json.dumps({"error": f"bad key {SECRET}"}).encode()))
@@ -390,9 +390,10 @@ def test_a_4xx_other_than_429_is_a_rejection_the_peer_will_repeat(stub, status):
     assert info.value.__cause__ is None and info.value.__suppress_context__
 
 
-@pytest.mark.parametrize("status", [429, 500, 502, 503])
-def test_429_and_5xx_are_not_rejections(stub, status):
-    """429 是限流、5xx 是对端的毛病:都可能过一会儿就好,不能判成确定性拒绝。"""
+@pytest.mark.parametrize("status", [408, 425, 429, 500, 502, 503])
+def test_408_425_429_and_5xx_are_not_rejections(stub, status):
+    """408 是对端等请求超时、425 是对端嫌请求来得太早、429 是限流、5xx 是对端的毛病:都可能过一会儿就好,
+    不能判成确定性拒绝。"""
     stub.script.append((status, b"x"))
     with pytest.raises(OpponentApiError, match=str(status)) as info:
         _respond(_backend(stub.url))
@@ -414,9 +415,9 @@ def test_post_chat_rejection_scrubs_the_key_from_a_label_that_carries_it(stub):
     assert SECRET not in str(info.value) and "***" in str(info.value)
 
 
-@pytest.mark.parametrize("status", [429, 500, 502, 503, 504])
-def test_429_and_5xx_are_the_peer_being_temporarily_unavailable(stub, status):
-    """限流与对端自己的毛病,过一会儿可能就好:OpponentUnavailableError(T1,轨迹源按条重跑)。
+@pytest.mark.parametrize("status", [408, 425, 429, 500, 502, 503, 504])
+def test_408_425_429_and_5xx_are_the_peer_being_temporarily_unavailable(stub, status):
+    """请求超时(408)、来得太早(425)、限流与对端自己的毛病,过一会儿可能就好:OpponentUnavailableError(T1,轨迹源按条重跑)。
     仍是 OpponentApiError(训练位撞上时译成延后);既不是超时也不是拒绝。"""
     stub.script.append((status, json.dumps({"error": f"bad key {SECRET}"}).encode()))
     with pytest.raises(OpponentUnavailableError, match=str(status)) as info:

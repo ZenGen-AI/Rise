@@ -44,7 +44,7 @@ _DETERMINISTIC = (
 )
 
 # 这三个 rollout 终止原因是确定性的拒绝(T2),重试无益:invalid_session 是请求本身有问题,
-# role_backend_rejected 是对手 API 明确拒绝了请求(4xx,429 除外),
+# role_backend_rejected 是对手 API 明确拒绝了请求(4xx,408、425、429 除外),
 # role_memory_failure 是对手位记忆的确定性失败(同样的输入再来还是同样的结果)。编排器据此把训练记录写 failed;
 # factory 的策略上下文也据此原样放行(其余 RolloutFailedError 都译成延后),所以两边共用这一个集合。
 _DETERMINISTIC_ROLLOUT_REASONS = frozenset({"invalid_session", "role_backend_rejected", "role_memory_failure"})

@@ -85,8 +85,8 @@ message TurnUpdate {
 message EndSession {
   string reason = 1;  // "max_turns" | "goal_reached" | "client_terminated"
                        // | "role_backend_failure" | "role_backend_timeout" | "timeout"
-                       // | "role_backend_rejected"(对端明确拒绝,4xx 且非 429;确定性,T2)
-                       // | "role_backend_unavailable"(对端暂时不可用,429、5xx、连不上;瞬态,T1)
+                       // | "role_backend_rejected"(对端明确拒绝,4xx 且非 408、425、429;确定性,T2)
+                       // | "role_backend_unavailable"(对端暂时不可用,408、425、429、5xx、连不上;瞬态,T1)
                        // | "role_memory_unavailable"(对手位记忆暂时不可用;瞬态,T1)
                        // | "role_memory_failure"(对手位记忆确定性失败;T2)
                        // | "invalid_session" | "client_disconnected"

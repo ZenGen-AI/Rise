@@ -399,7 +399,7 @@ def test_a_backend_that_raises_role_backend_rejected_ends_the_session_as_role_ba
 
 def test_an_external_api_opponent_answering_404_ends_the_session_as_role_backend_rejected(
         start_server, slow_chat):
-    """4xx(429 除外)是对端明确拒绝:真实 ExternalApiBackend 抛 OpponentRejectedError,经 TimeoutBackend 原样重抛,
+    """4xx(408、425、429 除外)是对端明确拒绝:真实 ExternalApiBackend 抛 OpponentRejectedError,经 TimeoutBackend 原样重抛,
     服务端据此报 role_backend_rejected。信息里没有密钥。"""
     server = slow_chat(0.0, status=404)
     end = _external_opponent_session(start_server, server.base_url, opponent_timeout_s=5.0)
