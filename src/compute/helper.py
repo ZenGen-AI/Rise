@@ -9,7 +9,7 @@ from pathlib import Path
 
 from compute.errors import ComputeError
 
-HELPER_SHA256 = "d467ff7cf7809a10f1f8e1f1b0bd7a9d45d0aea680d8a39627b264c32908ee33"
+HELPER_SHA256 = "cb34aea1774be81c2e66bd970c4365b849bd0bf6a468b58810068ac1ca0aed83"
 _HELPER_FILE = Path(__file__).with_name("job_tool.py")
 
 # 引导脚本只做一件事:把 stdin 里的助手原子地写到指定路径,哈希不符就不写。已有同哈希文件则什么都不写。
