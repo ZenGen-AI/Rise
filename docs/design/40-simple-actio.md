@@ -360,7 +360,7 @@ memory: {digest_before: <sha256>, remembered: "2", extraction_failed: "0"}
 | 激活轨迹 | episode 里每个 `TurnRecord` 的 `activation_trace` 字段 | 无,随 episode 一次写入 | SocialSimulator 的运行器 | [已落地] |
 | 技能条目 | `skill_library/` 下的 `skill` 产物 | 由 MindAgent 管 | MindAgent 收录处理器 | [已落地] |
 | 记忆条目 | `memory_library/` 下的 `memory` 产物 | 由 MindAgent 管 | 无:已废弃,记忆不再写这里,目录必须为空 | [已落地] |
-| 记忆库文件 | 接服务后 Starling 一侧不再有 rise 打开的库文件,世界在服务的数据目录里;替身的 held 快照存在替身根下 `held/<world_id>/<snapshot_id>.json` [计划中]。今天:仓库之外,一个世界一个 Starling SQLite 库:部署 `<root>/deploy/<scenario_id>.db`,训练 `<root>/runs/<run>/<episode>.db`,种子 `<root>/seeds/<seed_id>/<scenario_id>.db`;部署替身是 `.json`,训练替身是内存里的世界对象 | 无,文件内部有 `pending/committed/abandoned` 事件状态(见 4.5) | rollout 世界由 factory 的客户端一侧建、删,服务端只开;部署世界由 MindAgent 经管理面创建、备份与覆盖;SimpleActio 实例经端口读写 | [已落地] |
+| 记忆库文件 | 接服务后 Starling 一侧不再有 rise 打开的库文件,世界在服务的数据目录里;替身的 held 快照存在记忆根下 `held/<world_id>/<snapshot_id>.json`,重放世界在 `replay/` 下,都不在 FileTupleStore 的 `deploy/` 里 [计划中]。今天:仓库之外,一个世界一个 Starling SQLite 库:部署 `<root>/deploy/<scenario_id>.db`,训练 `<root>/runs/<run>/<episode>.db`,种子 `<root>/seeds/<seed_id>/<scenario_id>.db`;部署替身是 `.json`,训练替身是内存里的世界对象 | 无,文件内部有 `pending/committed/abandoned` 事件状态(见 4.5) | rollout 世界由 factory 的客户端一侧建、删,服务端只开;部署世界由 MindAgent 经管理面创建、备份与覆盖;SimpleActio 实例经端口读写 | [已落地] |
 
 SimpleActio 自身不写任何产物。技能的 `to_dict()` 原样作为产物的 `payload`;`MemoryEntry` 的 `to_dict()` 现在只供替身记忆与摘要使用。记忆库文件不进 git 树,因为原生 SQLite 带预写日志,文件字节不稳定。
 
@@ -477,12 +477,12 @@ def open(self, world_id: str, holder: str, *, read_only: bool = False) -> Memory
 
 | 方法 | Starling 实现 | 替身实现 |
 |---|---|---|
-| `snapshot` | 先确保世界已建,再拍 held 快照,`note` 让人在看板的快照列表里认得出 | 快照内容与 `note` 存进替身根下 `held/<world_id>/<snapshot_id>.json` |
+| `snapshot` | 先确保世界已建,再拍 held 快照,`note` 让人在看板的快照列表里认得出 | 快照内容与 `note` 存进记忆根下 `held/<world_id>/<snapshot_id>.json` |
 | `restore` | 服务恢复;摘要与快照记的不等时报 `restore_digest_mismatch`。崩溃安全由服务负责(复制、校验、归档、一步改名) | 按 id 读回 |
 | `delete_snapshot` | held 快照不参与修剪,由调用方显式删 | 删文件 |
-| `fork_replay` | 从快照分叉一个可回收世界,`retention_group` 是轮次 id;可回收世界从不跑后台任务 | 同一根下建 `verify.<round_id>.<scenario_id>.<后缀>.json` |
+| `fork_replay` | 从快照分叉一个可回收世界,`retention_group` 是轮次 id;可回收世界从不跑后台任务。返回完整世界名 `<前缀>.verify.<round_id>.<scenario_id>.<后缀>`,不再拼前缀 | 记忆根下建 `replay/<重放世界名>.json`,返回同形的名字;崩溃留下的文件不清,只占磁盘 |
 | `release_replay` | 关世界:客户端没有删世界的接口,重放世界留给 Starling 第 6 期清理 | 删文件 |
-| `open(read_only=True)` | 只读句柄;`recall`、`digest`、`close` 在服务端都不算写 | 写入抛永久 MemoryFailureError,与 Starling 的 `world_read_only` 同类 |
+| `open(read_only=True)` | 只读句柄;`recall`、`digest`、`close` 在服务端都不算写。名字以 `<前缀>.verify.` 开头就当重放世界直接开,不走 `ensure_world`;其余按部署世界 id 拼成 `<前缀>.deploy.<id>`。`wait_closed` 一律按完整世界名计端口 | 写入抛永久 MemoryFailureError,与 Starling 的 `world_read_only` 同类 |
 
 rise 删掉 `copy_library`、`library_digest`、`_require_library_file` 与"先删日志后换文件"那一套 [计划中]。部署世界不存在时:`open`、`remember_event`、`snapshot` 先建;`digest` 返回空种子的摘要,不建世界(两者相等已实测);`pending_events` 返回空列表;`abandon_event` 判永久失败。
 
@@ -809,6 +809,7 @@ SimpleActio 内部没有重试。抽取失败的事件在同一次 `respond` 里
 | AC-30 | 接服务后放弃事件按主体:`abandon_event(world, holder, key)`,`pending_events` 返回 PendingKey;替身事件表按 `(holder, key)`;空主体判永久失败,不解析 key 里的 `@holder` [计划中] | 照旧按 key 放弃;空主体时从 key 里解析主体 | Starling 第 2 期起放弃只作用于句柄自己的主体,照旧会抛 `event_not_found`;解析 key 的退路只为旧库而设,rise 走不到,留着会掩盖真问题 | 三个调用点要改;替身语义跟着变,由契约测试钉住 |
 | AC-31 | 部署快照改为服务的 held 快照,按快照 id 恢复与删除;替身同样按 id 实现 [计划中] | 继续由 rise 复制、备份、换文件 | rise 不再按路径打开世界;服务的恢复带崩溃安全与摘要校验 | 快照 id 要由 rise 自己记(客户端不能列快照),崩溃会留下孤儿 held 快照 |
 | AC-32 | 写入结果不是 `accepted` 或 `idempotent` 时判永久失败 [计划中] | 照旧只看 `extraction_failed` | `no_store`、`rejected` 被当成功会静默少记忆 | rise 的事件会不会得到这两个值未核实;得到时部署轮次判 T3、训练 rollout 判 T2 |
+| AC-33 | 接服务后,第 8 节错误码表没单列的 Starling 码按客户端异常的 `transient` 判;码与瞬态由 Starling 的错误码目录拥有,rise 只在表里列出的几处改判 [计划中] | 照旧"未知情形一律归确定性" | 今天的穷举映射面对的是进程内抛出的各种 Python 异常,来源不明才一律判确定性;客户端的每个异常都带服务端给的 `code` 与 `transient`,来源明确,Starling 新增的码不用等 rise 改表就能按对的桶走 | Starling 把一个码误标为瞬态时,rise 会反复重跑,直到连续延后上限 |
 
 ## 8. 失败处理与可观测
 
@@ -837,15 +838,16 @@ SimpleActio 自己的失败是 T2 确定性:同样输入必然再失败,不重�
 | Starling 抛的其余异常、`sqlite3` 异常、`OSError`、任何其他异常 | 假 | 调用方当 T2,不重跑;出现新的瞬态情形前先按 T2 处理 |
 | MemoryEventConflict、MemoryClosedError | 假 | 同上;两个都是 MemoryFailureError 的子类,本来就是调用方的编程错误或数据冲突 |
 
-接服务后映射改按客户端异常的 `code` 与 `transient` 给出 [计划中]。客户端所有异常都带这两个属性,消息就是 code;rise 的消息写成 `starling <code> (<类名>)`。码与瞬态的原值来自 Starling 的错误码目录,rise 改判两处,见 90 篇:
+接服务后映射改按客户端异常的 `code` 与 `transient` 给出 [计划中]。客户端所有异常都带这两个属性,消息就是 code;rise 的消息写成 `starling <code> (<类名>)`。码与瞬态的原值来自 Starling 的错误码目录(`S:src/governance/error_catalog.cpp:15-67`),rise 只改判下表标明的 `session_expired` 与开句柄时的 `world_held` 两处,另把 rise 没关的端口收到的 `handle_closed` 当作会话丢失;组合根怎么换会话见 Factory 篇的服务会话一节。上面"未知情形一律归确定性"的原则接服务后不再适用于 Starling 的码,改为信 Starling 的瞬态标记(AC-33):
 
 | code | rise 的异常 | `transient` |
 |---|---|---|
 | `event_conflict` | MemoryEventConflict | 假 |
-| `handle_closed` | MemoryClosedError | 假 |
+| `handle_closed`,端口已由 rise 关闭或会话已由 rise 关闭 | MemoryClosedError | 假 |
+| `handle_closed`,端口不是 rise 关的 | MemoryFailureError | 真(rise 改判):外部服务重启后旧句柄的回答,组合根随后换新会话 |
 | `recall_degraded`、`world_busy`、`worlds_unavailable`、`service_unavailable`、`service_timeout` | MemoryFailureError | 真 |
 | `session_expired` | MemoryFailureError | 真(rise 改判;原值非瞬态),组合根随后换新会话 |
-| `world_held`(开句柄时) | MemoryFailureError | 只在本进程旧会话过期后 60 秒的排空窗口内为真(rise 改判),其余为假 |
+| `world_held`(开句柄时) | MemoryFailureError | 只在排空窗口内为真(rise 改判):本进程有一个旧会话已丢失,丢失时它在这个世界上有可写句柄,且距丢失不到 60 秒;其余为假 |
 | `event_not_found`、`endpoint_key_missing`、`world_settings_mismatch`、`world_read_only`、`snapshot_not_found`、`restore_digest_mismatch` 等其余码 | MemoryFailureError | 取 `exc.transient` |
 
 异常信息不含端点地址与密钥(适配器只报异常类名与 `failure_category`),终止原因由调用方映射。组合根给每个 SimpleActio 实例外套一层转换后端,按 `transient` 改抛 simulator 的两个基类,所以 simulator 与 MindTrainer 不导入 `simple_actio`。转换后端只接 MemoryFailureError 一个基类,两个子类也被正确映射,不会落进驱动器的 `role_backend_failure`。对手位在服务端:瞬态译成 `role_memory_unavailable`(T1),确定性译成 `role_memory_failure`(T2);训练位在客户端:瞬态按条重跑,确定性判指令 `failed`。MindAgent 自己造部署实例,直接接 MemoryFailureError。
@@ -879,7 +881,7 @@ SimpleActio 自己的失败是 T2 确定性:同样输入必然再失败,不重�
 | 落盘替身 | FileTupleStore 与它复用的事件账本:提交点、崩溃后重调、备份与恢复、世界 id 与主体校验、账本带主体 | 无 | `tests/test_simple_actio_file_tuple_store.py` | 70 | [已落地] |
 | Starling 适配器 | 失败映射的穷举表、命中渲染、零分命中丢弃、`close` 的期限、空库摘要 | 假 Starling 与本机假 OpenAI 端点;装了 extra `memory` 才跑 | `tests/test_simple_actio_memory_starling.py` | 48 | [已落地] |
 | Starling 管理面 | StarlingDeploymentStore:短命连接、崩溃后重调、`restore_from` 的顺序与拒绝项、摘要不改被读的文件 | 本机假 OpenAI 端点;装了 extra `memory` 才跑 | `tests/test_simple_actio_starling_store.py` | 71 | [已落地] |
-| 世界契约(接服务后) [计划中] | 另加:同 key 两个主体各写一次两条都在;用错主体放弃判永久;`pending_events` 带主体;快照、写、恢复后摘要等于快照时;快照带 `note`;端口开着时恢复被拒;只读端口写入被拒;`fork_replay` 的摘要等于快照。适配器另测:召回显式传 `strict`、`include_volatile`;写入结果 `no_store`、`rejected` 判永久;关闭时会话过期与代号过期当作已关;错误码表逐行 | FileTupleStore 与连真 `starling-serve` 子进程的 StarlingDeploymentStore;未装客户端或服务端时 Starling 一侧跳过 | `tests/test_simple_actio_deployment_store_contract.py` 等 | 未定 | [计划中] |
+| 世界契约(接服务后) [计划中] | 另加:同 key 两个主体各写一次两条都在;用错主体放弃判永久;`pending_events` 带主体;快照、写、恢复后摘要等于快照时;快照带 `note`;端口开着时恢复被拒;只读端口写入被拒;`fork_replay` 的摘要等于快照,返回完整世界名,`open` 认得出它、不走 `ensure_world`;一个重放世界上开多个只读句柄。适配器另测:召回显式传 `strict`、`include_volatile`;写入结果 `no_store`、`rejected` 判永久;关闭时会话过期与代号过期当作已关;rise 没关的端口收到 `handle_closed` 判瞬态;错误码表逐行 | FileTupleStore 与连真 `starling-serve` 子进程的 StarlingDeploymentStore;未装客户端或服务端时 Starling 一侧跳过 | `tests/test_simple_actio_deployment_store_contract.py` 等 | 未定 | [计划中] |
 | 世界契约 | 部署管理面的两个实现过同一套参数化用例:同世界两主体互不召回、世界摘要覆盖全部主体、任一主体端口开着时恢复被拒、别的世界开着端口不影响、`wait_closed` 等到别的线程关端口 | FileTupleStore 与 StarlingDeploymentStore;未装 extra `memory` 时只跑前者 | `tests/test_simple_actio_deployment_store_contract.py` | 24 | [已落地] |
 
 合计 486 个用例,按上表的文件逐个实测照数;不装 extra `memory` 时 Starling 适配器与管理面两个文件整文件跳过,余 367 个,两个契约文件里 Starling 的参数化用例运行时跳过。`tests/test_mt_packaging.py` 要求新包同时加进 `pyproject.toml` 的 wheel 包列表。
@@ -922,7 +924,7 @@ SimpleActio 自己的失败是 T2 确定性:同样输入必然再失败,不重�
 | 记忆按情境世界组织 | [已落地] | 端口绑定世界与主体,召回按主体过滤;管理面八个方法按世界操作,含 `wait_closed`;替身账本的条目与事件行带 `holder`,摘要覆盖全部主体 |
 | 事件 key 带主体 | [已落地] | `<前缀>#<turn_index>@<主体>`;门② 的 key 不变 |
 | 部署对手位写部署世界 | [已落地] | 经 `AgentRuntime` 的登记表拿到轮次 id,与智能体位一起回滚、一起提交 |
-| 接 Starling 记忆服务 | [计划中] | 放弃事件带主体、管理面按快照 id、只读 `open`、写入判据改严;适配器改包客户端;替身同步改。施工分五步,本包落在第 1、2、4 步 |
+| 接 Starling 记忆服务 | [计划中] | 放弃事件带主体、管理面按快照 id、只读 `open`、写入判据改严;适配器改包客户端;替身同步改。施工分第 0 至 5 步,本包落在第 1、2、4 步 |
 
 ### 10.2 已知局限
 
