@@ -458,3 +458,79 @@ def test_an_empty_owner_deleted_by_hand_while_waiting_is_replaced(tmp_path):
         timer.join()
     assert owner.read_text(encoding="utf-8") == f"{repo.resolve()}\n"
     assert _leftovers(root) == [".owner"]
+
+
+# ---------------- 接记忆服务后的三个键(设计四 Task 9;90 篇配置键表、第 20 条) ----------------
+
+def _token_file(tmp_path, mode=0o600, name="dash.token"):
+    path = tmp_path / name
+    path.write_text("tok-s3cret\n", encoding="utf-8")
+    os.chmod(path, mode)
+    return path
+
+
+def test_both_service_keys_mean_external_mode_and_neither_means_spawn(tmp_path):
+    token = _token_file(tmp_path)
+    cfg = _read(tmp_path, _write(tmp_path, _payload(tmp_path, url="http://127.0.0.1:8787/", token_file=str(token))))
+    assert (cfg.mode, cfg.url, cfg.token_file, cfg.world_prefix) == ("external", "http://127.0.0.1:8787", token, "rise")
+    spawn = _read(tmp_path, _write(tmp_path, _payload(tmp_path, world_prefix="lab_2")))
+    assert (spawn.mode, spawn.url, spawn.token_file, spawn.world_prefix) == ("spawn", None, None, "lab_2")
+
+
+@pytest.mark.parametrize("url", ["http://localhost:8787", "http://127.0.0.2:8787", "http://[::1]:8787"])
+def test_every_loopback_host_is_accepted(tmp_path, url):
+    cfg = _read(tmp_path, _write(tmp_path, _payload(tmp_path, url=url, token_file=str(_token_file(tmp_path)))))
+    assert cfg.mode == "external"
+
+
+def _refused(tmp_path, **change):
+    with pytest.raises(FactoryConfigError) as info:
+        _read(tmp_path, _write(tmp_path, _payload(tmp_path, **change)))
+    return str(info.value)
+
+
+@pytest.mark.parametrize("change, needle", [
+    ({"url": "http://127.0.0.1:8787"}, "url and token_file"),                              # 只给一个
+    ({"token_file": "TOKEN"}, "url and token_file"),
+    ({"url": "http://10.0.0.1:8787", "token_file": "TOKEN"}, "loopback"),                  # 不是回环
+    ({"url": "https://127.0.0.1:8787", "token_file": "TOKEN"}, "loopback"),                # https
+    ({"url": "http://alice:s3cret@127.0.0.1:8787", "token_file": "TOKEN"}, "user:password"),  # userinfo
+    ({"url": "http://dash.example:8787", "token_file": "TOKEN"}, "loopback"),
+    ({"url": "http://127.0.0.1:8787", "token_file": "relative.token"}, "token_file must be an absolute path"),
+    ({"world_prefix": "ri.se"}, "world_prefix"),                                           # 含 `.`
+    ({"world_prefix": "-rise"}, "world_prefix"),
+    ({"world_prefix": "r" * 17}, "world_prefix"),
+])
+def test_bad_service_keys_are_refused_without_echoing_the_value(tmp_path, change, needle):
+    token = _token_file(tmp_path)
+    change = {k: (str(token) if v == "TOKEN" else v) for k, v in change.items()}
+    msg = _refused(tmp_path, **change)
+    assert needle in msg
+    for value in change.values():
+        assert str(value) not in msg
+    assert "s3cret" not in msg and "10.0.0.1" not in msg and str(tmp_path) not in msg
+
+
+def test_a_token_file_too_open_inside_the_repo_or_missing_is_refused_naming_only_the_key(tmp_path):
+    url = "http://127.0.0.1:8787"
+    loose = _token_file(tmp_path, mode=0o644)
+    msg = _refused(tmp_path, url=url, token_file=str(loose))
+    assert "token_file" in msg and "chmod 600" in msg and str(loose) not in msg
+    (tmp_path / "repo").mkdir()
+    inside = _token_file(tmp_path / "repo")
+    msg = _refused(tmp_path, url=url, token_file=str(inside))
+    assert "token_file must live outside" in msg and str(inside) not in msg
+    msg = _refused(tmp_path, url=url, token_file=str(tmp_path / "gone.token"))
+    assert "token_file does not exist" in msg and "gone.token" not in msg
+    link = tmp_path / "link.token"
+    link.symlink_to(_token_file(tmp_path, name="target.token"))
+    msg = _refused(tmp_path, url=url, token_file=str(link))
+    assert "token_file must point at a regular file, not a symlink" in msg
+    msg = _refused(tmp_path, url=url, token_file=str(tmp_path))
+    assert "token_file must point at a regular file" in msg
+
+
+def test_the_token_file_content_is_never_read_by_the_config_reader(tmp_path):
+    cfg = _read(tmp_path, _write(tmp_path, _payload(tmp_path, url="http://127.0.0.1:8787",
+                                                    token_file=str(_token_file(tmp_path)))))
+    assert "tok-s3cret" not in repr(cfg)

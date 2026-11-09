@@ -987,7 +987,7 @@ def settings_digest(settings: dict) -> str: ...    # sha256(json.dumps(settings,
 
 - `read_memory_config` 新规则（90 篇配置键表、第 20 条）：`url` 与 `token_file` 同给同不给；`url` 过 `normalize_base_url`（不许 userinfo），scheme 是 `http`，主机是回环地址（`127.0.0.0/8`、`::1`、`localhost`），否则 `FactoryConfigError("memory config: url must be an http URL on the loopback interface")`，不回显取值；`token_file` 是绝对路径、仓库外、0600、普通文件（复用 `_check_private`、`_is_inside`）；`world_prefix` 过 `WORLD_PREFIX_PATTERN.fullmatch`。`MemoryConfig.mode` 属性：`url` 给了是 `"external"`，否则 `"spawn"`。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 # tests/test_factory_starling_names.py
@@ -1068,19 +1068,19 @@ def test_worlds_built_and_forked_under_a_tuned_default_world_still_match_rise_se
 
 `tests/test_factory_memory_config.py` 加：`url` 只给一个、`url` 不是回环（`http://10.0.0.1:8787`）、`url` 是 https、`url` 带 userinfo、`token_file` 权限 0644、`token_file` 在仓库里、`world_prefix` 含 `.`，各退出码 2，文字不含取值；两者都给时 `mode == "external"`，都不给时 `mode == "spawn"`。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_factory_starling_names.py tests/test_factory_memory_config.py`
 Expected: FAIL（模块不在；配置不认新键）
 
-- [ ] **Step 3: 实现**：按 Interfaces。`source_lane` 的七个值与 `S:include/starling/governance/world_settings.hpp:40-49` 逐个对过，在常量旁注出处。
+- [x] **Step 3: 实现**：按 Interfaces。`source_lane` 的七个值与 `S:include/starling/governance/world_settings.hpp:40-49` 逐个对过，在常量旁注出处。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: 同 Step 2
 Expected: PASS；叶子继承那条在装了 extra 时真跑（不是 skip）
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/factory/starling_names.py src/factory/memory_config.py tests/test_factory_starling_names.py tests/test_factory_memory_config.py

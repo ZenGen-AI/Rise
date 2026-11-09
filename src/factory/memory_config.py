@@ -14,6 +14,7 @@ import csv
 import hashlib
 import importlib.metadata
 import io
+import ipaddress
 import json
 import os
 import secrets
@@ -28,6 +29,7 @@ import yaml
 
 from factory.configio import key_names
 from factory.errors import FactoryConfigError
+from factory.starling_names import WORLD_PREFIX_PATTERN
 
 MEMORY_CONFIG_ENV = "RISE_MEMORY_CONFIG"
 API_KEY_ENV = "OPENAI_API_KEY"
@@ -45,7 +47,8 @@ REQUIRED_KEYS = (
     "root", "extraction_base_url", "extraction_model",
     "embedding_base_url", "embedding_model", "embedding_dim",
 )
-OPTIONAL_KEYS = ("timeout_ms", "max_retries")
+OPTIONAL_KEYS = ("timeout_ms", "max_retries", "url", "token_file", "world_prefix")
+DEFAULT_WORLD_PREFIX = "rise"
 
 _OWNER_FILE = ".owner"
 _CODE_PREFIX = "starling/"
@@ -54,7 +57,10 @@ _OWNER_POLL_S = 0.02
 
 @dataclass(frozen=True)
 class MemoryConfig:
-    """本机记忆配置。`root` 是绝对路径;两个 `*_base_url` 存规范化后的值(不带 `user:password@`)。"""
+    """本机记忆配置。`root` 是绝对路径;两个 `*_base_url` 存规范化后的值(不带 `user:password@`)。
+
+    接记忆服务后:`url` 与 `token_file` 同给同不给;给了是外部模式(连用户在跑的看板服务),都不给是拉起模式。
+    `url` 存规范化后的值。`world_prefix` 是世界名前缀。"""
 
     root: Path
     extraction_base_url: str
@@ -64,18 +70,30 @@ class MemoryConfig:
     embedding_dim: int
     timeout_ms: int = DEFAULT_TIMEOUT_MS
     max_retries: int = DEFAULT_MAX_RETRIES
+    url: str | None = None
+    token_file: Path | None = None
+    world_prefix: str = DEFAULT_WORLD_PREFIX
+
+    @property
+    def mode(self) -> str:
+        """`external`(给了 `url`)或 `spawn`(rise 自己拉起服务)。"""
+        return "external" if self.url is not None else "spawn"
 
 
-def _check_private(path: Path) -> None:
-    """文件必须只有属主可读写。符号链接、非普通文件、权限过宽都拒绝。"""
+def _check_private(path: Path, *, key: str | None = None) -> None:
+    """文件必须只有属主可读写。符号链接、非普通文件、权限过宽都拒绝。
+
+    `key` 给了(配置里的键,如 `token_file`),报错写键名不写路径:那个路径是配置的取值。"""
+    what = f"memory config: {key}" if key is not None else MEMORY_CONFIG_ENV
     info = path.lstat()
     if stat.S_ISLNK(info.st_mode):
-        raise FactoryConfigError(f"{MEMORY_CONFIG_ENV} must point at a regular file, not a symlink")
+        raise FactoryConfigError(f"{what} must point at a regular file, not a symlink")
     if not stat.S_ISREG(info.st_mode):
-        raise FactoryConfigError(f"{MEMORY_CONFIG_ENV} must point at a regular file")
+        raise FactoryConfigError(f"{what} must point at a regular file")
     if stat.S_IMODE(info.st_mode) & 0o077:
+        shown = what if key is not None else str(path)
         raise FactoryConfigError(
-            f"{path} must not be readable by group or others; chmod 600 it before starting"
+            f"{shown} must not be readable by group or others; chmod 600 it before starting"
         )
 
 
@@ -141,6 +159,47 @@ def normalize_base_url(key: str, value: object) -> str:
     return f"{parts.scheme}://{host.lower()}{suffix}{parts.path.rstrip('/')}"
 
 
+_LOOPBACK_URL = "memory config: url must be an http URL on the loopback interface"
+
+
+def _check_service_url(value: object) -> str:
+    """记忆服务地址:http、主机是回环地址(`127.0.0.0/8`、`::1`、`localhost`)。报错不回显取值。"""
+    url = normalize_base_url("url", value)              # 不许 userinfo、query、fragment
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    if parts.scheme != "http":
+        raise FactoryConfigError(_LOOPBACK_URL)
+    if host != "localhost":
+        try:
+            loopback = ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            loopback = False
+        if not loopback:
+            raise FactoryConfigError(_LOOPBACK_URL)
+    return url
+
+
+def _check_token_file(value: object, *, repo_root: Path) -> Path:
+    """看板服务的 token 文件:绝对路径、仓库外、0600 的普通文件。报错只写键名,不写路径。"""
+    if not isinstance(value, str) or not value:
+        raise FactoryConfigError("memory config: token_file must be a non-empty string")
+    path = Path(value)
+    if not path.is_absolute():
+        raise FactoryConfigError("memory config: token_file must be an absolute path")
+    if _is_inside(path, repo_root):
+        raise FactoryConfigError("memory config: token_file must live outside the control-plane repository")
+    if not os.path.lexists(path):
+        raise FactoryConfigError("memory config: token_file does not exist")
+    _check_private(path, key="token_file")
+    return path
+
+
+def _check_world_prefix(value: object) -> str:
+    if not isinstance(value, str) or not WORLD_PREFIX_PATTERN.fullmatch(value):
+        raise FactoryConfigError("memory config: world_prefix must match [A-Za-z0-9][A-Za-z0-9_-]{0,15}")
+    return value
+
+
 def read_memory_config(*, env: Mapping[str, str] | None = None, repo_root: Path) -> MemoryConfig | None:
     """读并校验树外记忆配置。变量没设或为空串返回 `None`(替身);其余不合格一律 `FactoryConfigError`。"""
     environ = os.environ if env is None else env
@@ -181,10 +240,16 @@ def read_memory_config(*, env: Mapping[str, str] | None = None, repo_root: Path)
             f"memory config: timeout_ms × (max_retries + 1) must not exceed {MAX_MEMORY_CALL_MS} ms; "
             "outer turn budgets assume at most 4 s per memory call"
         )
+    if ("url" in data) != ("token_file" in data):
+        raise FactoryConfigError("memory config: url and token_file must be given together (or both left out)")
+    url = _check_service_url(data["url"]) if "url" in data else None
+    token_file = _check_token_file(data["token_file"], repo_root=repo_root) if "token_file" in data else None
+    world_prefix = _check_world_prefix(data.get("world_prefix", DEFAULT_WORLD_PREFIX))
     return MemoryConfig(
         root=root, extraction_base_url=extraction_base_url, extraction_model=extraction_model,
         embedding_base_url=embedding_base_url, embedding_model=embedding_model,
         embedding_dim=embedding_dim, timeout_ms=timeout_ms, max_retries=max_retries,
+        url=url, token_file=token_file, world_prefix=world_prefix,
     )
 
 
