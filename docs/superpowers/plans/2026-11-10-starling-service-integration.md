@@ -583,7 +583,7 @@ class MemoryLayout:
 
 `deploy/` 的两行照 90 篇第 18 条：只查四种数据后缀，不在允许名单里的就拒绝；其余一律不查。`.tmp`、`-wal`、`-shm`、`.lock` 是写到一半或运行时的文件，不是世界数据，拒绝它们只会让一次崩溃（`s1.json.tmp`、开着库时的 `s1.db-wal`）变成无法启动。`held/`、`replay/` 下的 `.db` 在最终规则里判旧布局，文字照 `check_memory_layout` 的同一口径列出至多 5 条。`deploy/` 下"已知情境"沿用今天的判法（`agent.yaml` 的 `scenario_ids`，`src/factory/memory_runtime.py:131-135`）：替身与过渡 Starling 的 `<scenario_id>.<后缀>` 里主名不在已知情境里的仍按旧布局报，提示词照 FC-37 不变。替身旧格式的 `deploy/<已知情境>.json` 账本本身不变，照旧合法。
 
-- [ ] **Step 1: 写失败的测试**（`tests/test_ma_memory_layout.py`）
+- [x] **Step 1: 写失败的测试**（`tests/test_ma_memory_layout.py`）
 
 ```python
 def _rec(lay, rid, eid, world, snapshot_id="snap-0"):
@@ -655,19 +655,19 @@ def test_a_creation_marker_is_legal_only_for_the_service_backend_and_a_known_sce
 
 `world_lock`、`hold_world`、`_check_segment`、`_check_world` 的旧用例（`:42-58`、`:145-155`）照旧保留；按旁注的用例（`:27-40`、`:59-143`、`:157-210`）改写成按记录，或在新表里已有覆盖时删掉。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_ma_memory_layout.py`
 Expected: FAIL（没有 `SnapshotRecord`、`write_record`；`legacy_entries` 不收 `backend`）
 
-- [ ] **Step 3: 实现**：按 Interfaces。`seeds`、`runs` 判旧布局时报目录本身（相对路径，不展开里面的文件）；`held/`、`replay/` 下的 `.db` 逐个文件报。`deploy/` 里先按文件名结尾挑出带数据后缀的文件，再按完整文件名比允许名单（替身 `<已知情境>.json`，过渡 `<已知情境>.db`，最终 `<已知情境>.created`），所以 `s1.rec.json` 不会被当成情境 `s1` 的账本。
+- [x] **Step 3: 实现**：按 Interfaces。`seeds`、`runs` 判旧布局时报目录本身（相对路径，不展开里面的文件）；`held/`、`replay/` 下的 `.db` 逐个文件报。`deploy/` 里先按文件名结尾挑出带数据后缀的文件，再按完整文件名比允许名单（替身 `<已知情境>.json`，过渡 `<已知情境>.db`，最终 `<已知情境>.created`），所以 `s1.rec.json` 不会被当成情境 `s1` 的账本。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: 同 Step 2
 Expected: PASS（`tests/test_ma_*` 其余文件与 `tests/test_factory_memory_wiring.py` 此时会失败，由 Task 7 改）
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/mindagent/memory_layout.py tests/test_ma_memory_layout.py

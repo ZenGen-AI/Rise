@@ -1,23 +1,20 @@
-"""部署记忆根目录的磁盘布局(设计三 4.1 节):一个情境一个世界,世界锁、整世界起点快照、验证快照。
+"""部署记忆根目录的磁盘布局(设计三 4.1 节,50 篇"接服务后的在途记录"一段):一个情境一个世界,世界锁、
+起点快照与验证快照的在途记录。
 
-替身下 `MemoryLayout(mem_root)` 与 `FileTupleStore(mem_root / "deploy")` 共用同一个根:
+    <根>/deploy/<scenario_id>.lock                              世界锁(两个后端共用)
+    <根>/snapshots/<round_id>/deploy-<episode_id>.rec.json      起点快照的在途记录:一个 episode 一份
+    <根>/snapshots/<round_id>/verify-<scenario_id>.rec.json     验证快照的在途记录:一个情境一份
 
-    <根>/deploy/<scenario_id>.json                              部署世界
-    <根>/deploy/<scenario_id>.lock                              世界锁
-    <根>/snapshots/<round_id>/deploy-<episode_id>.json          起点快照:一个 episode 一份,整个世界
-    <根>/snapshots/<round_id>/deploy-<episode_id>.world         快照旁注:内容是它所属的 scenario_id
-    <根>/snapshots/<round_id>/verify-<scenario_id>.json         验证快照:一个情境一份
-    <根>/snapshots/<round_id>/verify/                           验证临时世界
-
-后缀由 `suffix` 给:替身是 `.json`,真实 Starling 后端是 `.db`;`.lock` 与 `.world` 的后缀固定。
-快照文件名里没有情境也没有人格,起点快照属于哪个世界只读 `.world` 旁注,不解析文件名。
-旁注先于快照写(崩在两步之间会留下没有快照的旁注):它不算在途快照,也不算旧布局遗留。
-旁注内容就是 scenario_id,和世界 id 用同一份白名单(`PERSONA_ID_PATTERN`)校验;读旁注时只容忍末尾
-恰好一个换行(人手 `echo s1 > x.world` 恢复丢失的旁注会带它),其余空白一律当坏旁注。
-旧布局(按人格建库、没有旁注的快照)不迁移,`legacy_entries` 只负责把它们认出来。
+快照本身是部署管理面的 held 快照,rise 只在记录里记它的 id(客户端没有列快照的接口)。记录内容是
+`{"world_id", "snapshot_id", "digest"}`,自带世界 id,所以不再有 `.world` 旁注,也不解析文件名。
+两个后端的记录格式相同;世界文件、held 快照与重放世界放在哪里由后端定(90 篇第 4 章布局表),
+`legacy_entries` 按后端判旧布局。文件名以 `deploy-` 起头、以 `.rec.json` 结尾才是起点快照的记录;
+替身旧快照 `deploy-*.json` 不带 `.rec`,分得开。旧布局(按人格建库、快照文件与旁注)不迁移,
+`legacy_entries` 只负责把它们认出来。
 """
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Iterable
 from contextlib import AbstractContextManager
@@ -29,7 +26,14 @@ from controlplane.lock import hold_file_lock
 from mindagent.errors import MindAgentDataError
 
 _DEPLOY_PREFIX = "deploy-"
-_WORLD_SUFFIX = ".world"
+_RECORD_SUFFIX = ".rec.json"
+_RECORD_KEYS = {"world_id", "snapshot_id", "digest"}
+
+# 判旧布局只看这四种数据后缀(90 篇第 18 条):`.tmp`、`-wal`、`-shm`、`.lock` 是写到一半或运行时的文件,
+# 不是世界数据,拒绝它们会让一次崩溃变成无法启动。`.rec.json` 也以 `.json` 结尾,列出来是为了与文档逐字对应。
+_DATA_SUFFIXES = (".json", ".db", ".created", _RECORD_SUFFIX)
+# 每个后端在 deploy/ 下允许的 `<已知情境><后缀>`。"starling-inprocess" 是第 2、3 步的过渡后端,第 4 步删。
+_DEPLOY_SUFFIX = {"stand-in": ".json", "starling-inprocess": ".db", "starling": ".created"}
 
 
 def _check_segment(name: str, value: str) -> str:
@@ -47,15 +51,31 @@ def _check_world(scenario_id: str) -> str:
     return scenario_id
 
 
-def _tag_path(snapshot: Path) -> Path:
-    """快照的 `.world` 旁注:同目录、同主名。"""
-    return snapshot.with_suffix(_WORLD_SUFFIX)
+def _record_problem(record: object) -> str | None:
+    """记录三个字段的校验,写与读共用:返回不合格的原因(不含字段内容),合格返回 None。"""
+    if not isinstance(record, SnapshotRecord):
+        return "not a SnapshotRecord"
+    if not isinstance(record.world_id, str) or not PERSONA_ID_PATTERN.fullmatch(record.world_id):
+        return "world_id is not a valid scenario id"
+    if not isinstance(record.snapshot_id, str) or not record.snapshot_id or "/" in record.snapshot_id:
+        return "snapshot_id must be a non-empty string without '/'"
+    if not isinstance(record.digest, str) or not record.digest:
+        return "digest must be a non-empty string"
+    return None
+
+
+@dataclass(frozen=True)
+class SnapshotRecord:
+    """一份在途记录:快照属于哪个世界、管理面给的快照 id、快照时的摘要。"""
+
+    world_id: str
+    snapshot_id: str
+    digest: str
 
 
 @dataclass(frozen=True)
 class MemoryLayout:
     root: Path
-    suffix: str = ".json"
 
     def world_lock(self, scenario_id: str) -> Path:
         return self.root / "deploy" / f"{_check_world(scenario_id)}.lock"
@@ -68,26 +88,27 @@ class MemoryLayout:
         return self.root / "snapshots" / _check_segment("round_id", round_id)
 
     def snapshot(self, round_id: str, episode_id: str) -> Path:
+        """起点快照的在途记录路径。"""
         _check_segment("episode_id", episode_id)
-        return self._round_dir(round_id) / f"{_DEPLOY_PREFIX}{episode_id}{self.suffix}"
+        return self._round_dir(round_id) / f"{_DEPLOY_PREFIX}{episode_id}{_RECORD_SUFFIX}"
 
     def verify_snapshot(self, round_id: str, scenario_id: str) -> Path:
-        return self._round_dir(round_id) / f"verify-{_check_world(scenario_id)}{self.suffix}"
+        """验证快照的在途记录路径。"""
+        return self._round_dir(round_id) / f"verify-{_check_world(scenario_id)}{_RECORD_SUFFIX}"
 
-    def verify_scratch(self, round_id: str) -> Path:
-        """基线与候选各自的快照副本放它下面,轮次结束连目录删。"""
-        return self._round_dir(round_id) / "verify"
-
-    def write_world_tag(self, snapshot: Path, scenario_id: str) -> None:
-        """在快照旁写 `.world` 旁注(内容是 scenario_id)。快照可以还不存在:调用方先写旁注、后取备份。
-        先写临时文件再改名:崩在写一半留下的空旁注会让 `world_of` 一直报错,要人来删。"""
-        _check_world(scenario_id)
-        tag = _tag_path(snapshot)
-        tag.parent.mkdir(parents=True, exist_ok=True)
-        tmp = tag.with_name(f".{tag.name}.tmp")
+    def write_record(self, path: Path, record: SnapshotRecord) -> None:
+        """写一份在途记录。先校验再落盘;先写临时文件再改名:崩在写一半留下的半截记录会让 `read_record`
+        一直报错,要人来删。`sort_keys`、`ensure_ascii=False`,人删快照前要能读懂它。"""
+        problem = _record_problem(record)
+        if problem is not None:
+            raise ValueError(f"in-flight record: {problem}")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.tmp")
+        body = json.dumps({"world_id": record.world_id, "snapshot_id": record.snapshot_id, "digest": record.digest},
+                          ensure_ascii=False, sort_keys=True, indent=2) + "\n"
         try:
-            tmp.write_text(scenario_id, encoding="utf-8")
-            os.replace(tmp, tag)
+            tmp.write_text(body, encoding="utf-8")
+            os.replace(tmp, path)
         except BaseException:
             tmp.unlink(missing_ok=True)
             raise
@@ -99,60 +120,85 @@ class MemoryLayout:
         except ValueError:
             return path.name
 
-    def world_of(self, snapshot: Path) -> str:
-        """读快照的 `.world` 旁注。旁注缺失、读不出、内容(去掉末尾恰好一个 `\\n` 后)过不了世界 id 白名单
-        都抛 MindAgentDataError:坏旁注不能变成路径,也不能当成"不属于任何世界"悄悄放过。
-        按字节读再解码:不做换行翻译,`s1\\r\\n` 这类内容照实判坏。"""
-        tag = _tag_path(snapshot)
+    def read_record(self, path: Path) -> SnapshotRecord:
+        """读一份在途记录。读不出、不是 JSON 对象、键不是恰好那三个、字段过不了校验(world_id 过世界 id 白名单)
+        都抛 MindAgentDataError,文字里只有相对记忆根的路径与原因,不回显记录内容:坏记录不能变成路径,
+        也不能当成"不属于任何世界"悄悄放过。"""
+        rel = self._rel(path)
         try:
-            content = tag.read_bytes().decode("utf-8")
-        except (OSError, UnicodeDecodeError) as exc:
-            raise MindAgentDataError(f"快照旁注读不出: {self._rel(tag)}: {type(exc).__name__}") from exc
-        scenario_id = content[:-1] if content.endswith("\n") else content
-        if not PERSONA_ID_PATTERN.fullmatch(scenario_id):
-            raise MindAgentDataError(f"快照旁注内容不是合法的情境 id: {self._rel(tag)}: {content[:64]!r}")
-        return scenario_id
+            doc = json.loads(path.read_bytes().decode("utf-8"))
+        except (OSError, ValueError) as exc:     # JSONDecodeError、UnicodeDecodeError 都是 ValueError
+            raise MindAgentDataError(f"在途记录读不出: {rel}: {type(exc).__name__}") from exc
+        if not isinstance(doc, dict) or set(doc) != _RECORD_KEYS:
+            raise MindAgentDataError(f"在途记录不是带 world_id、snapshot_id、digest 三个键的对象: {rel}")
+        record = SnapshotRecord(doc["world_id"], doc["snapshot_id"], doc["digest"])
+        problem = _record_problem(record)
+        if problem is not None:
+            raise MindAgentDataError(f"在途记录内容不合法: {rel}: {problem}")
+        return record
 
-    def _is_snapshot(self, p: Path) -> bool:
-        return p.is_file() and p.name.startswith(_DEPLOY_PREFIX) and p.name.endswith(self.suffix)
+    def world_of(self, path: Path) -> str:
+        """在途记录所属的世界,读法与失败同 `read_record`。"""
+        return self.read_record(path).world_id
+
+    @staticmethod
+    def _is_record(p: Path) -> bool:
+        return p.is_file() and p.name.startswith(_DEPLOY_PREFIX) and p.name.endswith(_RECORD_SUFFIX)
 
     def round_snapshots(self, round_id: str) -> list[Path]:
-        """该轮次目录下以 `deploy-` 起头、以 suffix 结尾的文件(不含 `.world` 旁注),按名排序。"""
+        """该轮次目录下起点快照的在途记录(`deploy-*.rec.json`),按名排序。"""
         d = self._round_dir(round_id)
         if not d.is_dir():
             return []
-        return sorted((p for p in d.iterdir() if self._is_snapshot(p)), key=lambda p: p.name)
+        return sorted((p for p in d.iterdir() if self._is_record(p)), key=lambda p: p.name)
 
     def any_uncommitted_snapshots(self) -> list[Path]:
-        """`snapshots/*/` 下名字以 `deploy-` 起头、以 suffix 结尾的文件(任何情境、任何轮次),按路径排序,
-        有没有旁注都算。验证快照(`verify-`)、验证副本目录与 `.world` 旁注不算。门② 有它们在就延后:
-        在途轮次重入会重读库。"""
+        """`snapshots/*/` 下起点快照的在途记录(任何情境、任何轮次),按路径排序,读不读得出都算。
+        验证记录(`verify-`)不算。门② 有它们在就延后:在途轮次重入会重读库。"""
         base = self.root / "snapshots"
         if not base.is_dir():
             return []
-        return sorted(p for d in base.iterdir() if d.is_dir() for p in d.iterdir() if self._is_snapshot(p))
-
-    def tagged_snapshots(self) -> list[Path]:
-        """带 `.world` 旁注文件的起点快照(任何情境、任何轮次),按路径排序。装配期逐个 `world_of` 它们,
-        坏旁注当场暴露,而不是留到门② 才抛。"""
-        return [p for p in self.any_uncommitted_snapshots() if _tag_path(p).is_file()]
+        return sorted(p for d in base.iterdir() if d.is_dir() for p in d.iterdir() if self._is_record(p))
 
     def uncommitted_snapshots(self, scenario_id: str) -> list[Path]:
-        """任何轮次里旁注内容等于 scenario_id 的起点快照。没有旁注的快照是旧布局遗留,不在其中
-        (`legacy_entries` 报它们)。任何一份快照的旁注坏了都抛 MindAgentDataError:宁可停下,
-        也不漏判一份在途快照。"""
+        """任何轮次里 world_id 等于 scenario_id 的起点快照记录。任何一份记录读不出都抛 MindAgentDataError:
+        宁可停下,也不漏判一份在途快照。"""
         _check_world(scenario_id)
-        return [p for p in self.tagged_snapshots() if self.world_of(p) == scenario_id]
+        return [p for p in self.any_uncommitted_snapshots() if self.world_of(p) == scenario_id]
 
-    def legacy_entries(self, known_scenarios: Iterable[str]) -> list[str]:
-        """记忆根下属于旧布局的文件,相对记忆根的 POSIX 路径,排序。两类:
-        `deploy/` 直属的库文件(suffix 结尾)里主名不在 known_scenarios 的(`.lock` 不算);
-        `snapshots/*/` 下没有 `.world` 旁注的起点快照。验证快照与验证副本目录、孤儿旁注都不算。"""
-        known = set(known_scenarios)
+    def legacy_entries(self, known_scenarios: Iterable[str], *, backend: str) -> list[str]:
+        """记忆根下按 backend 判属于旧布局的条目,相对记忆根的 POSIX 路径,排序(90 篇第 18 条与第 4 章布局表)。
+        backend 取 "stand-in"、"starling-inprocess"(第 2、3 步的过渡)、"starling" 之一。
+
+        - `deploy/` 直属文件只看四种数据后缀:不是 `<已知情境><本后端的后缀>` 的都报。按完整文件名比允许名单,
+          所以 `s1.rec.json` 不会被当成情境 s1 的账本。其余文件(`.lock`、`.tmp`、`-wal`、`-shm` 等)不查。
+        - `seeds/`、`runs/`:除了过渡后端(训练世界仍在进程内)都报目录本身,不展开里面的文件。
+        - `snapshots/*/` 下的 `.db`、`.world` 与不带 `.rec` 的 `deploy-*.json`:三个后端都报。记录与 `verify/` 目录合法。
+        - `held/`、`replay/` 下的 `.db`:服务后端逐个文件报(第 2、3 步过渡留下的);其余后端与其余文件不查。
+        - 服务文件(`service*`、`.owner`)不查。
+
+        读不出的在途记录不在这里报,由组合根逐份 `read_record` 报。"""
+        if backend not in _DEPLOY_SUFFIX:
+            raise ValueError(f"backend: {backend!r}")
+        allowed = {f"{s}{_DEPLOY_SUFFIX[backend]}" for s in known_scenarios}
         found: list[Path] = []
         deploy = self.root / "deploy"
         if deploy.is_dir():
             found += (p for p in deploy.iterdir()
-                      if p.is_file() and p.name.endswith(self.suffix) and p.name[:-len(self.suffix)] not in known)
-        found += (p for p in self.any_uncommitted_snapshots() if not _tag_path(p).is_file())
+                      if p.is_file() and p.name.endswith(_DATA_SUFFIXES) and p.name not in allowed)
+        if backend != "starling-inprocess":
+            found += (p for p in (self.root / "seeds", self.root / "runs") if os.path.lexists(p))
+        base = self.root / "snapshots"
+        if base.is_dir():
+            for d in base.iterdir():
+                if not d.is_dir():
+                    continue
+                found += (p for p in d.iterdir() if p.is_file() and (
+                    p.name.endswith((".db", ".world"))
+                    or (p.name.startswith(_DEPLOY_PREFIX) and p.name.endswith(".json")
+                        and not p.name.endswith(_RECORD_SUFFIX))))
+        if backend == "starling":
+            for name in ("held", "replay"):
+                if (self.root / name).is_dir():
+                    found += (p for p in (self.root / name).rglob("*.db") if p.is_file())
         return sorted(p.relative_to(self.root).as_posix() for p in found)
