@@ -154,7 +154,12 @@ def rise_settings(config: "MemoryConfig") -> dict:
     }
 
 
+def canonical_digest(obj: object) -> str:
+    """规范化 JSON(键排序、无空白、不转义非 ASCII)的 sha256。rise 设置的摘要、服务抽取配置的摘要都用它。"""
+    text = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def settings_digest(settings: dict) -> str:
     """rise 设置规范化 JSON 的 sha256(进运行时身份的 `extraction.world_settings`),与键序无关。"""
-    text = json.dumps(settings, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return canonical_digest(settings)

@@ -1116,7 +1116,7 @@ git commit -m "feat(factory): 世界名、标签与 rise 设置(写出每个叶�
   - `Unauthorized`、`ProtocolMismatch` 走"其余"那行（非瞬态）；它们在装配期与重连时由会话模块先接住、转成 `FactoryConfigError` 或致命状态（Task 12），到不了端口。
   - `factory.starling_session.service_runtime(info, settings, config) -> dict`（90 篇运行时身份表）：五个顶层键，`backend` `"starling"`；`starling_version` `f"{info['version']}+git:{info['commit']}+protocol:{info['protocol']}"`；`extraction` 是今天的五项（`base_url`、`model`、`timeout_ms`、`max_retries`，`prompts` 改为 `info["extraction_config"]` 规范化 JSON 的 sha256）加 `world_settings`（`settings_digest(settings)`）；`embedding` 不变；`trace_schema` `TRACE_SCHEMA_V2`。规范化 JSON 一律 `json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)`。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 # tests/test_simple_actio_client_errors.py
@@ -1186,19 +1186,19 @@ def test_the_identity_changes_with_the_extraction_config_and_the_settings(memory
     assert a == service_runtime({**INFO, "extraction_config": {"a": [2], "b": 1}}, {"x": 1}, memory_config)
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_simple_actio_client_errors.py tests/test_factory_starling_session.py tests/test_simple_actio_instance.py`
 Expected: FAIL（函数不在；白名单不放 `starling_client`）
 
-- [ ] **Step 3: 实现**：按 Interfaces。`translate_client_failure` 在 `memory_starling.py` 里惰性导入 `starling_client.errors`（模块层已导入 `starling`；第 4 步换成模块层导入 `starling_client`）。
+- [x] **Step 3: 实现**：按 Interfaces。`translate_client_failure` 在 `memory_starling.py` 里惰性导入 `starling_client.errors`（模块层已导入 `starling`；第 4 步换成模块层导入 `starling_client`）。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_simple_actio_client_errors.py tests/test_factory_starling_session.py tests/test_simple_actio_instance.py tests/test_simple_actio_memory_starling.py tests/test_factory_cross_plan.py`
 Expected: PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/simple_actio/memory_starling.py src/factory/starling_session.py tests/test_simple_actio_client_errors.py tests/test_factory_starling_session.py tests/test_simple_actio_instance.py

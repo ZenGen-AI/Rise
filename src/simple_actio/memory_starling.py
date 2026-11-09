@@ -106,6 +106,40 @@ def translate_failure(exc: BaseException) -> MemoryFailureError:
     return MemoryFailureError(f"starling memory failed: {name}", transient=False)
 
 
+def translate_client_failure(exc: BaseException, *, port_closed_by_rise: bool,
+                             in_drain_window: bool) -> MemoryFailureError:
+    """客户端 `starling_client` 异常的映射(40 篇第 8 节的码表、AC-33)。返回新异常,调用方 `raise ... from None`。
+
+    消息一律 `starling <code> (<类名>)`,不带服务端的 detail:它可能含端点地址。瞬态按 Starling 给的 `transient`,
+    只有三处由 rise 改判:
+    - `handle_closed`:rise 自己关过的端口是 `MemoryClosedError`(永久);rise 没关的端口收到它,是外部服务重启,判瞬态;
+    - `session_expired`:判瞬态,下一次开句柄换新会话;
+    - `world_held`:排空窗口内判瞬态(服务端在等过期会话的在途调用结束),其余永久。
+    `Unauthorized`、`ProtocolMismatch` 走"其余"(非瞬态);它们在装配期与重连时由会话模块先接住。
+    `TimeoutError`(`RemoteMemory.close` 超时)与其他异常都是永久失败,只写类名。
+
+    第 3 步惰性导入 `starling_client.errors`(模块层导入的仍是进程内的 `starling`),第 4 步换成模块层导入。"""
+    from starling_client import errors
+
+    if isinstance(exc, MemoryFailureError):
+        return exc
+    name = type(exc).__name__
+    if not isinstance(exc, errors.StarlingClientError):
+        return MemoryFailureError(f"starling client failed: {name}", transient=False)
+    message = f"starling {exc.code} ({name})"
+    if isinstance(exc, errors.EventConflict):
+        return MemoryEventConflict(message)
+    if isinstance(exc, errors.MemoryClosed):
+        if port_closed_by_rise:
+            return MemoryClosedError(message)
+        return MemoryFailureError(message, transient=True)
+    if isinstance(exc, errors.SessionExpired):
+        return MemoryFailureError(message, transient=True)
+    if exc.code == "world_held":
+        return MemoryFailureError(message, transient=in_drain_window)
+    return MemoryFailureError(message, transient=bool(exc.transient))
+
+
 @contextlib.contextmanager
 def _translated() -> Iterator[None]:
     """块内抛的一切 Exception 按第 10 节的表改抛,原异常的文字不带出去。"""
