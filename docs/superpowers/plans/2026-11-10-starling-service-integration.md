@@ -1252,7 +1252,7 @@ def spawn_service(root: Path, env: Mapping[str, str], *, python: str = sys.execu
 - 残留核对（退出码 3 时按序，任一项不过就拒绝、写出那一项与 pid，不发任何信号）：①归属锁已在手（上面已取）；②`service.pid` 在且是 `{"pid": int, "argv": [str, ...]}`；③`probe.alive(pid)`；④`probe.uid_of(pid) == os.getuid()`；⑤命令行：`command_of` 给列表时逐项比 `argv[1:]`、第一项的文件名以 `python` 开头（不分大小写）；给字符串时要以 `" " + " ".join(argv[1:])` 结尾，且前面那段的文件名以 `python` 开头；记下的 `argv` 必须含 `-m starling.service` 与 `--data-dir <本次的 D>`；⑥对 `D/.lock` 试 `hold_file_lock`：拿得到就立即释放、不发信号、直接重试启动。全部通过才 `SIGTERM`，每 0.2 秒试一次 `D/.lock` 至多 40 秒，没释放就 `SIGKILL` 再等至多 5 秒，删 `service.pid`，重试启动一次。每步记一条 warning（pid 与核对结果）。
 - `restart()`：`alive()` 为真时什么都不做；否则按 `RESTART_BACKOFF_S` 的第 n 项 `sleep` 后重新走一遍拉起（新端口、新 token，归属锁不放）；进程生命周期内第 4 次调用抛 `ServiceRestartsExhausted`。
 
-- [ ] **Step 1: 写失败的测试**（`tests/test_factory_starling_service.py`；真拉起的用例 `importorskip("starling.service")`）
+- [x] **Step 1: 写失败的测试**（`tests/test_factory_starling_service.py`；真拉起的用例 `importorskip("starling.service")`）
 
 ```python
 import json, os, signal, subprocess, sys, time
@@ -1392,19 +1392,19 @@ def test_restarts_back_off_and_stop_after_three(tmp_path):
         svc.close()
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_factory_starling_service.py`
 Expected: FAIL（模块不在）
 
-- [ ] **Step 3: 实现**：按 Interfaces。`SYSTEM_PROBE` 的 `uid_of`、`command_of` 按 `sys.platform` 选 macOS 与 Linux 两套；`subprocess.run([...], capture_output=True, timeout=5)` 失败或非零退出返回 `None`。`SpawnedService.__repr__` 不含 token。
+- [x] **Step 3: 实现**：按 Interfaces。`SYSTEM_PROBE` 的 `uid_of`、`command_of` 按 `sys.platform` 选 macOS 与 Linux 两套；`subprocess.run([...], capture_output=True, timeout=5)` 失败或非零退出返回 `None`。`SpawnedService.__repr__` 不含 token。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: 同 Step 2
 Expected: PASS（装了 extra 时真拉起的用例真跑；整份文件约 1 分钟）
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/factory/starling_service.py tests/test_factory_starling_service.py
