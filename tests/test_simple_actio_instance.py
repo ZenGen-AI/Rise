@@ -409,7 +409,7 @@ def test_close_forwards_to_the_port():
 
 
 def test_an_instance_over_a_file_port_reads_the_same_store_the_management_plane_writes(tmp_path):
-    store = FileTupleStore(tmp_path)
+    store = FileTupleStore(tmp_path / "deploy", held_root=tmp_path / "held", replay_root=tmp_path / "replay")
     store.remember_event("s1", "pa", "ep0:1", "对方担心预算", interlocutor="pb")
     inst = _ported(store.open("s1", "pa"), EchoGuidance())
     before = store.digest("s1")  # 实例回复后会写库,摘要要在 respond 之前取
@@ -596,7 +596,8 @@ def test_a_shorter_history_does_not_move_the_written_turn_back_so_old_turns_are_
 
 
 def test_with_the_file_store_the_round_prefixed_key_lands_and_close_abandons_nothing(tmp_path):
-    store = FileTupleStore(tmp_path, extraction_failure=lambda event: "timeout")
+    store = FileTupleStore(tmp_path / "deploy", held_root=tmp_path / "held", replay_root=tmp_path / "replay",
+                           extraction_failure=lambda event: "timeout")
     inst = instantiate(EchoGuidance(), skills=[], memory=store.open("s1", "pa"), episode_id="round-7/deploy-m-sc-0",
                        holder="pa", interlocutors={"b": "pb"}, library_version=LV, profile=None)
     _, _, t = inst.respond(_persona(), _scenario(), [B0], "a")
@@ -661,8 +662,9 @@ _ALLOWED = ("simple_actio", "simulator.datamodel", "__future__", "copy", "datacl
 _ALLOWED_MEMORY_STARLING = _ALLOWED + ("starling", "os", "tempfile", "shutil", "contextlib", "collections.abc", "functools",
                                        "threading")
 
-# memory.py 的 FileTupleStore 用 threading.Lock 与 Condition 守端口计数:端口在服务端线程关,驱动器在另一条线程上等
-_ALLOWED_MEMORY = _ALLOWED + ("threading",)
+# memory.py 的 FileTupleStore 用 threading.Lock 与 Condition 守端口计数:端口在服务端线程关,驱动器在另一条线程上等;
+# secrets 给快照 id 与重放世界名的随机后缀用(40 篇 5.1 节)
+_ALLOWED_MEMORY = _ALLOWED + ("threading", "secrets")
 
 
 def _allowed(mod, allowed=_ALLOWED):

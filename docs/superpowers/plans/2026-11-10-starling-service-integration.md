@@ -342,7 +342,7 @@ def open_replay(self, replay_world: str, holder: str) -> MemoryBackend: ...  # �
 - `delete_snapshot`：文件不在是空操作。Starling 对已删的快照回 `snapshot_not_found`，rise 当作成功（50 篇"删一个已删的快照"一段），两边都幂等，由契约用例钉住。
 - `open_replay` 开出的只读端口，`remember` 抛永久 `MemoryFailureError("world_read_only")`；`embed_pending` 只读时返回 0。
 
-- [ ] **Step 1: 写失败的测试**（`tests/test_simple_actio_deployment_store_contract.py`，参数化到两个实现；本任务只要求 `file` 参数通过）
+- [x] **Step 1: 写失败的测试**（`tests/test_simple_actio_deployment_store_contract.py`，参数化到两个实现；本任务只要求 `file` 参数通过）
 
 ```python
 def test_a_snapshot_then_writes_then_restore_gives_back_the_snapshot_digest(case):
@@ -432,12 +432,12 @@ def test_held_snapshots_and_replay_worlds_live_outside_deploy(tmp_path):
 
 `test_simple_actio_memory_port.py::test_both_protocols_are_checked_by_method_names` 的替身协议类改成新的方法集，断言 `"backup_to" not in dir(DeploymentMemoryStore)`、`"fork_replay" in dir(DeploymentMemoryStore)`、`"open_replay" in dir(DeploymentMemoryStore)`，并断言 `inspect.signature(DeploymentMemoryStore.open)` 的参数只有 `self`、`world_id`、`holder`（没有 `read_only`）。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider -k "not starling" tests/test_simple_actio_deployment_store_contract.py tests/test_simple_actio_file_tuple_store.py tests/test_simple_actio_memory_port.py`
 Expected: FAIL（没有 `snapshot`、`fork_replay`、`open_replay`；构造参数不对）
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 按 Interfaces。`snapshot`、`restore`、`fork_replay` 的读写都在 store 的锁里；`restore` 的"查端口数、读快照、写世界"在同一次持锁里。快照写用 `_write_ledger` 同一套临时文件加改名。重放世界的读写复用 `_load`/`_save`：`open_replay` 固定读 `replay_root`，`open` 与其余按世界 id 的方法固定读写 `root`，不看名字长什么样。端口计数的键在开端口时就定成完整世界名。`stand_in_deployment_memory` 改成：
 
@@ -447,12 +447,12 @@ return DeploymentMemory(
     layout, copy.deepcopy(STAND_IN_MEMORY_RUNTIME), FileTupleStore)   # 第四个字段在 Task 7 删
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: 同 Step 2，再加 `tests/test_simple_actio_memory_contract.py tests/test_simple_actio_instance.py`
 Expected: PASS（`-k "not starling"`；Starling 参数在 Task 5 修）
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/simple_actio/memory_port.py src/simple_actio/memory.py src/factory/memory_runtime.py tests/test_simple_actio_deployment_store_contract.py tests/test_simple_actio_file_tuple_store.py tests/test_simple_actio_memory_port.py

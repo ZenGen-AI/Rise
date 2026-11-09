@@ -158,14 +158,16 @@ def check_memory_layout(layout: MemoryLayout, repo_root: Path) -> None:
 
 
 def stand_in_deployment_memory(repo_root: Path) -> DeploymentMemory:
-    """替身部署记忆:FileTupleStore(<根>/deploy) 与 MemoryLayout(<根>) 共用一个根,运行时身份是替身那份的拷贝。
+    """替身部署记忆:FileTupleStore(<根>/deploy,held 快照在 <根>/held,重放世界在 <根>/replay) 与 MemoryLayout(<根>)
+    共用一个根,运行时身份是替身那份的拷贝。
     造之前先过 `check_memory_layout`(后缀 `.json`),旧布局拒绝启动。
     启动日志不在这里记:选后端是 `memory_wiring` 的事,它只记一次。"""
     root = stand_in_memory_root(repo_root)
     layout = MemoryLayout(root)
     check_memory_layout(layout, repo_root)
-    return DeploymentMemory(FileTupleStore(root / "deploy"), layout,
-                            copy.deepcopy(STAND_IN_MEMORY_RUNTIME), FileTupleStore)
+    return DeploymentMemory(
+        FileTupleStore(root / "deploy", held_root=root / "held", replay_root=root / "replay"),
+        layout, copy.deepcopy(STAND_IN_MEMORY_RUNTIME), FileTupleStore)   # 第四个字段在 Task 7 删
 
 
 # ---------------- Starling 那一路 ----------------

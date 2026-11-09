@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import secrets
 import threading
 from copy import deepcopy
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ from simple_actio.memory_port import (
     PERSONA_ID_PATTERN,
     PendingKey,
     RememberOutcome,
+    SnapshotRef,
 )
 from simple_actio.text import tokens
 
@@ -438,19 +440,32 @@ def _read_ledger(path: Path) -> _Ledger:
         raise MemoryFailureError(type(exc).__name__, transient=False) from None
 
 
-def _write_ledger(path: Path, ledger: _Ledger) -> None:
+def _write_json(path: Path, doc: dict) -> None:
     """先写 <path>.tmp 再 replace 到正式文件,中途崩溃不会留下半个库。"""
     tmp = path.with_name(path.name + ".tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp.write_text(json.dumps(ledger.to_json(), ensure_ascii=False, sort_keys=True, indent=2) + "\n",
-                       encoding="utf-8")
+        tmp.write_text(json.dumps(doc, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
         tmp.replace(path)
     except OSError as exc:
         try:
             tmp.unlink(missing_ok=True)
         except OSError:
             pass
+        raise MemoryFailureError(type(exc).__name__, transient=False) from None
+
+
+def _write_ledger(path: Path, ledger: _Ledger) -> None:
+    _write_json(path, ledger.to_json())
+
+
+def _read_snapshot(path: Path) -> _Ledger:
+    """读并校验一份 held 快照 `{"note": ..., "ledger": ...}`。与 `_read_ledger` 同口径:读不出一律永久失败,只报类名。"""
+    try:
+        doc = _check.require_keys(json.loads(path.read_text(encoding="utf-8")), "held snapshot", {"note", "ledger"})
+        _check.text(doc["note"], "held snapshot.note", allow_empty=True)
+        return _Ledger.from_json(doc["ledger"])
+    except (OSError, ValueError) as exc:
         raise MemoryFailureError(type(exc).__name__, transient=False) from None
 
 
@@ -462,14 +477,22 @@ def _check_name(value: object, what: str) -> str:
     return value
 
 
+# 替身的世界名前缀:`world_prefix` 的缺省值。替身不读本机记忆配置,所以写死(40 篇 5.1 节方法表)。
+STAND_IN_WORLD_PREFIX = "rise"
+
+
 class FileTupleStore:
     """DeploymentMemoryStore 的落盘替身:<root>/<world_id>.json 存一份 _Ledger.to_json(),世界还没有文件时
     等同空库。一个世界一个文件,各 holder(主体)的条目与事件行都在里面。每个操作都是"读整份、改、写整份"。
+    held 快照是 <held_root>/<world_id>/<snapshot_id>.json(内容 `{"note", "ledger"}`),重放世界是
+    <replay_root>/<重放世界名>.json(组合根传 `<记忆根>/held` 与 `<记忆根>/replay`,90 篇第 4 章布局表)。
+    `open` 与其余按世界 id 的方法只读写 root,`open_replay` 只读 replay_root,不看名字长什么样(40 篇 AC-34)。
 
     一个世界的所有主体共用这一个文件,端口又会在两条线程上用(部署驱动器线程写智能体位,服务端线程写对手位),
     所以每个碰世界文件的操作(端口与管理面一样)都在 store 的锁里完成"读整份、改、写整份":两次读改写
     不会互相覆盖,也不会同时写同一个 .tmp。同一把锁还守打开着的端口数:端口会在服务端线程关,
-    而驱动器在另一条线程上 wait_closed 或 restore_from。锁只在一个 store 实例内有效,
+    而驱动器在另一条线程上 wait_closed 或 restore。端口数按完整世界名计,部署端口记在
+    `rise.deploy.<world_id>` 下,重放端口记在重放世界名下,两种共用一张表。锁只在一个 store 实例内有效,
     所以组合根只造一个 store(与 StarlingDeploymentStore 的假设一致)。
     extraction_failure 是故障注入口:对一条事件返回非 None 的字符串,就当这次抽取以该
     failure_category 失败;缺省从不失败。它在锁外调用,所以可以慢,也可以回头调这个 store。"""
@@ -478,15 +501,19 @@ class FileTupleStore:
         self,
         root: Path,
         *,
+        held_root: Path,
+        replay_root: Path,
         extraction_failure: Callable[[MemoryEvent], str | None] | None = None,
     ) -> None:
         # 构造不碰磁盘(终审 M-1):装配在预检之前就造替身,预检失败时不能在 .git 里留下空目录;
-        # 根目录由第一次写(_write_ledger)建
+        # 三个根目录各由第一次写(_write_json)建
         self._root = Path(root)
+        self._held_root = Path(held_root)
+        self._replay_root = Path(replay_root)
         self._extraction_failure = extraction_failure
         self._lock = threading.Lock()  # 守世界文件的读改写与 _open;公开操作各自持有,内部的 _load/_save 不拿
         self._all_closed = threading.Condition(self._lock)  # 某个世界的端口数归零时 notify_all
-        self._open: dict[str, int] = {}  # 每个世界打开着的端口数(不分主体),读写都要持 _lock
+        self._open: dict[str, int] = {}  # 每个完整世界名打开着的端口数(不分主体),读写都要持 _lock
 
     # ---- 读写 ----
 
@@ -496,18 +523,35 @@ class FileTupleStore:
         _check_name(world_id, "world_id")
         return self._root / f"{world_id}.json"
 
-    def _load(self, world_id: str) -> _Ledger:
-        path = self._path(world_id)
+    def _held_path(self, world_id: str, snapshot_id: str) -> Path:
+        _check_name(world_id, "world_id")
+        _check_name(snapshot_id, "snapshot_id")
+        return self._held_root / world_id / f"{snapshot_id}.json"
+
+    def _replay_path(self, replay_world: str) -> Path:
+        _check_name(replay_world, "replay_world")
+        return self._replay_root / f"{replay_world}.json"
+
+    @staticmethod
+    def _deploy_key(world_id: str) -> str:
+        """部署世界在端口计数表里的键:完整世界名,与 Starling 的 `<前缀>.deploy.<id>` 同形。"""
+        return f"{STAND_IN_WORLD_PREFIX}.deploy.{world_id}"
+
+    @staticmethod
+    def _load_at(path: Path) -> _Ledger:
         return _read_ledger(path) if path.exists() else _Ledger()
+
+    def _load(self, world_id: str) -> _Ledger:
+        return self._load_at(self._path(world_id))
 
     def _save(self, world_id: str, ledger: _Ledger) -> None:
         _write_ledger(self._path(world_id), ledger)
 
     # ---- 端口计数 ----
 
-    def _port_opened(self, world_id: str) -> None:
+    def _port_opened(self, key: str) -> None:
         with self._lock:
-            self._open[world_id] = self._open.get(world_id, 0) + 1
+            self._open[key] = self._open.get(key, 0) + 1
 
     def _port_closed(self, port: "_FilePort") -> None:
         """关一个端口。"已关"的判断与计数在同一把锁里:两条线程同时关同一个端口不会减两次。"""
@@ -515,19 +559,27 @@ class FileTupleStore:
             if port._closed:
                 return
             port._closed = True
-            left = self._open[port._world_id] - 1
+            left = self._open[port._key] - 1
             if left > 0:
-                self._open[port._world_id] = left
+                self._open[port._key] = left
             else:
-                del self._open[port._world_id]
+                del self._open[port._key]
                 self._all_closed.notify_all()
 
     # ---- DeploymentMemoryStore ----
 
     def open(self, world_id: str, holder: str) -> "_FilePort":
-        self._path(world_id)
+        path = self._path(world_id)
         _check_name(holder, "holder")
-        return _FilePort(self, world_id, holder)
+        return _FilePort(self, world_id, holder, path=path, key=self._deploy_key(world_id), read_only=False)
+
+    def open_replay(self, replay_world: str, holder: str) -> "_FilePort":
+        """在重放世界上开只读端口。文件不在是永久失败(与 Starling 的 world_not_found 同类),不建。"""
+        path = self._replay_path(replay_world)
+        _check_name(holder, "holder")
+        if not path.exists():
+            raise MemoryFailureError("open_replay: world_not_found", transient=False)
+        return _FilePort(self, replay_world, holder, path=path, key=replay_world, read_only=True)
 
     def remember_event(
         self, world_id: str, holder: str, key: str, text: str, *, interlocutor: str,
@@ -577,55 +629,98 @@ class FileTupleStore:
         return out
 
     def digest(self, world_id: str) -> str:
+        return self._digest_at(self._path(world_id))
+
+    def _digest_at(self, path: Path) -> str:
         with self._lock:
-            ledger = self._load(world_id)
+            ledger = self._load_at(path)
         return ledger.digest()
 
-    def _recall(self, world_id: str, holder: str, query: str, limit: int) -> list[MemoryHit]:
+    def _recall_at(self, path: Path, holder: str, query: str, limit: int) -> list[MemoryHit]:
         with self._lock:
-            ledger = self._load(world_id)
+            ledger = self._load_at(path)
         return ledger.recall(query, limit=limit, holder=holder)
 
-    def backup_to(self, world_id: str, path: Path) -> str:
-        """把账本规范化写到 path(世界还没有文件时写空账本,所以起点副本总是存在),
-        返回读回的副本的逻辑摘要。"""
-        path = Path(path)
-        with self._lock:  # 只有读世界文件需要锁;副本写到别处
-            ledger = self._load(world_id)
-        _write_ledger(path, ledger)
-        return _read_ledger(path).digest()
-
-    def restore_from(self, world_id: str, path: Path) -> str:
-        """用 path 的内容覆盖该世界的库,返回恢复后的逻辑摘要。该世界还有任何主体的端口开着时拒绝
-        (别的世界开着端口不挡);坏备份在覆盖之前就被拒,库原样不动。检查与覆盖在同一把锁里,
-        检查之后不会再有端口插进来。"""
-        self._path(world_id)
+    def snapshot(self, world_id: str, *, note: str) -> SnapshotRef:
+        """把账本连同 note 写成 held 快照,返回快照 id 与读回的快照的逻辑摘要。id 在写之前就定;世界还没有文件时
+        快照是空账本,摘要等于空世界摘要,也不建部署世界文件。"""
+        _check.text(note, "snapshot.note", allow_empty=True)
+        snapshot_id = "snap-" + secrets.token_hex(8)
+        path = self._held_path(world_id, snapshot_id)
         with self._lock:
-            if self._open.get(world_id, 0) > 0:
-                raise MemoryFailureError("restore_from: world has an open port", transient=False)
-            ledger = _read_ledger(Path(path))
+            ledger = self._load(world_id)
+            _write_json(path, {"note": note, "ledger": ledger.to_json()})
+            return SnapshotRef(snapshot_id, _read_snapshot(path).digest())
+
+    def restore(self, world_id: str, snapshot_id: str) -> str:
+        """用这份快照覆盖该世界的库,返回恢复后的逻辑摘要。该世界还有任何主体的部署端口开着时拒绝
+        (与 Starling 服务的 world_held 同类;别的世界与重放世界开着端口不挡);快照不在或读不出时在覆盖之前就拒,
+        库原样不动。查端口数、读快照、写世界在同一次持锁里,检查之后不会再有端口插进来。"""
+        path = self._held_path(world_id, snapshot_id)
+        with self._lock:
+            if self._open.get(self._deploy_key(world_id), 0) > 0:
+                raise MemoryFailureError("restore: world has an open port", transient=False)
+            if not path.exists():
+                raise MemoryFailureError("restore: snapshot_not_found", transient=False)
+            ledger = _read_snapshot(path)
             self._save(world_id, ledger)
         return ledger.digest()
 
+    def delete_snapshot(self, world_id: str, snapshot_id: str) -> None:
+        """删快照文件;不在是空操作(Starling 回 snapshot_not_found,rise 也当作成功,两边都幂等)。"""
+        path = self._held_path(world_id, snapshot_id)
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise MemoryFailureError(type(exc).__name__, transient=False) from None
+
+    def fork_replay(self, world_id: str, snapshot_id: str, *, round_id: str) -> str:
+        """从快照分叉一个重放世界:写 replay_root/<名字>.json,返回名字 `rise.verify.<round_id>.<world_id>.<8 位十六进制>`。
+        快照不在是永久失败。崩溃留下的重放世界文件不清,只占磁盘(90 篇失败表)。"""
+        path = self._held_path(world_id, snapshot_id)
+        _check_name(round_id, "round_id")
+        name = f"{STAND_IN_WORLD_PREFIX}.verify.{round_id}.{world_id}.{secrets.token_hex(4)}"
+        target = self._replay_path(name)            # 拼出来超过 128 字符时在这里拒绝,不写任何文件
+        with self._lock:
+            if not path.exists():
+                raise MemoryFailureError("fork_replay: snapshot_not_found", transient=False)
+            _write_ledger(target, _read_snapshot(path))
+        return name
+
+    def release_replay(self, replay_world_id: str) -> None:
+        """删重放世界的文件;不在是空操作。"""
+        path = self._replay_path(replay_world_id)
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise MemoryFailureError(type(exc).__name__, transient=False) from None
+
     def wait_closed(self, world_id: str, timeout_s: float) -> bool:
-        """等该世界打开着的端口数降到 0:到了返回 True,超过 timeout_s 秒返回 False。端口可以在别的线程上关。"""
+        """等该部署世界打开着的端口数降到 0:到了返回 True,超过 timeout_s 秒返回 False。端口可以在别的线程上关。
+        重放端口记在重放世界名下,不算进来。"""
         self._path(world_id)
         if isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float)) or not timeout_s >= 0:
             raise SimpleActioDataError(f"wait_closed.timeout_s: expected a non-negative number, got {timeout_s!r}")
+        key = self._deploy_key(world_id)
         with self._all_closed:
-            return self._all_closed.wait_for(lambda: self._open.get(world_id, 0) == 0, timeout_s)
+            return self._all_closed.wait_for(lambda: self._open.get(key, 0) == 0, timeout_s)
 
 
 class _FilePort:
     """FileTupleStore 发出的端口,绑定 (世界, 主体):每次调用都经 store 读写磁盘上的库,所以端口与管理面看到
-    同一份;recall 只看本主体名下的条目,remember 写在本主体名下。"""
+    同一份;recall 只看本主体名下的条目,remember 写在本主体名下。`open_replay` 开的端口只读:remember 抛永久
+    MemoryFailureError("world_read_only")(与 Starling 的同名码同类),embed_pending 返回 0。"""
 
-    def __init__(self, store: FileTupleStore, world_id: str, holder: str) -> None:
+    def __init__(self, store: FileTupleStore, world_id: str, holder: str, *,
+                 path: Path, key: str, read_only: bool) -> None:
         self._store = store
         self._world_id = world_id
         self._holder = holder
+        self._path = path          # 部署世界在 root 下,重放世界在 replay_root 下,开端口时就定
+        self._key = key            # 端口计数表里的完整世界名
+        self._read_only = read_only
         self._closed = False  # 只在持 store._lock 时改(_port_closed);_live 的无锁读只会早一拍或晚一拍看到
-        store._port_opened(world_id)
+        store._port_opened(key)
 
     def _live(self) -> FileTupleStore:
         if self._closed:
@@ -633,10 +728,13 @@ class _FilePort:
         return self._store
 
     def recall(self, query: str, *, limit: int) -> list[MemoryHit]:
-        return self._live()._recall(self._world_id, self._holder, query, limit)
+        return self._live()._recall_at(self._path, self._holder, query, limit)
 
     def remember(self, event: MemoryEvent) -> RememberOutcome:
-        return self._live().remember_event(
+        store = self._live()
+        if self._read_only:
+            raise MemoryFailureError("world_read_only", transient=False)
+        return store.remember_event(
             self._world_id, self._holder, event.key, event.text, interlocutor=event.interlocutor)
 
     def embed_pending(self) -> int:
@@ -644,7 +742,7 @@ class _FilePort:
         return 0
 
     def digest(self) -> str:
-        return self._live().digest(self._world_id)
+        return self._live()._digest_at(self._path)
 
     def close(self) -> None:
         self._store._port_closed(self)
