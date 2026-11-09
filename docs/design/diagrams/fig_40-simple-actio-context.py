@@ -10,7 +10,7 @@ def build() -> Canvas:
         desc="SocialSimulator 的运行器把实例当后端调用,MindAgent 的客户端循环实例化 SimpleActio 并调用 respond,"
              "factory 组合根构造训练路的实例。SimpleActio 把技能、经验与记忆渲染成指导语交给模型后端,包外只导入 simulator.datamodel。"
              "技能库由 MindAgent 读入后传给 SimpleActio,SimpleActio 自己不读产物树。"
-             "记忆经记忆端口读写 Starling 的树外 SQLite 库,Starling 是可选依赖。")
+             "记忆经记忆端口读写 Starling 记忆服务里的世界,客户端是可选依赖。")
     c.lane(14, 40, 1052, 150, "计算层", kind="compute")
     c.lane(14, 214, 1052, 170, "共享基础设施", kind="infra")
     c.lane(14, 408, 1052, 160, "SimpleActio 之外的依赖与数据", kind="neutral")
@@ -24,7 +24,7 @@ def build() -> Canvas:
     dm = c.box(28, 458, 244, "simulator.datamodel", "Persona · Scenario · TurnRecord",
                h=70, kind="compute")
     mb = c.box(288, 458, 244, "模型后端", "respond 或 respond_guided\n测试用罐头后端", h=70, kind="neutral")
-    mem = c.store(548, 448, 244, "Starling 记忆库", "一个世界一个 SQLite 库(树外)\n可选依赖 extra memory",
+    mem = c.store(548, 448, 244, "Starling 记忆服务", "一个情境一个具名世界\n可选依赖 extra memory",
                   h=90)
     lib = c.store(808, 448, 244, "技能库", "skill_library/\n由 MindAgent 读写", h=90)
     fac = c.box(730, 262, 200, "factory 组合根", "构造训练路的全部实例\n训练位 · 对手位", h=90, kind="neutral")

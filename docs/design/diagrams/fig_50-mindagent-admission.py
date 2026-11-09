@@ -28,7 +28,7 @@ def build() -> Canvas:
     appr = c.box(xs[3], 314, 190, "提案 approved", "调和循环产生\nadmit_proposal", kind="control", h=hh)
     chk = c.box(xs[2] - 16, 314, 232, "校验全部增量", "记忆增量只许三键:\npersona_id · text · interlocutor\n不合法则一条不写",
                 kind="compute", h=hh)
-    wr = c.box(xs[1], 314, w, "写库条目", "技能写 skill_library/\n记忆 remember_event 进\n该人格的 Starling 库",
+    wr = c.box(xs[1], 314, w, "写库条目", "技能写 skill_library/\n记忆 remember_event 进\n该情境的部署世界",
                kind="store", h=hh)
     st = c.box(xs[0], 314, w, "library_state", "对应版本 +1\nadmitted 追加一条", kind="store", h=hh)
 

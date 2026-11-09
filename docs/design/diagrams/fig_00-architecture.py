@@ -8,7 +8,7 @@ def build() -> Canvas:
     c = Canvas(
         1080, 730, title="Rise 系统架构",
         desc="四层结构。控制层放决策与配方相关的四个组件。协调层 ControlPlane 配三道人工审核门。"
-             "计算层放三个子系统。共享基础设施放 SimpleActio、Starling 记忆库、远端计算层、训练与推理引擎。"
+             "计算层放三个子系统。共享基础设施放 SimpleActio、Starling 记忆服务、远端计算层、训练与推理引擎。"
              "三个计算层子系统都使用 SimpleActio 实例,MindTrainer 用的是训练位实例。"
              "所有子系统经 ControlPlane 读写产物,只有两条受限直连接口绕过它。")
     c.lane(14, 44, 1052, 146, "控制层(本地开发机)", kind="control")
@@ -31,7 +31,7 @@ def build() -> Canvas:
     cm = c.box(40, 590, 215, "远端计算层 compute", "经 SSH 在远端 GPU 主机上跑作业\nGPU 租约 · 预检 · 作业控制", kind="infra", h=80)
     rv = c.box(300, 590, 160, "ROLL · vLLM", "分布式训练 · 推理引擎", kind="infra", h=80)
     ac = c.box(500, 590, 240, "SimpleActio", "带技能库与显式记忆的智能体框架\n每次响应附带激活轨迹\nStarling 记忆", kind="infra", h=80)
-    st = c.box(800, 590, 250, "Starling", "个体记忆 · 语句级抽取 · 语义召回\nSQLite 内嵌,一个世界一个库,人格是主体", kind="infra", h=80)
+    st = c.box(800, 590, 250, "Starling", "记忆服务 · 具名世界 · 快照与分叉\n一个情境一个世界,人格是主体", kind="infra", h=80)
 
     def fx(node, target):
         return (node.cx - target.x) / target.w
