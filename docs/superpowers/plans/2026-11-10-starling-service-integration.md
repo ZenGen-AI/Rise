@@ -693,7 +693,7 @@ git commit -m "feat(mindagent): 记忆布局改读在途记录 .rec.json,旧布�
   - 验证段：`fork_replay` 每个情境至多一次（第一次有提案要这个情境的实例时做），`instance_with(extra, scenario_id)` 在它上面 `open_replay(replay, agent_pid)`（`replay` 是 `fork_replay` 原样返回的名字，40 篇 AC-34）；`built` 记实例，`replays` 记重放世界名。finally 顺序：关实例 → 每个重放世界 `release_replay` → 每个情境 `delete_snapshot` 并删 `verify-` 记录 → `_rmdir_if_empty(snapshots/<round_id>)`。收尾里的任何失败只记 warning（终审 M-1 的同一口径）。
   - `make_start_round_handler(...)` 不再收 `scratch_store_factory`；`DeploymentMemory` 只剩 `store`、`layout`、`runtime` 三个字段。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 `tests/test_ma_deployment.py`：
 
@@ -775,12 +775,12 @@ def test_an_unreadable_in_flight_record_exits_2_naming_it_relative_to_the_root(t
     assert "snapshots/r1/deploy-deploy-m-s1-1.rec.json" in err and str(root) not in err
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_ma_deployment.py tests/test_ma_rounds.py tests/test_ma_admit.py tests/test_ma_e2e.py tests/test_factory_memory_wiring.py tests/test_factory_handlers.py`
 Expected: FAIL（驱动器还在调 `backup_to`；处理器还收 `scratch_store_factory`）
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 按 Interfaces。`_restore` 的骨架：
 
@@ -806,12 +806,12 @@ def _restore(memory_store, world_id, rec_path, layout, expected, episode_id, clo
 
 `rounds.py` 的回滚用同一个分码（`DeferredError` 原样上抛，`_close_round` 不接，轮次留 pending）。`rounds.py` 不再用 `shutil` 就删掉这个导入。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_ma_deployment.py tests/test_ma_rounds.py tests/test_ma_admit.py tests/test_ma_e2e.py tests/test_ma_verify.py tests/test_ma_memory_layout.py tests/test_ma_deployment_starling.py tests/test_factory_memory_wiring.py tests/test_factory_memory_runtime.py tests/test_factory_handlers.py tests/test_simple_actio_deployment_store_contract.py tests/test_simple_actio_starling_store.py`
 Expected: PASS。这是第 2 步的最后一个任务：控制者在后台跑全量，必须绿。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/mindagent/deployment.py src/mindagent/rounds.py src/mindagent/admit.py src/factory/handlers.py src/factory/memory_runtime.py tests/test_ma_deployment.py tests/test_ma_rounds.py tests/test_ma_deployment_starling.py tests/test_ma_e2e.py tests/test_ma_admit.py tests/test_factory_handlers.py tests/test_factory_memory_wiring.py

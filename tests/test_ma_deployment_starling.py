@@ -1,7 +1,7 @@
 """第 5 步的部署记忆语义在真 Starling 上再跑一遍(设计源第 11 节"真 Starling 或替身"的集成行)。
 
 用例照 `tests/test_ma_deployment.py`、`tests/test_ma_admit.py` 里同名语义的替身用例写,辅助代码从那两个模块导入,
-不复制。差别只有三处:库换成 `StarlingDeploymentStore`(配 `suffix=".db"` 的 `MemoryLayout`);抽取失败改用
+不复制。差别只有三处:库换成 `StarlingDeploymentStore`(held 快照与重放世界是过渡布局的库文件);抽取失败改用
 假端点的 `fail_keys`(取代 `FileTupleStore(extraction_failure=)`);摘要比较用 `store.digest(world)`,不比库文件内容。
 部署用例的世界是情境 s1(`WORLD`),智能体位主体是 pa。
 假端点是本机回环子进程(`tests/starling_fakes.py`),不发任何外网请求。"""
@@ -39,8 +39,9 @@ def mem(tmp_path):
     with FakeOpenAI(dim=256) as fake, offline_api_key():
         root = tmp_path / "mem"
         yield SimpleNamespace(
-            store=StarlingDeploymentStore(root / "deploy", endpoints=fake.endpoints()),
-            layout=MemoryLayout(root, suffix=".db"), failing=fake.fail_keys, fake=fake)
+            store=StarlingDeploymentStore(root / "deploy", held_root=root / "held", replay_root=root / "replay",
+                                          endpoints=fake.endpoints()),
+            layout=MemoryLayout(root), failing=fake.fail_keys, fake=fake)
 
 
 @pytest.fixture
@@ -65,6 +66,12 @@ def _pending_in_copy(path: Path) -> list[tuple[str, str]]:
             memory.close(timeout=10)
 
 
+def _held_file(mem, eid):
+    """在途记录指的 held 快照库文件(过渡布局:held/<世界>/<快照 id>.db)。"""
+    rec = mem.layout.read_record(mem.layout.snapshot(ROUND, eid))
+    return mem.layout.root / "held" / rec.world_id / f"{rec.snapshot_id}.db"
+
+
 class _StartProbe:
     """`_run` 的 started 参数只调 append。每条 episode 开始时(起点快照已落)顺手看一眼部署世界与快照里的 pending 行。"""
 
@@ -77,28 +84,28 @@ class _StartProbe:
         self.seen.append({
             "eid": eid, "digest": digest,
             "library_pending": self._mem.store.pending_events(WORLD),
-            "snapshot_pending": _pending_in_copy(self._mem.layout.snapshot(ROUND, eid)),
+            "snapshot_pending": _pending_in_copy(_held_file(self._mem, eid)),
         })
 
 
 # ---------------- 部署驱动器(替身用例:tests/test_ma_deployment.py) ----------------
 
 def _record_restores(mem, monkeypatch):
-    """记下每次 restore_from 之前世界的摘要,用来证明回滚前库里确实有这次尝试写的记忆。
+    """记下每次 restore 之前世界的摘要,用来证明回滚前库里确实有这次尝试写的记忆。
     此时端口都已关,库静止,读摘要安全。不数调用次数。"""
     before_restore = []
-    real = mem.store.restore_from
+    real = mem.store.restore
 
-    def spy(world, path):
+    def spy(world, snapshot_id):
         before_restore.append(mem.store.digest(world))
-        return real(world, path)
+        return real(world, snapshot_id)
 
-    monkeypatch.setattr(mem.store, "restore_from", spy)
+    monkeypatch.setattr(mem.store, "restore", spy)
     return before_restore
 
 
 def test_a_retry_rolls_the_library_back_to_the_same_digest(store, mem, monkeypatch):
-    """两次尝试都写了记忆后失败:每次失败之后 restore_from 起点副本,用尽重试时库停在起点;重入后的两次尝试
+    """两次尝试都写了记忆后失败:每次失败之后按记录恢复起点快照,用尽重试时库停在起点;重入后的两次尝试
     仍从同一个起点开始。替身:test_exhausted_transient_retries_leave_the_library_at_the_start。"""
     digests = {}
     before_restore = _record_restores(mem, monkeypatch)
@@ -113,7 +120,7 @@ def test_a_retry_rolls_the_library_back_to_the_same_digest(store, mem, monkeypat
     (ep,) = _run(store, f, mem, digests=digests)
     assert ep.id == EID and len(f.clients) == 2
     assert [c.traces[0]["memory"]["digest_before"] for c in f.clients] == [start, start]   # 两次尝试同一起点
-    assert not mem.layout.snapshot(ROUND, EID).exists()                # 删起点快照 = 提交
+    assert not mem.layout.snapshot(ROUND, EID).exists()                # 删在途记录 = 提交
     assert mem.store.digest(WORLD) != start                            # 提交了的记忆留在库里
 
 
@@ -154,7 +161,7 @@ def test_a_pending_row_from_a_failed_attempt_does_not_conflict_on_the_retry(stor
     assert mem.store.pending_events(WORLD) == []
     with pytest.raises(MemoryEventConflict):                           # 成功后被放弃,是终态
         mem.store.remember_event(WORLD, "pa", KEY0, "pb：我换个说法", interlocutor="pb")
-    assert not mem.layout.snapshot(ROUND, EID).exists()                # 删起点快照 = 提交
+    assert not mem.layout.snapshot(ROUND, EID).exists()                # 删在途记录 = 提交
 
 
 def test_the_second_round_reuses_the_episode_id_but_not_the_event_keys(store, mem):
@@ -201,8 +208,8 @@ def test_no_pending_rows_survive_an_episode_and_the_next_start_snapshot_is_clean
     assert first["digest"] != second["digest"]                         # 第一条提交的记忆进了第二条的起点
     assert mem.store.pending_events(WORLD) == []
     for eid in (EID, EID2):
-        snap = mem.layout.snapshot(ROUND, eid)
-        assert not snap.exists() and not snap.with_suffix(".world").exists()
+        assert not mem.layout.snapshot(ROUND, eid).exists()
+    assert list((mem.layout.root / "held" / WORLD).iterdir()) == []     # 提交时 held 快照也删了
     with pytest.raises(MemoryEventConflict):                           # 放弃是终态
         mem.store.remember_event(WORLD, "pa", KEY0, "pb：我很生气!!", interlocutor="pb")
 

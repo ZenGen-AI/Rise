@@ -88,7 +88,8 @@ def world(tmp_path):
         return EnvironmentServiceClient(_DeadlineStub(pb2_grpc.EnvironmentServiceStub(channel)))
 
     mem_root = tmp_path.parent / f"{tmp_path.name}-mem"         # 部署记忆在仓库外
-    memory_store, memory_layout = FileTupleStore(mem_root / "deploy"), MemoryLayout(mem_root)
+    memory_store = FileTupleStore(mem_root / "deploy", held_root=mem_root / "held", replay_root=mem_root / "replay")
+    memory_layout = MemoryLayout(mem_root)
     handler = make_start_round_handler(
         config=AgentConfig(scenario_ids=("s1", "s2", "s3"), bindings=(OPP, AGENT), max_turns=4,
                            min_support=3, min_ratio=0.5),
@@ -96,7 +97,7 @@ def world(tmp_path):
         backend_factory=lambda model_id, ckpt: Echo(),
         personas_loader=lambda s, ids: {pid: read_persona(s, pid) for pid in ids},
         memory_store=memory_store, memory_layout=memory_layout,
-        memory_runtime=STAND_IN_MEMORY_RUNTIME, scratch_store_factory=FileTupleStore,
+        memory_runtime=STAND_IN_MEMORY_RUNTIME,
     )
     yield store, handler, memory_store, memory_layout
     for c in channels:

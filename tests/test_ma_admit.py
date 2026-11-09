@@ -15,7 +15,7 @@ from controlplane.reconcile import Action
 from mindagent.admit import MEMORY_DEFINITION_KEYS, make_admit_proposal_handler
 from mindagent.errors import MindAgentDataError
 from mindagent.library import load_library
-from mindagent.memory_layout import MemoryLayout
+from mindagent.memory_layout import MemoryLayout, SnapshotRecord
 
 PID = "proposal-agent-round-zengen-v3-1"
 SKILL = {"id": "skill-candidate-emotion_high", "version": 1, "level": "micro", "priority": 100,
@@ -49,7 +49,8 @@ def mem(tmp_path):
 
     root = tmp_path / "mem"
     return SimpleNamespace(
-        store=FileTupleStore(root / "deploy", extraction_failure=extraction_failure),
+        store=FileTupleStore(root / "deploy", held_root=root / "held", replay_root=root / "replay",
+                             extraction_failure=extraction_failure),
         layout=MemoryLayout(root), failing=failing, extractions=extractions)
 
 
@@ -302,12 +303,18 @@ def test_a_memory_failure_error_is_recorded_by_class_name_only(store, mem, monke
     assert fr.payload["reason"] == f"remember {KEY}: MemoryFailureError"
 
 
+def _empty_digest(mem):
+    """空世界的摘要:另一个根上没有文件的替身世界。"""
+    root = mem.layout.root / "empty"
+    return FileTupleStore(root / "deploy", held_root=root / "held", replay_root=root / "replay").digest("s1")
+
+
 def _in_flight_copy(mem, world, episode="deploy-zengen-v3-s1-1"):
-    """该世界的一份未提交起点快照,带 .world 旁注(与部署驱动器落的一致)。"""
-    snap = mem.layout.snapshot("agent-round-zengen-v3", episode)
-    mem.layout.write_world_tag(snap, world)
-    mem.store.backup_to(world, snap)
-    return snap
+    """该世界的一份未提交起点快照:held 快照加在途记录(与部署驱动器落的一致)。返回记录路径。"""
+    ref = mem.store.snapshot(world, note=f"rise episode {episode}")
+    rec = mem.layout.snapshot("agent-round-zengen-v3", episode)
+    mem.layout.write_record(rec, SnapshotRecord(world, ref.snapshot_id, ref.digest))
+    return rec
 
 
 def test_an_in_flight_round_of_the_same_world_defers_admission_until_its_copy_is_gone(store, mem):
@@ -315,12 +322,11 @@ def test_an_in_flight_round_of_the_same_world_defers_admission_until_its_copy_is
     _put(store, increments=[{"kind": "memory", "definition": MEMORY}])
     snap = _in_flight_copy(mem, "s1")
     before, head = mem.store.digest("s1"), store._git("rev-parse", "HEAD")
-    with pytest.raises(DeferredError, match="world s1 has an uncommitted deployment episode: deploy-deploy-zengen-v3-s1-1.json"):
+    with pytest.raises(DeferredError, match="world s1 has an uncommitted deployment episode: deploy-deploy-zengen-v3-s1-1.rec.json"):
         _admit(store, mem)
     assert mem.store.digest("s1") == before and store._git("rev-parse", "HEAD") == head
     assert store.read_product(proposal_file(PID)).status == "approved"
     snap.unlink()
-    snap.with_suffix(".world").unlink()
     _admit(store, mem)
     assert store.read_product(proposal_file(PID)).status == "effective"
 
@@ -368,7 +374,7 @@ def test_a_malformed_memory_definition_is_t2_and_touches_nothing(store, mem, def
     _admit(store, mem)
     assert store.read_product(proposal_file(PID)).status == "approved"
     assert store.read_product(failure_record_file("run-003", f"admit-{PID}")).payload["category"] == "T2"
-    assert mem.store.digest("s1") == FileTupleStore(mem.layout.root / "empty").digest("s1")
+    assert mem.store.digest("s1") == _empty_digest(mem)
 
 
 def test_a_bad_scenario_id_names_the_scenario_id_in_the_reason(store, mem):
@@ -390,7 +396,7 @@ def test_a_memory_increment_outside_the_bound_pairs_is_t2_and_touches_nothing(st
     assert fr.payload["reason"] == (
         f"memory increment {KEY}: ('s1', 'pz') is not a bound pair of the deployment config")
     assert not store.exists(library_state_file())
-    assert mem.store.digest("s1") == FileTupleStore(mem.layout.root / "empty").digest("s1")
+    assert mem.store.digest("s1") == _empty_digest(mem)
     assert mem.store.pending_events("s1") == [] and mem.extractions == []
     head = store._git("rev-parse", "HEAD")
     _admit(store, mem)                                     # 下一 tick 只读,什么都不写
@@ -413,7 +419,7 @@ def test_the_first_unbound_pair_stops_the_whole_proposal(store, mem):
     _admit(store, mem)
     fr = store.read_product(failure_record_file("run-003", f"admit-{PID}"))
     assert fr.payload["reason"].startswith(f"memory increment {PID}#2: ('s1', 'pz')")
-    assert mem.store.digest("s1") == FileTupleStore(mem.layout.root / "empty").digest("s1")
+    assert mem.store.digest("s1") == _empty_digest(mem)
     assert mem.extractions == []
 
 
@@ -440,7 +446,7 @@ def test_unreadable_deployment_bindings_are_t2_and_touch_nothing(store, mem):
     assert (fr.payload["category"], fr.payload["point"]) == ("T2", "mindagent.admit")
     assert fr.payload["reason"] == "cannot read the deployment bindings: agent.yaml is missing"
     assert not store.exists(library_state_file())
-    assert mem.store.digest("s1") == FileTupleStore(mem.layout.root / "empty").digest("s1")
+    assert mem.store.digest("s1") == _empty_digest(mem)
     assert mem.store.pending_events("s1") == [] and mem.extractions == []
     assert store._git("rev-parse", "HEAD") != head          # 只多了那一条失败记录的提交
     head = store._git("rev-parse", "HEAD")
@@ -454,7 +460,7 @@ def test_one_proposal_can_write_into_two_worlds_and_takes_both_locks(store, mem)
     with mem.layout.hold_world("s2"):
         with pytest.raises(DeferredError, match="world library locked"):
             _admit(store, mem)
-        assert mem.store.digest("s1") == FileTupleStore(mem.layout.root / "empty").digest("s1")   # 锁先取全、再写
+        assert mem.store.digest("s1") == _empty_digest(mem)   # 锁先取全、再写
     _admit(store, mem)
     proposal = store.read_product(proposal_file(PID))
     assert proposal.status == "effective" and set(proposal.payload["admitted_statements"]) == {KEY, f"{PID}#2"}
@@ -499,11 +505,10 @@ def test_a_skill_only_proposal_is_deferred_while_any_round_has_an_uncommitted_co
     _put(store)
     snap = _in_flight_copy(mem, "s2")                                          # 别的世界的副本也算
     head = store._git("rev-parse", "HEAD")
-    with pytest.raises(DeferredError, match="deploy-deploy-zengen-v3-s1-1.json"):
+    with pytest.raises(DeferredError, match="deploy-deploy-zengen-v3-s1-1.rec.json"):
         _admit(store, mem)
     assert store._git("rev-parse", "HEAD") == head and store.read_product(proposal_file(PID)).status == "approved"
     snap.unlink()
-    snap.with_suffix(".world").unlink()
     _admit(store, mem)
     assert store.read_product(proposal_file(PID)).status == "effective"
 
@@ -619,19 +624,19 @@ def test_an_earlier_t1_or_t2_record_does_not_block_reentry(store, mem, monkeypat
     assert store.read_product(proposal_file(PID)).status == "effective"
 
 
-# ---------------- 整分支终审:门② 遇到坏旁注 ----------------
+# ---------------- 整分支终审:门② 遇到读不出的在途记录 ----------------
 
-def test_an_unreadable_world_tag_defers_admission_and_writes_nothing(store, mem, tmp_path):
-    # 任一快照的 .world 旁注坏了,uncommitted_snapshots 抛 MindAgentDataError;门② 转 DeferredError
+def test_an_unreadable_in_flight_record_defers_admission_and_writes_nothing(store, mem, tmp_path):
+    # 任一在途记录读不出,uncommitted_snapshots 抛 MindAgentDataError;门② 转 DeferredError
     # (守护进程退避、连续延后有上限),不让它越过处理器打崩守护进程。提案、库、树、失败记录都不动
     _put(store, increments=[{"kind": "memory", "definition": MEMORY}])
     snap = _in_flight_copy(mem, "s2", "deploy-zengen-v3-s2-1")
-    snap.with_suffix(".world").write_text("../" + "x" * 200)           # 人手改坏的旁注
+    snap.write_text('{"world_id": "../' + "x" * 200 + '", "snapshot_id": "snap-0", "digest": "d"}')   # 人手改坏的记录
     before, head = mem.store.digest("s1"), store._git("rev-parse", "HEAD")
     with pytest.raises(DeferredError) as exc:
         _admit(store, mem)
     reason = str(exc.value)
-    assert reason == ("world s1: a snapshot world tag is unreadable and needs a manual fix "
+    assert reason == ("world s1: an in-flight record is unreadable and needs a manual fix "
                       "(MindAgentDataError)")
     assert str(tmp_path) not in reason and "x" * 20 not in reason
     assert store.read_product(proposal_file(PID)).status == "approved"
@@ -639,25 +644,25 @@ def test_an_unreadable_world_tag_defers_admission_and_writes_nothing(store, mem,
     assert mem.store.digest("s1") == before and store._git("rev-parse", "HEAD") == head
 
 
-def test_an_unreadable_world_tag_also_defers_a_skill_only_proposal(store, mem, monkeypatch):
-    # 只含技能的提案不走世界那圈;全局等待那处今天只列文件、不读旁注,但也照样接住:布局以后改成读旁注时
-    # 坏旁注同样不许漏出处理器。这里让它像 uncommitted_snapshots 一样逐个读旁注
+def test_an_unreadable_in_flight_record_also_defers_a_skill_only_proposal(store, mem, monkeypatch):
+    # 只含技能的提案不走世界那圈;全局等待那处今天只列文件、不读记录,但也照样接住:布局以后改成读记录时
+    # 坏记录同样不许漏出处理器。这里让它像 uncommitted_snapshots 一样逐份读记录
     _put(store)
     snap = _in_flight_copy(mem, "s2", "deploy-zengen-v3-s2-1")
-    snap.with_suffix(".world").write_bytes(b"\xff\xfe")
+    snap.write_bytes(b"\xff\xfe")
     real = MemoryLayout.any_uncommitted_snapshots
 
-    def reading_tags(self):
+    def reading_records(self):
         found = real(self)
         for p in found:
             self.world_of(p)
         return found
 
-    monkeypatch.setattr(MemoryLayout, "any_uncommitted_snapshots", reading_tags)
+    monkeypatch.setattr(MemoryLayout, "any_uncommitted_snapshots", reading_records)
     head = store._git("rev-parse", "HEAD")
     with pytest.raises(DeferredError) as exc:
         _admit(store, mem)
-    assert str(exc.value) == ("admission: a snapshot world tag is unreadable and needs a manual fix "
+    assert str(exc.value) == ("admission: an in-flight record is unreadable and needs a manual fix "
                               "(MindAgentDataError)")
     assert store._git("rev-parse", "HEAD") == head and store.read_product(proposal_file(PID)).status == "approved"
     assert not store.exists(failure_record_file("run-003", f"admit-{PID}"))

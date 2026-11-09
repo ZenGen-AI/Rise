@@ -119,7 +119,6 @@ def _agent(ctx) -> Handler:
         memory_store=mem.store,
         memory_layout=mem.layout,
         memory_runtime=mem.runtime,
-        scratch_store_factory=mem.scratch_store_factory,
         register_episode=runtime.register_deployment_episode,
         unregister_episode=runtime.unregister_deployment_episode,
         **extra,

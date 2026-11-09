@@ -4,11 +4,11 @@
 1. 读提案,不是 approved 就返回;增量与库版本先校验,不合法记一次 T2、提案留在 approved。
    记忆增量的 (scenario_id, persona_id) 必须是部署配置里绑定的一对(bound_pairs 每次调用时现读,
    只在提案有记忆增量时才调):不是、或读不了绑定,都在拿锁与写任何东西之前记一次 T2,提案留在 approved。
-2. 记忆增量所涉情境世界(scenario_id,去重后排序)逐个拿世界锁,并查该世界有没有未提交的部署起点副本:
-   锁被占或有在途 episode 就抛 DeferredError(守护进程不写树、按退避重试),否则轮次重入覆盖部署库时
-   会抹掉刚收录的记忆。任何世界有未提交的起点副本时,只含技能的提案也延后:在途轮次重入会重读库,
-   技能版本一变,已提交的 episode 就换新 id 重跑、记下新记忆,随后在途那条的起点副本覆盖回去,
-   把这些记忆悄悄抹掉。任一快照的 `.world` 旁注坏了(读不出或不是合法情境 id)也抛 DeferredError,
+2. 记忆增量所涉情境世界(scenario_id,去重后排序)逐个拿世界锁,在锁内读在途记录,查该世界有没有未提交的
+   部署起点快照:锁被占或有在途 episode 就抛 DeferredError(守护进程不写树、按退避重试),否则轮次重入恢复
+   部署世界时会抹掉刚收录的记忆。任何世界有未提交的起点快照时,只含技能的提案也延后:在途轮次重入会重读库,
+   技能版本一变,已提交的 episode 就换新 id 重跑、记下新记忆,随后在途那条按快照恢复回去,
+   把这些记忆悄悄抹掉。任一在途记录读不出(不是合法 JSON、键不对或世界 id 不合法)也抛 DeferredError,
    原因只报类名与世界 id:它要人修,不能越过处理器打崩守护进程。
 3. 记忆增量按位置逐个 remember_event 写进 scenario_id 那个世界、记在 persona_id 名下,事件 key 是
    <proposal_id>#<k>(不带持有者:持有者在 remember_event 的参数里)。记忆先于技能写:
@@ -168,8 +168,8 @@ def make_admit_proposal_handler(
                 try:
                     in_flight = memory_layout.uncommitted_snapshots(sid)
                 except MindAgentDataError as exc:
-                    # 坏旁注要人修:转延后(退避、连续延后有上限),不让它越过处理器打崩守护进程。只报类名
-                    raise DeferredError(f"world {sid}: a snapshot world tag is unreadable and needs a manual fix "
+                    # 坏记录要人修:转延后(退避、连续延后有上限),不让它越过处理器打崩守护进程。只报类名
+                    raise DeferredError(f"world {sid}: an in-flight record is unreadable and needs a manual fix "
                                         f"({type(exc).__name__})") from exc
                 if in_flight:
                     names = ", ".join(p.name for p in in_flight)
@@ -177,7 +177,7 @@ def make_admit_proposal_handler(
             try:
                 in_flight = memory_layout.any_uncommitted_snapshots()
             except MindAgentDataError as exc:
-                raise DeferredError("admission: a snapshot world tag is unreadable and needs a manual fix "
+                raise DeferredError("admission: an in-flight record is unreadable and needs a manual fix "
                                     f"({type(exc).__name__})") from exc
             if in_flight:
                 # 只含技能的提案也延后:库版本在轮次在途时不许变(见模块 docstring 第 2 步)

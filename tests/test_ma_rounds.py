@@ -17,7 +17,8 @@ from controlplane.reconcile import Action
 from factory.memory_runtime import STAND_IN_MEMORY_RUNTIME
 from inference_bridge import BridgeError, ScriptedBridge
 from mindagent.config import AgentConfig
-from mindagent.memory_layout import MemoryLayout
+from mindagent.memory_layout import MemoryLayout, SnapshotRecord
+from simple_actio.memory_port import MemoryFailureError
 from mindagent.rounds import make_start_round_handler, round_id_for, supersede_stale_rounds, task_id_for
 from simulator.datamodel import Episode, Persona, RoleBinding, RoleSlot, Scenario, TurnRecord
 from simulator.realtime.client import SessionRejectedError
@@ -28,6 +29,9 @@ OPP = RoleBinding("b", "pb", "frozen_reference", model_ref="zengen-v1")
 ANGRY = "我真的很生气!!"
 GOAL = {"id": "skill-goal", "version": 1, "level": "macro", "priority": 0, "trigger": {"turn_at_least": 0},
         "policy": {"instructions": ["推进目标"]}, "description": ""}
+# 第二个能产出草案的技能(照 GOAL 的写法):两个草案时基线与候选不止一对,验证段每个情境仍只分叉一次
+GOAL2 = {"id": "skill-goal-2", "version": 1, "level": "macro", "priority": 0, "trigger": {"turn_at_least": 0},
+         "policy": {"instructions": ["再推进一步"]}, "description": ""}
 CKPT = BigRef("file:///ckpt/v1", "c" * 64, 1)
 ROUND = "agent-round-zengen-v1"
 
@@ -135,7 +139,8 @@ def store(tmp_path):
 @pytest.fixture
 def mem(tmp_path):
     root = tmp_path / "mem"
-    return SimpleNamespace(store=FileTupleStore(root / "deploy"), layout=MemoryLayout(root))
+    return SimpleNamespace(store=FileTupleStore(root / "deploy", held_root=root / "held", replay_root=root / "replay"),
+                           layout=MemoryLayout(root))
 
 
 def _cfg(**kw):
@@ -159,7 +164,7 @@ def _handler(factory=None, bridge=None, backends=None, mem=None, **cfg):
     return make_start_round_handler(
         config=_cfg(**cfg), client_factory=factory or _Factory(), backend_factory=backend_factory,
         personas_loader=_loader, bridge=bridge, memory_store=mem.store, memory_layout=mem.layout,
-        memory_runtime=STAND_IN_MEMORY_RUNTIME, scratch_store_factory=FileTupleStore)
+        memory_runtime=STAND_IN_MEMORY_RUNTIME)
 
 
 def _start(store, handler, model="zengen-v1"):
@@ -293,7 +298,7 @@ def test_an_unexpected_exception_propagates_and_leaves_the_round_pending(store, 
     h = make_start_round_handler(config=_cfg(), client_factory=_Factory(),
                                  backend_factory=lambda m, c: Echo(), personas_loader=loader,
                                  memory_store=mem.store, memory_layout=mem.layout,
-                                 memory_runtime=STAND_IN_MEMORY_RUNTIME, scratch_store_factory=FileTupleStore)
+                                 memory_runtime=STAND_IN_MEMORY_RUNTIME)
     with pytest.raises(Crash):
         _start(store, h)
     assert store.read_product(agent_round_file("zengen-v1")).status == "pending"
@@ -533,15 +538,16 @@ def test_the_round_records_the_memory_runtime_and_each_episodes_start_digest(sto
     assert all(isinstance(d, str) for d in digests.values())          # 一条 episode 一个世界摘要
     assert mem.layout.round_snapshots(ROUND) == []                    # 全部已提交
     assert not any(mem.layout.verify_snapshot(ROUND, sid).exists() for sid in ("s1", "s2", "s3"))   # 轮次结束即删
-    assert not mem.layout.verify_scratch(ROUND).exists()
+    assert not (mem.layout.root / "snapshots" / ROUND).exists()
     assert sorted(p.name for p in (mem.layout.root / "deploy").glob("*.json")) == ["s1.json", "s2.json", "s3.json"]
+    assert all(not list(d.iterdir()) for d in (mem.layout.root / "held").iterdir())   # held 快照提交后都删了
 
 
 def test_the_round_payload_gets_a_copy_of_the_memory_runtime(store, mem):
     runtime = json.loads(json.dumps(STAND_IN_MEMORY_RUNTIME))
     h = make_start_round_handler(config=_cfg(), client_factory=_Factory(), backend_factory=lambda m, c: Echo(),
                                  personas_loader=_loader, memory_store=mem.store, memory_layout=mem.layout,
-                                 memory_runtime=runtime, scratch_store_factory=FileTupleStore)
+                                 memory_runtime=runtime)
     runtime["backend"] = "mutated-after-assembly"
     assert _start(store, h).payload["memory_runtime"]["backend"] == "stand-in"
 
@@ -564,7 +570,7 @@ def test_a_t3_round_rolls_back_the_in_flight_episode_and_drops_its_copy(store, m
     second = "deploy-zengen-v1-s2-1"
     assert mem.store.digest("s2") == env.payload["episode_digests"][second]
     assert mem.layout.round_snapshots(ROUND) == []
-    assert not list((mem.layout.root / "snapshots" / ROUND).glob("*.world"))   # 旁注随快照删
+    assert not list((mem.layout.root / "held" / "s2").iterdir())       # 回滚后 held 快照也删了
 
 
 def test_a_data_error_mid_episode_is_rolled_back_by_the_round(store, mem):
@@ -583,7 +589,7 @@ def test_a_data_error_mid_episode_is_rolled_back_by_the_round(store, mem):
     backend = Spoiled()
     h = make_start_round_handler(config=_cfg(), client_factory=_Factory(), backend_factory=lambda m, c: backend,
                                  personas_loader=_loader, memory_store=mem.store, memory_layout=mem.layout,
-                                 memory_runtime=STAND_IN_MEMORY_RUNTIME, scratch_store_factory=FileTupleStore)
+                                 memory_runtime=STAND_IN_MEMORY_RUNTIME)
     env = _start(store, h)
     _assert_failed(store, "mindagent.rounds", "SimpleActioDataError")
     assert mem.store.digest("s2") == env.payload["episode_digests"]["deploy-zengen-v1-s2-1"]
@@ -620,21 +626,25 @@ def test_a_failed_restore_fails_the_round_and_keeps_library_and_copy(store, mem)
     assert len(mem.layout.round_snapshots(ROUND)) == 1                # 副本保留;库停在覆盖后的状态,不再回滚
 
 
-def test_verification_replays_on_read_only_snapshot_copies(store, mem, monkeypatch):
+def test_verification_replays_on_read_only_replay_worlds(store, mem, monkeypatch):
     import mindagent.rounds as rounds
     calls = []
     real = rounds.instantiate
     monkeypatch.setattr(rounds, "instantiate", lambda *a, **kw: calls.append(kw) or real(*a, **kw))
     seen_verify = {}
-    real_backup = mem.store.backup_to
+    real_snap, real_write = mem.store.snapshot, MemoryLayout.write_record
 
-    def backup_to(world, path):
-        digest = real_backup(world, path)
+    def snapshot(world, *, note):
+        seen_verify.setdefault(world, []).append(note)
+        return real_snap(world, note=note)
+
+    def write_record(self, path, rec):
         if path.name.startswith("verify-"):
-            seen_verify[world] = path == mem.layout.verify_snapshot(ROUND, world) and path.exists()
-        return digest
+            assert path == mem.layout.verify_snapshot(ROUND, rec.world_id)
+        return real_write(self, path, rec)
 
-    monkeypatch.setattr(mem.store, "backup_to", backup_to)
+    monkeypatch.setattr(mem.store, "snapshot", snapshot)
+    monkeypatch.setattr(MemoryLayout, "write_record", write_record)
     _skill(store, GOAL)
     env = _start(store, _handler(mem=mem))
     assert env.payload["proposals"]                                    # 有草案才会验证
@@ -643,14 +653,46 @@ def test_verification_replays_on_read_only_snapshot_copies(store, mem, monkeypat
     assert len(replays) == 6 * len(env.payload["proposals"])
     assert all(kw["memory"] is not None for kw in replays)
     assert all(mem.store.pending_events(sid) == [] for sid in ("s1", "s2", "s3"))
-    assert all(seen_verify[sid] for sid in ("s1", "s2", "s3"))         # 每个情境的验证快照都拍过
+    assert all(f"rise verify {ROUND} {sid}" in seen_verify[sid] for sid in ("s1", "s2", "s3"))   # 每个情境的验证快照都拍过
     assert not mem.layout.verify_snapshot(ROUND, "s1").exists()        # 轮次结束即删
+    assert not list((mem.layout.root / "replay").iterdir())            # 重放世界都放了
+
+
+def test_verification_forks_one_replay_world_per_scenario_and_releases_it(store, mem, monkeypatch):
+    forks, names, opened, released = [], [], [], []
+    real_fork, real_open, real_release = mem.store.fork_replay, mem.store.open_replay, mem.store.release_replay
+
+    def fork(w, sid, *, round_id):
+        forks.append(w); names.append(real_fork(w, sid, round_id=round_id)); return names[-1]
+
+    monkeypatch.setattr(mem.store, "fork_replay", fork)
+    monkeypatch.setattr(mem.store, "open_replay", lambda name, holder: opened.append(name) or real_open(name, holder))
+    monkeypatch.setattr(mem.store, "release_replay", lambda name: released.append(name) or real_release(name))
+    _skill(store, GOAL); _skill(store, GOAL2)                           # 两个草案:基线与候选不止一对
+    _start(store, _handler(mem=mem))
+    assert sorted(forks) == sorted(set(forks)) and set(forks) <= {"s1", "s2", "s3"}   # 每个情境至多一次
+    assert opened and set(opened) <= set(names)                         # 重放端口只经 open_replay,名字原样传
+    assert len(opened) > len(names)                                     # 多个实例共用一个重放世界
+    assert sorted(released) == sorted(names)
+    assert not any(mem.layout.verify_snapshot(ROUND, sid).exists() for sid in ("s1", "s2", "s3"))
+    assert not (mem.layout.root / "snapshots" / ROUND).exists()
+
+
+def test_a_verify_record_left_by_a_crash_is_dropped_with_its_snapshot_before_a_new_one(store, mem):
+    # 50 篇:验证收尾先删快照、后删记录;崩在两者之间,重入见到旧记录会对同一个 id 再删一次
+    ref = mem.store.snapshot("s1", note=f"rise verify {ROUND} s1")
+    rec = mem.layout.verify_snapshot(ROUND, "s1")
+    mem.layout.write_record(rec, SnapshotRecord("s1", ref.snapshot_id, ref.digest))
+    _skill(store, GOAL)
+    env = _start(store, _handler(mem=mem))
+    assert env.status == "executed" and not rec.exists()
+    assert not (mem.layout.root / "held" / "s1" / f"{ref.snapshot_id}.json").exists()
 
 
 # ---------------- 修补第 1 轮:轮次写成终态之前先回滚 ----------------
 
 def _kept_copy(store, mem):
-    """造一个 pending 轮次,s1 在途时崩:起点快照留着,s1 世界里有半截记忆。返回 (起点摘要, 快照路径)。"""
+    """造一个 pending 轮次,s1 在途时崩:在途记录与 held 快照留着,s1 世界里有半截记忆。返回 (起点摘要, 记录路径)。"""
     class Crash(Exception):
         pass
 
@@ -671,7 +713,7 @@ def test_a_superseded_round_with_a_kept_copy_is_rolled_back_first(store, mem):
     env2 = _start(store, _handler(mem=mem), model="zengen-v2")
     old = store.read_product(agent_round_file("zengen-v1"))
     assert old.status == "failed" and old.payload["failure"]["category"] == "superseded"
-    assert not snap.exists() and not snap.with_suffix(".world").exists()
+    assert not snap.exists()
     # v1 的半截记忆在 v2 开跑之前就被覆盖回起点:v2 第一条 episode 的起点摘要就是 v1 那条的起点
     assert env2.payload["episode_digests"]["deploy-zengen-v2-s1-1"] == start
 
@@ -702,8 +744,8 @@ def test_a_rollback_locks_the_worlds_of_the_stale_round_not_only_the_current_con
     assert mem.store.digest("s1") == start and not snap.exists()
 
 
-def test_a_stale_round_product_without_scenario_ids_is_rolled_back_by_its_world_tags(store, mem):
-    # 产物早于本改动、没有 scenario_ids:按快照旁注找世界、锁上再恢复
+def test_a_stale_round_product_without_scenario_ids_is_rolled_back_by_its_records(store, mem):
+    # 产物早于本改动、没有 scenario_ids:按在途记录里的世界、锁上再恢复
     start, snap = _kept_copy(store, mem)
     env = store.read_product(agent_round_file("zengen-v1"))
     del env.payload["scenario_ids"]
@@ -716,14 +758,16 @@ def test_a_stale_round_product_without_scenario_ids_is_rolled_back_by_its_world_
     assert mem.store.digest("s1") == start and not snap.exists()
 
 
-def test_a_stale_snapshot_without_a_world_tag_fails_the_rollback_naming_it(store, mem):
-    # 本轮自己重入时驱动器按路径认得自己的快照,不靠旁注;回滚(这里由取代它的新轮次触发)要靠旁注找世界
+def test_a_stale_unreadable_record_fails_the_rollback_naming_it(store, mem):
+    # 回滚(这里由取代它的新轮次触发)要靠记录找世界;记录读不出就一个世界都不碰
     start, snap = _kept_copy(store, mem)
-    snap.with_suffix(".world").unlink()
+    snap.write_text("not json")
     _model(store, 2, "run-002")
     (store.repo_root / run_dir("run-002")).mkdir(parents=True)
     env2 = _start(store, _handler(mem=mem, scenario_ids=("s2",)), model="zengen-v2")
-    assert env2.status == "executed"
+    # 读不出的记录照旧日坏旁注的口径:新轮次查在途快照时同样读到它,宁可停下(T3),不往任何世界写
+    assert env2.status == "failed" and "MindAgentDataError" in env2.payload["failure"]["reason"]
+    assert mem.layout.round_snapshots("agent-round-zengen-v2") == []
     env = store.read_product(agent_round_file("zengen-v1"))
     assert env.status == "failed" and env.payload["failure"]["point"] == "mindagent.deployment.restore"
     assert snap.name in env.payload["failure"]["reason"]
@@ -765,21 +809,74 @@ def test_a_failed_rollback_still_fails_the_round_and_keeps_library_and_copy(stor
     start, snap = _kept_copy(store, mem)
     before = mem.store.digest("s1")
 
-    def broken(world, path):
+    def broken(world, snapshot_id):
         raise OSError("disk")
 
-    monkeypatch.setattr(mem.store, "restore_from", broken)
+    monkeypatch.setattr(mem.store, "restore", broken)
     _model(store, 2, "run-002")
     _start(store, _handler(mem=mem))
     env = store.read_product(agent_round_file("zengen-v1"))
     assert env.status == "failed" and env.payload["failure"]["point"] == "mindagent.deployment.restore"
     assert "OSError" in env.payload["failure"]["reason"] and "disk" not in env.payload["failure"]["reason"]
     assert snap.exists() and mem.store.digest("s1") == before
-    assert mem.layout.world_of(snap) == "s1"                           # 旁注也留着
+    assert mem.layout.world_of(snap) == "s1"                           # 记录原样留着
 
 
-def test_a_copy_that_cannot_be_deleted_after_rollback_fails_the_round_instead_of_escaping(store, mem, monkeypatch):
-    # 终审复审 F4:覆盖成功但删副本永久失败(如权限)时,轮次判 T3 留记录,不从处理器逃出
+@pytest.mark.parametrize("code", ["world_held", "snapshot_not_found", "restore_digest_mismatch"])
+def test_a_permanent_restore_failure_in_a_rollback_fails_the_round_and_keeps_record_and_snapshot(
+        store, mem, monkeypatch, code):
+    start, snap = _kept_copy(store, mem)
+    deleted = []
+    monkeypatch.setattr(mem.store, "restore",
+                        lambda w, sid: (_ for _ in ()).throw(MemoryFailureError(code, transient=False)))
+    monkeypatch.setattr(mem.store, "delete_snapshot", lambda w, sid: deleted.append(sid))
+    _model(store, 2, "run-002")
+    _start(store, _handler(mem=mem))
+    env = store.read_product(agent_round_file("zengen-v1"))
+    assert env.status == "failed" and env.payload["failure"]["point"] == "mindagent.deployment.restore"
+    assert "MemoryFailureError" in env.payload["failure"]["reason"]
+    assert snap.exists() and deleted == []                             # 记录与快照都留着等人
+
+
+def test_a_busy_world_defers_the_rollback_and_keeps_the_round_pending(store, mem, monkeypatch):
+    from controlplane.deferred import DeferredError
+    start, snap = _kept_copy(store, mem)
+    monkeypatch.setattr(mem.store, "restore",
+                        lambda w, sid: (_ for _ in ()).throw(MemoryFailureError("world_busy", transient=True)))
+    _model(store, 2, "run-002")
+    with pytest.raises(DeferredError, match="MemoryFailureError"):
+        _start(store, _handler(mem=mem))
+    assert store.read_product(agent_round_file("zengen-v1")).status == "pending"
+    assert snap.exists()
+
+
+def test_a_rollback_restores_by_record_then_drops_record_and_snapshot(store, mem, monkeypatch):
+    start, rec = _kept_copy(store, mem)                                 # 夹具改成留一份在途记录
+    deleted = []
+    real = mem.store.delete_snapshot
+    monkeypatch.setattr(mem.store, "delete_snapshot", lambda w, sid: deleted.append((w, sid, rec.exists())) or real(w, sid))
+    _model(store, 2, "run-002")
+    _start(store, _handler(mem=mem))
+    assert mem.store.digest("s1") == start and not rec.exists()
+    assert [(w, gone) for w, _, gone in deleted][:1] == [("s1", False)]
+
+
+def test_a_snapshot_that_cannot_be_deleted_after_a_rollback_is_only_a_warning(store, mem, monkeypatch, caplog):
+    start, rec = _kept_copy(store, mem)
+    monkeypatch.setattr(mem.store, "delete_snapshot",
+                        lambda w, sid: (_ for _ in ()).throw(OSError("denied at /secret")))
+    _model(store, 2, "run-002")
+    (store.repo_root / run_dir("run-002")).mkdir(parents=True)
+    with caplog.at_level("WARNING"):
+        env2 = _start(store, _handler(mem=mem), model="zengen-v2")
+    old = store.read_product(agent_round_file("zengen-v1"))
+    assert old.payload["failure"]["category"] == "superseded"           # 回滚成功,轮次照常被取代
+    assert env2.payload["episode_digests"]["deploy-zengen-v2-s1-1"] == start and not rec.exists()
+    assert "delete_snapshot failed: OSError" in caplog.text and "/secret" not in caplog.text
+
+
+def test_a_record_that_cannot_be_deleted_after_rollback_fails_the_round_instead_of_escaping(store, mem, monkeypatch):
+    # 终审复审 F4:恢复成功但删记录永久失败(如权限)时,轮次判 T3 留记录,不从处理器逃出
     _, snap = _kept_copy(store, mem)
     real_unlink = type(snap).unlink
 
@@ -811,7 +908,7 @@ def test_a_corrupt_deployment_library_fails_the_round_t3_and_the_tick_does_not_r
     path.write_text("{not json", encoding="utf-8")
     _tick(store, _handler(mem=mem))
     fr = _assert_failed(store, "mindagent.deployment.memory",
-                        "backup deploy-zengen-v1-s1-1 of world s1: MemoryFailureError")
+                        "snapshot deploy-zengen-v1-s1-1 of world s1: MemoryFailureError")
     assert "not json" not in fr.payload["reason"]
     _tick(store, _handler(mem=mem))                                      # 终态:下一 tick 不再触发
     assert store.read_product(agent_round_file("zengen-v1")).status == "failed"
@@ -821,19 +918,20 @@ def test_a_snapshot_directory_that_cannot_be_created_fails_the_round_t3(store, m
     (mem.layout.root / "snapshots").parent.mkdir(parents=True, exist_ok=True)
     (mem.layout.root / "snapshots").write_text("a file where the directory should be", encoding="utf-8")
     _tick(store, _handler(mem=mem))
-    fr = _assert_failed(store, "mindagent.deployment.memory", "snapshot dir for deploy-zengen-v1-s1-1: NotADirectoryError")
+    fr = _assert_failed(store, "mindagent.deployment.memory",
+                        "record snapshot of deploy-zengen-v1-s1-1: NotADirectoryError")
     assert "should be" not in fr.payload["reason"] and str(mem.layout.root) not in fr.payload["reason"]
 
 
 def test_a_failing_verify_snapshot_fails_the_round_t3(store, mem, monkeypatch):
-    real = mem.store.backup_to
+    real = mem.store.snapshot
 
-    def backup_to(world, path):
-        if path.name.startswith("verify-"):
+    def snapshot(world, *, note):
+        if note.startswith("rise verify "):
             raise OSError("disk full at /secret/path")
-        return real(world, path)
+        return real(world, note=note)
 
-    monkeypatch.setattr(mem.store, "backup_to", backup_to)
+    monkeypatch.setattr(mem.store, "snapshot", snapshot)
     _tick(store, _handler(mem=mem))
     fr = _assert_failed(store, "mindagent.rounds.verify", "OSError")
     assert "/secret/path" not in fr.payload["reason"]
@@ -853,12 +951,11 @@ def test_a_scenario_id_the_lock_refuses_fails_the_round_t3_without_rollback(stor
     assert factory.count == 0 and not (mem.layout.root / "snapshots").exists()
 
 
-def test_a_corrupt_world_tag_left_by_another_round_fails_the_round_t3(store, mem):
-    # uncommitted_snapshots 遇到坏旁注抛 MindAgentDataError:确定性,轮次 T3;一个会话都不开
+def test_an_unreadable_record_left_by_another_round_fails_the_round_t3(store, mem):
+    # uncommitted_snapshots 遇到读不出的记录抛 MindAgentDataError:确定性,轮次 T3;一个会话都不开
     p = mem.layout.snapshot("agent-round-zengen-v0", "deploy-zengen-v0-s1-1")
     p.parent.mkdir(parents=True)
-    p.write_text("{}")
-    p.with_suffix(".world").write_text("s1 ")
+    p.write_text('{"world_id": "s1 ", "snapshot_id": "snap-0", "digest": "d"}')
     factory = _Factory()
     _tick(store, _handler(mem=mem, factory=factory))
     _assert_failed(store, "mindagent.rounds", "MindAgentDataError")
@@ -867,10 +964,9 @@ def test_a_corrupt_world_tag_left_by_another_round_fails_the_round_t3(store, mem
 
 def test_another_rounds_uncommitted_snapshot_defers_the_round_and_writes_no_snapshot(store, mem):
     from controlplane.deferred import DeferredError
+    ref = mem.store.snapshot("s1", note="rise episode deploy-zengen-v0-s1-1")
     p = mem.layout.snapshot("agent-round-zengen-v0", "deploy-zengen-v0-s1-1")
-    p.parent.mkdir(parents=True)
-    p.write_text("{}")
-    mem.layout.write_world_tag(p, "s1")
+    mem.layout.write_record(p, SnapshotRecord("s1", ref.snapshot_id, ref.digest))
     factory = _Factory()
     with pytest.raises(DeferredError, match="round agent-round-zengen-v0"):
         _start(store, _handler(mem=mem, factory=factory))
@@ -884,29 +980,24 @@ def test_the_round_handler_forwards_the_episode_registration_hooks(store, mem):
     h = make_start_round_handler(
         config=_cfg(scenario_ids=("s1",)), client_factory=_Factory(), backend_factory=lambda m, c: Echo(),
         personas_loader=_loader, memory_store=mem.store, memory_layout=mem.layout,
-        memory_runtime=STAND_IN_MEMORY_RUNTIME, scratch_store_factory=FileTupleStore,
+        memory_runtime=STAND_IN_MEMORY_RUNTIME,
         register_episode=lambda eid, rid: seen.append(("register", eid, rid)),
         unregister_episode=lambda eid: seen.append(("unregister", eid)))
     assert _start(store, h).status == "executed"
     assert seen == [("register", "deploy-zengen-v1-s1-1", ROUND), ("unregister", "deploy-zengen-v1-s1-1")]
 
 
-def test_a_verify_copy_that_cannot_be_restored_fails_the_round_t3(store, mem):
-    # 验证重放的临时副本 restore_from 抛永久 MemoryFailureError:T3(失败点 mindagent.rounds.verify),只报类名
+def test_a_replay_world_that_cannot_be_forked_fails_the_round_t3(store, mem, monkeypatch):
+    # fork_replay 抛永久 MemoryFailureError:T3(失败点 mindagent.rounds.verify),只报类名
     from simple_actio.memory_port import MemoryFailureError
-
-    class BrokenScratch(FileTupleStore):
-        def restore_from(self, world_id, path):
-            raise MemoryFailureError("JSONDecodeError at /secret", transient=False)
-
+    monkeypatch.setattr(mem.store, "fork_replay", lambda *a, **kw: (_ for _ in ()).throw(
+        MemoryFailureError("JSONDecodeError at /secret", transient=False)))
     _skill(store, GOAL)                                                  # 有草案才会验证
-    h = make_start_round_handler(config=_cfg(), client_factory=_Factory(), backend_factory=lambda m, c: Echo(),
-                                 personas_loader=_loader, memory_store=mem.store, memory_layout=mem.layout,
-                                 memory_runtime=STAND_IN_MEMORY_RUNTIME, scratch_store_factory=BrokenScratch)
-    _tick(store, h)
+    _tick(store, _handler(mem=mem))
     fr = _assert_failed(store, "mindagent.rounds.verify", "verify snapshot: MemoryFailureError")
     assert "/secret" not in fr.payload["reason"]
     assert not (mem.layout.root / "snapshots" / ROUND).exists()          # 验证收尾照常清掉
+    assert all(not list(d.iterdir()) for d in (mem.layout.root / "held").iterdir())
 
 
 def test_an_executed_round_leaves_no_empty_snapshot_directory(store, mem):
@@ -919,18 +1010,13 @@ def test_an_executed_round_leaves_no_empty_snapshot_directory(store, mem):
 
 # ---------------- 修复波次 A:验证重放里的记忆异常(终审 I-2)与验证收尾的 close 失败(终审 M-1) ----------------
 
-class _RecallFailingScratch(FileTupleStore):
-    """验证重放的临时副本库:它开出的端口 recall 抛给定的 MemoryFailureError(替身端口注入异常);
-    close 照常关(还记下次数),所以收尾能删掉临时目录。"""
+def _failing_replays(mem, monkeypatch, *, exc, closes=None):
+    """让替身管理面的 open_replay 开出的只读端口 recall 抛给定的 MemoryFailureError;close 照常关(还记下次数),
+    所以收尾能放掉重放世界。"""
+    real = mem.store.open_replay
 
-    def __init__(self, root, *, exc, closes=None):
-        super().__init__(root)
-        self._exc = exc
-        self._closes = closes
-
-    def open(self, world_id, holder):
-        port = super().open(world_id, holder)
-        exc, closes = self._exc, self._closes
+    def open_replay(name, holder):
+        port = real(name, holder)
 
         class Port:
             def recall(self, query, *, limit):
@@ -952,20 +1038,17 @@ class _RecallFailingScratch(FileTupleStore):
 
         return Port()
 
-
-def _verify_handler(mem, scratch_factory):
-    return make_start_round_handler(config=_cfg(), client_factory=_Factory(), backend_factory=lambda m, c: Echo(),
-                                    personas_loader=_loader, memory_store=mem.store, memory_layout=mem.layout,
-                                    memory_runtime=STAND_IN_MEMORY_RUNTIME, scratch_store_factory=scratch_factory)
+    monkeypatch.setattr(mem.store, "open_replay", open_replay)
 
 
-def test_a_transient_memory_failure_in_verification_replay_defers_the_round(store, mem):
+def test_a_transient_memory_failure_in_verification_replay_defers_the_round(store, mem, monkeypatch):
     from simple_actio.memory_port import MemoryFailureError
     from controlplane.deferred import DeferredError
     closes = []
     boom = MemoryFailureError("embed endpoint http://secret/v1 down", transient=True)
     _skill(store, GOAL)                                                  # 有草案才会验证
-    h = _verify_handler(mem, lambda root: _RecallFailingScratch(root, exc=boom, closes=closes))
+    _failing_replays(mem, monkeypatch, exc=boom, closes=closes)
+    h = _handler(mem=mem)
     with pytest.raises(DeferredError) as info:
         h(store, Action(kind="start_agent_round", target_id="zengen-v1", detail={}))
     assert "MemoryFailureError" in info.value.reason and "secret" not in info.value.reason
@@ -973,42 +1056,61 @@ def test_a_transient_memory_failure_in_verification_replay_defers_the_round(stor
     assert env.status == "pending"
     assert not store.exists(failure_record_file("run-001", "agent-zengen-v1"))
     assert closes                                                        # 验证实例照样关了
-    assert not mem.layout.verify_snapshot(ROUND, "s1").exists()          # 验证快照已删
-    assert not mem.layout.verify_scratch(ROUND).exists()                 # 临时目录已删
+    assert not mem.layout.verify_snapshot(ROUND, "s1").exists()          # 验证记录已删
+    assert not list((mem.layout.root / "replay").iterdir())              # 重放世界已放
     _tick(store, h)                                                      # 守护进程的 tick 接住延后,不以异常退出
+    monkeypatch.undo()
     env = _start(store, _handler(mem=mem))                               # 嵌入恢复后重入:部署 episode 复用,轮次收完
     assert env.status == "executed" and env.payload["proposals"]
 
 
-def test_a_permanent_memory_failure_in_verification_replay_fails_the_round_t3(store, mem):
+def test_a_permanent_memory_failure_in_verification_replay_fails_the_round_t3(store, mem, monkeypatch):
     from simple_actio.memory_port import MemoryFailureError
     boom = MemoryFailureError("RuntimeError at /secret/db", transient=False)
     _skill(store, GOAL)
-    _tick(store, _verify_handler(mem, lambda root: _RecallFailingScratch(root, exc=boom)))   # 不从 tick 逃出
+    _failing_replays(mem, monkeypatch, exc=boom)
+    _tick(store, _handler(mem=mem))                                      # 不从 tick 逃出
     fr = _assert_failed(store, "mindagent.rounds.verify", "MemoryFailureError")
     assert "/secret" not in fr.payload["reason"]
     assert not (mem.layout.root / "snapshots" / ROUND).exists()          # 验证收尾照常清掉
 
 
-def test_a_close_failure_in_verification_cleanup_does_not_change_the_round_result(store, mem, caplog):
+def test_a_close_failure_in_verification_cleanup_does_not_change_the_round_result(store, mem, monkeypatch, caplog):
     from simple_actio.memory_port import MemoryFailureError
+    real = mem.store.open_replay
 
-    class CloseFailingScratch(FileTupleStore):
-        def open(self, world_id, holder):
-            port = super().open(world_id, holder)
-            real_close = port.close
+    def open_replay(name, holder):
+        port = real(name, holder)
+        real_close = port.close
 
-            def close():
-                real_close()
-                raise MemoryFailureError("checkpoint at /secret/db", transient=False)
+        def close():
+            real_close()
+            raise MemoryFailureError("checkpoint at /secret/db", transient=False)
 
-            port.close = close
-            return port
+        port.close = close
+        return port
 
+    monkeypatch.setattr(mem.store, "open_replay", open_replay)
     _skill(store, GOAL)
     with caplog.at_level("WARNING", logger="mindagent.rounds"):
-        _tick(store, _verify_handler(mem, CloseFailingScratch))
+        _tick(store, _handler(mem=mem))
     env = store.read_product(agent_round_file("zengen-v1"))
     assert env.status == "executed" and env.payload["proposals"]          # 轮次结果不受影响
     assert "MemoryFailureError" in caplog.text and "/secret" not in caplog.text
     assert not (mem.layout.root / "snapshots" / ROUND).exists()
+
+
+@pytest.mark.parametrize("step", ["release_replay", "delete_snapshot"])
+def test_a_failure_while_tidying_up_verification_is_only_a_warning(store, mem, monkeypatch, caplog, step):
+    real = getattr(mem.store, step)
+
+    def failing(*a, **kw):
+        real(*a, **kw)
+        raise OSError("gone at /secret")
+
+    _skill(store, GOAL)
+    monkeypatch.setattr(mem.store, step, failing)
+    with caplog.at_level("WARNING"):
+        env = _start(store, _handler(mem=mem))
+    assert env.status == "executed" and env.payload["proposals"]
+    assert "OSError" in caplog.text and "/secret" not in caplog.text

@@ -646,7 +646,7 @@ def _three_slots():
 def test_a_registered_deployment_session_opens_opponents_in_the_scenario_world(store, tmp_path):
     from simple_actio.memory import FileTupleStore
     from simulator.datamodel import TurnRecord
-    deploy = FileTupleStore(tmp_path / "deploy")
+    deploy = FileTupleStore(tmp_path / "deploy", held_root=tmp_path / "held", replay_root=tmp_path / "replay")
     runtime = AgentRuntime(store, ("嗯",), deployment_store=deploy)
     runtime.register_deployment_episode("deploy-m-s1-1", "agent-round-m")
     res = runtime._backends(_slot_info(_scenario_with(), _two_slots(), episode_id="deploy-m-s1-1"))
@@ -664,7 +664,7 @@ def test_each_deployment_opponent_writes_under_its_own_persona(store, tmp_path):
     """同一轮被两个对手位各记一次:key 以各自位上的人格 id 结尾、记在各自名下,不是槽位 id,也不互换。"""
     from simple_actio.memory import FileTupleStore
     from simulator.datamodel import TurnRecord
-    deploy = FileTupleStore(tmp_path / "deploy")
+    deploy = FileTupleStore(tmp_path / "deploy", held_root=tmp_path / "held", replay_root=tmp_path / "replay")
     runtime = AgentRuntime(store, ("嗯",), deployment_store=deploy)
     runtime.register_deployment_episode("deploy-m-s1-1", "agent-round-m")
     res = runtime._backends(_slot_info(_scenario_with(), _three_slots(), episode_id="deploy-m-s1-1"))
@@ -683,7 +683,7 @@ def test_an_unregistered_deployment_session_keeps_empty_opponents_and_warns(stor
     import logging
     from simple_actio.memory import FileTupleStore, TupleMemory
     from simulator.datamodel import TurnRecord
-    deploy = FileTupleStore(tmp_path / "deploy")
+    deploy = FileTupleStore(tmp_path / "deploy", held_root=tmp_path / "held", replay_root=tmp_path / "replay")
     runtime = AgentRuntime(store, ("嗯",), deployment_store=deploy)
     runtime.register_deployment_episode("deploy-m-s1-2", "agent-round-m")     # 别的 episode 登记了,不算这条
     with caplog.at_level(logging.WARNING, logger="factory.agent"):
@@ -698,7 +698,7 @@ def test_an_unregistered_deployment_session_keeps_empty_opponents_and_warns(stor
 
 def test_unregistering_a_deployment_episode_sends_later_sessions_back_to_an_empty_memory(store, tmp_path):
     from simple_actio.memory import FileTupleStore, TupleMemory
-    deploy = FileTupleStore(tmp_path / "deploy")
+    deploy = FileTupleStore(tmp_path / "deploy", held_root=tmp_path / "held", replay_root=tmp_path / "replay")
     runtime = AgentRuntime(store, ("嗯",), deployment_store=deploy)
     runtime.register_deployment_episode("deploy-m-s1-1", "agent-round-m")
     runtime.unregister_deployment_episode("deploy-m-s1-1")
@@ -711,7 +711,7 @@ def test_unregistering_a_deployment_episode_sends_later_sessions_back_to_an_empt
 def test_a_training_session_never_opens_deployment_ports(store, tmp_path):
     """会话登记给了训练 run 就走训练路,哪怕它的 episode id 也在部署登记表里。"""
     from simple_actio.memory import FileTupleStore, TupleMemory
-    deploy = FileTupleStore(tmp_path / "deploy")
+    deploy = FileTupleStore(tmp_path / "deploy", held_root=tmp_path / "held", replay_root=tmp_path / "replay")
     runtime = AgentRuntime(store, ("嗯",), deployment_store=deploy)
     runtime.register_session("s1", "run-1")
     runtime.register_deployment_episode("run-1-grpo0-s1-r0", "agent-round-m")
@@ -724,7 +724,7 @@ def test_a_training_session_never_opens_deployment_ports(store, tmp_path):
 def test_a_failure_after_opening_a_deployment_port_closes_it_before_reraising(store, tmp_path, monkeypatch):
     import factory.agent as agent_mod
     from simple_actio.memory import FileTupleStore
-    deploy = FileTupleStore(tmp_path / "deploy")
+    deploy = FileTupleStore(tmp_path / "deploy", held_root=tmp_path / "held", replay_root=tmp_path / "replay")
     real = agent_mod.memory_role_backend
     calls = []
 
@@ -746,7 +746,7 @@ def test_a_failure_after_opening_a_deployment_port_closes_it_before_reraising(st
 def test_a_failing_port_open_closes_the_ports_already_opened(store, tmp_path, monkeypatch):
     from simple_actio.memory import FileTupleStore
     from simple_actio.memory_port import MemoryFailureError
-    deploy = FileTupleStore(tmp_path / "deploy")
+    deploy = FileTupleStore(tmp_path / "deploy", held_root=tmp_path / "held", replay_root=tmp_path / "replay")
     real = deploy.open
 
     def open_once(world, holder):
@@ -765,7 +765,7 @@ def test_a_failing_port_open_closes_the_ports_already_opened(store, tmp_path, mo
 def test_the_deployment_table_is_kept_without_the_runtime_lock(store, tmp_path):
     """登记与注销只取 _routes_lock:驱动器在 finally 里注销时,close() 可能正持着 _lock 等处理器退出。"""
     from simple_actio.memory import FileTupleStore
-    runtime = AgentRuntime(store, ("嗯",), deployment_store=FileTupleStore(tmp_path / "deploy"))
+    runtime = AgentRuntime(store, ("嗯",), deployment_store=FileTupleStore(tmp_path / "deploy", held_root=tmp_path / "held", replay_root=tmp_path / "replay"))
     done = threading.Event()
 
     def churn():
@@ -1142,7 +1142,7 @@ def test_round_and_admit_handlers_and_the_runtime_share_one_management_plane(sto
         assert isinstance(r["memory_store"], FileTupleStore) and r["memory_store"] is a["memory_store"]
         assert r["memory_layout"] is a["memory_layout"]
         assert r["memory_layout"].root == git_dir(store.repo_root) / "rise-memory"
-        assert r["memory_runtime"] == STAND_IN_MEMORY_RUNTIME and r["scratch_store_factory"] is FileTupleStore
+        assert r["memory_runtime"] == STAND_IN_MEMORY_RUNTIME and "scratch_store_factory" not in r
         assert r.get("stream_deadline_s") is None                       # 替身保持现值
         assert not (store.repo_root / "control-plane" / "rise-memory").exists()
         # 运行时开对手端口用的是同一个管理面:端口数是实例内状态,不共用的话驱动器的 wait_closed 看不见对手端口

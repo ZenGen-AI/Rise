@@ -5,12 +5,12 @@
 带激活轨迹;对手轮次的内心独白与轨迹按协议已被抹掉)以 deploy-<model>-<scenario>-<k> 为 id
 写进绑定模型所在 run 的 episodes 目录。失败会话整条重跑(补充 E.4)。
 
-部署记忆(设计三 4.3–4.5 节):一个情境一个部署世界(世界 id 就是 scenario_id),跨轮次持久,智能体位与
-部署对手位都是其中的主体。每条 episode 开始前先写 `.world` 旁注、再把整个世界 backup_to 起点快照
-snapshots/<round_id>/deploy-<episode_id>;每次尝试新开 (世界, 智能体位人格) 端口、新造实例,对手位的端口由服务端
-按登记的 round_id 开。尝试失败先关实例与端口、等这个世界的端口全关(服务端在另一条线程上收尾),再用起点快照
-覆盖整个世界。成功时等端口全关、落盘 episode、放弃这条 episode 留下的 pending 行(不分主体),最后删快照、再删
-旁注:删快照就是提交点。两种 id:服务端与落盘文件名用不带轮次的部署 id(deploy-...,白名单不含 '/'),
+部署记忆(设计三 4.3–4.5 节,50 篇"接服务后的快照顺序"):一个情境一个部署世界(世界 id 就是 scenario_id),
+跨轮次持久,智能体位与部署对手位都是其中的主体。每条 episode 开始前先拍整个世界的 held 快照(`snapshot`),
+再把快照 id 写进在途记录 snapshots/<round_id>/deploy-<episode_id>.rec.json;每次尝试新开 (世界, 智能体位人格) 端口、
+新造实例,对手位的端口由服务端按登记的 round_id 开。尝试失败先关实例与端口、等这个世界的端口全关(服务端在另一条
+线程上收尾),再按记录里的快照 id 恢复整个世界。成功时等端口全关、落盘 episode、放弃这条 episode 留下的 pending 行
+(不分主体),再删记录、最后删快照:删记录就是提交点。两种 id:服务端与落盘文件名用不带轮次的部署 id(deploy-...,白名单不含 '/'),
 实例(事件 key 的前缀)用带轮次前缀的 <round_id>/deploy-...,所以下一轮同名的部署 id 不撞上一轮的 key。
 调用方(轮次处理器)持本轮全部情境的世界锁。
 """
@@ -31,8 +31,8 @@ from controlplane.deferred import DeferredError
 from controlplane.gitstore import GitStore
 from controlplane.paths import episode_file
 from mindagent.config import agent_slot_of
-from mindagent.errors import AgentRoundFailedError, RestoreFailedError
-from mindagent.memory_layout import MemoryLayout, _tag_path
+from mindagent.errors import AgentRoundFailedError, MindAgentDataError, RestoreFailedError
+from mindagent.memory_layout import MemoryLayout, SnapshotRecord
 from simulator.datamodel import Episode, Persona, RoleAssignment, RoleBinding
 from simulator.realtime.client import EnvironmentServiceClient, SessionRejectedError
 from simulator.store_adapter import read_episode, read_scenario, write_episode
@@ -140,10 +140,10 @@ _log = logging.getLogger(__name__)
 
 
 def _memory_op(what: str, call: Callable[[], _T]) -> _T:
-    """部署记忆管理面与副本文件操作(建副本目录、backup、open、pending、abandon、删副本):永久的
+    """部署记忆管理面与在途记录的文件操作(snapshot、写记录、open、pending、abandon、删记录):永久的
     MemoryFailureError 与 OSError 改抛 AgentRoundFailedError(失败点 MEMORY_POINT,只报类名),轮次处理器据此
     判 T3 并回滚(终审 I-2:坏库或磁盘问题不能从处理器逃出、让守护进程每次重启都在同一处退出)。
-    瞬态的 MemoryFailureError 原样上抛:轮次留 pending,下一 tick 重入。覆盖(restore_from)不走这里,见 _restore。"""
+    瞬态的 MemoryFailureError 原样上抛:轮次留 pending,下一 tick 重入。恢复(restore)不走这里,见 _restore。"""
     try:
         return call()
     except MemoryFailureError as exc:
@@ -163,22 +163,52 @@ def _close_after_failure(what: str, close: Callable[[], None]) -> None:
         _log.warning("%s failed while another exception propagates: %s", what, type(exc).__name__)
 
 
-def _restore(memory_store: DeploymentMemoryStore, world_id: str, snap: Path,
+def _restore(memory_store: DeploymentMemoryStore, world_id: str, rec_path: Path, layout: MemoryLayout,
              expected: str | None, episode_id: str, close_wait_s: float) -> str:
-    """先等该世界的端口全关(至多 close_wait_s 秒),再用起点快照覆盖整个世界,返回覆盖后的摘要。等不到、
-    覆盖抛错、摘要与 expected 不等都是 RestoreFailedError(设计二第 9 节"覆盖失败"、设计三 4.5 节):原因只报
-    类名,库与快照由调用方原样保留,等人来看。"""
+    """先等该世界的端口全关(至多 close_wait_s 秒),再按在途记录里的快照 id 恢复整个世界,返回恢复后的摘要。
+    恢复的分码(50 篇"接服务后 `wait_closed` 保留"一节的表),`rounds.py` 的轮次回滚走同一个判法:
+
+    - 等不到端口全关、记录读不出、恢复抛永久 MemoryFailureError(`world_held`、`snapshot_not_found`、
+      `restore_digest_mismatch` 等)或 OSError、摘要与 expected 不等:RestoreFailedError(设计二第 9 节"覆盖失败")。
+    - 恢复抛瞬态 MemoryFailureError(服务的 `world_busy`:在途调用还没排干):DeferredError,轮次留 pending,
+      重入时先恢复。
+
+    原因只报类名;记录与快照由调用方原样保留,等重入或等人来看。"""
     what = f"restore {episode_id} in world {world_id}"
+    point = "mindagent.deployment.restore"
     if not memory_store.wait_closed(world_id, close_wait_s):
-        raise RestoreFailedError(f"{what}: memory ports still open after {close_wait_s:g}s",
-                                 point="mindagent.deployment.restore")
+        raise RestoreFailedError(f"{what}: memory ports still open after {close_wait_s:g}s", point=point)
     try:
-        digest = memory_store.restore_from(world_id, snap)
-    except (MemoryFailureError, OSError) as exc:
-        raise RestoreFailedError(f"{what}: {type(exc).__name__}", point="mindagent.deployment.restore") from exc
+        rec = layout.read_record(rec_path)
+        digest = memory_store.restore(world_id, rec.snapshot_id)
+    except MemoryFailureError as exc:
+        if exc.transient:            # world_busy:服务端还在排空,轮次延后、重入先恢复
+            raise DeferredError(f"{what}: {type(exc).__name__}") from exc
+        raise RestoreFailedError(f"{what}: {type(exc).__name__}", point=point) from exc
+    except (MindAgentDataError, OSError) as exc:
+        raise RestoreFailedError(f"{what}: {type(exc).__name__}", point=point) from exc
     if expected is not None and digest != expected:
-        raise RestoreFailedError(f"{what}: digest mismatch", point="mindagent.deployment.restore")
+        raise RestoreFailedError(f"{what}: digest mismatch", point=point)
     return digest
+
+
+def drop_snapshot(memory_store: DeploymentMemoryStore, world_id: str, snapshot_id: str, what: str) -> None:
+    """提交与回滚收尾时删 held 快照。记录已经删了(提交点已过),快照删不掉只留一个孤儿 held 快照,由人在看板里
+    按 `note` 删(50 篇 MA-41、失败表"孤儿 held 快照"一行):失败只记 warning、只报类名,不改变结果。
+    删已删的快照两个管理面都不抛,这里不另判。"""
+    try:
+        memory_store.delete_snapshot(world_id, snapshot_id)
+    except (MemoryFailureError, OSError) as exc:
+        _log.warning("%s: delete_snapshot failed: %s", what, type(exc).__name__)
+
+
+def _read_record_or_fail(layout: MemoryLayout, rec_path: Path, episode_id: str) -> SnapshotRecord:
+    """提交前读回本条的在途记录拿快照 id:这份记录是本次尝试之前写的或恢复时读过的,读不出说明有人动了它,
+    按管理面的永久失败判 T3(MindAgentDataError 照 `_memory_op` 的口径改抛,只报类名)。"""
+    try:
+        return layout.read_record(rec_path)
+    except MindAgentDataError as exc:
+        raise AgentRoundFailedError(f"read record of {episode_id}: {type(exc).__name__}", point=MEMORY_POINT) from exc
 
 
 def _await_closed(memory_store: DeploymentMemoryStore, world_id: str, close_wait_s: float, before: str) -> None:
@@ -306,30 +336,30 @@ def run_deployment_episodes(
 
     - 世界:一条 episode 的世界就是它的情境(world = scenario_id)。开 episode 之前,这个世界里有别的轮次留下的
       未提交起点快照(R1 回滚失败,或 R1 的轮次产物读不出)就抛 DeferredError,原因写出那个轮次 id,要人恢复或
-      删掉它;任何一份快照的 `.world` 旁注坏了抛 MindAgentDataError(轮次处理器判 T3)。本轮自己的快照不算。
-    - 起点快照:快照不在时依次 write_world_tag、memory_store.backup_to(world, snap)、
-      on_episode_start(部署 id, 起点摘要):旁注先写,崩在两步之间只留一个孤儿旁注,它既不算在途快照、也不算旧布局。
+      删掉它;任何一份在途记录读不出抛 MindAgentDataError(轮次处理器判 T3)。本轮自己的快照不算。
+    - 起点快照:记录不在时依次 memory_store.snapshot(world, note=f"rise episode {部署 id}")、写在途记录、
+      on_episode_start(部署 id, 起点摘要)。崩在快照与记录之间只留一个孤儿 held 快照,重入时重拍。
     - 每次尝试:先等该世界的端口全关,再 register_episode(部署 id, round_id)(服务端据此在同一世界里开对手位的
       端口),memory_store.open(世界, 智能体位人格) 新端口,make_instance(f"{round_id}/{部署 id}", 端口, 智能体位人格)
       新造实例,跑会话,关实例与端口,unregister_episode(部署 id)(finally 里,失败的尝试也撤销)。尝试失败先等
-      该世界的端口全关、再用起点快照覆盖整个世界(_restore),下一次尝试面对起点状态;成功时等端口全关再提交。
+      该世界的端口全关、再按记录恢复整个世界(_restore),下一次尝试面对起点状态;成功时等端口全关再提交。
       等端口全关的上限都是 close_wait_s 秒。
-    - 等端口全关超时:要恢复时抛 RestoreFailedError(库与快照都保留,等人看);开一次尝试或提交之前抛
-      DeferredError(瞬态,轮次留 pending,重入时"快照在就先恢复")。
+    - 等端口全关超时:要恢复时抛 RestoreFailedError(记录与快照都保留,等人看);开一次尝试或提交之前抛
+      DeferredError(瞬态,轮次留 pending,重入时"记录在就先恢复")。恢复的分码见 _restore。
     - 提交:某次尝试成功后落盘 episode,放弃这条 episode 留下的 pending 行(列世界的,只放弃本轮本条前缀
       f"{round_id}/{部署 id}#" 的,各按行自带的主体放弃,智能体位与对手位的都算;门② 的行归提案),
-      最后删起点快照、再删旁注。删快照就是提交点;崩在它之前,快照还在,这条就算在途。先删快照:崩在两步之间
-      留下的是孤儿旁注,反过来会留下没有旁注的快照,启动检查会把它当成旧布局。
-    - 重入:起点快照还在的 episode 先覆盖、核对摘要等于 episode_digests 里记的,再按同一 id 重跑,不重新备份。
-      起点快照不在、episode 已落盘且可复用(见 _reusable)的直接复用;技能版本变了的改用
+      再删在途记录、最后删 held 快照。删记录就是提交点;崩在它之前,记录还在,这条就算在途。先删记录:反过来
+      先删快照再崩,重入会拿一个不存在的 id 去恢复已提交的 episode。删快照失败只记 warning(drop_snapshot)。
+    - 重入:记录还在的 episode 先恢复、核对摘要等于 episode_digests 里记的,再按同一 id 重跑,不重新拍快照。
+      记录不在、episode 已落盘且可复用(见 _reusable)的直接复用;技能版本变了的改用
       rerun_episode_id(部署 id, 技能版本) 重跑,原 episode 留在树里。episode_digests 的值是本改动之前的形状
       (dict)时当作没记过:已提交的 episode 不复用、按同一 id 重跑。
     - 失败:T1(TRANSIENT_REASONS 与传输层 UNAVAILABLE)整条重跑,上限 max_retries_per_episode;其余失败
-      不重跑。两者都以 DeploymentFailedError 结束,部署世界已覆盖回起点、起点快照保留(留给重入或轮次回滚)。
-      覆盖失败(等不到端口全关、抛错或摘要对不上)抛 RestoreFailedError,库与快照都保留。
+      不重跑。两者都以 DeploymentFailedError 结束,部署世界已恢复到起点、记录与快照保留(留给重入或轮次回滚)。
+      恢复失败(等不到端口全关、永久失败或摘要对不上)抛 RestoreFailedError,库、记录与快照都保留。
     - 实例自己的异常(记忆端口失败除外)与存储的 OSError:会话先 abort(服务端不落盘),实例已关,
       原异常原样上抛,不重试、不包装、不覆盖,与进程崩溃同效。
-    - 部署记忆管理面与快照文件操作(写旁注、建快照目录、backup、open、pending、abandon、删快照与旁注)的永久失败
+    - 部署记忆管理面与在途记录的文件操作(snapshot、写记录、open、pending、abandon、删记录)的永久失败
       (MemoryFailureError 非瞬态、OSError)抛 AgentRoundFailedError(失败点 mindagent.deployment.memory,
       只报类名),轮次处理器判 T3 并回滚(见 _memory_op)。每次尝试收尾关实例与端口也按这一语义;
       有原异常在途(尝试失败、实例自己抛错)时 close 失败不盖掉原异常,只记 warning(终审 M-1)。
@@ -351,7 +381,7 @@ def run_deployment_episodes(
         return digest if isinstance(digest, str) else None   # 旧形状 {persona_id: 摘要} 当作没记过
 
     def committed_reusable(eid: str) -> tuple[bool, Episode | None]:
-        """起点快照不在且已落盘时返回 (能否复用, 已落盘的 episode);快照在或没落盘时 (False, None)。"""
+        """在途记录不在且已落盘时返回 (能否复用, 已落盘的 episode);记录在或没落盘时 (False, None)。"""
         if memory_layout.snapshot(round_id, eid).exists():
             return False, None
         if not store.exists(episode_file(run_id, eid)):
@@ -382,17 +412,20 @@ def run_deployment_episodes(
                                     f"{others[0].parent.name}; restore or delete it by hand")
             if scenario is None:
                 scenario = read_scenario(store, scenario_id)
-            snap = memory_layout.snapshot(round_id, eid)
-            if snap.exists():
-                # 在途时崩溃(不论 episode 文件有没有落盘):先覆盖回起点、核对摘要,不重新备份
+            rec_path = memory_layout.snapshot(round_id, eid)
+            if rec_path.exists():
+                # 在途时崩溃(不论 episode 文件有没有落盘):先恢复到起点、核对摘要,不重新拍快照
                 expected = recorded(eid)
-                start = _restore(memory_store, world, snap, expected, eid, close_wait_s)
-                if expected is None:  # 崩在 backup 与写回轮次产物之间(或产物是旧形状)
+                start = _restore(memory_store, world, rec_path, memory_layout, expected, eid, close_wait_s)
+                if expected is None:  # 崩在写记录与写回轮次产物之间(或产物是旧形状)
                     on_episode_start(eid, start)
             else:
-                _memory_op(f"snapshot dir for {eid}", lambda: snap.parent.mkdir(parents=True, exist_ok=True))
-                _memory_op(f"world tag for {eid}", lambda: memory_layout.write_world_tag(snap, world))
-                start = _memory_op(f"backup {eid} of world {world}", lambda: memory_store.backup_to(world, snap))
+                ref = _memory_op(f"snapshot {eid} of world {world}",
+                                 lambda: memory_store.snapshot(world, note=f"rise episode {eid}"))
+                _memory_op(f"record snapshot of {eid}",
+                           lambda: memory_layout.write_record(rec_path, SnapshotRecord(world, ref.snapshot_id,
+                                                                                       ref.digest)))
+                start = ref.digest
                 on_episode_start(eid, start)
             budget = 1 + max_retries_per_episode
             raw = None
@@ -408,7 +441,7 @@ def run_deployment_episodes(
                 try:
                     port = _memory_op(f"open {persona_id} in world {world}",
                                       lambda: memory_store.open(world, persona_id))
-                    # 先关实例与端口:restore_from 要求该世界没有打开的端口。close 失败(终审 M-1)没有原异常在途时
+                    # 先关实例与端口:restore 要求该世界没有打开的端口。close 失败(终审 M-1)没有原异常在途时
                     # 按 _memory_op 改抛,有原异常在途时不盖它、只记 warning
                     try:
                         instance = make_instance(f"{round_id}/{eid}", port, persona_id)
@@ -436,14 +469,14 @@ def run_deployment_episodes(
                 if failure is None:
                     break
                 # 服务端的对手端口在另一条线程上关:_restore 先等这个世界的端口全关
-                _restore(memory_store, world, snap, start, eid, close_wait_s)
+                _restore(memory_store, world, rec_path, memory_layout, start, eid, close_wait_s)
                 if not failure.transient or attempt == budget:
                     raise DeploymentFailedError(
                         episode_id=eid, reason=failure.reason, detail=failure.detail,
                         attempts=attempt, transient=failure.transient,
                         failed_attempts=failed_attempts,
                     ) from failure
-            # 只有某次尝试成功才走到这里:等端口全关、落盘、放弃本条的 pending 行、删起点快照(提交点)与旁注
+            # 只有某次尝试成功才走到这里:等端口全关、落盘、放弃本条的 pending 行、删记录(提交点)、删快照
             _await_closed(memory_store, world, close_wait_s, f"committing {eid}")
             episode = Episode(
                 id=eid, scenario_id=raw.scenario_id, role_assignment=raw.role_assignment,
@@ -455,7 +488,8 @@ def run_deployment_episodes(
             for p in pending:
                 if p.key.startswith(prefix):
                     _memory_op(f"abandon {p.key}", lambda p=p: memory_store.abandon_event(world, p.holder, p.key))
-            _memory_op(f"commit {eid}", snap.unlink)
-            _memory_op(f"drop world tag of {eid}", lambda: _tag_path(snap).unlink(missing_ok=True))
+            rec = _read_record_or_fail(memory_layout, rec_path, eid)
+            _memory_op(f"commit {eid}", rec_path.unlink)
+            drop_snapshot(memory_store, world, rec.snapshot_id, f"commit {eid}")
             out.append(episode)
     return out

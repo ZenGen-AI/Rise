@@ -24,8 +24,8 @@
 
 组合根按记忆配置选后端(`memory_wiring`,设计二 5.1、6.2、6.4 节,第 10 节拒绝项):没设 RISE_MEMORY_CONFIG 走替身,
 设了就装配 Starling,配置有任何问题在装配期抛 `FactoryConfigError`(命令行退出码 2),不退回替身静默跑。
-记忆根是旧布局(按人格建库、没有 `.world` 旁注的起点快照)时同样在装配期拒绝启动,不迁移(设计三 4.8 节);
-`.world` 旁注坏了也在这里报,而不是留到门② 才抛。
+记忆根是旧布局(按人格建库、快照文件与旁注,判法按后端)时同样在装配期拒绝启动,不迁移(设计三 4.8 节,
+90 篇第 18 条);在途记录读不出也在这里报,而不是留到门② 才抛。
 
 部署记忆(设计二第 9 节):轮次处理器与门② 共用的一份 DeploymentMemory。替身的根目录在这棵工作树的
 git 目录里(与仓库锁 rise.lock 同处):不进工作树、不进提交,跨进程重启保留,所以起点副本与门② 收录
@@ -67,7 +67,7 @@ from factory.memory_config import (
 )
 from mindagent.deployment import SESSION_CLOSE_WAIT_S
 from mindagent.errors import MindAgentDataError
-from mindagent.memory_layout import MemoryLayout, _tag_path
+from mindagent.memory_layout import MemoryLayout
 from simulator.realtime.validation import validate_episode_id
 
 if TYPE_CHECKING:       # 只给类型注解用:运行时不导入 simple_actio.memory_starling(它导入 starling)
@@ -100,14 +100,13 @@ def stand_in_memory_resolver(seed: str | None, scenario_ids: tuple[str, ...]) ->
 
 @dataclass(frozen=True)
 class DeploymentMemory:
-    """部署记忆的四件套:库(管理面)、目录布局、运行时身份、验证重放用的临时副本库工厂。
+    """部署记忆的三件套:库(管理面)、目录布局、运行时身份。验证重放也只经这个管理面分叉重放世界。
     组合根只造一份,轮次处理器与门② 拿同一个 store:它的"打开着的端口数"是实例内状态,共用才能让
-    restore_from 的守卫看见轮次处理器开着的端口。"""
+    restore 的守卫看见轮次处理器开着的端口。"""
 
     store: DeploymentMemoryStore
     layout: MemoryLayout
     runtime: dict
-    scratch_store_factory: Callable[[Path], DeploymentMemoryStore]
 
 
 def stand_in_memory_root(repo_root: Path) -> Path:
@@ -118,56 +117,59 @@ def stand_in_memory_root(repo_root: Path) -> Path:
 _SHOWN_ENTRIES = 5     # 旧布局拒绝启动时文字里列出的条目数,多出来的只报个数
 
 
-def check_memory_layout(layout: MemoryLayout, repo_root: Path) -> None:
-    """记忆根是旧布局(设计三 4.8 节)或有坏的 `.world` 旁注时拒绝启动,抛 `FactoryConfigError`(命令行退出码 2)。
-    只读磁盘,先于任何对记忆根的写。不迁移、不静默忽略:旧库里的记忆不会被任何世界读到,留着会让人以为还在用。
+def _shown(entries: list[str]) -> str:
+    shown = ", ".join(entries[:_SHOWN_ENTRIES])
+    if len(entries) > _SHOWN_ENTRIES:
+        shown += f" and {len(entries) - _SHOWN_ENTRIES} more"
+    return shown
 
-    - 已知情境取自 `agent.yaml` 的 `scenario_ids`;文件不在时是空集,`deploy/` 下任何库都算旧布局。
+
+def check_memory_layout(layout: MemoryLayout, repo_root: Path, *, backend: str) -> None:
+    """记忆根是旧布局(设计三 4.8 节,90 篇第 18 条)或有读不出的在途记录时拒绝启动,抛 `FactoryConfigError`
+    (命令行退出码 2)。只读磁盘,先于任何对记忆根的写。不迁移、不静默忽略:旧库里的记忆不会被任何世界读到,
+    留着会让人以为还在用。
+
+    - 已知情境取自 `agent.yaml` 的 `scenario_ids`;文件不在时是空集,`deploy/` 下任何世界文件都算旧布局。
       `agent.yaml` 读不了的 `FactoryConfigError` 原样上抛。
-    - 旧布局条目由 `MemoryLayout.legacy_entries` 给,文字列出至多 5 条。它只按文件名判:从 `agent.yaml` 删掉的
-      情境的世界也会被报出,所以文字指向把情境加回配置或把文件移出记忆根,不指向清空目录。没有旁注的 `deploy-`
-      快照也算在里面,但新格式快照的旁注丢了会被同样报出,所以文字里点明这一种恢复办法。
-    - 有旁注的快照逐个 `world_of`:旁注坏了在装配期报,而不是留到门② 才抛。文字里的路径相对记忆根。"""
+    - 旧布局条目由 `MemoryLayout.legacy_entries(..., backend=)` 按后端给,文字列出至多 5 条。它只按文件名判:
+      从 `agent.yaml` 删掉的情境的世界也会被报出,所以文字指向把情境加回配置或把文件移出记忆根,不指向清空目录。
+    - 在途记录逐份 `read_record`:读不出在装配期报,而不是留到门② 才抛。文字里的路径相对记忆根,不回显记录内容。"""
     from factory.agent import AGENT_CONFIG, read_agent_settings        # 惰性:拖进 grpc 与 mindagent
 
     store = GitStore(str(repo_root))
     known = read_agent_settings(store)[0].scenario_ids if store.exists(AGENT_CONFIG) else ()
-    entries = layout.legacy_entries(known)
+    entries = layout.legacy_entries(known, backend=backend)
     if entries:
-        shown = ", ".join(entries[:_SHOWN_ENTRIES])
-        if len(entries) > _SHOWN_ENTRIES:
-            shown += f" and {len(entries) - _SHOWN_ENTRIES} more"
         # 只按文件名判,分不出"已从 agent.yaml 移除的情境的世界"和"旧的按人格库":指向移回或移走,不指向清空
+        # 提示照 FC-37 不变;旧的"快照丢了 .world 旁注"一句删掉:接服务后没有旁注,补写旁注救不回任何东西
         raise FactoryConfigError(
-            f"memory root has the old per-persona layout ({shown}); "
+            f"memory root has the old per-persona layout ({_shown(entries)}); "
             "if any of these are worlds of scenarios removed from agent.yaml, add the scenarios back to agent.yaml "
             "or move the files out of the memory root; delete them only once they are confirmed to be old "
-            "per-persona libraries; "
-            "a deploy-deploy-* snapshot listed here may instead be a new snapshot that lost its .world tag: "
-            "write the scenario id into <snapshot>.world or delete the snapshot"
+            "per-persona libraries"
         )
-    for snapshot in layout.tagged_snapshots():
+    for record in layout.any_uncommitted_snapshots():
         try:
-            layout.world_of(snapshot)
+            layout.read_record(record)
         except MindAgentDataError:
-            tag = _tag_path(snapshot).relative_to(layout.root).as_posix()       # 不回显旁注内容和绝对路径
+            rel = record.relative_to(layout.root).as_posix()       # 不回显记录内容和绝对路径
             raise FactoryConfigError(
-                f"memory root has a snapshot world tag that cannot be used ({tag}); "
-                "write the scenario id into that .world file or delete the snapshot and its tag"
+                f"memory root has an in-flight record that cannot be read ({rel}); "
+                "fix its world_id, snapshot_id and digest, or delete it once its held snapshot is dealt with"
             ) from None
 
 
 def stand_in_deployment_memory(repo_root: Path) -> DeploymentMemory:
     """替身部署记忆:FileTupleStore(<根>/deploy,held 快照在 <根>/held,重放世界在 <根>/replay) 与 MemoryLayout(<根>)
     共用一个根,运行时身份是替身那份的拷贝。
-    造之前先过 `check_memory_layout`(后缀 `.json`),旧布局拒绝启动。
+    造之前先过 `check_memory_layout`(后端 `stand-in`),旧布局拒绝启动。
     启动日志不在这里记:选后端是 `memory_wiring` 的事,它只记一次。"""
     root = stand_in_memory_root(repo_root)
     layout = MemoryLayout(root)
-    check_memory_layout(layout, repo_root)
+    check_memory_layout(layout, repo_root, backend="stand-in")
     return DeploymentMemory(
         FileTupleStore(root / "deploy", held_root=root / "held", replay_root=root / "replay"),
-        layout, copy.deepcopy(STAND_IN_MEMORY_RUNTIME), FileTupleStore)   # 第四个字段在 Task 7 删
+        layout, copy.deepcopy(STAND_IN_MEMORY_RUNTIME))
 
 
 # ---------------- Starling 那一路 ----------------
@@ -720,7 +722,7 @@ def memory_wiring(repo_root: Path, env: Mapping[str, str], *, deployment: bool) 
     - 没设(或空串):替身。`deployment` 为真才造替身的部署记忆。
     - 设了,按序:Starling 的安装来源(未安装、editable 在这里拒绝,先于任何对 `simple_actio.memory_starling` 的导入与对记忆
       根目录的写)、`OPENAI_API_KEY` 非空、`runs/` 不是符号链接也不是文件、认领记忆根目录(被另一个仓库占用就拒绝)、
-      记忆根不是旧布局且 `.world` 旁注都完好(`check_memory_layout`,后缀 `.db`)、导入 `simple_actio.memory_starling`。
+      记忆根不是旧布局且在途记录都读得出(`check_memory_layout`,后端 `starling-inprocess`)、导入 `simple_actio.memory_starling`。
       替身的同一项检查在 `stand_in_deployment_memory` 里,只在造部署记忆时做。
       装了包但 C++ 扩展载不进来(`ImportError`)译成与「没装」同一条安装提示的 `FactoryConfigError`。"""
     config = read_memory_config(env=env, repo_root=repo_root)
@@ -734,8 +736,8 @@ def memory_wiring(repo_root: Path, env: Mapping[str, str], *, deployment: bool) 
     check_api_key(env)
     _check_runs_dir(config.root)
     claim_memory_root(config.root, repo_root)
-    memory_layout = MemoryLayout(config.root, suffix=".db")
-    check_memory_layout(memory_layout, repo_root)
+    memory_layout = MemoryLayout(config.root)
+    check_memory_layout(memory_layout, repo_root, backend="starling-inprocess")    # 第 2、3 步的过渡规则,Task 17 换
     try:
         from simple_actio.memory_starling import (
             StarlingDeploymentStore,
@@ -765,8 +767,6 @@ def memory_wiring(repo_root: Path, env: Mapping[str, str], *, deployment: bool) 
                                     replay_root=config.root / "replay", endpoints=endpoints),
             memory_layout,
             copy.deepcopy(runtime),
-            lambda path: StarlingDeploymentStore(path, held_root=path / "held", replay_root=path / "replay",
-                                                 endpoints=endpoints),     # Task 7 删
         )
     _log.info("memory backend: starling")
     return MemoryWiring("starling", deployment_memory, starling_memory_resolver(layout, runtime), worlds, worlds.sweep)
