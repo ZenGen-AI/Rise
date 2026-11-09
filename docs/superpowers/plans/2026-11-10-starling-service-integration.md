@@ -4,11 +4,11 @@
 
 **Goal:** rise 的记忆从"进程内按路径开 Starling 库"换成"经纯 Python 客户端 `starling_client` 连 Starling 记忆服务"：世界、快照、分叉都按名字交给服务，rise 不再打开库文件；缺省连用户已在跑的看板服务（外部模式），测试与没有看板的机器由 rise 自己拉起服务（拉起模式）。记忆语义不变，替身路径一行不受影响。
 
-**Architecture:** 端口 `MemoryBackend` 五个方法不变，适配器 `StarlingMemory` 内部对象从 `starling.Memory` 换成客户端的 `RemoteMemory`。部署管理面改签名：放弃事件带主体、`pending_events` 返回 `PendingKey`、快照按 id（`snapshot`/`restore`/`delete_snapshot`）、验证重放从快照分叉可回收世界（`fork_replay`/`release_replay`/只读 `open`）；快照 id 记在记忆根下的在途记录 `.rec.json`。替身与 Starling 两个实现过同一套契约测试。组合根新增三个模块：世界名与 rise 设置（纯函数）、服务进程的拉起与残留核对、服务会话 ServiceSession（代号、按代号的端口计数、排空窗口、管理传输、重连再核对、致命停机）。训练 rollout 世界改为从种子分叉、只关不删；`factory seed` 从部署世界建种子，`bind` 按起点摘要钉住种子版本。
+**Architecture:** 端口 `MemoryBackend` 五个方法不变，适配器 `StarlingMemory` 内部对象从 `starling.Memory` 换成客户端的 `RemoteMemory`。部署管理面改签名：放弃事件带主体、`pending_events` 返回 `PendingKey`、快照按 id（`snapshot`/`restore`/`delete_snapshot`）、验证重放从快照分叉可回收世界（`fork_replay`/`release_replay`/只读的 `open_replay`）；快照 id 记在记忆根下的在途记录 `.rec.json`。替身与 Starling 两个实现过同一套契约测试。组合根新增三个模块：世界名与 rise 设置（纯函数）、服务进程的拉起与残留核对、服务会话 ServiceSession（代号、按代号的端口计数、排空窗口、管理传输、重连再核对、致命停机）。训练 rollout 世界改为从种子分叉、只关不删；`factory seed` 从部署世界建种子，`bind` 按起点摘要钉住种子版本。
 
 **Tech Stack:** Python 3.12，pytest（`uv run --offline pytest`），Starling `cff319d952360727823024ff43c71b15055bd8e3`（第 1 至 4 期已合并；可选 extra `memory`：第 1、2 步是 `starling-memory` 一行，第 3 步起是 `starling-client`（`#subdirectory=clients/python`）与 `starling-memory[dashboard]` 两行，钉同一提交），真 `starling-serve` 子进程，本机回环的假抽取与嵌入端点（`tests/starling_fakes.py`），gRPC 回环服务端。
 
-**Spec:** 权威设计在 `docs/design/`（00、20、30、40、50、90 篇里标 [计划中] 的接服务内容；`README.md` 与 `STYLE.md`）。历史规格 `docs/superpowers/specs/2026-11-08-starling-service-integration-design.md` 只在 docs/design 指向它的细节处用。两者冲突以 `docs/design/` 为准；计划与 docs/design 冲突也以 docs/design 为准，执行者发现冲突先停下报告，不自行发明行为（见文末「待定」）。Starling 侧引用写成 `S:<路径>:<行>`，指 `/Users/jaredguo-mini/develop/memory/starling` 在 `cff319d` 的文件。
+**Spec:** 权威设计在 `docs/design/`（00、20、30、40、50、90 篇里标 [计划中] 的接服务内容；`README.md` 与 `STYLE.md`）。历史规格 `docs/superpowers/specs/2026-11-08-starling-service-integration-design.md` 只在 docs/design 指向它的细节处用。两者冲突以 `docs/design/` 为准；计划与 docs/design 冲突也以 docs/design 为准，执行者发现冲突先停下报告，不自行发明行为（开工前已裁定的几项见文末「已定」）。Starling 侧引用写成 `S:<路径>:<行>`，指 `/Users/jaredguo-mini/develop/memory/starling` 在 `cff319d` 的文件。
 
 ## Global Constraints
 
@@ -16,7 +16,7 @@
 - **测试命令与基线。** 全量：`uv run --offline pytest -q -m 'not slow' -p no:cacheprovider`。基线（`bda664a`，2026-11-10 实测，11 分 47 秒）：`4811 passed, 13 skipped, 56 deselected`。总数会变，不许有失败。每个任务的 Step 4 只跑它列出的文件；全量由控制者在每个任务提交后于后台跑，与评审并行。**每一步（第 0 至 5 步）的最后一个任务结束时全量必须绿**；同一步内的中间任务允许下文列出的红窗口，不为它们加兼容层。
 - **装依赖。** 第 3 步改了锁文件之后，本机先跑一次 `uv sync --extra dev --extra memory`（要编译 Starling 的 C++，2026-11-10 在干净 venv 里实测 2 分 38 秒）。`uv run` 不删多余的包，所以不重新 sync 时 `starling_client` 不在，真服务的测试会被 `importorskip` 跳过、看起来是绿的。第 3 步之后的每个任务 Step 4 先确认 `uv run --offline python -c "import starling_client, starling.service"` 成功。
 - **红窗口。** Task 2 结束到 Task 3 结束：Starling 部署管理面的签名落后于端口协议，`tests/test_simple_actio_deployment_store_contract.py`、`tests/test_simple_actio_starling_store.py`、`tests/test_ma_deployment_starling.py` 的 Starling 参数会失败。Task 4 结束到 Task 7 结束：管理面的快照接口与布局变了，契约测试与 `tests/test_simple_actio_starling_store.py` 的 Starling 一侧到 Task 5 才恢复，`tests/test_ma_*.py`、`tests/test_factory_handlers.py`、`tests/test_factory_memory_wiring.py`、`tests/test_factory_memory_runtime.py` 里与部署相关的用例到 Task 7 才恢复。Task 13 至 17 在分支上做（见下一条），分支上的中间提交不要求绿。
-- **第 4 步是一次提交**（00 篇施工表：回退它就回到进程内 `cff319d`）。Task 13 至 17 在本地分支 `design4-step4` 上逐任务提交；Task 17 的最后一步把分支 `git merge --squash` 成 main 上的一个提交。**这次合并要等用户拍板**，执行者停在那一步报告，不自行合并。
+- **第 4 步是一次提交**（00 篇施工表：回退它就回到进程内 `cff319d`）。Task 13 至 17 在本地分支 `design4-step4` 上逐任务提交；Task 17 的最后一步在全量绿之后把分支 `git merge --squash` 成 main 上的一个提交，**不停下等用户**：合并只在本地 main 上做，分支 `design4-step4` 保留不删，随时能对照或回退。推送仍要先问用户。
 - **真服务的测试。** 起真的 `starling-serve` 子进程，照 `S:tests/python/fakes/service_proc.py:35-147` 的写法，夹具在 `tests/starling_service.py`（Task 8 建）：`[sys.executable, "-m", "starling.service", "--data-dir", D, "--host", "127.0.0.1", "--port", "0", "--token-file", F]`，环境去掉 `OPENAI_*` 与 `STARLING_*`，`HOME` 与数据目录都在 pytest 的临时目录下，`OPENAI_API_KEY` 只放占位值 `offline-test-key`；模块级共用一个服务。抽取与嵌入走 `tests/starling_fakes.py` 的假端点。没装客户端或服务端时用 `pytest.importorskip("starling_client")`、`pytest.importorskip("starling.service")` 跳过。
 - **不碰用户的东西。** 任何测试与核实步骤都不读写用户的 `~/.starling`，不连正在跑的 8787 看板服务，不读开发者环境里的 `RISE_MEMORY_CONFIG`（测试一律传显式的 `env` 字典）。
 - **导入边界。** 第 3 步起，`starling_client` 只由 `src/simple_actio/memory_starling.py` 与 `src/factory/starling_session.py` 导入；第 4 步起 `src/` 下没有任何文件导入 `starling`（拉起模式用子进程 `python -m starling.service`，不是导入；安装来源经 `importlib.metadata` 读）。守卫：`tests/test_factory_cross_plan.py:204-212`（`test_only_simple_actio_memory_starling_imports_starling`，第 3 步扩成两条）、`tests/test_simple_actio_instance.py:655-674`（`simple_actio` 的导入白名单）、`tests/test_factory_boundaries.py`、`tests/test_import_boundaries.py` 等 `tests/test_*_boundaries.py` 的语法树扫描。没设 `RISE_MEMORY_CONFIG` 时不导入 `starling_client`，由装配测试钉住。
@@ -49,7 +49,7 @@
 - **分叉超时后按确切世界名加摘要复用**：`fork` 在服务端已建好世界、客户端却超时。rise 按调用前定下的确切世界名查 `list_worlds(with_digest=True)`，摘要等于钉住的摘要才用；摘要不等就换后缀重建；不能按 `(episode_id, attempt)` 查到上一个进程留下、已有写入的世界。Task 15 加三条用例（复用、摘要不等换后缀、上一个进程的同 episode 世界不被认领）。
 - **残留服务的误认**：pid 被复用（pid 指向一个无关的活进程）、命令行里的 `--data-dir` 不同、命令行被截断、归属锁被另一个进程持有、`D/.lock` 已经没人持。前四种都拒绝启动且不发任何信号、那个进程还活着；最后一种不发信号直接重试启动。Task 11 注入读命令行与读属主的函数，每种情形一条用例。
 - **叶子继承**：看板默认世界的 `source_lane` 子键（如 `k_source`、`tau_source`）与 provider 的 `enable_thinking` 不是默认值时，rise 建的世界与分叉出的世界仍与 rise 设置逐叶相等，`open(settings=rise 设置)` 不报 `world_settings_mismatch`。Task 9 用拉起的真服务、在 `D/starling.json` 里预放非默认值来测。
-- **第 2 至 4 步之间的过渡布局**：第 2、3 步里进程内 Starling 后端的 `deploy/*.db`、`held/`、`replay/`、`seeds/`、`runs/` 合法，`snapshots/` 下的 `.db`、`.world` 与不带 `.rec` 的 `deploy-*.json` 判旧布局；第 4 步起 Starling 后端切到最终规则（`deploy/` 只许 `*.lock` 与 `*.created`，`seeds/`、`runs/` 判旧布局）。替身的规则在两段里相同。Task 6 与 Task 17 各加一组用例，同一个记忆根在两种规则下得到不同结论。
+- **第 2 至 4 步之间的过渡布局**：第 2、3 步里进程内 Starling 后端的 `deploy/*.db`、`held/`、`replay/`、`seeds/`、`runs/` 合法，`snapshots/` 下的 `.db`、`.world` 与不带 `.rec` 的 `deploy-*.json` 判旧布局；第 4 步起 Starling 后端切到最终规则（`deploy/` 下带数据后缀的文件只许 `<已知情境>.created`；`seeds/`、`runs/` 与 `held/`、`replay/` 下的 `.db` 判旧布局）。替身的规则在两段里相同。两种规则都只查 `.json`、`.db`、`.created`、`.rec.json` 四种数据后缀，`.tmp`、`-wal`、`-shm`、`.lock` 不查。Task 6 与 Task 17 各加一组用例，同一个记忆根在两种规则下得到不同结论。
 - **设置核对在持仓库锁之后**：第二个 `run` 撞上仓库锁之前不能开过任何句柄，否则在跑守护进程的恢复会收到 `world_held` 判 T3。Task 16 断言装配期不开句柄，核对只在 `on_locked` 里做。
 - **恢复的分码**：`wait_closed` 返回真之后，恢复收到 `world_busy` 判瞬态（轮次延后、重入先恢复），`world_held`、`snapshot_not_found`、`restore_digest_mismatch` 判 `RestoreFailedError`（记录与快照都保留）。Task 7（替身与假管理面）与 Task 14（真服务）各钉一次。
 
@@ -308,8 +308,8 @@ git commit -m "feat(simple_actio): 进程内 Starling 升到 cff319d,按主体�
 ### Task 4: 端口协议换快照接口，替身实现 `held/` 与 `replay/`
 
 **Files:**
-- Modify: `src/simple_actio/memory_port.py:96-135`（删 `backup_to`、`restore_from`；加 `snapshot`、`restore`、`delete_snapshot`、`fork_replay`、`release_replay`；`open` 加 `read_only`；加冻结数据类 `SnapshotRef`）
-- Modify: `src/simple_actio/memory.py:461-637`（`FileTupleStore` 换实现；`_FilePort` 加只读；构造参数加 `held_root`、`replay_root`）
+- Modify: `src/simple_actio/memory_port.py:96-135`（删 `backup_to`、`restore_from`；加 `snapshot`、`restore`、`delete_snapshot`、`fork_replay`、`release_replay`、`open_replay`；`open` 签名不变；加冻结数据类 `SnapshotRef`）
+- Modify: `src/simple_actio/memory.py:461-637`（`FileTupleStore` 换实现、加 `open_replay`；`_FilePort` 加只读；端口计数改按完整世界名；构造参数加 `held_root`、`replay_root`）
 - Modify: `src/factory/memory_runtime.py:160-168`（`stand_in_deployment_memory` 按新构造参数造替身）
 - Test: `tests/test_simple_actio_deployment_store_contract.py`（整个文件按新接口重写，参数化夹具 `:31-44` 不变）、`tests/test_simple_actio_file_tuple_store.py:243-640`（`backup_to`/`restore_from` 的用例改写成按 id）、`tests/test_simple_actio_memory_port.py:36-60`
 
@@ -328,15 +328,19 @@ def restore(self, world_id: str, snapshot_id: str) -> str: ...
 def delete_snapshot(self, world_id: str, snapshot_id: str) -> None: ...
 def fork_replay(self, world_id: str, snapshot_id: str, *, round_id: str) -> str: ...
 def release_replay(self, replay_world_id: str) -> None: ...
-def open(self, world_id: str, holder: str, *, read_only: bool = False) -> MemoryBackend: ...
+def open_replay(self, replay_world: str, holder: str) -> MemoryBackend: ...  # 永远只读
 ```
+
+`open(world_id, holder)`、`remember_event`、`digest`、`wait_closed` 的签名不变，四者都只收部署世界 id（40 篇 AC-34）。
 
 - `FileTupleStore(root, *, held_root: Path, replay_root: Path, extraction_failure=None)`：`root` 仍是部署世界目录 `<记忆根>/deploy`；held 快照 `held_root/<world_id>/<snapshot_id>.json`，内容 `{"note": ..., "ledger": <_Ledger.to_json()>}`；重放世界 `replay_root/<重放世界名>.json`。构造仍不碰磁盘。组合根传 `held_root=<记忆根>/held`、`replay_root=<记忆根>/replay`（90 篇第 4 章布局表）。
 - 快照 id：`"snap-" + secrets.token_hex(8)`；`snapshot` 在写之前就定 id，世界没有文件时快照是空账本，摘要等于空世界摘要。
-- 重放世界名：`f"{STAND_IN_WORLD_PREFIX}.verify.{round_id}.{world_id}.{secrets.token_hex(4)}"`，`STAND_IN_WORLD_PREFIX = "rise"`（`world_prefix` 的缺省值；替身不读本机记忆配置，所以写死），与 Starling 的 `<前缀>.verify.<round_id>.<scenario_id>.<后缀>` 同形（40、50 篇）。`open(name, ...)` 的 `name` 以 `rise.verify.` 开头就按重放世界读写 `replay_root`，否则按部署世界 `root`；名字过 `PERSONA_ID_PATTERN` 之外另限 128 字符。`wait_closed`、端口计数一律按传进来的完整名计。情境 id 本身以 `rise.verify.` 开头时会被误认，见「待定」第 2 条。
+- 重放世界名：`f"{STAND_IN_WORLD_PREFIX}.verify.{round_id}.{world_id}.{secrets.token_hex(4)}"`，`STAND_IN_WORLD_PREFIX = "rise"`（`world_prefix` 的缺省值；替身不读本机记忆配置，所以写死），与 Starling 的 `<前缀>.verify.<round_id>.<scenario_id>.<后缀>` 同形（40、50 篇）。
+- 两种打开不按名字前缀推断（40 篇 AC-34）：`open_replay(name, holder)` 只读 `replay_root/<name>.json`，文件不在抛永久失败、不建；`open(world_id, holder)` 只读写部署世界 `root/<world_id>.json`，名为 `rise.verify.x` 的情境照旧是部署世界。两者的名字都过 `PERSONA_ID_PATTERN`。
+- 端口计数表按完整世界名，两种端口共用一张：部署端口记在 `rise.deploy.<world_id>` 下，重放端口记在重放世界名下。`wait_closed(world_id, ...)` 收部署世界 id，拼成 `rise.deploy.<world_id>` 再查，所以开着的重放端口不挡部署世界的恢复。
 - `restore`：该世界有端口开着时抛永久 `MemoryFailureError("restore: world has an open port")`（与 Starling 服务端的 `world_held` 同类）；快照不在时抛永久 `MemoryFailureError("restore: snapshot_not_found")`；快照读不出时抛永久（只报类名）。返回恢复后的摘要。
-- `delete_snapshot`：文件不在是空操作（与服务端删已删快照的行为对齐由 Task 14 核实；替身先按幂等写）。
-- 只读端口的 `remember` 抛永久 `MemoryFailureError("world_read_only")`；`embed_pending` 只读时返回 0。
+- `delete_snapshot`：文件不在是空操作。Starling 对已删的快照回 `snapshot_not_found`，rise 当作成功（50 篇"删一个已删的快照"一段），两边都幂等，由契约用例钉住。
+- `open_replay` 开出的只读端口，`remember` 抛永久 `MemoryFailureError("world_read_only")`；`embed_pending` 只读时返回 0。
 
 - [ ] **Step 1: 写失败的测试**（`tests/test_simple_actio_deployment_store_contract.py`，参数化到两个实现；本任务只要求 `file` 参数通过）
 
@@ -361,10 +365,11 @@ def test_restore_is_refused_while_a_port_of_the_world_is_open(case):
     store.restore("s1", ref.snapshot_id)
 
 
-def test_restoring_a_deleted_snapshot_is_a_permanent_failure(case):
+def test_a_deleted_snapshot_deletes_again_quietly_but_cannot_be_restored(case):
     store = case.store
     ref = store.snapshot("s1", note="n")
     store.delete_snapshot("s1", ref.snapshot_id)
+    store.delete_snapshot("s1", ref.snapshot_id)            # 服务回 snapshot_not_found,rise 当作成功
     with pytest.raises(MemoryFailureError) as info:
         store.restore("s1", ref.snapshot_id)
     _assert_permanent(info)
@@ -376,25 +381,36 @@ def test_a_replay_world_starts_at_the_snapshot_and_takes_many_read_only_ports(ca
     ref = store.snapshot("s1", note="rise verify r1 s1")
     store.remember_event("s1", "pa", "later#0@pa", "pb：后来的", interlocutor="pb")
     name = store.fork_replay("s1", ref.snapshot_id, round_id="r1")
-    assert name.startswith("rise.verify.r1.s1.") and len(name.rsplit(".", 1)[1]) == 8
-    base, cand = store.open(name, "pa", read_only=True), store.open(name, "pa", read_only=True)
+    assert name.split(".")[1:4] == ["verify", "r1", "s1"] and len(name.rsplit(".", 1)[1]) == 8
+    base, cand = store.open_replay(name, "pa"), store.open_replay(name, "pa")
     assert base.digest() == cand.digest() == ref.digest
+    assert store.wait_closed("s1", 0.05) is True            # 重放端口记在重放世界名下,不挡部署世界
     with pytest.raises(MemoryFailureError) as info:
         base.remember(MemoryEvent("x#0@pa", "pb：写不进去", "pb"))
     _assert_permanent(info)
     base.close(); cand.close()
-    assert store.wait_closed(name, 0.05) is True
     store.release_replay(name)
 
 
-def test_wait_closed_counts_ports_by_the_full_world_name(case):
+def test_a_scenario_named_like_a_replay_world_is_still_a_deploy_world(case):
     store = case.store
     ref = store.snapshot("s1", note="n")
     name = store.fork_replay("s1", ref.snapshot_id, round_id="r1")
-    port = store.open(name, "pa", read_only=True)
-    assert store.wait_closed("s1", 0.05) is True            # 重放世界的端口不算部署世界的
-    assert store.wait_closed(name, 0.05) is False
+    replay = store.open_replay(name, "pa")
+    store.remember_event(name, "pa", KEY, TEXT, interlocutor="pb")   # 情境 id 恰好等于重放世界名:写的是部署世界
+    assert store.digest(name) != ref.digest and replay.digest() == ref.digest
+    port = store.open(name, "pa")
+    assert store.wait_closed(name, 0.05) is False           # 部署端口记在 <前缀>.deploy.<name> 下
     port.close()
+    assert store.wait_closed(name, 0.05) is True            # 重放端口还开着,记在另一个键下
+    replay.close()
+    store.release_replay(name)
+
+
+def test_open_replay_does_not_build_a_world_that_was_never_forked(case):
+    with pytest.raises(MemoryFailureError) as info:
+        case.store.open_replay("rise.verify.r1.s1.00000000", "pa")
+    _assert_permanent(info)
 ```
 
 `tests/test_simple_actio_file_tuple_store.py` 加替身专有的布局用例：
@@ -402,6 +418,9 @@ def test_wait_closed_counts_ports_by_the_full_world_name(case):
 ```python
 def test_held_snapshots_and_replay_worlds_live_outside_deploy(tmp_path):
     store = FileTupleStore(tmp_path / "deploy", held_root=tmp_path / "held", replay_root=tmp_path / "replay")
+    with pytest.raises(MemoryFailureError):
+        store.open_replay("rise.verify.r1.s1.00000000", "pa")
+    assert not (tmp_path / "replay").exists()               # 没分叉过的重放世界不建
     ref = store.snapshot("s1", note="rise episode e1")
     name = store.fork_replay("s1", ref.snapshot_id, round_id="r1")
     assert json.loads((tmp_path / "held" / "s1" / f"{ref.snapshot_id}.json").read_text("utf-8"))["note"] == "rise episode e1"
@@ -411,16 +430,16 @@ def test_held_snapshots_and_replay_worlds_live_outside_deploy(tmp_path):
     assert not (tmp_path / "replay" / f"{name}.json").exists()
 ```
 
-`test_simple_actio_memory_port.py::test_both_protocols_are_checked_by_method_names` 的替身协议类改成新的方法集，断言 `"backup_to" not in dir(DeploymentMemoryStore)`、`"fork_replay" in dir(DeploymentMemoryStore)`。
+`test_simple_actio_memory_port.py::test_both_protocols_are_checked_by_method_names` 的替身协议类改成新的方法集，断言 `"backup_to" not in dir(DeploymentMemoryStore)`、`"fork_replay" in dir(DeploymentMemoryStore)`、`"open_replay" in dir(DeploymentMemoryStore)`，并断言 `inspect.signature(DeploymentMemoryStore.open)` 的参数只有 `self`、`world_id`、`holder`（没有 `read_only`）。
 
 - [ ] **Step 2: 跑测试确认失败**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider -k "not starling" tests/test_simple_actio_deployment_store_contract.py tests/test_simple_actio_file_tuple_store.py tests/test_simple_actio_memory_port.py`
-Expected: FAIL（没有 `snapshot`、`fork_replay`；构造参数不对）
+Expected: FAIL（没有 `snapshot`、`fork_replay`、`open_replay`；构造参数不对）
 
 - [ ] **Step 3: 实现**
 
-按 Interfaces。`snapshot`、`restore`、`fork_replay` 的读写都在 store 的锁里；`restore` 的"查端口数、读快照、写世界"在同一次持锁里。快照写用 `_write_ledger` 同一套临时文件加改名。重放世界的读写复用 `_load`/`_save`，按名字选目录。`stand_in_deployment_memory` 改成：
+按 Interfaces。`snapshot`、`restore`、`fork_replay` 的读写都在 store 的锁里；`restore` 的"查端口数、读快照、写世界"在同一次持锁里。快照写用 `_write_ledger` 同一套临时文件加改名。重放世界的读写复用 `_load`/`_save`：`open_replay` 固定读 `replay_root`，`open` 与其余按世界 id 的方法固定读写 `root`，不看名字长什么样。端口计数的键在开端口时就定成完整世界名。`stand_in_deployment_memory` 改成：
 
 ```python
 return DeploymentMemory(
@@ -437,7 +456,7 @@ Expected: PASS（`-k "not starling"`；Starling 参数在 Task 5 修）
 
 ```bash
 git add src/simple_actio/memory_port.py src/simple_actio/memory.py src/factory/memory_runtime.py tests/test_simple_actio_deployment_store_contract.py tests/test_simple_actio_file_tuple_store.py tests/test_simple_actio_memory_port.py
-git commit -m "feat(simple_actio): 部署管理面改按快照 id,加 fork_replay、release_replay 与只读 open;替身快照与重放世界移出 deploy/"
+git commit -m "feat(simple_actio): 部署管理面改按快照 id,加 fork_replay、release_replay 与只读的 open_replay;替身快照与重放世界移出 deploy/"
 ```
 
 ### Task 5: 进程内 Starling 的过渡实现
@@ -445,7 +464,7 @@ git commit -m "feat(simple_actio): 部署管理面改按快照 id,加 fork_repla
 过渡布局（00 篇施工表第 2 行、90 篇第 18 条）：held 快照是 `<记忆根>/held/<world_id>/<snapshot_id>.db`，重放世界是 `<记忆根>/replay/<重放世界名>.db`，部署世界照旧 `<记忆根>/deploy/<scenario_id>.db`。这一套到第 4 步整体删掉，所以只求与替身过同一套契约，不做新的崩溃安全设计：沿用今天 `backup_to`（`VACUUM INTO`）与 `restore_from`（先删日志、后换文件）的实现。
 
 **Files:**
-- Modify: `src/simple_actio/memory_starling.py:358-572`（`StarlingDeploymentStore`：构造参数加 `held_root`、`replay_root`；`backup_to` 与 `restore_from` 改成私有的 `_backup_to`、`_restore_from`，在其上实现 `snapshot`、`restore`、`delete_snapshot`、`fork_replay`、`release_replay`；`open` 加 `read_only`）、`:149-243`（`StarlingMemory` 加 `read_only`）
+- Modify: `src/simple_actio/memory_starling.py:358-572`（`StarlingDeploymentStore`：构造参数加 `held_root`、`replay_root`；`backup_to` 与 `restore_from` 改成私有的 `_backup_to`、`_restore_from`，在其上实现 `snapshot`、`restore`、`delete_snapshot`、`fork_replay`、`release_replay`、`open_replay`；端口计数改按完整世界名；`open` 签名不变）、`:149-243`（`StarlingMemory` 加 `read_only`，只给 `open_replay` 用）
 - Modify: `src/factory/memory_runtime.py:758-765`（`memory_wiring` 造 `StarlingDeploymentStore` 时传两个新根）
 - Test: `tests/test_simple_actio_starling_store.py:299-700`（`backup_to`/`restore_from` 的用例改走私有方法或改写成按 id；崩溃点用例 `:594-623` 保留，改调 `_restore_from`）、`tests/test_simple_actio_deployment_store_contract.py`（Task 4 新增用例的 `starling` 参数）、`tests/test_simple_actio_memory_starling.py`
 
@@ -458,10 +477,12 @@ git commit -m "feat(simple_actio): 部署管理面改按快照 id,加 fork_repla
   - `delete_snapshot(world_id, snapshot_id)`：删文件与它的 `-wal`、`-shm`，不在是空操作。
   - `fork_replay(world_id, snapshot_id, *, round_id)`：`copy_library(held 文件, replay_root / f"{名字}.db")`，返回名字。
   - `release_replay(name)`：删 `replay_root/<name>.db` 与旁边的 `-wal`、`-shm`。
-  - `open(world_id, holder, *, read_only=False)`：名字以 `rise.verify.` 开头就开 `replay_root/<name>.db`（文件不在抛永久失败，不建库），否则照旧开部署世界。端口计数按传进来的名字。
+  - `open_replay(name, holder)`：开 `replay_root/<name>.db` 上的只读端口（`StarlingMemory(..., read_only=True)`）；文件不在抛永久失败，不建库。
+  - `open(world_id, holder)`：签名与行为不变，只开部署世界 `root/<world_id>.db`，不看名字前缀。
+  - 端口计数表按完整世界名：部署端口记在 `rise.deploy.<world_id>` 下，重放端口记在重放世界名下；`wait_closed(world_id, ...)` 拼成部署世界名再查。
   - `StarlingMemory(memory, *, read_only=False, ...)`：只读时 `remember` 抛永久 `MemoryFailureError("world_read_only")`，`embed_pending` 返回 0 且不调门面。
 
-- [ ] **Step 1: 写失败的测试**：Task 4 Step 1 的五条契约用例此时对 `starling` 参数是红的，不另写。`tests/test_simple_actio_starling_store.py` 加过渡布局专有的一条：
+- [ ] **Step 1: 写失败的测试**：Task 4 Step 1 的六条契约用例此时对 `starling` 参数是红的，不另写。`tests/test_simple_actio_starling_store.py` 加过渡布局专有的一条：
 
 ```python
 def test_the_transitional_layout_keeps_held_and_replay_files_out_of_deploy(tmp_path, fake):
@@ -507,7 +528,7 @@ Expected: PASS
 
 ```bash
 git add src/simple_actio/memory_starling.py src/factory/memory_runtime.py tests/test_simple_actio_starling_store.py tests/test_simple_actio_deployment_store_contract.py tests/test_simple_actio_memory_starling.py
-git commit -m "feat(simple_actio): 进程内 Starling 管理面的过渡实现:held/ 下按 id 的备份,replay/ 下的重放世界"
+git commit -m "feat(simple_actio): 进程内 Starling 管理面的过渡实现:held/ 下按 id 的备份,replay/ 下的重放世界与 open_replay"
 ```
 
 ### Task 6: `MemoryLayout` 改读在途记录，旧布局按后端判（过渡规则）
@@ -548,19 +569,19 @@ class MemoryLayout:
 
 | 位置 | `stand-in` | `starling-inprocess`（过渡） | `starling`（第 4 步起） |
 |---|---|---|---|
-| `deploy/*.lock` | 合法 | 合法 | 合法 |
 | `deploy/<已知情境>.json` | 合法 | 判旧布局 | 判旧布局 |
 | `deploy/<已知情境>.db` | 判旧布局 | 合法 | 判旧布局 |
 | `deploy/<已知情境>.created` | 判旧布局 | 判旧布局 | 合法 |
-| `deploy/` 下其余以 `.json`、`.db`、`.created` 结尾的文件（含不是已知情境名的） | 判旧布局 | 判旧布局 | 判旧布局 |
-| `deploy/` 下其余文件（`*.tmp`、`*.db-wal`、`*.db-shm` 等） | 不查 | 不查 | 不查 |
+| `deploy/` 下其余带数据后缀（`.json`、`.db`、`.created`、`.rec.json`）的文件，含不是已知情境名的 | 判旧布局 | 判旧布局 | 判旧布局 |
+| `deploy/` 下其余文件（`*.lock`、`*.tmp`、`*-wal`、`*-shm` 等） | 不查 | 不查 | 不查 |
 | `seeds/`、`runs/` 目录 | 判旧布局（替身根在 git 目录里，从来没有这两个目录） | 合法（训练世界仍在进程内） | 判旧布局 |
 | `snapshots/*/` 下的 `.db`、`.world`、不带 `.rec` 的 `deploy-*.json` | 判旧布局 | 判旧布局 | 判旧布局 |
 | `snapshots/*/` 下的 `*.rec.json`、`snapshots/*/verify/` 目录 | 合法 | 合法 | 合法 |
-| `held/`、`replay/` | 合法 | 合法 | 不查（90 篇没把它们列进拒绝项；第 2、3 步留下的过渡文件见「待定」第 3 条） |
+| `held/`、`replay/` 下的 `.db` | 不查 | 合法 | 判旧布局，逐个文件列出（第 2、3 步过渡留下的） |
+| `held/`、`replay/` 下的其余文件（替身的 `.json` 等） | 合法 | 合法 | 不查 |
 | `service/`、`service.log`、`service.pid`、`service.owner.lock`、`service.token`、`.owner` | 不查 | 不查 | 不查 |
 
-"不查"那一行是对 90 篇第 18 条"只许"的保守读法：照字面全拒，崩在写一半时留下的 `s1.json.tmp`、进程内 Starling 开着库时的 `s1.db-wal` 都会让下次启动退出码 2。见「待定」第 1 条。`deploy/` 下"已知情境"沿用今天的判法（`agent.yaml` 的 `scenario_ids`，`src/factory/memory_runtime.py:131-135`）：替身与过渡 Starling 的 `<scenario_id>.<后缀>` 里主名不在已知情境里的仍按旧布局报，提示词照 FC-37 不变。替身旧格式的 `deploy/<已知情境>.json` 账本本身不变，照旧合法。
+`deploy/` 的两行照 90 篇第 18 条：只查四种数据后缀，不在允许名单里的就拒绝；其余一律不查。`.tmp`、`-wal`、`-shm`、`.lock` 是写到一半或运行时的文件，不是世界数据，拒绝它们只会让一次崩溃（`s1.json.tmp`、开着库时的 `s1.db-wal`）变成无法启动。`held/`、`replay/` 下的 `.db` 在最终规则里判旧布局，文字照 `check_memory_layout` 的同一口径列出至多 5 条。`deploy/` 下"已知情境"沿用今天的判法（`agent.yaml` 的 `scenario_ids`，`src/factory/memory_runtime.py:131-135`）：替身与过渡 Starling 的 `<scenario_id>.<后缀>` 里主名不在已知情境里的仍按旧布局报，提示词照 FC-37 不变。替身旧格式的 `deploy/<已知情境>.json` 账本本身不变，照旧合法。
 
 - [ ] **Step 1: 写失败的测试**（`tests/test_ma_memory_layout.py`）
 
@@ -604,28 +625,32 @@ def test_uncommitted_snapshots_are_found_by_the_world_in_the_record_and_skip_ver
 
 
 @pytest.mark.parametrize("backend, legacy", [
-    ("stand-in", ["deploy/pa.json", "deploy/s1.db", "runs", "seeds", "snapshots/r1/deploy-m-1.db",
-                  "snapshots/r1/deploy-m-2.json", "snapshots/r1/deploy-m-3.world"]),
-    ("starling-inprocess", ["deploy/pa.json", "deploy/s1.json", "snapshots/r1/deploy-m-1.db",
+    ("stand-in", ["deploy/pa.json", "deploy/s1.db", "deploy/s1.rec.json", "runs", "seeds",
+                  "snapshots/r1/deploy-m-1.db", "snapshots/r1/deploy-m-2.json", "snapshots/r1/deploy-m-3.world"]),
+    ("starling-inprocess", ["deploy/pa.json", "deploy/s1.json", "deploy/s1.rec.json", "snapshots/r1/deploy-m-1.db",
                             "snapshots/r1/deploy-m-2.json", "snapshots/r1/deploy-m-3.world"]),
-    ("starling", ["deploy/pa.json", "deploy/s1.db", "deploy/s1.json", "runs", "seeds",
+    ("starling", ["deploy/pa.json", "deploy/s1.db", "deploy/s1.json", "deploy/s1.rec.json", "held/s1/snap-1.db",
+                  "replay/y.db", "runs", "seeds",
                   "snapshots/r1/deploy-m-1.db", "snapshots/r1/deploy-m-2.json", "snapshots/r1/deploy-m-3.world"]),
 ])
 def test_the_same_root_is_judged_by_its_backend(tmp_path, backend, legacy):
-    for rel in ("deploy/s1.lock", "deploy/pa.json", "deploy/s1.json", "deploy/s1.db",
+    for rel in ("deploy/s1.lock", "deploy/pa.json", "deploy/s1.json", "deploy/s1.db", "deploy/s1.rec.json",
                 "snapshots/r1/deploy-m-1.db", "snapshots/r1/deploy-m-2.json", "snapshots/r1/deploy-m-3.world",
                 "snapshots/r1/deploy-m-4.rec.json", "held/s1/snap-0.json", "replay/x.json",
+                "held/s1/snap-1.db", "replay/y.db",                          # 第 2、3 步过渡留下的
                 "seeds/k/s1.db", "runs/run-1/e.db", "service.log", ".owner",
-                "deploy/s1.db-wal", "deploy/s1.json.tmp"):                    # 不按后缀判的文件不报
+                "deploy/s1.db-wal", "deploy/s1.db-shm", "deploy/s1.json.tmp"):   # 不带数据后缀的文件不报
         (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True); (tmp_path / rel).write_text("{}")
     assert MemoryLayout(tmp_path).legacy_entries(["s1"], backend=backend) == legacy
 
 
-def test_a_creation_marker_is_legal_only_for_the_service_backend(tmp_path):
-    (tmp_path / "deploy").mkdir(); (tmp_path / "deploy" / "s1.created").write_text("")
+def test_a_creation_marker_is_legal_only_for_the_service_backend_and_a_known_scenario(tmp_path):
+    (tmp_path / "deploy").mkdir()
+    for name in ("s1.created", "s9.created", "s1.created.tmp"):
+        (tmp_path / "deploy" / name).write_text("")
     lay = MemoryLayout(tmp_path)
-    assert lay.legacy_entries(["s1"], backend="starling") == []
-    assert lay.legacy_entries(["s1"], backend="stand-in") == ["deploy/s1.created"]
+    assert lay.legacy_entries(["s1"], backend="starling") == ["deploy/s9.created"]
+    assert lay.legacy_entries(["s1"], backend="stand-in") == ["deploy/s1.created", "deploy/s9.created"]
 ```
 
 `world_lock`、`hold_world`、`_check_segment`、`_check_world` 的旧用例（`:42-58`、`:145-155`）照旧保留；按旁注的用例（`:27-40`、`:59-143`、`:157-210`）改写成按记录，或在新表里已有覆盖时删掉。
@@ -635,7 +660,7 @@ def test_a_creation_marker_is_legal_only_for_the_service_backend(tmp_path):
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_ma_memory_layout.py`
 Expected: FAIL（没有 `SnapshotRecord`、`write_record`；`legacy_entries` 不收 `backend`）
 
-- [ ] **Step 3: 实现**：按 Interfaces。`seeds`、`runs` 判旧布局时报目录本身（相对路径，不展开里面的文件）。
+- [ ] **Step 3: 实现**：按 Interfaces。`seeds`、`runs` 判旧布局时报目录本身（相对路径，不展开里面的文件）；`held/`、`replay/` 下的 `.db` 逐个文件报。`deploy/` 里先按文件名结尾挑出带数据后缀的文件，再按完整文件名比允许名单（替身 `<已知情境>.json`，过渡 `<已知情境>.db`，最终 `<已知情境>.created`），所以 `s1.rec.json` 不会被当成情境 `s1` 的账本。
 
 - [ ] **Step 4: 跑测试确认通过**
 
@@ -653,7 +678,7 @@ git commit -m "feat(mindagent): 记忆布局改读在途记录 .rec.json,旧布�
 
 **Files:**
 - Modify: `src/mindagent/deployment.py:35`（去掉 `_tag_path`）、`:166-181`（`_restore` 读记录、按 id 恢复、分码）、`:304-340`（docstring）、`:385-396`（开 episode：`snapshot` → 写记录 → `on_episode_start`）、`:439`、`:446-459`（提交：删记录 → `delete_snapshot`，后者失败只记 warning）
-- Modify: `src/mindagent/rounds.py:13-37`（模块文档）、`:63`、`:285-307`（删 `scratch_store_factory`）、`:336-372`（回滚：`restore` → 删记录 → `delete_snapshot`）、`:459-506`（验证：每情境 `snapshot` 加 `verify-` 记录、每情境 `fork_replay` 一次、只读 `open`，finally 里 `release_replay`、删快照与记录）
+- Modify: `src/mindagent/rounds.py:13-37`（模块文档）、`:63`、`:285-307`（删 `scratch_store_factory`）、`:336-372`（回滚：`restore` → 删记录 → `delete_snapshot`）、`:459-506`（验证：每情境 `snapshot` 加 `verify-` 记录、每情境 `fork_replay` 一次、`open_replay` 开只读端口，finally 里 `release_replay`、删快照与记录）
 - Modify: `src/mindagent/admit.py:167-185`（读不出的在途记录：延后文字从"world tag"改成"in-flight record"，仍只报类名）
 - Modify: `src/factory/handlers.py:122`（删 `scratch_store_factory=`）
 - Modify: `src/factory/memory_runtime.py:70`、`:101-110`（`DeploymentMemory` 删 `scratch_store_factory` 字段）、`:121-157`（`check_memory_layout(layout, repo_root, *, backend)`：`legacy_entries(..., backend=)`，再对每份在途记录 `read_record`，读不出退出码 2、文字写相对路径）、`:160-168`、`:735-765`（`MemoryLayout(config.root)`，`backend="starling-inprocess"`）
@@ -664,8 +689,8 @@ git commit -m "feat(mindagent): 记忆布局改读在途记录 .rec.json,旧布�
 - Produces:
   - 起点快照 `note`：`f"rise episode {episode_id}"`；验证快照 `note`：`f"rise verify {round_id} {scenario_id}"`（50 篇在途记录表）。
   - 恢复分码（50 篇"接服务后 `wait_closed` 保留"一节的表）：`wait_closed` 返回真之后，`restore` 抛**瞬态** `MemoryFailureError`（服务的 `world_busy`）→ `DeferredError`，轮次留 pending、记录与快照保留，重入时先恢复；抛**永久** `MemoryFailureError`（`world_held`、`snapshot_not_found`、`restore_digest_mismatch` 等）或 `OSError` → `RestoreFailedError`（失败点 `mindagent.deployment.restore`，只报类名），记录与快照保留；摘要与记录不等 → `RestoreFailedError`。`_restore` 与 `rounds.py` 的回滚走同一个判法。
-  - 提交与回滚收尾的 `delete_snapshot` 抛 `MemoryFailureError` 或 `OSError` 时 `_log.warning("... delete_snapshot failed: %s", 类名)`，不改变结果（50 篇 MA-41、失败表"孤儿 held 快照"一行）。
-  - 验证段：`fork_replay` 每个情境至多一次（第一次有提案要这个情境的实例时做），`instance_with(extra, scenario_id)` 在它上面 `open(replay, agent_pid, read_only=True)`；`built` 记实例，`replays` 记重放世界名。finally 顺序：关实例 → 每个重放世界 `release_replay` → 每个情境 `delete_snapshot` 并删 `verify-` 记录 → `_rmdir_if_empty(snapshots/<round_id>)`。收尾里的任何失败只记 warning（终审 M-1 的同一口径）。
+  - 提交与回滚收尾的 `delete_snapshot` 抛 `MemoryFailureError` 或 `OSError` 时 `_log.warning("... delete_snapshot failed: %s", 类名)`，不改变结果（50 篇 MA-41、失败表"孤儿 held 快照"一行）。删已删的快照不抛（两个管理面都幂等），驱动器不另判。
+  - 验证段：`fork_replay` 每个情境至多一次（第一次有提案要这个情境的实例时做），`instance_with(extra, scenario_id)` 在它上面 `open_replay(replay, agent_pid)`（`replay` 是 `fork_replay` 原样返回的名字，40 篇 AC-34）；`built` 记实例，`replays` 记重放世界名。finally 顺序：关实例 → 每个重放世界 `release_replay` → 每个情境 `delete_snapshot` 并删 `verify-` 记录 → `_rmdir_if_empty(snapshots/<round_id>)`。收尾里的任何失败只记 warning（终审 M-1 的同一口径）。
   - `make_start_round_handler(...)` 不再收 `scratch_store_factory`；`DeploymentMemory` 只剩 `store`、`layout`、`runtime` 三个字段。
 
 - [ ] **Step 1: 写失败的测试**
@@ -709,15 +734,20 @@ def test_a_restore_failure_is_split_by_its_transient_flag_and_keeps_the_record(s
 
 ```python
 def test_verification_forks_one_replay_world_per_scenario_and_releases_it(store, mem, monkeypatch):
-    forks, released = [], []
-    real_fork, real_release = mem.store.fork_replay, mem.store.release_replay
-    monkeypatch.setattr(mem.store, "fork_replay",
-                        lambda w, sid, *, round_id: forks.append(w) or real_fork(w, sid, round_id=round_id))
+    forks, names, opened, released = [], [], [], []
+    real_fork, real_open, real_release = mem.store.fork_replay, mem.store.open_replay, mem.store.release_replay
+
+    def fork(w, sid, *, round_id):
+        forks.append(w); names.append(real_fork(w, sid, round_id=round_id)); return names[-1]
+
+    monkeypatch.setattr(mem.store, "fork_replay", fork)
+    monkeypatch.setattr(mem.store, "open_replay", lambda name, holder: opened.append(name) or real_open(name, holder))
     monkeypatch.setattr(mem.store, "release_replay", lambda name: released.append(name) or real_release(name))
     _skill(store, GOAL); _skill(store, GOAL2)                           # 两个草案:基线与候选不止一对
     _start(store, _handler(mem=mem))
     assert sorted(forks) == sorted(set(forks)) and set(forks) <= {"s1", "s2", "s3"}   # 每个情境至多一次
-    assert len(released) == len(forks)
+    assert opened and set(opened) <= set(names)                         # 重放端口只经 open_replay,名字原样传
+    assert sorted(released) == sorted(names)
     assert not any(mem.layout.verify_snapshot(ROUND, sid).exists() for sid in ("s1", "s2", "s3"))
     assert not (mem.layout.root / "snapshots" / ROUND).exists()
 
@@ -733,7 +763,7 @@ def test_a_rollback_restores_by_record_then_drops_record_and_snapshot(store, mem
     assert [(w, gone) for w, _, gone in deleted] == [("s1", False)]
 ```
 
-`GOAL2` 是第二个能产出草案的发现（照 `GOAL` 的写法在测试文件里加一个）。`_kept_copy`、`_verify_handler`、`_RecallFailingScratch`、`BrokenScratch` 改成在替身管理面上 monkeypatch `fork_replay`、`open`、`restore`，不再造临时管理面。`tests/test_factory_memory_wiring.py` 的旧布局用例按 Task 6 的表改期望，加一条：
+`GOAL2` 是第二个能产出草案的发现（照 `GOAL` 的写法在测试文件里加一个）。`_kept_copy`、`_verify_handler`、`_RecallFailingScratch`、`BrokenScratch` 改成在替身管理面上 monkeypatch `fork_replay`、`open_replay`、`restore`，不再造临时管理面。`tests/test_factory_memory_wiring.py` 的旧布局用例按 Task 6 的表改期望，加一条：
 
 ```python
 def test_an_unreadable_in_flight_record_exits_2_naming_it_relative_to_the_root(tmp_path, store, monkeypatch, capsys):
@@ -927,12 +957,12 @@ def empty_seed_world(prefix: str) -> str: ...                        # <前缀>.
 def seed_world(prefix: str, seed_id: str, scenario_id: str, version: int) -> str: ...   # <前缀>.seed.<seed_id>.<scenario_id>.v<n>
 def rollout_world(prefix: str, episode_id: str, suffix: str) -> str: ...                # <前缀>.ro.<episode_id>.<后缀>
 def replay_world(prefix: str, round_id: str, scenario_id: str, suffix: str) -> str: ... # <前缀>.verify.<round_id>.<scenario_id>.<后缀>
-def is_replay_world(prefix: str, name: str) -> bool: ...             # name.startswith(f"{prefix}.verify.")
 def labels(prefix: str, root: str, kind: str, **extra: str) -> dict[str, str]: ...      # {"repo": 前缀, "root": root, "kind": kind, **extra}
 def rise_settings(config: MemoryConfig) -> dict: ...
 def settings_digest(settings: dict) -> str: ...    # sha256(json.dumps(settings, sort_keys=True, separators=(",", ":")))
 ```
 
+- 不提供"按名字判世界种类"的函数：重放世界只经管理面的 `open_replay` 打开，部署世界只经 `open`（40 篇 AC-34），没有调用方需要从名字反推。
 - 超长：拼出的名字超过 128 字符时，把**中间的 id 段**（部署世界的 `scenario_id`；种子的 `seed_id` 与 `scenario_id` 按从长到短逐段替换，直到不超长；rollout 的 `episode_id`；重放世界的 `round_id` 再 `scenario_id`）换成它的 sha256 前 24 位；标签里照旧是完整的 id。
 - `rise_settings(config)` 返回 90 篇世界设置表的全部叶子，一个不缺：
 
@@ -1428,7 +1458,7 @@ class ServiceSession:
 - 端口计数：`open_port` 在当前代号的计数上加一，再调 `client.open(world, holder=holder, read_only=read_only, settings=settings)`；失败时退回计数并按 `translate_client_failure(..., in_drain_window=self.in_drain_window(world))` 抛。成功后调 `wrap(remote, release, generation)` 造端口（`release` 在端口关闭或"当作已关"时调一次，减计数；计数归零且这一代已丢失时 `client.close()`）。代号记在端口里，`owns_generation` 给适配器判"代号过期，当作已关"（40 篇适配器测试项）。
 - 丢失：适配器在调用收到 `SessionExpired`、或 rise 没关的端口收到 `handle_closed` 时调 `mark_lost(gen, writable_worlds=...)`；`mark_lost` 记下"代号 gen 在哪些世界上有可写句柄、丢失时刻"，只对当前代号生效（旧代号重复报告是空操作）。
 - 换会话：下一次 `open_port` 或 `admin` 发现当前代号已丢失时，新建客户端（`connect(url_of(), token=token_of(), timeout_s=HANDLE_TIMEOUT_S)`，拉起模式下先 `restart()`），代号加一，`_log.warning("memory service session %d lost; switched to %d", old, new)`。换完立刻调 `info()` 与 `identity` 比 `commit`、`protocol`、`extraction_digest`；不符，或 `connect` 抛 `Unauthorized`、`ProtocolMismatch`，或 `restart()` 抛 `ServiceRestartsExhausted`：记下致命原因（`fatal` 非空），本次调用与之后的每次 `open_port`、`admin` 都抛**瞬态** `MemoryFailureError("starling session is stopping")`，不落到单条指令或轮次上（90 篇"停守护进程分两半"）。
-- 排空窗口：`in_drain_window(world)` 为真当且仅当有一个已丢失的代号在丢失时于 `world` 上有可写句柄，且距丢失不到 `DRAIN_WINDOW_S`。
+- 排空窗口：`in_drain_window(world)` 为真当且仅当有一个已丢失的代号在丢失时于 `world` 上有可写句柄，且距丢失不到 `DRAIN_WINDOW_S`。`world` 是完整世界名，记录与比较都按它（90 篇"排空窗口的比较键"一段）：rollout 世界每次重试都换后缀，重连后开的是新世界，窗口只对名字不变的部署世界起作用。
 - 管理传输：`transport(url_of(), token_of(), ADMIN_TIMEOUT_S)`，缺省 `starling_client.Transport`；请求体不带 `session_id`，所以会话过期后照常可用。管理传输随换会话重建（拉起模式下端口与 token 会变）。客户端异常照 `translate_client_failure`（`port_closed_by_rise=False`、`in_drain_window=False`）。
 - 关闭：`close()` 关当前与尚未关掉的旧客户端（过期的客户端 `close()` 不发 disconnect，客户端自己处理），再关管理传输。拉起服务的停止不在这里，由组合根另登记（Task 16）。
 
@@ -1588,7 +1618,7 @@ git commit -m "feat(factory): 服务会话:代号与按代号的端口计数、�
 
 ## 第 4 步：接线（一次提交）
 
-开工前：`git switch -c design4-step4`。Task 13 至 17 在这个分支上逐任务提交，中间提交不要求全量绿（红窗口见 Global Constraints）。Task 17 的最后一步把分支压成 main 上的一个提交，**等用户拍板**。
+开工前：`git switch -c design4-step4`。Task 13 至 17 在这个分支上逐任务提交，中间提交不要求全量绿（红窗口见 Global Constraints）。Task 17 的最后一步在全量绿之后把分支压成 main 上的一个提交，不停下等用户；分支保留不删，随时能对照或回退。
 
 ### Task 13: 端口改包 `RemoteMemory`，派发器让解析器的瞬态失败原样延后
 
@@ -1600,7 +1630,7 @@ git commit -m "feat(factory): 服务会话:代号与按代号的端口计数、�
 **Interfaces:**
 - Consumes: Task 10 的 `translate_client_failure`；Task 12 的 `ServiceSession.owns_generation`、`mark_lost`。
 - Produces:
-  - `StarlingMemory(remote, *, generation: int, session: SessionView, release: Callable[[], None], read_only: bool = False, close_timeout_s: float = 60.0)`。`SessionView` 是适配器里按结构声明的协议（`owns_generation(gen) -> bool`、`mark_lost(gen, *, writable_worlds) -> None`），`simple_actio` 不导入 `factory`。
+  - `StarlingMemory(remote, *, generation: int, session: SessionView, release: Callable[[], None], read_only: bool = False, close_timeout_s: float = 60.0)`。`read_only=True` 只由管理面的 `open_replay` 传（Task 14）。`SessionView` 是适配器里按结构声明的协议（`owns_generation(gen) -> bool`、`mark_lost(gen, *, writable_worlds) -> None`），`simple_actio` 不导入 `factory`。
   - 方法逐一对应（40 篇"接服务后"的 Starling 一行）：`recall` → `remote.recall(q, k=limit, mode="semantic", strict=True, include_volatile=True)`，命中是 `{"content_id", "score", "row"}`，`row` 是客户端的 `StatementRow`，`_render` 用的五个字段都在；`remember` → `remote.remember_event(key, text, interlocutor=, epoch=EPOCH)`，结果照 Task 3 的 `_outcome`（内容 id 换算改调 `remote.content_ids`）；`embed_pending` → `remote.next_seq()` 加 `remote.embed_pending(now)`；`digest` → `remote.digest()`。
   - 调用收到 `SessionExpired`，或 rise 没关的端口收到 `handle_closed`：先 `session.mark_lost(generation, writable_worlds=[] if read_only else [remote.world])`，再抛 `translate_client_failure(...)`（瞬态）。
   - `close()`：已关返回；`session.owns_generation(generation)` 为假时不发请求，直接当作已关（置位、调 `release`）；否则 `remote.close(timeout=close_timeout_s)`，收到 `SessionExpired` 或 `MemoryClosed` 也当作已关；`TimeoutError` 照旧抛非瞬态 `MemoryFailureError`、端口保持打开（今天的语义，`memory_starling.py:228-243`）。
@@ -1699,7 +1729,7 @@ git commit -m "feat: Starling 端口改包 RemoteMemory,会话过期与 rise 没
 ### Task 14: 部署管理面走服务：`ensure_world`、创建标记、按快照 id、重放世界；外部服务重启
 
 **Files:**
-- Modify: `src/simple_actio/memory_starling.py:248-572`（删 `_sidecar`、`_require_library_file`、`copy_library`、`_short_connection`、`library_digest`、`empty_digest`、`starling_version`、`extraction_prompts_digest`、`translate_failure`、`_translated` 与进程内的 `StarlingDeploymentStore`；重写为经会话的 `StarlingDeploymentStore`）
+- Modify: `src/simple_actio/memory_starling.py:248-572`（删 `_sidecar`、`_require_library_file`、`copy_library`、`_short_connection`、`library_digest`、`empty_digest`、`starling_version`、`extraction_prompts_digest`、`translate_failure`、`_translated` 与进程内的 `StarlingDeploymentStore`；重写为经会话的 `StarlingDeploymentStore`，含 `open` 与 `open_replay` 两个打开方法）
 - Modify: `src/simple_actio/memory_starling.py:54-77`（`StarlingEndpoints` 只装端点字段，删 `make_llm`、`make_embedder`）
 - Test: `tests/test_simple_actio_starling_store.py`（整份重写为真服务用例）、`tests/test_simple_actio_deployment_store_contract.py:31-44`（`starling` 参数改用真服务，世界前缀每条用例唯一）、`tests/test_ma_deployment_starling.py:30-60`（夹具改用真服务）
 
@@ -1715,17 +1745,18 @@ class StarlingDeploymentStore:
 
 | 方法 | 实现 |
 |---|---|
-| `open(world_id, holder, *, read_only=False)` | `name` 以 `<前缀>.verify.` 开头就当重放世界直接开；否则 `ensure_world(world_id)` 再开 `<前缀>.deploy.<world_id>`。`session.open_port(name, holder, read_only=, settings=, wrap=...)`；端口计数按完整世界名 |
+| `open(world_id, holder)` | 只收部署世界 id：`ensure_world(world_id)` 再开 `<前缀>.deploy.<world_id>`，`session.open_port(name, holder, read_only=False, settings=, wrap=...)`。不看 `world_id` 长什么样，名为 `<前缀>.verify.x` 的情境照旧是部署世界 |
+| `open_replay(replay_world, holder)` | 参数是 `fork_replay` 返回的完整世界名，原样开，不走 `ensure_world`：`session.open_port(replay_world, holder, read_only=True, settings=, wrap=...)`，`wrap` 造 `StarlingMemory(..., read_only=True)`。世界不在时服务回 `world_not_found`，判永久 |
 | `remember_event(world_id, holder, key, text, *, interlocutor)` | `ensure_world`；holder 的可写句柄上 `remember_event` 加 `embed_pending`，再关（今天短连接的同一口径） |
 | `abandon_event(world_id, holder, key)` | 世界不存在（`world_not_found`）判永久失败；否则 holder 的句柄上 `abandon_event` |
 | `pending_events(world_id)` | 管理调用 `pending_events`；`world_not_found` 返回 `[]`；空 holder 判永久 |
 | `digest(world_id)` | 管理调用 `digest`；`world_not_found` 返回 `empty_seed_digest`，不建世界（40 篇：两者相等已实测） |
 | `snapshot(world_id, *, note)` | `ensure_world`；管理调用 `snapshot`，返回 `SnapshotRef(out["snapshot_id"], out["digest"])` |
 | `restore(world_id, snapshot_id)` | 管理调用 `restore`，返回摘要；码照 Task 10 映射（`world_busy` 瞬态，`world_held`、`snapshot_not_found`、`restore_digest_mismatch` 永久） |
-| `delete_snapshot(world_id, snapshot_id)` | 管理调用 `delete_snapshot` |
+| `delete_snapshot(world_id, snapshot_id)` | 管理调用 `delete_snapshot`；快照已删时服务回 `snapshot_not_found`（`S:src/governance/world_store.cpp:1131-1133`），这里当作成功返回，与替身的幂等一致（50 篇"删一个已删的快照"一段）。其余码照 Task 10 映射 |
 | `fork_replay(world_id, snapshot_id, *, round_id)` | 世界名 `replay_world(prefix, round_id, world_id, new_suffix())`（调用前定），管理调用 `fork(source=<部署世界名>, name=, snapshot_id=, labels=labels(prefix, root, "verify", round_id=, scenario_id=), retention_group=round_id, reclaimable=True, settings=)`，返回完整世界名 |
 | `release_replay(name)` | 管理调用 `close_world` |
-| `wait_closed(world_id, timeout_s)` | 进程内计数，按完整世界名；部署世界 id 先拼成 `<前缀>.deploy.<id>` |
+| `wait_closed(world_id, timeout_s)` | 进程内计数，按完整世界名，部署与重放两种端口共用一张表；参数是部署世界 id，先拼成 `<前缀>.deploy.<id>` 再查 |
 
 - `ensure_world(world_id)`：①有创建标记 `marker_dir/<world_id>.created` 而 `list_worlds` 里没有这个世界 → 永久失败 `"deploy world <名字> was deleted"`（装配期另报退出码 2，Task 16）；②`create_world(name, labels=labels(prefix, root, "deploy", scenario_id=world_id), settings=settings, seed=False)`，成功就写创建标记（临时文件加改名）；③收到 `world_exists`：`list_worlds(labels={"repo": prefix, "kind": "deploy", "scenario_id": world_id})` 翻完所有页找这个名字，找不到、`seed` 或 `read_only` 为真、`kind`、`repo` 不对 → 永久 `"world <名字> was not created by rise"`；`root` 标签不等于本记忆根 → 永久 `"world <名字> belongs to another memory root"`；对得上且标记不在就补写标记。同一进程内对每个世界只做一次（记一个集合）。
 - 空种子 `ensure_empty_seed()`（同一类里，装配期调）：同样三步，世界名 `<前缀>.seed-empty`，`seed=True`，标签 `kind=seed-empty`；返回它的摘要（`list_worlds(with_digest=True)` 里的 `digest`）。
@@ -1763,6 +1794,28 @@ def test_a_deleted_deploy_world_is_not_rebuilt_silently(store_factory):
         fresh.open("s1", "pa")
 
 
+def test_deleting_a_deleted_snapshot_is_a_success_against_the_real_service(store_factory):
+    store, _, admin = store_factory()
+    ref = store.snapshot("s1", note="n")
+    store.delete_snapshot("s1", ref.snapshot_id)
+    with pytest.raises(Exception) as raw:                                # 服务本身回 snapshot_not_found
+        admin("delete_snapshot", {"world": f"{store.prefix}.deploy.s1", "snapshot_id": ref.snapshot_id})
+    assert "snapshot_not_found" in str(raw.value)
+    store.delete_snapshot("s1", ref.snapshot_id)                         # 管理面当作成功,不抛
+
+
+def test_open_replay_opens_the_forked_name_as_is_and_open_never_treats_a_name_as_a_replay(store_factory):
+    store, marker_dir, admin = store_factory()
+    ref = store.snapshot("s1", note="n")
+    name = store.fork_replay("s1", ref.snapshot_id, round_id="r1")
+    port = store.open_replay(name, "pa")
+    assert port.digest() == ref.digest
+    port.close()
+    store.open(name, "pa").close()                                       # 情境 id 恰好等于重放世界名:建的是部署世界
+    deploys = admin("list_worlds", {"labels": {"repo": store.prefix, "kind": "deploy"}})["worlds"]
+    assert f"{store.prefix}.deploy.{name}" in {w["name"] for w in deploys} and (marker_dir / f"{name}.created").is_file()
+
+
 def test_reading_an_unknown_world_builds_nothing_and_gives_the_empty_seed_digest(store_factory):
     store, marker_dir, admin = store_factory()
     assert store.digest("s9") == store.empty_seed_digest and store.pending_events("s9") == []
@@ -1783,7 +1836,7 @@ def test_after_an_external_restart_an_old_port_reads_handle_closed_as_a_lost_ses
     assert store.wait_closed("s1", 0.1) is True
 ```
 
-`store_factory(prefix=None, root_label=None, marker_dir=None)` 在模块级真服务上造 `ServiceSession` 与 `StarlingDeploymentStore`（前缀缺省取递增的 `t<n>`），返回 `(store, marker_dir, admin)`；`restartable()` 另起一个本条用例独占的真服务（`start_service(..., port=<固定空闲端口>)`），`service.restart()` 在同一端口重起。`_delete_world_through_the_dashboard_route(name)` 用 httpx（`trust_env=False`、带 bearer token）发 `DELETE /api/worlds/<name>?confirm=<name>`（`S:python/starling/dashboard/routes/worlds.py:396-404`；路由前缀以 `S:python/starling/dashboard/app.py` 的挂载为准，实现时核对；客户端没有删世界的接口，只有测试这样做）。契约文件 `tests/test_simple_actio_deployment_store_contract.py` 的 `starling` 参数改为同一套夹具，Task 2、4 写下的契约用例对两个后端都跑。
+`store_factory(prefix=None, root_label=None, marker_dir=None)` 在模块级真服务上造 `ServiceSession` 与 `StarlingDeploymentStore`（前缀缺省取递增的 `t<n>`），返回 `(store, marker_dir, admin)`；`admin(op, body)` 直接调 `session.admin`，不经管理面；`restartable()` 另起一个本条用例独占的真服务（`start_service(..., port=<固定空闲端口>)`），`service.restart()` 在同一端口重起。`_delete_world_through_the_dashboard_route(name)` 用 httpx（`trust_env=False`、带 bearer token）发 `DELETE /api/worlds/<name>?confirm=<name>`（`S:python/starling/dashboard/routes/worlds.py:396-404`；路由前缀以 `S:python/starling/dashboard/app.py` 的挂载为准，实现时核对；客户端没有删世界的接口，只有测试这样做）。契约文件 `tests/test_simple_actio_deployment_store_contract.py` 的 `starling` 参数改为同一套夹具，Task 2、4 写下的契约用例对两个后端都跑。
 
 - [ ] **Step 2: 跑测试确认失败**
 
@@ -1801,7 +1854,7 @@ Expected: PASS（`tests/test_ma_deployment_starling.py` 的恢复分码用例在
 
 ```bash
 git add src/simple_actio/memory_starling.py tests/test_simple_actio_starling_store.py tests/test_simple_actio_deployment_store_contract.py tests/test_ma_deployment_starling.py
-git commit -m "feat(simple_actio): 部署管理面改走记忆服务:ensure_world 三步核对与创建标记、held 快照、重放世界分叉"
+git commit -m "feat(simple_actio): 部署管理面改走记忆服务:ensure_world 三步核对与创建标记、held 快照、重放世界分叉与 open_replay"
 ```
 
 ### Task 15: 训练世界改为分叉、只关不删；解析器走服务；分叉超时后按确切世界名复用
@@ -1930,7 +1983,7 @@ git commit -m "feat(factory): rollout 世界改为从空种子分叉、只关不
 - Consumes: Task 9 至 15 的全部新对象。
 - Produces:
   - `memory_wiring(repo_root, env, *, deployment)` 的顺序（90 篇 4c 前一行、第 12 至 23 条）：①读配置；②安装来源：`client_install_commit("starling-client")` 非 editable 且有提交，拉起模式下 `client_install_commit("starling-memory")` 也要且两者相同；③拉起模式下 `check_api_key(env)`；④认领记忆根，`check_memory_layout(layout, repo_root, backend="starling")`（最终规则，Task 17）；⑤拉起（`spawn_service(root, env)`）或连接（`token_file` 读出 token，`url`）；造 `ServiceSession(pinned_commit=②的提交)`，协议、token、提交不一致在这里退出码 2；⑥`settings = rise_settings(config)`，`runtime = service_runtime(session.info, settings, config)`；⑦`ensure_empty_seed()`。**不**开任何部署世界的句柄。没设 `RISE_MEMORY_CONFIG` 时照旧在第一行返回替身，不导入 `starling_client`。
-  - `MemoryWiring(backend, deployment, memory_resolver, training_worlds, on_locked, closers, session)`：`on_locked` 是持仓库锁之后才跑的检查（90 篇"世界设置"一段、FC-48、第 23 条）：对 `agent.yaml` 里每个情境，部署世界不在而创建标记在 → `FactoryConfigError("deploy world <名字> was deleted ...")`；在 → 带 rise 设置开一次只读句柄再关，`world_settings_mismatch` → `FactoryConfigError`，文字写世界名；`ensure_world` 核对不过同样退出码 2。替身与不需要记忆的路径 `on_locked=None`。`closers` 依次是：关会话（`session.close`）、拉起模式下停服务（`SpawnedService.close`）。
+  - `MemoryWiring(backend, deployment, memory_resolver, training_worlds, on_locked, closers, session)`：`on_locked` 是持仓库锁之后才跑的检查（90 篇"世界设置"一段、FC-48、第 23 条）：对 `agent.yaml` 里每个情境，部署世界不在而创建标记在 → `FactoryConfigError("deploy world <名字> was deleted ...")`；在 → 带 rise 设置开一次只读句柄再关（直接 `session.open_port(<前缀>.deploy.<sid>, ..., read_only=True, ...)`；管理面的 `open` 只开可写句柄，`open_replay` 只开重放世界，两者都不用），`world_settings_mismatch` → `FactoryConfigError`，文字写世界名；`ensure_world` 核对不过同样退出码 2。替身与不需要记忆的路径 `on_locked=None`。`closers` 依次是：关会话（`session.close`）、拉起模式下停服务（`SpawnedService.close`）。
   - 收尾顺序（90 篇"停止"一段）：`assemble` 在造运行时之前先登记 `memory.closers`（逆序执行，所以最后跑）：先关运行时与端口，再关客户端，最后停服务、删 `service.pid`、释放归属锁。
   - 致命停机（90 篇"停守护进程分两半"、FC-47）：`_guard(fn, session)` 包住派发器与每个处理器：调用返回或抛出之后查 `session.fatal`，非空就抛 `FactoryConfigError(f"memory service: {session.fatal}; see service.log")`（外部模式不写 `service.log`）。调和循环不接它，命令行译成退出码 2。
   - `deploy_turn_timeout_s` 不变（40 秒按服务端每次至多 4 秒折算，客户端超时 30 秒只在服务卡住时生效，90 篇"客户端超时"表）。
@@ -2032,12 +2085,12 @@ git commit -m "feat(factory): 记忆装配改连服务:新顺序、持锁后的�
 ### Task 17: 旧布局切到最终规则，删进程内代码与 `starling` 导入，压成一个提交
 
 **Files:**
-- Modify: `src/mindagent/memory_layout.py`（`legacy_entries` 删 `"starling-inprocess"` 分支，只剩 `"stand-in"` 与 `"starling"`）
+- Modify: `src/mindagent/memory_layout.py`（`legacy_entries` 删 `"starling-inprocess"` 分支，只剩 `"stand-in"` 与 `"starling"`；`"starling"` 照 Task 6 表的最后一列，`held/`、`replay/` 下的 `.db` 判旧布局）
 - Modify: `src/factory/memory_runtime.py`（删 `StarlingLayout` 余下部分与一切按路径的 Starling 代码；`check_memory_layout` 的 `backend` 只收两个值）
 - Modify: `tests/test_factory_cross_plan.py:204-212`（`test_only_simple_actio_memory_starling_imports_starling` 改成"`src/` 下没有文件导入 `starling`"）
 - Modify: `tests/test_simple_actio_instance.py:655-674`（`_ALLOWED_MEMORY_STARLING` 删 `starling`、`shutil`、`tempfile`、`functools` 中不再用到的项，加 `starling_client`；以实际导入为准）
 - Modify: `tests/test_memory_live.py:1-30`（`live_port` 改成经拉起模式的服务开端口；仍只在 `RISE_MEMORY_LIVE=1` 时跑）
-- Test: `tests/test_ma_memory_layout.py`（Task 6 的参数化用例删 `starling-inprocess` 一行）、`tests/test_factory_memory_wiring.py:337-445`（旧布局用例：同一个记忆根，Starling 下 `deploy/s1.db`、`seeds/`、`runs/` 判旧布局退出码 2，替身下照旧合法）
+- Test: `tests/test_ma_memory_layout.py`（Task 6 的参数化用例删 `starling-inprocess` 一行）、`tests/test_factory_memory_wiring.py:337-445`（旧布局用例：Starling 下 `deploy/s1.db`、`seeds/`、`runs/` 与 `held/`、`replay/` 下的 `.db` 判旧布局退出码 2；同一个记忆根里替身的 `held/*/*.json`、`replay/*.json` 合法，`deploy/s1.db-wal`、`deploy/s1.json.tmp` 两个后端都不查）
 
 **Interfaces:**
 - Consumes: Task 13 至 16。
@@ -2057,7 +2110,8 @@ def test_nothing_under_src_imports_starling():
 
 
 # tests/test_factory_memory_wiring.py
-@pytest.mark.parametrize("rel", ["deploy/s1.db", "seeds/k/s1.db", "runs/run-1/e.db", "snapshots/r1/deploy-m-1.world"])
+@pytest.mark.parametrize("rel", ["deploy/s1.db", "seeds/k/s1.db", "runs/run-1/e.db", "snapshots/r1/deploy-m-1.world",
+                                 "held/s1/snap-0.db", "replay/rise.verify.r1.s1.00000000.db"])
 def test_a_starling_root_left_from_the_in_process_era_exits_2_listing_it(store, tmp_path, monkeypatch, capsys, rel):
     pytest.importorskip("starling_client"); pytest.importorskip("starling.service")
     _agent_yaml(store, scenario_ids=["s1"])
@@ -2067,6 +2121,14 @@ def test_a_starling_root_left_from_the_in_process_era_exits_2_listing_it(store, 
     err = capsys.readouterr().err
     assert rel.split("/")[0] in err and str(tmp_path) not in err
     assert not (tmp_path / "mem" / "service.pid").exists()               # 旧布局在拉起服务之前就拒绝
+
+
+def test_half_written_and_runtime_files_never_block_a_stand_in_start(store):
+    root = _stand_in_root(store)
+    for rel in ("deploy/s1.json.tmp", "deploy/s1.db-wal", "deploy/s1.db-shm", "held/s1/snap-0.json",
+                "replay/rise.verify.r1.s1.00000000.json"):
+        (root / rel).parent.mkdir(parents=True, exist_ok=True); (root / rel).write_text("{}")
+    memory_wiring(store.repo_root, {}, deployment=True)                  # 替身在造部署记忆时查,不抛
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -2081,20 +2143,23 @@ Expected: FAIL（还有文件导入 `starling`；过渡规则仍在）
 Run: `uv run --offline pytest -q -m 'not slow' -p no:cacheprovider`
 Expected: 0 failed（第 4 步的最后一个任务，在分支上跑全量；真服务的用例都真跑，不是 skip：`uv run --offline pytest -q -rs -m 'not slow' -p no:cacheprovider tests/test_simple_actio_starling_store.py tests/test_factory_starling_service.py tests/test_factory_training_worlds.py` 的跳过原因里不应有 `starling_client`）
 
-- [ ] **Step 5: 在分支上提交，再压成 main 上的一个提交（等用户拍板）**
+- [ ] **Step 5: 在分支上提交，全量绿就压成 main 上的一个提交，保留分支，继续第 5 步**
 
 ```bash
 git add src/mindagent/memory_layout.py src/factory/memory_runtime.py tests/test_factory_cross_plan.py tests/test_simple_actio_instance.py tests/test_memory_live.py tests/test_ma_memory_layout.py tests/test_factory_memory_wiring.py
 git commit -m "refactor: 旧布局切到最终规则,删进程内 Starling 代码,src/ 不再导入 starling"
 ```
 
-停下，向用户报告分支 `design4-step4` 的五个提交与全量结果，等用户同意后再：
+Step 4 的全量绿了就合并，不停下等用户。压缩合并只在本地 main 上做，分支 `design4-step4` 保留不删，随时能对照或回退；不推送（推送前先问用户）。全量不绿就不合并，按失败修到绿再合。
 
 ```bash
 git switch main
 git merge --squash design4-step4
 git commit -m "feat: rise 接 Starling 记忆服务(第 4 步):端口、管理面、训练世界、解析器改走客户端,装配连服务,删进程内代码"
+git branch --list design4-step4        # 期望仍列出这个分支:不删
 ```
+
+合并后在 main 上接着做第 5 步（Task 18）。给控制者的报告写明分支上的五个提交、main 上的压缩提交号与全量结果。
 
 ## 第 5 步：建种子与按摘要钉住种子版本
 
@@ -2292,7 +2357,7 @@ git commit -m "feat(factory): bind 收解出的起点摘要并按它钉住种子
 
 **Files:**
 - Modify: `docs/design/00-overview.md`、`20-socialsimulator.md`、`30-mindtrainer.md`、`40-simple-actio.md`、`50-mindagent.md`、`90-factory-and-cli.md`、`docs/design/_shared/context-block.md`（若有接服务的内容）
-- Modify: 本计划（勾选；「待定」一节写明每条最后怎么定的）
+- Modify: 本计划（勾选；「已定」一节里的哪条在施工中有偏差就照实改写）
 
 - [ ] **Step 1: 跑全量**
 
@@ -2304,7 +2369,7 @@ Expected: 0 failed；另跑 `uv run --offline pytest -q -rs -m 'not slow' -p no:
 - [ ] **Step 3: 跑文档检查**
 
 Run: `python3 docs/design/tools/sync_docs.py && python3 docs/design/tools/check_docs.py && python3 docs/design/tools/check_consistency.py`
-Expected: 三者都是 0 个错误；`ServiceSession`、`fork_replay`、`PendingKey`、`SnapshotRef` 的符号告警消失
+Expected: 三者都是 0 个错误；`ServiceSession`、`fork_replay`、`open_replay`、`PendingKey`、`SnapshotRef` 的符号告警消失
 
 - [ ] **Step 4: 提交**
 
@@ -2315,14 +2380,18 @@ git commit -m "docs(design): rise 接 Starling 记忆服务标为已落地"
 
 ---
 
-## 待定
+## 已定
 
-下面几条是 `docs/design/` 没写清或前后不一致的地方。计划里按括号里的读法写了任务，执行到对应任务之前要由用户或设计复审定下来；定了以后先改 `docs/design/`，再改本计划。
+开工前的七条待定项已于 2026-11-10 裁定，先并入 `docs/design/`，再改了上面的任务。下表只指出每条现在写在哪里，内容以 docs/design 为准。
 
-1. **`deploy/` 下"只许"的范围**（90 篇第 18 条）。字面是替身只许 `*.lock` 与 `<scenario_id>.json`、Starling 只许 `*.lock` 与 `*.created`。照字面全拒，写到一半崩溃留下的临时文件（`FileTupleStore` 写账本的 `.tmp`）与进程内 Starling 开着库时的 `-wal`、`-shm` 都会让下次启动退出码 2。Task 6 只拒绝以 `.json`、`.db`、`.created` 结尾的非法文件，其余不查。要不要照字面全拒？
-2. **重放世界与部署世界的名字空间**（40、50 篇）。`open` 以"名字以 `<前缀>.verify.` 开头"认重放世界。情境 id 过 `PERSONA_ID_PATTERN`，允许含 `.`，所以名为 `rise.verify.x` 的情境会被当成重放世界。替身的重放世界名沿用同一前缀（Task 4 写死 `rise`），同样有这个问题。要不要禁止情境 id 以 `<前缀>.verify.` 开头（装配期拒绝），或改用别的判法（例如管理面记下自己分叉出的重放世界名）？
-3. **第 2、3 步留下的过渡文件**。进程内 Starling 的过渡布局在记忆根下留下 `held/*/*.db` 与 `replay/*.db`。第 4 步的最终规则（90 篇第 18 条）只列了 `seeds/`、`runs/`、`snapshots/` 下的旧文件与 `deploy/` 的非法文件，没提 `held/` 与 `replay/`，Task 6 让 Starling 后端对它们"不查"。这些文件不会被任何世界读到，按 FC-37 的思路应当拒绝启动；而替身在同一路径上有合法文件，两个后端共用记忆根时规则又不同。要不要把 Starling 后端下的 `held/`、`replay/` 也列进旧布局？
-4. **种子标签的 `root` 与种子选取**。00 篇"按标签找种子"按 `repo`、`root`、`kind=seed`、`seed_id`、`scenario_id` 查，`root` 是记忆根的摘要。人在看板上"升级种子"得到的新世界照抄旧标签（含 `root`），这没问题；但种子要在两台机器或两个记忆根之间共用时，`root` 会把它挡掉。本期按文档写（Task 19 按 `root` 过滤）；若有共用种子的需要，要另定。
-5. **`delete_snapshot` 删一个已删的快照**。50 篇说提交时 `delete_snapshot` 失败只记 warning，没说服务对不存在的 id 回什么码。Task 4 让替身按幂等写；Task 14 用真服务核对，若服务回 `snapshot_not_found`，两边要对齐（建议都按幂等处理，不改提交结果）。
-6. **`world_held` 的排空窗口按世界名还是部署世界 id**（40 篇、90 篇）。文档写"在这个世界上有可写句柄"。Task 12 按完整世界名记录与比较。rollout 世界每次重试都换名字，所以重连后 rollout 的 `world_held` 不会落进窗口；这与"rollout 重试换新世界"一致，但文档没明说。
-7. **句柄调用的超时与修正决定 G2 的旧说法**。90 篇 FC-46 定的是句柄调用 30 秒、管理调用 300 秒，修正决定文件里 G2 的"一律 300 秒"已被取代。本计划按 90 篇写。90 篇"客户端超时"表把 `digest(world)` 与 `pending_events(world)` 列为管理调用；而 40 篇"`pending_events`、`digest` 用不开句柄的管理调用"与它一致。两处无冲突，记在这里只为提醒执行者不要按 G2 的旧值写常量。
+| 项 | 裁定 | docs/design 里的位置 | 改到的任务 |
+|---|---|---|---|
+| 1 `deploy/` 下"只许"的范围 | 只查 `.json`、`.db`、`.created`、`.rec.json` 四种数据后缀，不在允许名单里的拒绝；`.tmp`、`-wal`、`-shm`、`.lock` 等不查 | 90 篇第 6.1 节拒绝项第 18 条 | Task 6、17 |
+| 2 重放世界与部署世界的名字空间 | 不按名字前缀推断；重放世界只经 `open_replay(replay_world, holder)`，永远只读，不走 `ensure_world`；`open` 只收部署世界 id，去掉 `read_only`；`wait_closed` 按完整世界名计，两种端口共用一张计数表 | 40 篇第 5.1 节"接服务后管理面的签名"与方法表、第 5.4 节调用表、AC-34；50 篇第 5 章管理面规则表"重放世界"一行与第 6 章重放世界一段；00 篇第 3.2 节管理面签名一段 | Task 4、5、7、9、13、14 |
+| 3 第 2、3 步留下的过渡文件 | 第 4 步起 Starling 后端下 `held/`、`replay/` 里的 `.db` 判旧布局，与其他旧布局同一口径列出至多 5 条；替身在这两处的 `.json` 合法 | 90 篇第 18 条与第 4 章记忆根布局表；00 篇施工表第 4 行 | Task 6、17 |
+| 4 种子标签的 `root` | 照文档按 `root` 过滤，跨记忆根不共用种子 | 00 篇第 2.2 节非目标表"跨记忆根共用种子"一行、第 3.2 节"按标签找种子"一段 | Task 19 不变 |
+| 5 `delete_snapshot` 删已删的快照 | Starling 回 `snapshot_not_found`，rise 当作成功，与替身的幂等一致 | 50 篇第 6 章"删一个已删的快照"一段与第 8 章失败表；40 篇第 5.1 节方法表 `delete_snapshot` 一行 | Task 4、7、14 |
+| 6 排空窗口的比较键 | 按完整世界名；rollout 世界每次重试换名字，窗口只对部署世界起作用 | 90 篇第 5 章"排空窗口的比较键"一段与服务会话情形表；00 篇、90 篇术语表"排空窗口"一行 | Task 12 |
+| 7 句柄与管理调用的超时 | 照 90 篇 FC-46：句柄调用 30 秒、管理调用 300 秒 | 90 篇 FC-46 与"客户端超时"表 | 不改 |
+
+另一处约定改了：第 4 步压成一个提交不再停下等用户（Global Constraints 与 Task 17 Step 5）。

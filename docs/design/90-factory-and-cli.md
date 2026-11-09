@@ -411,8 +411,8 @@ sampling_k: 4       # 整数,至少 1
 |---|---|---|
 | `deploy/<scenario_id>.json` | 部署世界 | 无 |
 | `deploy/<scenario_id>.created` | 无 | 创建标记:rise 第一次建这个部署世界时写,之后世界不在就判"部署世界被删" |
-| `held/<world_id>/<snapshot_id>.json` | held 快照与它的 `note` | 无,快照在服务里 |
-| `replay/<重放世界名>.json` | 重放世界,`release_replay` 删;崩溃留下的不清,只占磁盘 | 无,重放世界在服务里 |
+| `held/<world_id>/<snapshot_id>.json` | held 快照与它的 `note` | 无,快照在服务里;第 2、3 步留下的 `held/*/*.db` 判旧布局 |
+| `replay/<重放世界名>.json` | 重放世界,`release_replay` 删;崩溃留下的不清,只占磁盘 | 无,重放世界在服务里;第 2、3 步留下的 `replay/*.db` 判旧布局 |
 | `service/`、`service.log`、`service.pid`、`service.owner.lock` | 无 | 只在拉起模式下有 |
 
 一个记忆根目录只属于一个控制面仓库:根目录下的 `.owner` 文件记该仓库的绝对路径,首次使用时先写临时文件、fsync,再用硬链接发布成 `.owner`,`FileExistsError` 时读回再比。装配期读到的路径与当前仓库不同,就退出码 2,信息写两个路径;两个仓库同时首次使用,只有一个能发布成功,发布出来的就是完整内容,另一个读到对方的路径而退出。读到 0 字节的 `.owner`(旧做法被打断留下的)也拒绝,信息写出该删哪个文件。否则两个仓库共用一个根目录时,部署记忆会混写,启动清扫也会删掉对方在途的 rollout 世界 [已落地]。
@@ -595,9 +595,11 @@ SESSION_CLOSE_WAIT_S = 70.0   # mindagent.deployment;服务端 join 上限 60 �
 | 端口不是 rise 关的,却收到 `handle_closed` | 外部看板重启后端口与 token 不变(token 存在 `starling.json`,`S:python/starling/dashboard/config.py:152-154`),新进程认不出旧句柄,回 `handle_closed`(`S:src/governance/session_table.cpp:64-74`),心跳至多 10 秒后才发现过期。所以同样判瞬态,把这一代会话标为丢失 |
 | 下一次需要服务 | 新建客户端,代号加一,记 warning;旧客户端引用计数归零后再关 |
 | 每次换会话之后 | 重新核对 `info()` 的 `commit`、`protocol`、`extraction_config` 摘要与 token。任一项与装配期不符,或重连遇到 Unauthorized、ProtocolMismatch:停守护进程,按装配错误退出(退出码 2),日志写原因;不落到单条指令或轮次 |
-| 新会话开句柄收到 `world_held`,世界在丢失会话的可写列表里,距过期不到 60 秒 | 判瞬态,即排空窗口;服务端要等过期会话的在途调用结束 |
+| 新会话开句柄收到 `world_held`,世界在丢失会话的可写列表里,距过期不到 60 秒 | 判瞬态,即排空窗口;服务端要等过期会话的在途调用结束。按完整世界名记录与比较 |
 | 拉起模式下服务退出 | 下一次需要时重新拉起,退避 1、4、16 秒,一个进程至多重启 3 次。次数用完:停守护进程,退出码 2,日志写 `service.log` 的路径 |
 | 服务重启时在途的调用 | 已提交写入都在;在途调用丢了,按瞬态重跑。在途的 `snapshot` 留下孤儿 held 快照(在途记录还没写);在途的 `fork` 走上面"分叉超时"那一行 |
+
+排空窗口的比较键是完整世界名 [计划中]。rollout 世界每次重试都换后缀,重连后开的是新世界,不会撞上 `world_held`;排空窗口只对名字不变的部署世界起作用。
 
 "停守护进程"分两半。ServiceSession 记下致命原因后,一切记忆调用都抛瞬态 MemoryFailureError,所以在途的指令与轮次只会延后,不判 T2 或 T3。组合根给派发器与每个处理器套一层:调用返回或抛出之后查致命状态,查到就抛 `FactoryConfigError`。调和循环不接它(处理器异常原样上抛,派发器只接 `DirectiveFailedError`,`src/controlplane/daemon.py:349-360`;`reconcile_once` 只接 `DeferredError`,`:469`),命令行译成退出码 2(`src/factory/cli.py:162-164`)。
 
@@ -766,7 +768,7 @@ TypeScript 命令行:`rise <review|approve|reject|confirm|status> [id] [reason]`
 | 15 | 记忆配置设置后,Starling 不是 editable 安装 [已落地];接服务后查的包换成 `starling-client`(拉起模式下另查 `starling-memory`),来源必须有 git 提交,不再接受 `record:` [计划中] | editable 安装的源码目录随时在变,运行时身份无从钉住;没有提交就无法与服务报的提交比对 |
 | 16 | 记忆配置设置后,Starling 已安装且载得进来 [已落地];接服务后查的是 `starling-client`,拉起模式下另查 `starling-memory` [计划中] | 配置要求 Starling 却没装它,或装了而 C++ 扩展载不进来,信息都说明 `pip install '.[memory]'`。不装 extra 的环境不设 `RISE_MEMORY_CONFIG` 就走替身路径 |
 | 17 | 记忆配置设置后,记忆根目录的 `.owner` 记的是当前仓库,且 `runs/` 不是符号链接或文件;首次使用时先写临时文件再以硬链接发布,两个仓库同时首次使用只有一个发布得成 [已落地]。接服务后 `runs/` 存在就按旧布局拒绝(第 18 条)[计划中] | 根目录属于别的仓库:两个仓库共用时部署记忆会混写,启动清扫会删掉对方在途的 rollout 世界。信息写两个路径。`runs/` 是符号链接时清扫会删到记忆根之外,文字只写相对名 |
-| 18 | 记忆根目录不是按人格的旧布局,且起点快照的 `.world` 旁注都可读 [已落地];接服务后按后端判 [计划中] | 接服务后 [计划中]:两个后端都拒绝 `seeds/`、`runs/` 目录,`snapshots/` 下的 `.db`、`.world` 与不带 `.rec` 的 `deploy-*.json`,以及读不出的在途记录。`deploy/` 下替身只许 `*.lock` 与 `<scenario_id>.json`,Starling 服务只许 `*.lock` 与 `*.created`;布局见第 4 章的表。第 2、3 步是过渡:进程内 Starling 的 `deploy/*.db` 仍合法,第 4 步起才判旧布局。今天:`deploy/` 下有非已知情境名的库文件,或 `snapshots/` 下有缺旁注的起点快照。配置在场时在导入 Starling 之前查;替身只在造部署记忆时查。旧库不会被任何世界读到,悄悄留着会让人以为它还在用。信息列出可疑条目(至多 5 条),提示移回配置或移出记忆根(FC-37) |
+| 18 | 记忆根目录不是按人格的旧布局,且起点快照的 `.world` 旁注都可读 [已落地];接服务后按后端判 [计划中] | 接服务后 [计划中]:两个后端都拒绝 `seeds/`、`runs/` 目录,`snapshots/` 下的 `.db`、`.world` 与不带 `.rec` 的 `deploy-*.json`,以及读不出的在途记录。`deploy/` 下只查带数据后缀的文件:`.json`、`.db`、`.created`、`.rec.json`。替身只许 `<已知情境>.json`,Starling 服务只许 `<已知情境>.created`,不在名单里的都拒绝。其余文件一律不查,含 `.tmp`、`-wal`、`-shm`、`.lock`:它们是写到一半或运行时的文件,不是世界数据,拒绝它们会让一次崩溃变成无法启动。Starling 服务下 `held/`、`replay/` 里的 `.db` 也判旧布局,它们是第 2、3 步进程内过渡留下的;替身在这两处的 `.json` 合法。布局见第 4 章的表。第 2、3 步是过渡:进程内 Starling 的 `deploy/*.db`、`held/`、`replay/` 仍合法,第 4 步起才判旧布局。今天:`deploy/` 下有非已知情境名的库文件,或 `snapshots/` 下有缺旁注的起点快照。配置在场时在导入 Starling 之前查;替身只在造部署记忆时查。旧库不会被任何世界读到,悄悄留着会让人以为它还在用。信息列出可疑条目(至多 5 条),提示移回配置或移出记忆根(FC-37) |
 | 19 | `agent.yaml` 的 `bindings` 里 `persona_id` 不重复 | 两个位共用一个主体就共用记忆与事件 key。由 `read_agent_settings` 查,它有三个调用方:轮次处理器与运行时装配在装配期调,出错退出码 2;`interact_policy` 每次派发时调,转成 `DirectiveFailedError` 判 T2。训练配置与合成绑定的同类重复也由派发器判 T2(FC-36) |
 | 20 | 接服务后:`url` 与 `token_file` 同给同不给,`url` 是回环地址的 http URL,`token_file` 在仓库外、0600 [计划中] | 只给一个、地址不是回环、文件权限过宽或在仓库里 |
 | 21 | 接服务后:安装来源有 git 提交;拉起模式下两个包同一提交;服务报的提交等于钉住的提交;协议一致、token 对 [计划中] | 外部模式下文字写出两个提交,提示同步看板服务的源码树或 rise 的钉住版本;文字不含端点地址与 token |
@@ -1120,6 +1122,6 @@ factory 是第九个工作包,前八个全部落地后才施工。前置关系:1
 | 世界 | 一个记忆库或一份替身账本,里面有多个主体。部署按情境,训练按 rollout,种子按情境 [已落地];接服务后 Starling 一侧是服务注册表里的具名世界 [计划中] |
 | rise 设置 | rise 写出全部叶子的那份世界设置,建世界、分叉、开句柄都传它 [计划中] |
 | 服务会话、代号 | 进程里当前在用的那个 `starling_client.Client`,代号从 1 递增;端口记下开它时的代号 [计划中] |
-| 排空窗口 | 本进程一个会话丢失后 60 秒内,且丢失时它在这个世界上有可写句柄;窗口内开句柄的 `world_held` 判瞬态 [计划中] |
+| 排空窗口 | 本进程一个会话丢失后 60 秒内,且丢失时它在这个世界上有可写句柄,世界按完整世界名比较;窗口内开句柄的 `world_held` 判瞬态 [计划中] |
 | 外部模式、拉起模式 | rise 连用户已在跑的看板服务(缺省),或 rise 自己以子进程拉起一个服务 [计划中] |
 | 主体(holder) | 世界里的一个人格;端口绑定 `(世界, 主体)`,召回只返回本主体名下的记忆 |
