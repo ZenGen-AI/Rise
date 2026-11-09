@@ -1,6 +1,6 @@
 # 设计四：rise 接 Starling 记忆服务
 
-状态：设计稿，二审修改中。日期：2026-11-08 初稿，2026-11-09 修改。基线：设计依据的 rise 代码是 `1c2e364`，初稿提交为 `6961f80`；Starling `cff319d`（记忆服务第 1 至 4 期已合并）。
+状态：设计稿，第 16 节已全部拍板，待复审。日期：2026-11-08 初稿，2026-11-09 修改。基线：设计依据的 rise 代码是 `1c2e364`，初稿提交为 `6961f80`；Starling `cff319d`（记忆服务第 1 至 4 期已合并）。
 权威文档集是 `docs/design/`。本稿审定后并入 00、20、30、40、50、90 六篇，另写施工计划；并入后本稿只作历史来源。
 
 引用写法：
@@ -43,6 +43,11 @@
 | 服务从哪来 | 配置给了服务地址就连；没给就由 rise 按钉住的版本在本机以子进程拉起，等就绪，rise 退出时 SIGTERM | 用户 2026-11-02 |
 | 看板 | 缺省连看板服务：记忆配置写 `url` 与 `token_file`，rise 不管它的起停，靠 `world_prefix` 与标签和用户别的世界区分。拉起模式保留，只给测试和没有看板的机器用，这种模式没有页面（6.1） | 用户 2026-11-09 |
 | 孤儿 held 快照 | 接受，由人在看板里删。快照时把 episode id（验证快照写 round 与 scenario）写进 `note`；rise 侧不加任何清理（4.2） | 用户 2026-11-09 |
+| extra `memory` | 一个 extra，客户端与服务端两行都装（第 9 节） | 用户 2026-11-09 |
+| 有内容的种子 | rise 加建种子的命令 `factory seed`，从部署世界分叉（5.6） | 用户 2026-11-09 |
+| 拉起模式的残留服务 | 核对后自动停掉，核对不过就拒绝启动（6.2） | 用户 2026-11-09 |
+| 拉起的服务中途退出 | 自动重启：退避 1、4、16 秒，按 rise 进程生命周期计，至多 3 次；旧会话等端口关完再关（6.4） | 用户 2026-11-09 |
+| 开句柄时的 `world_held` | 只在本进程旧会话的 60 秒排空窗口内判瞬态，其余永久（第 8 节） | 用户 2026-11-09 |
 | 世界与主体 | 一个模拟世界 = 一个 Starling 世界，人格是 holder。一个情境一个部署世界；每条 rollout 从情境的种子世界分叉一个平行世界 | 用户 2026-11-03（设计三已落地，只换后端） |
 | 看板里看全部世界 | 用户要在 Starling 看板里查看所有世界，含训练中的 rollout 世界；rollout 世界结束后留着复盘 | 用户 2026-11-02 |
 | 时机 | 第 4 期合并后对接，跳过单独接第 2 期 | 用户 2026-11-06 |
@@ -276,8 +281,8 @@ Starling 的世界名规则：首字符字母或数字，其余 `[A-Za-z0-9._-]`
 | 世界 | 世界名 | 标签（都带 `repo=<前缀>`） | 可回收 |
 |---|---|---|---|
 | 部署世界 | `<前缀>.deploy.<scenario_id>` | `kind=deploy`、`scenario_id` | 否 |
-| 空种子 | `<前缀>.seed-empty` | `kind=seed`、`seed_id=none` | 否（种子） |
-| 种子 | 人定，建议 `<前缀>.seed.<seed_id>.<scenario_id>.v<n>` | `kind=seed`、`seed_id`、`scenario_id` | 否（种子） |
+| 空种子 | `<前缀>.seed-empty` | `kind=seed-empty`（不带 `seed_id`，免得和人起的种子 id 撞） | 否（种子） |
+| 种子 | `<前缀>.seed.<seed_id>.<scenario_id>.v<n>`，由 `factory seed` 生成（5.6） | `kind=seed`、`seed_id`、`scenario_id`、`version=<n>` | 否（种子） |
 | rollout 世界 | `<前缀>.ro.<episode_id>.<8 位十六进制>` | `kind=rollout`、`run_id`、`scenario_id`、`episode_id`、`seed_id`、`attempt` | 是，`retention_group=run_id` |
 | 重放世界 | `<前缀>.verify.<round_id>.<scenario_id>.<8 位十六进制>` | `kind=verify`、`round_id`、`scenario_id` | 是，`retention_group=round_id` |
 
@@ -297,7 +302,7 @@ Starling 的世界名规则：首字符字母或数字，其余 `[A-Za-z0-9._-]`
 | `_discard` | 删库文件 | `close_world`，只关不删 |
 | `sweep` | 删 `runs/` 下全部子项（`memory_runtime.py:650-673`） | 去掉：没有本地文件要清；`MemoryWiring.sweep` 为 `None` |
 
-- **起点核对**：`bind(run_id, seed, digests)` 多收一个参数，是派发器解出的 `memory.digests`。调用处 `src/factory/interact_policy.py:393` 改传 `cfg.memory["digests"]`（策略工厂拿到的已是解析后的配置，`src/mindtrainer/dispatch.py:401-412`）。`_create` 比较 `fork` 返回的 `digest` 与 `digests[scenario_id]`，不等就抛永久失败：种子在 run 中途被换掉了。`fork` 返回 `{world, digest}`、摘要等于来源，2026-11-09 已实测。
+- **起点核对**：`bind(run_id, seed, digests)` 多收一个参数，是派发器解出的 `memory.digests`。调用处 `src/factory/interact_policy.py:393` 改传 `cfg.memory["digests"]`（策略工厂拿到的已是解析后的配置，`src/mindtrainer/dispatch.py:401-412`）。`bind` 为每个情境在候选种子里取摘要等于 `digests[scenario_id]` 的版本最大的一份，钉住它的世界名，这个 run 的 rollout 都从它分叉；解析之后有人用 `factory seed --new-version` 建了新版本，也不会换掉在跑的 run 的起点。一份都对不上就抛永久失败。`_create` 再比一次 `fork` 返回的 `digest`，作第二道。`fork` 返回 `{world, digest}`、摘要等于来源，2026-11-09 已实测。
 - **重试与命名**：世界删不掉，同一个 episode 的每次 `_create` 都换一个 8 位随机后缀，`attempt` 标签从 1 递增（进程内按 episode id 计）。保留表与"端口没关上就判瞬态"的规则不变。
 - **`fork` 失败**：`world_exists` 是永久码（`S:src/governance/error_catalog.cpp:17`；`S:src/governance/world_store.cpp:2008-2012`），收到就换后缀再分叉，至多 3 次。`ServiceTimeout` 时服务端不一定没做：先按 `list_worlds(labels={repo, kind=rollout, episode_id, attempt})` 查，查到就用它，查不到再用新后缀重试。物理世界名写进端口与 warning 日志。
 - **`_discard` 的异常**：`close_rollout` 只接 `OSError`（`memory_runtime.py:507-512`）。`_discard` 内部把 `starling_client` 的异常译成 `MemoryFailureError` 并吸收，只记 warning（只报码），公共收尾逻辑不改。
@@ -310,11 +315,11 @@ Starling 的世界名规则：首字符字母或数字，其余 `[A-Za-z0-9._-]`
 
 | 项 | 决定 |
 |---|---|
-| 谁建 | rise 不建有内容的种子。人用 Starling 的分叉路由从部署世界或它的快照分叉，`seed=true`，打上 5.1 的标签（看板路由 `S:python/starling/dashboard/routes/worlds.py:405`，分叉体带 `labels`、`seed`，`:67-76`）。rise 只自动建空种子（5.4） |
-| 怎么找 | `list_worlds(labels={repo, kind=seed, seed_id, scenario_id}, with_digest=True)`，翻完所有页（缺省每页 50，`S:clients/python/starling_client/client.py:191-197`；上限 500，`S:src/governance/registry_db.cpp:37`），只取 `seed` 为真的项 |
-| 升级后新旧同标签 | 新种子照抄旧种子的标签（答复 `:47`），取 `created_at` 最大的一份，相同时取名字最大的。`created_at` 精确到秒，同一秒建的两份相同（`S:python/starling/dashboard/world_manager.py:207-210`） |
+| 谁建 | 有内容的种子由人用 `factory seed` 从部署世界分叉（5.6，用户 11-09 定）；空种子由 rise 在装配期自动建（5.4） |
+| 怎么找 | `list_worlds(labels={repo, kind=seed, seed_id, scenario_id}, with_digest=True)`，翻完所有页（缺省每页 50，`S:clients/python/starling_client/client.py:191-197`；上限 500，`S:src/governance/registry_db.cpp:37`），只取 `seed` 为真的项。取 `version` 标签最大的；同版本有几份（升级出来的，见下一行）取 `created_at` 最大的，再相同取名字最大的 |
+| 升级 | 本期不做命令，由人在看板上调升级路由（`S:python/starling/dashboard/routes/worlds.py:414`）。升级出的新种子照抄旧种子的标签，含 `version`（`S:src/governance/world_store.cpp:2154`），所以按上一行的规则被选中。`created_at` 精确到秒（`S:python/starling/dashboard/world_manager.py:207-210`） |
 | 旧布局 `seeds/<seed_id>/<scenario_id>.db` | 不再支持。记忆根下有 `seeds/` 目录就在装配期拒绝启动（退出码 2），与设计三 4.8 的旧布局同一口径。今天还没有任何种子（需求 §4.4） |
-| 种子落后于当前 schema | 分叉返回 `world_schema_behind`（答复 `:45`），rise 判永久失败，派发器 T2。原因里写"需要人显式升级种子" |
+| 种子落后于当前 schema | 分叉返回 `world_schema_behind`（`S:src/governance/world_store.cpp:1950-1958`），rise 判永久失败，派发器 T2。原因里写"需要人在看板里升级种子" |
 
 ### 5.4 没有种子时
 
@@ -337,6 +342,32 @@ Starling 的世界名规则：首字符字母或数字，其余 `[A-Za-z0-9._-]`
 | 服务瞬态失败 | 不会发生（只读本地文件） | 抛 `DeferredError`，指令留 pending |
 
 派发器今天把解析器抛的一切异常译成 `DirectiveFailedError`（`src/mindtrainer/dispatch.py:287-290`），瞬态的服务失败也会变成 T2。所以 `_resolve_memory` 加一条：`DeferredError` 原样上抛。
+
+### 5.6 建种子的命令 `factory seed`
+
+用户 11-09 定由 rise 建种子。命令放在 `src/factory/cli.py` 的子命令里，写法照 `import-sombench`（`src/factory/cli.py:72-77`、`:125-139`）：参数解析在 `build_parser`，实现放新模块 `src/factory/seed.py`，惰性导入，`FactoryConfigError` 译成退出码 2。
+
+```
+factory seed <repo_root> --seed-id <seed_id> --scenario <scenario_id> [--scenario ...] [--snapshot <id>] [--new-version]
+```
+
+| 项 | 决定 |
+|---|---|
+| 种子 id | `--seed-id` 必填，人给，过 `PERSONA_ID_PATTERN`（`src/simple_actio/memory_port.py:13`）。指令里的 `memory.seed` 填同一个值 |
+| 情境 | `--scenario` 至少一个，必须在 `agent.yaml` 的 `scenario_ids` 里。逐个处理，按 id 排序 |
+| 来源 | 缺省是该情境部署世界的当前状态。`--snapshot` 给的是人在看板快照列表里看到的快照 id，只能配一个 `--scenario`。rise 不为建种子拍快照：持着世界锁时没有 rise 的写者，从开着的世界分叉读的是它最近一次提交（`S:python/starling/dashboard/world_manager.py:1355-1368`），拍一份临时快照只多一个留下孤儿的窗口 |
+| 世界锁 | 每个情境先取世界锁（`src/mindagent/memory_layout.py:63-65`），被占就退出码 2，原因写"部署轮次或门② 正在用这个世界"。锁内查 `uncommitted_snapshots(scenario_id)`，有在途 episode 也退出码 2：那条 episode 会被回滚，种子不能拍进它的写入 |
+| 部署世界不存在 | 退出码 2。空种子已由 rise 自动建（5.4） |
+| 已有同 `seed_id` 与 `scenario_id` 的种子 | 缺省拒绝，退出码 2，打印已有的世界名与版本。加 `--new-version` 才建 v(n+1)，n 是这组标签下最大的 `version`；首份是 v1 |
+| 分叉参数 | `fork(部署世界名, 种子世界名, snapshot_id=..., seed=True, labels={repo, kind=seed, seed_id, scenario_id, version}, settings=rise 设置)` |
+| 输出 | 每个情境一行：`<世界名> <摘要>`，摘要取 `fork` 返回的 `digest` |
+| 两种模式 | 都能用。命令按 7.4 的第 1 至 6 步打开服务、算 rise 设置，不造部署与训练对象；用完关会话，拉起模式下停掉服务。命令不写控制面的树，不取仓库锁：外部模式下守护进程在跑时也能用，冲突由世界锁挡住；拉起模式下守护进程在跑时归属锁被占（6.2），命令退出码 2，要先停守护进程 |
+| 替身 | 退出码 2：替身没有种子 |
+| 升级 | 不做命令，由人在看板上做（5.3）。升级只在 Starling 迁移版本变了之后才需要，次数少 |
+
+崩溃与超时：Starling 的分叉在复制、校验都过了之后才登记，失败不留文件也不留注册项（答复 `:45`），所以崩在任何一步，种子要么完整存在，要么不存在。重跑时已存在就按"已有种子"那一行拒绝并打印它。`fork` 超时（`ServiceTimeout`）时先按世界名查 `list_worlds`，查到就当作成功打印，查不到退出码 2，提示重跑。
+
+对实验的影响：`--new-version` 之后，派发器为引用这个 `seed_id` 的指令解出的摘要换成新版本的，续训中的 run 因此判 T3（第 12 节）。所以缺省拒绝，改版本要显式。
 
 ## 6. 服务进程与会话
 
@@ -370,13 +401,30 @@ Starling 的世界名规则：首字符字母或数字，其余 `[A-Za-z0-9._-]`
 | token | 每次启动 `secrets.token_urlsafe(32)`：先删上次遗留的 `<记忆根>/service.token`，再写临时文件（0600）、改名到这个固定路径，看到 ready 后删掉 | 服务只在启动时读一次（`S:python/starling/service/serve.py:219-227`）。不进命令行、日志与异常 |
 | 就绪 | 等 stdout 出现 `starling-serve ready`，上限 60 秒 | 就绪之前一切接口回 503（`S:python/starling/service/serve.py:12-16`）。2026-11-09 实测：空数据目录下 listening 0.31 秒、ready 0.36 秒 |
 | stdout、stderr | stdout 由一条线程读完；stderr 追加到 `<记忆根>/service.log` | 访问日志多，管道会写满（`S:tests/python/fakes/service_proc.py:4-5`） |
-| pid | rise 写 `<记忆根>/service.pid`，正常停止后删 | Starling 不写 pid 文件，只持 `D/.lock`（`S:python/starling/service/serve.py:10-11`）。pid 只给人看，rise 不据此杀进程 |
+| 归属锁 | 拉起服务之前对 `<记忆根>/service.owner.lock` 取独占非阻塞锁（`src/controlplane/lock.py:81-93` 的 `hold_file_lock`），持到 rise 退出；描述符不传给子进程 | rise 进程死掉（含 SIGKILL）时内核释放它，所以锁取得到就说明没有活着的 rise 在用拉起的服务。Python 3.4 起新建的描述符缺省不继承（PEP 446） |
+| pid 文件 | rise 写 `<记忆根>/service.pid`（临时文件加改名，0600），内容是 JSON：`pid` 与完整 `argv`；正常停止后删 | Starling 不写 pid 文件，只持 `D/.lock`（`S:python/starling/service/serve.py:10-11`）。残留服务的核对用它（下文） |
+
+**残留服务**（用户 11-09 定：核对后自动停掉）。只在拉起模式下、子进程以退出码 3（`data_dir_in_use`，`S:python/starling/service/serve.py:61-74`）退出时走；外部模式下 rise 绝不碰服务进程。按序核对，任一项对不上就拒绝启动、报出那一项，不杀：
+
+| 序 | 核对 | 怎么查 | 对不上的例子 |
+|---|---|---|---|
+| 1 | 归属锁已在本进程手里 | 拉起之前已取（上表） | 另一个 rise 进程（守护进程、`reconcile`、`factory seed`）正在用这个服务 |
+| 2 | `service.pid` 在、读得出 | 读 JSON | 文件缺失、内容坏 |
+| 3 | 那个 pid 活着 | `os.kill(pid, 0)` | `ProcessLookupError` |
+| 4 | 进程属于当前用户 | macOS：`ps -o uid= -p <pid>`；Linux：`os.stat("/proc/<pid>").st_uid`；与 `os.getuid()` 比 | 别的用户 |
+| 5 | 命令行除第一项（解释器路径）外等于 pid 文件记的 `argv[1:]`，其中是 `-m starling.service`、`--data-dir` 后面是本次的 D；第一项的文件名以 `python` 开头（不分大小写） | macOS：`ps -ww -o command= -p <pid>`（不加 `-ww` 会按终端宽度截断），去掉开头的解释器路径后与 `" ".join(argv[1:])` 逐字比；Linux：`/proc/<pid>/cmdline` 按 NUL 拆开，与 `argv[1:]` 逐项比 | pid 被复用；命令行读不到（权限、进程刚退出） |
+| 6 | `D/.lock` 确实被持有 | 对它试独占非阻塞锁，与服务同一取法（`S:python/starling/service/serve.py:62-68`） | 拿得到：残留服务已经退了，立即释放，不杀、直接重试启动 |
+
+全部对上才 SIGTERM，等至多 40 秒（服务 drain 30 秒，`S:python/starling/service/serve.py:17-18`，加 10 秒余量）看 `D/.lock` 释放；还没释放就 SIGKILL，再等至多 5 秒。然后删 `service.pid`，重试启动一次；再报 `data_dir_in_use` 就拒绝启动，不再杀。每一步记一条 warning，写 pid 与核对结果，不写 token。
+
+不比解释器路径：macOS 上 venv 的 `python` 会换成框架里的 `Python.app/Contents/MacOS/Python` 再执行，`ps` 显示的第一项与 `sys.executable` 不同（2026-11-09 实测）。D 只用不含空格的路径，否则 macOS 上逐字比会有歧义，D 含空格时这一项判对不上。核对 6 只证明有人持着锁，证明不了持锁的就是这个 pid（macOS 没有按进程查 flock 的接口）。核对 5 要求命令行就是 rise 为这个 D 拉起的那条，两条合起来防误杀。核对 1 防的是另一种误杀：两个 rise 进程同时用拉起模式，第二个看到的服务五项全对，却是第一个正在用的。
 
 启动失败的出口，全部是装配期 `FactoryConfigError`（退出码 2），文字写 `service.log` 的相对路径：
 
 | 情形 | 依据 |
 |---|---|
-| 退出码 3（`data_dir_in_use`）：D 被另一个进程锁着 | `S:python/starling/service/serve.py:10-11`、`:61-74`。上次 rise 被 SIGKILL 会留下这种孤儿；文字给出 `service.pid` 里记的 pid，提示"确认是 starling-serve 后手动停掉，再删 service.pid" |
+| 归属锁被占 | 文字写"另一个 rise 进程正在用拉起的服务"。拉起模式下守护进程在跑时，第二个 `run` 与 `factory seed` 都停在这里（`reconcile` 先撞上仓库锁，`src/factory/wire.py:530-531`） |
+| 残留服务核对不过，或停掉后重试仍是 `data_dir_in_use` | 文字写对不上的那一项与 pid，提示人确认后手动停掉、再删 `service.pid` |
 | 退出码 1：注册表或默认世界开不了，或端口绑不上 | `S:python/starling/service/serve.py:12-16`、`:163-167` |
 | 60 秒内没有 ready | 杀掉子进程再退出 |
 
@@ -409,7 +457,7 @@ Starling 的世界名规则：首字符字母或数字，其余 `[A-Za-z0-9._-]`
 
 1. 运行时与端口先关（已登记的收尾）。
 2. 当前与尚未关掉的旧 `Client` 逐个 `close()`：停心跳、断开会话、释放句柄（`client.py:201-218`）。
-3. 拉起模式：SIGTERM，等至多 40 秒（服务 drain 30 秒，`S:python/starling/service/serve.py:17-18`，再加 10 秒余量），仍没退出就 SIGKILL；删 `service.pid`。2026-11-09 实测 SIGTERM 退出码 0。rise 自己被 SIGKILL 时子进程留下，下次启动报 `data_dir_in_use`（6.2）。
+3. 拉起模式：SIGTERM，等至多 40 秒（服务 drain 30 秒，`S:python/starling/service/serve.py:17-18`，再加 10 秒余量），仍没退出就 SIGKILL；删 `service.pid`，最后释放归属锁。2026-11-09 实测 SIGTERM 退出码 0。rise 自己被 SIGKILL 时子进程留下，下次启动按 6.2 核对后停掉它。
 
 ## 7. 世界设置与本机记忆配置
 
@@ -544,7 +592,7 @@ settings = {
 | 两者同一提交 | 无 | 一条测试读 `pyproject.toml`，断言两行的提交相同；运行期由 7.4 第 2、6 步核对 |
 | `src/` 里导入 | `simple_actio/memory_starling.py` 导入 `starling` | 改为导入 `starling_client`；全仓库不再导入 `starling` |
 
-客户端包不含服务（`S:pyproject.toml:28` 只打包 `python/starling`）。外部模式只用到客户端那一行；拉起模式与测试两行都要。是否拆成两个 extra 见第 16 节。
+客户端包不含服务（`S:pyproject.toml:28` 只打包 `python/starling`）。外部模式只用到客户端那一行；拉起模式与测试两行都要。用户已定一个 extra 两行都装（第 1 节）：两行钉同一个提交，一处改。
 
 `StarlingEndpoints`（`memory_starling.py:53-76`）不再造 C++ 适配器，改成只装端点字段，供 rise 设置与运行时身份用。
 
@@ -560,7 +608,8 @@ settings = {
 | D6 | rise 显式给全部会影响记忆的设置，关来源 lane | 继承服务默认世界 | 身份要描述实际行为；进程内没有来源 lane；外部服务的默认世界不归 rise 管，有人会改 | 看板对话页在 rise 的世界里不可用（`chat` 被删） |
 | D7 | `wait_closed` 保留，服务端检查兜底 | 只靠服务端的 `world_held` | 对手位端口在另一条线程上收尾，不等就恢复必然被拒 | 进程内计数仍要求组合根只造一个管理面 |
 | D8 | `session_expired` 判瞬态；开句柄时的 `world_held` 只在本进程旧会话的 60 秒排空窗口内判瞬态 | 按 C++ 原值判永久；一律判瞬态 | 重连后几秒内必然撞上旧会话的在途调用；窗口外的占用是真冲突，要立刻暴露 | 要记每个过期会话在哪些世界上有可写句柄 |
-| D9 | 种子由人在 Starling 一侧分叉并打标签，rise 只读 | rise 加建种子的命令 | 现在没有任何种子；分叉路由已带标签与 `seed` | 要人按标签约定手写请求 |
+| D9 | rise 加 `factory seed` 命令，从部署世界分叉种子（用户已定） | 人在看板里分叉并手打标签 | 标签与世界名由 rise 按 5.1 生成，不靠人手写；命令在世界锁内查在途 episode，种子停在已提交状态上 | 多一个子命令；升级种子仍由人在看板做 |
+| D12 | 拉起模式的残留服务核对后自动停掉（用户已定） | 拒绝启动、由人停 | rise 被 SIGKILL 后每次都要人手动停服务 | 核对规则要防误杀（6.2），读命令行在 macOS 与 Linux 各一套 |
 | D10 | 拉起模式下服务端与客户端装在同一个 venv，用 `sys.executable -m starling.service` 拉起 | 另一个环境里的 `starling-serve` 命令 | 一处钉提交，装配期能核对两个包的提交 | rise 的 venv 仍要编译 Starling 的 C++ |
 | D11 | 缺省连用户已在跑的看板服务（用户已定） | 缺省拉起 | 拉起的服务没有页面，人拿不到端口与 token；看板服务有前端 | 看板服务的提交要跟 rise 的钉住版本同步；数据目录与用户别的世界共用 |
 
@@ -568,7 +617,10 @@ settings = {
 
 | 情形 | 判定 | 去向 |
 |---|---|---|
-| 服务起不来、`data_dir_in_use`、协议或提交不一致（含看板服务没跟上钉住版本）、token 错 | 确定性 | 装配期退出码 2 |
+| 服务起不来、协议或提交不一致（含看板服务没跟上钉住版本）、token 错 | 确定性 | 装配期退出码 2 |
+| 拉起模式遇到残留服务 | 六项核对都对上 | 停掉它、重试启动一次（6.2） |
+| 残留服务核对不过、归属锁被占、停掉后仍 `data_dir_in_use` | 确定性 | 装配期退出码 2，不杀 |
+| `factory seed`：世界锁被占、有在途 episode、已有同 id 种子且没给 `--new-version`、部署世界不存在 | 确定性 | 命令退出码 2，不建种子 |
 | 已有部署世界的设置与 rise 设置不同 | 确定性 | 装配期退出码 2，文字写世界名 |
 | 服务连不上、请求超时、`world_busy` | 瞬态 | 部署：`DeferredError`；训练：`role_memory_unavailable` 重跑 |
 | 会话过期 | 瞬态 | 当前尝试失败重跑；下一次调用前换新会话 |
@@ -599,6 +651,8 @@ settings = {
 
 **部署轮次**：轮次产物的 `memory_runtime` 只记录、不参与复用判据（`src/mindagent/deployment.py:125-137`）。新部署世界从空开始。树里若有旧后端下已提交的部署 episode，它会被复用，它的记忆不会写进新世界。本机旧验证树已于 11-06 删除（第 1 节“旧数据”一行）。
 
+**种子换版本**：`factory seed --new-version` 之后，解析器为这个 `seed_id` 解出新版本的摘要，引用它的 run 续训判 T3（5.6）。
+
 **写入结果**：`remember_event` 的 `outcome` 是 `no_store` 或 `rejected` 时，今天当成功、记零条语句；改后判永久失败（3.2），部署轮次判 T3、训练 rollout 判 T2。rise 的事件会不会得到这两个值没有核实（第 17 节）。
 
 **堆积**：每个训练步分叉 `groups_per_step × group_size` 个 rollout 世界，每个部署轮次每个情境一个重放世界。第 6 期合并前它们都留在服务的数据目录里。rise 不对可回收世界拍快照，所以第 6 期“带 held 快照的世界不删”这一条（服务设计 `:222`）挡不住它们。
@@ -610,7 +664,9 @@ settings = {
 | 契约（部署管理面） | 两个后端各过一遍：同 key 两主体各写一次；按主体放弃，用错主体判永久；`pending_events` 带主体；快照、写、恢复后摘要等于快照时；快照带 `note`；端口开着时恢复被拒；只读端口写入被拒；`fork_replay` 的摘要等于快照；同名世界标签不对时 `ensure_world` 判永久 |
 | 契约（训练世界） | 两个后端各过一遍：同 rollout 两主体互不召回；同组两条 rollout 起点摘要相同、互不可见；`bind` 给的摘要与分叉结果不等时判永久；同一 episode 重试换新世界、`attempt` 递增；`fork` 回 `world_exists` 时换后缀；`close_world` 失败只记 warning |
 | 适配器 | 召回显式传 `strict`、`include_volatile`；`outcome` 为 `no_store`、`rejected` 时判永久（今天判成功）；关闭时 `SessionExpired` 与代号过期当作已关；错误码表逐行 |
-| 服务进程 | 拉起、读端口、等 ready、SIGTERM 退出码 0；`data_dir_in_use` 译成退出码 2；遗留的 token 文件不挡下次启动；子进程被杀后按退避重启；token 不出现在命令行、日志、异常里 |
+| 服务进程 | 拉起、读端口、等 ready、SIGTERM 退出码 0；遗留的 token 文件不挡下次启动；子进程被杀后按退避重启；token 不出现在命令行、日志、异常里 |
+| 残留服务 | 拉起后 SIGKILL 掉 rise 进程，再启动时核对通过、停掉残留、启动成功。以下各一条，都拒绝启动且残留进程还活着：pid 文件缺失；pid 指向一个无关进程（模拟 pid 复用）；命令行的 `--data-dir` 不同；归属锁被另一个进程持有。另一条：残留已退出、`D/.lock` 没人持，直接启动、不发信号。读命令行在 macOS 与 Linux 各测一遍 |
+| `factory seed` | 外部与拉起两种模式各跑一遍：建 v1，世界名、标签、摘要等于部署世界；再跑不带 `--new-version` 被拒；带了建 v2，解析器取 v2；`--snapshot` 从看板快照分叉；世界锁被占、有在途记录、部署世界不存在、替身，各一条退出码 2；`bind` 钉住解析时那一版，中途建 v3 不影响在跑的 run |
 | 会话 | 一个会话里训练位与对手位同写一个世界；会话过期后换新会话，旧端口在别的线程上调用照样抛 `SessionExpired` 而不是连接已关；旧会话的端口关完后旧 `Client` 才关；排空窗口内的 `world_held` 判瞬态，窗口外判永久 |
 | 设置 | 已有部署世界的设置被改后，装配期退出码 2；默认世界开着后台时，部署世界摘要静置不变 |
 | 装配 | 客户端与服务提交不一致、协议不一致、editable 安装、旧布局（含不带 `.rec` 的 `deploy-*.json`），各一条退出码 2；`url` 与 `token_file` 只给一个时退出码 2；没设 `RISE_MEMORY_CONFIG` 时不导入 `starling_client` |
@@ -632,7 +688,8 @@ settings = {
 | 1 | 钉住的提交升到 `cff319d`，仍进程内；端口的 `abandon_event` 带主体、`pending_events` 返回 `PendingKey`；替身按 `(holder, key)`；调用点见第 15 节。从这一步起 Starling run 续训判 T3（第 12 节） | 进程内，按 holder 开连接放弃 |
 | 2 | 端口改按快照 id，加 `fork_replay`、`release_replay`、只读 `open`；`MemoryLayout` 改读 `.rec.json`；部署驱动器、回滚、验证、门② 跟着改；`scratch_store_factory` 整条链删掉（4.5）；替身实现 | 进程内管理面用按 id 命名的备份文件实现同一接口（第 4 步删掉） |
 | 3 | 新模块：服务拉起与停止、`ServiceSession`（代号、引用计数、排空窗口）、rise 设置、`ensure_world`、错误映射、运行时身份；带真 `starling-serve` 的测试；不接线 | 不变 |
-| 4 | 接线：`StarlingMemory`、部署管理面、训练世界、解析器改走客户端；配置新键；装配顺序；旧布局；extra `memory` 换成两行；删进程内代码 | 改走服务 |
+| 4 | 接线：`StarlingMemory`、部署管理面、训练世界、解析器改走客户端；配置新键；装配顺序；旧布局；残留服务的核对与停止；extra `memory` 换成两行；删进程内代码 | 改走服务 |
+| 5 | `factory seed` 子命令与 `src/factory/seed.py`；`bind` 按摘要钉住种子版本 | 新增 |
 
 回退：第 4 步是一次提交，回退它就回到进程内 `cff319d`。第 1 到 3 步不改变 Starling 路径的外部行为。没装 extra `memory`、没设 `RISE_MEMORY_CONFIG` 时：`memory_wiring` 直接返回替身（`memory_runtime.py:724-730`），不读配置、不导入客户端、不拉起服务。替身只在第 1、2 步改了接口形状，由契约测试钉住与 Starling 同语义。
 
@@ -658,16 +715,11 @@ settings = {
 | `src/factory/interact_policy.py:393` | `training_worlds.bind(run_id, seed)` | `bind(run_id, seed, cfg.memory["digests"])`（5.2） | 4 |
 | `src/factory/memory_runtime.py` | 解析器、`StarlingTrainingWorlds`、`memory_wiring`、`check_memory_layout` | 5.2、5.5、7.4、7.6；`StarlingLayout` 的 `seed_dir`、`seed`、`rollout_world`、`runs_dir` 删掉 | 2、4 |
 | `src/mindtrainer/dispatch.py:287-290` | 解析器的一切异常译成 `DirectiveFailedError` | `DeferredError` 原样上抛（5.5） | 4 |
+| `src/factory/cli.py:56-86`、`:105-162` | 子命令 `run`、`reconcile`、`install-defaults`、`import-sombench`、`trace`、`cost`、`logs` | 加 `seed`（5.6），实现在新模块 `src/factory/seed.py` | 5 |
 
 ## 16. 需用户拍板
 
-| 问题 | 推荐 | 理由 |
-|---|---|---|
-| extra `memory` 是一个还是两个（客户端与服务端分开） | 一个，两行都装 | 测试要起真服务，CI 与本机都要服务端；两行钉同一个提交，一处改。外部模式下服务端那一行装着不用 |
-| 有内容的种子由谁建 | 本期不加 rise 命令，人在看板服务上分叉并按 5.1 打标签 | 现在没有种子；分叉路由已带 `labels`、`seed`（`S:python/starling/dashboard/routes/worlds.py:67-76`、`:405`）；命令等有了用例再加 |
-| 遇到上次留下的孤儿服务（`data_dir_in_use`）。只涉及拉起模式 | 拒绝启动，报出 `service.pid` 里的 pid，由人停掉 | 自动杀进程不可逆，记下的 pid 不保证还是那个服务 |
-| 拉起的服务中途退出 | 自动重启：退避 1、4、16 秒，按 rise 进程生命周期计，至多 3 次；旧会话按 6.4 等端口关完再关；在途的 `snapshot` 留下孤儿快照（4.2），在途的 `fork` 先查后建（5.2） | 已提交写入都在，在途调用本就按瞬态重跑；不重启的话守护进程要连续延后 20 次才退出 |
-| 开句柄时的 `world_held` 判瞬态还是永久 | 只在本进程旧会话的 60 秒排空窗口内判瞬态，其余永久（第 8 节） | 窗口内是自己旧会话的在途调用，几秒后就好；窗口外是别的进程或人占着，延后只会掩盖 |
+已全部拍板，见第 1 节。
 
 ## 17. 未核实项
 
