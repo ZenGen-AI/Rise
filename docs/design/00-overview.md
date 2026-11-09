@@ -918,12 +918,12 @@ V2 要做多租户、配方跨工厂流通、数据结构升级。这些无法�
 | 29 | [计划中] 服务端关端口的耗时分布未核实:正常收尾是否远低于 70 秒 | 收尾常超 70 秒时,部署轮次频繁延后,恢复前超时判 `RestoreFailedError` 等人;训练重试频繁落到瞬态记忆失败 | 跑 100 条部署 episode,记录每条从客户端结束到服务端端口关完的耗时 |
 | 30 | [计划中] 部署对手位积累记忆后,智能体位的行为是否随部署次数漂移未核实 | 轮次之间的发现集合随对手记忆变化,分不清是模型变了还是对手变了 | 同一模型连续部署 5 轮,比较每轮的发现集合 |
 | 31 | [计划中] 看板服务的进程环境里有没有 `OPENAI_API_KEY`、它报的提交是什么 | 外部模式下 rise 查不到密钥,首次抽取、嵌入或召回才报 `endpoint_key_missing`;提交不同则拒绝启动 | 用 `token_file` 连上调 `info()`;建一个空世界写一条事件 |
-| 32 | [计划中] uv 能否锁住同一仓库、同一提交的两个 git 依赖(一个带子目录);从 git URL 装时服务报的提交是否为 `unknown` | 锁不住就装不上 extra;是 `unknown` 则提交核对过不了,拉起模式改为只比客户端提交 | 改 `pyproject.toml` 后跑 `uv lock` 与 `uv sync --extra memory`,起服务比对提交 |
+| 32 | [已落地] uv 锁得住同一仓库、同一提交的两个 git 依赖(一个带子目录);从 git URL 装时服务报完整提交,不是 `unknown`。2026-11-10 用 uv 0.10.7 在临时副本里钉 `cff319d` 核实:`uv lock` 锁出 `starling-client` 0.1.0(带子目录 `clients/python`)与 `starling-memory` 0.0.1 两项,新增 26 个包;`uv sync --extra memory` 从 PyPI 装上 `httpx2==2.16.0`;两份 `direct_url.json` 的 `vcs_info.commit_id`、`starling_client.COMMIT` 与服务 `info()` 的 `commit` 都是完整的 40 位提交,`protocol` 是 1 | extra 装得上;拉起模式比客户端与服务两个提交的设计不用改。只有源码树里未构建的客户端副本报 `unknown`,那不是支持的安装方式 | 升级 Starling 时用新提交重跑 `scripts/check_starling_deps.py`,七项全 OK 才改钉住的提交 |
 | 33 | [计划中] rise 的事件会不会得到写入结果 `no_store` 或 `rejected` | 改后判永久失败:部署轮次 T3,训练 rollout T2;今天当成功、记零条语句 | 部署与训练各跑一轮真实对话,统计写入结果 |
 | 34 | [计划中] rollout 世界、重放世界、孤儿快照与 `pre-rollback` 归档的堆积速度 | Starling 第 6 期合并前它们都留在服务的数据目录里;部署世界每次恢复多一份整库归档,第 6 期之前一份都不删 | 跑一个训练 run 与一个部署轮次,按标签数世界、量数据目录,每天记一次 |
 | 35 | [计划中] 关掉来源 lane 后,服务的召回与摘要是否逐项等于进程内 Starling | 不等就改了记忆语义,违反只换后端的前提 | 用同一份世界设置在服务与进程内各跑一遍,比较 |
 | 36 | [计划中] 看板正在看某个 rollout 世界时,`close_world` 会不会阻塞到 30 秒;本机睡眠唤醒后服务会话是否过期 | 前者拖慢 rollout 收尾;后者让唤醒后的第一批调用判瞬态并重连 | 看板打开一个世界页面同时调 `close_world` 计时;开一个会话,合盖 5 分钟后调用一次 |
-| 37 | [计划中] 管理调用的 300 秒超时依赖 `starling_client` 的私有模块 `_transport` | Starling 改了它的签名,rise 的管理调用就坏了;句柄调用不受影响 | 施工第 0 步装上依赖后核对签名;第 3 步加一条测试钉住;升级 Starling 时重跑 |
+| 37 | [已落地] 管理调用的 300 秒超时依赖 `starling_client` 的私有模块 `_transport`。2026-11-10 在 `cff319d` 上核实:`Transport` 也由 `starling_client.__all__` 导出;构造是 `(url, token, timeout_s=30.0, *, _httpx_transport=None)`,`post` 是 `(path, json=None, *, timeout_s=None) -> dict`,与管理传输的设计一致;用 `Transport(url, token, 300.0)` 发一次不带会话的 `list_worlds` 成功 | 管理传输的设计不用改。Starling 以后改了这两个签名,rise 的管理调用就坏了;句柄调用不受影响 | 第 3 步加一条测试按 `inspect.signature` 钉住两个签名;升级 Starling 时重跑 `scripts/check_starling_deps.py` |
 
 ## 11. 决策总表
 

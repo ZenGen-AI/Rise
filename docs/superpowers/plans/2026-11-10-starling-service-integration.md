@@ -70,7 +70,7 @@
 
 **闸门：** 第 1 项（uv 锁得住两行）FAIL 时，计划停在这里，不进第 1 步，向用户报告。其余项 FAIL 时按风险表的"影响"一列改设计（例如服务报 `unknown` 就改成拉起模式只比客户端提交），先改 `docs/design/`，再回来改本计划。
 
-- [ ] **Step 1: 写核实脚本**
+- [x] **Step 1: 写核实脚本**
 
 ```python
 # scripts/check_starling_deps.py(节选:检查项与判据)
@@ -90,7 +90,7 @@ EXPECTED_POST = "(self, path: 'str', json: 'dict | None' = None, *, timeout_s: '
 
 脚本在 `<临时目录>/venv` 的解释器里跑探针（`uv run --project <临时目录> python -I -c ...`），不碰仓库的 `.venv`。token 由脚本生成、写进 0600 的文件、探针结束即删，不打印。
 
-- [ ] **Step 2: 跑脚本**
+- [x] **Step 2: 跑脚本**
 
 Run: `python3 scripts/check_starling_deps.py --commit cff319d952360727823024ff43c71b15055bd8e3 --workdir "$(mktemp -d)"`
 Expected: 七行 `OK`，退出码 0。2026-11-10 已在临时副本里手工跑过同一组检查，结果如下，脚本的输出应与之一致：
@@ -106,19 +106,19 @@ Expected: 七行 `OK`，退出码 0。2026-11-10 已在临时副本里手工跑�
 | `Transport` 签名 | 与上面两行逐字相同；`Transport` 在 `starling_client.__all__` 里 |
 | 不带会话的管理调用 | `list_worlds` 成功；拉起到 ready 1.87 秒，SIGTERM 退出码 0，临时 HOME 下没有生成任何文件 |
 
-- [ ] **Step 3: 把结果写进风险表**
+- [x] **Step 3: 把结果写进风险表**
 
 `docs/design/00-overview.md:920` 第 32 行与 `:925` 第 37 行改成已核实的写法：状态从 [计划中] 改为 [已落地]，"影响"一列改写为核实结论（锁得住、`httpx2` 装得上、git 安装报完整提交，拉起模式比两个提交的设计不用改；`Transport` 在 `cff319d` 的签名如上，第 3 步的测试钉住它），"缓解"一列写重跑办法（升级 Starling 时重跑 `scripts/check_starling_deps.py`）。不改别的行。
 
 Run: `python3 docs/design/tools/sync_docs.py && python3 docs/design/tools/check_docs.py && python3 docs/design/tools/check_consistency.py`
 Expected: 三者 0 个错误
 
-- [ ] **Step 4: 确认主干没变**
+- [x] **Step 4: 确认主干没变**
 
 Run: `git diff --stat -- pyproject.toml uv.lock`
 Expected: 空输出
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add scripts/check_starling_deps.py docs/design/00-overview.md
