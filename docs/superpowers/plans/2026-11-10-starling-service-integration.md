@@ -864,7 +864,7 @@ def service(tmp_path_factory):
 
 - 导入守卫：`src/` 下导入 `starling_client`（任何层级、含函数内惰性导入）的只有 `simple_actio/memory_starling.py` 与 `factory/starling_session.py`。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 # tests/test_starling_service_fixture.py
@@ -912,21 +912,21 @@ def test_only_the_adapter_and_the_service_session_import_starling_client():
 
 `_top_level_imports`（`tests/test_factory_cross_plan.py:175-183`）用 `ast.walk` 扫全树，函数体内的惰性导入也算。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_starling_service_fixture.py tests/test_factory_cross_plan.py`
 Expected: FAIL（`starling_service` 模块不在；装了旧锁文件时 `starling_client` 被跳过，先改依赖再跑）
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 改 `pyproject.toml`，跑 `uv lock`，再跑 `uv sync --extra dev --extra memory`（确认 `uv run --offline python -c "import starling_client, starling.service"` 成功）。写 `tests/starling_service.py`。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_starling_service_fixture.py tests/test_factory_cross_plan.py tests/test_mt_packaging.py tests/test_simple_actio_starling_store.py`
 Expected: PASS（`tests/test_simple_actio_starling_store.py` 证明进程内路径在新锁文件上照旧）
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add pyproject.toml uv.lock tests/starling_service.py tests/test_starling_service_fixture.py tests/test_factory_cross_plan.py

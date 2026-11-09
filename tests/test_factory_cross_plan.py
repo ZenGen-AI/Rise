@@ -212,6 +212,18 @@ def test_only_simple_actio_memory_starling_imports_starling():
     assert offenders == []
 
 
+def test_only_the_adapter_and_the_service_session_import_starling_client():
+    """设计四全局约束:第 3 步起 src/ 下只有适配器与服务会话导入 starling_client(任何层级,含函数内惰性导入)。"""
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[1] / "src"
+    allowed = {"simple_actio/memory_starling.py", "factory/starling_session.py"}
+    offenders = [f"{p.relative_to(src)}:{n}" for p in sorted(src.rglob("*.py"))
+                 for n, top in _top_level_imports(p)
+                 if top == "starling_client" and p.relative_to(src).as_posix() not in allowed]
+    assert offenders == []
+
+
 def _module_level_imports(path):
     """一个 .py 文件在模块层(含模块层的 if/try 里)的绝对导入,给出完整模块路径;函数体内的惰性导入不算。"""
     import ast
