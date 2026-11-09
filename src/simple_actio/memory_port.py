@@ -40,6 +40,14 @@ class RememberOutcome:
     category: str | None
 
 
+@dataclass(frozen=True)
+class PendingKey:
+    """一条待处理事件:事件键与写下它的主体。同一 key 在两个主体名下是两条事件,放弃要指明主体。"""
+
+    key: str
+    holder: str
+
+
 class MemoryFailureError(Exception):
     """记忆后端失败。transient 区分瞬态(可重试)与永久失败。
 
@@ -95,7 +103,8 @@ class MemoryBackend(Protocol):
 
 @runtime_checkable
 class DeploymentMemoryStore(Protocol):
-    """部署管理面:按世界 id 打开(世界, 主体)端口、登记与放弃事件、备份与恢复。世界级操作不分主体。
+    """部署管理面:按世界 id 打开(世界, 主体)端口、登记与放弃事件、备份与恢复。登记、放弃事件与开端口分主体,
+    列待处理事件、摘要、备份与恢复按整个世界。
     isinstance 只按方法名检查。"""
 
     def open(self, world_id: str, holder: str) -> MemoryBackend:
@@ -108,12 +117,13 @@ class DeploymentMemoryStore(Protocol):
         """以事件键登记并记住一件事,记在 holder 名下。"""
         ...
 
-    def abandon_event(self, world_id: str, key: str) -> None:
-        """放弃一个待处理事件。事件键已带主体,所以不分主体。"""
+    def abandon_event(self, world_id: str, holder: str, key: str) -> None:
+        """放弃 holder 名下的一个待处理事件。同一 key 在两个主体名下是两条事件,只动这一条;找不到抛
+        MemoryFailureError(transient=False),已提交抛 MemoryEventConflict,已放弃是空操作。"""
         ...
 
-    def pending_events(self, world_id: str) -> list[str]:
-        """该世界尚未处理完的事件键,不分主体。"""
+    def pending_events(self, world_id: str) -> list[PendingKey]:
+        """该世界全部主体尚未处理完的事件,按 seq 升序。主体为空串的行判永久失败。"""
         ...
 
     def backup_to(self, world_id: str, path: Path) -> str:

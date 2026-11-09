@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from simple_actio.memory import FileTupleStore
-from simple_actio.memory_port import MemoryEventConflict, MemoryFailureError
+from simple_actio.memory_port import MemoryEventConflict, MemoryFailureError, PendingKey
 from simple_actio.skills import Skill
 from controlplane.deferred import DeferredError
 from controlplane.envelope import Envelope, OwnerRef
@@ -258,7 +258,7 @@ def test_a_later_extraction_failure_after_an_earlier_commit_defers_and_then_conv
     assert (fr.payload["category"], fr.payload["point"]) == ("T1", "mindagent.admit.memory")
     assert f"{PID}#2" in fr.payload["reason"] and "transport_failure" in fr.payload["reason"]
     assert not store.exists(failure_record_file("run-003", f"admit-{PID}-partial"))
-    assert mem.store.pending_events("s1") == [f"{PID}#2"]              # 留 pending,不放弃
+    assert mem.store.pending_events("s1") == [PendingKey(f"{PID}#2", "pa")]  # 留 pending,不放弃
     assert not store.exists(library_state_file())
     mem.failing.clear()                                                # 抽取恢复后重入
     _admit(store, mem)
@@ -547,7 +547,7 @@ def test_a_transient_extraction_failure_defers_without_abandoning_and_reentry_ad
     with pytest.raises(DeferredError, match=category):
         _admit(store, mem)
     assert store.read_product(proposal_file(PID)).status == "approved"
-    assert mem.store.pending_events("s1") == [KEY]                    # 没被放弃
+    assert mem.store.pending_events("s1") == [PendingKey(KEY, "pa")]    # 没被放弃
     fr = store.read_product(failure_record_file("run-003", f"admit-{PID}"))
     assert (fr.payload["category"], fr.payload["point"]) == ("T1", "mindagent.admit.memory")
     assert KEY in fr.payload["reason"] and category in fr.payload["reason"]
@@ -584,7 +584,7 @@ def test_a_deterministic_failure_after_a_commit_is_t3_and_reentry_does_not_extra
     fr = store.read_product(failure_record_file("run-003", PARTIAL))
     assert (fr.payload["category"], fr.payload["point"]) == ("T3", "mindagent.admit.memory")
     assert fr.payload["reason"] == f"partial admission: {PID}#2 semantic_rejection after 1 committed"
-    assert mem.store.pending_events("s1") == [f"{PID}#2"]              # 不放弃,等人处理
+    assert mem.store.pending_events("s1") == [PendingKey(f"{PID}#2", "pa")]  # 不放弃,等人处理
     assert not store.exists(library_state_file())
     extractions, head = len(mem.extractions), store._git("rev-parse", "HEAD")
     _admit(store, mem)                                                 # 下一个 tick

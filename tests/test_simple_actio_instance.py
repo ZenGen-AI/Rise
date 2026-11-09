@@ -8,7 +8,9 @@ from simple_actio.errors import SimpleActioDataError
 from simple_actio.experience import ReasoningExperience
 from simple_actio.instance import IgnoreGuidance, as_guided, instantiate, render_guidance
 from simple_actio.memory import FileTupleStore, MemoryEntry, TupleMemory, content_id
-from simple_actio.memory_port import MemoryClosedError, MemoryEvent, MemoryFailureError, MemoryHit, RememberOutcome
+from simple_actio.memory_port import (
+    MemoryClosedError, MemoryEvent, MemoryFailureError, MemoryHit, PendingKey, RememberOutcome,
+)
 from simple_actio.signals import default_registry
 from simple_actio.skills import Skill
 from simple_actio.trace import (
@@ -600,7 +602,7 @@ def test_with_the_file_store_the_round_prefixed_key_lands_and_close_abandons_not
     _, _, t = inst.respond(_persona(), _scenario(), [B0], "a")
     assert t["memory"]["extraction_failed"] == "1"
     inst.close()
-    assert store.pending_events("s1") == ["round-7/deploy-m-sc-0#0@pa"]  # close 只关库,不放弃
+    assert store.pending_events("s1") == [PendingKey("round-7/deploy-m-sc-0#0@pa", "pa")]  # close 只关库,不放弃
     with pytest.raises(MemoryFailureError):
         inst.respond(_persona(), _scenario(), [B0], "a")              # 端口已关:MemoryClosedError
 
@@ -617,7 +619,7 @@ def test_event_keys_carry_the_writing_holder():
     world = TupleMemory()
     inst = _world_instance(world, "pb", interlocutors={"a": "pa", "b": "pb"})
     inst.respond(_persona(), _scenario(), [TurnRecord(0, "a", "你好")], "b")
-    assert world._live().events.keys() == {"ep#0@pb"}
+    assert world._live().events.keys() == {("pb", "ep#0@pb")}
 
 
 def test_three_slots_write_the_same_turn_once_per_listener():
@@ -627,7 +629,7 @@ def test_three_slots_write_the_same_turn_once_per_listener():
     history = [TurnRecord(0, "a", "预算砍一半")]
     b.respond(_persona(), _scenario(), history, "b")
     c.respond(_persona(), _scenario(), history, "c")
-    assert set(world._live().events) == {"ep#0@pb", "ep#0@pc"}
+    assert set(world._live().events) == {("pb", "ep#0@pb"), ("pc", "ep#0@pc")}
     assert world.world("pb").recall("预算", limit=3) and world.world("pc").recall("预算", limit=3)
 
 

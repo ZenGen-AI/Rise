@@ -202,12 +202,12 @@ def make_admit_proposal_handler(
                         if statements:
                             raise
                         # 上一次放弃了这条、没写成 rejected 就崩了:再放弃一次(已放弃是空操作,已提交会抛)
-                        memory_store.abandon_event(sid, key)
+                        memory_store.abandon_event(sid, pid, key)
                         reject(f"extraction failed for {key}: event was abandoned earlier")
                         return
                     transient = outcome.failed and outcome.category in TRANSIENT_EXTRACTION_CATEGORIES
                     if outcome.failed and not statements and not transient:
-                        memory_store.abandon_event(sid, key)
+                        memory_store.abandon_event(sid, pid, key)
                 except (MemoryFailureError, OSError, SimpleActioDataError) as exc:
                     # 不改提案、不放弃事件:留在 approved,下一 tick 重入同 key 补收据(只报类名)。
                     # SimpleActioDataError:库拒收这条事件(替身要求 interlocutor 非空),登记之前就拒,库没动;

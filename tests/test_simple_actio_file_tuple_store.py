@@ -9,7 +9,7 @@ from simple_actio.errors import SimpleActioDataError
 from simple_actio.memory import FileTupleStore, MemoryEntry, TupleMemory, _Ledger, content_id
 from simple_actio.memory_port import (
     DeploymentMemoryStore, MemoryBackend, MemoryClosedError, MemoryEvent, MemoryEventConflict,
-    MemoryFailureError, RememberOutcome,
+    MemoryFailureError, PendingKey, RememberOutcome,
 )
 
 EV = MemoryEvent("ep-1#0", "pb：我担心预算超支", "pb")
@@ -54,38 +54,50 @@ def test_ledger_begin_on_a_pending_row_with_a_different_text_conflicts():
     assert led.begin(MemoryEvent("k", "pb：一", "pb"), holder="pb") is None
     with pytest.raises(MemoryEventConflict):
         led.begin(MemoryEvent("k", "pb：二", "pb"), holder="pb")
-    assert led.events["k"]["text"] == "pb：一" and led.next_seq == 1
+    assert led.events[("pb", "k")]["text"] == "pb：一" and led.next_seq == 1
 
 
 def test_ledger_commit_refuses_an_abandoned_row_and_an_unknown_key():
     led = _Ledger()
     led.begin(MemoryEvent("k", "pb：一", "pb"), holder="pb")
-    led.abandon("k")
+    led.abandon("k", holder="pb")
     with pytest.raises(MemoryEventConflict):
-        led.commit("k")
-    assert led.entries == [] and led.events["k"]["state"] == "abandoned"
+        led.commit("k", holder="pb")
+    assert led.entries == [] and led.events[("pb", "k")]["state"] == "abandoned"
     with pytest.raises(MemoryFailureError) as info:
-        led.commit("nope")
+        led.commit("nope", holder="pb")
     assert info.value.transient is False and not isinstance(info.value, MemoryEventConflict)
 
 
 def test_ledger_fail_only_applies_to_a_pending_row():
     led = _Ledger()
     led.begin(MemoryEvent("done", "pb：一", "pb"), holder="pb")
-    led.commit("done")
+    led.commit("done", holder="pb")
     led.begin(MemoryEvent("gone", "pb：二", "pb"), holder="pb")
-    led.abandon("gone")
+    led.abandon("gone", holder="pb")
     for key in ("done", "gone", "nope"):
         with pytest.raises(MemoryFailureError) as info:
-            led.fail(key, "timeout")
+            led.fail(key, "timeout", holder="pb")
         assert info.value.transient is False
-    assert led.events["done"]["failure_category"] is None and led.events["gone"]["failure_category"] is None
+    assert (led.events[("pb", "done")]["failure_category"] is None
+            and led.events[("pb", "gone")]["failure_category"] is None)
 
 
 def test_ledger_from_json_rejects_a_duplicate_event_key():
     doc = _doc(_ev_row("k", 0, "pending"), _ev_row("k", 1, "pending"))
     with pytest.raises(SimpleActioDataError, match="duplicate event key"):
         _Ledger.from_json(doc)
+
+
+def test_the_same_key_under_two_holders_is_two_ledger_rows():
+    led = _Ledger()
+    assert led.begin(MemoryEvent("k", "pb：一", "pb"), holder="pa") is None
+    assert led.begin(MemoryEvent("k", "pa：二", "pa"), holder="pb") is None     # 同 key 不同主体:另一行,不撞冲突
+    led.commit("k", holder="pb")
+    assert led.events[("pa", "k")]["state"] == "pending" and led.events[("pb", "k")]["state"] == "committed"
+    assert led.next_seq == 2
+    clone = _Ledger.from_json(json.loads(json.dumps(led.to_json())))       # 读回来也是两行
+    assert clone.events.keys() == led.events.keys() and clone.digest() == led.digest()
 
 
 @pytest.mark.parametrize("rows, match", [
@@ -102,30 +114,31 @@ def test_ledger_from_json_checks_statement_ids_against_state_and_seq_uniqueness(
 def test_ledger_from_json_still_accepts_a_consistent_ledger():
     led = _Ledger.from_json(_doc(_ev_row("a", 0, "committed", [content_id("pb", "pb：一")]),
                                  _ev_row("b", 1, "pending"), _ev_row("c", 2, "abandoned")))
-    assert [led.events[k]["state"] for k in "abc"] == ["committed", "pending", "abandoned"] and led.next_seq == 3
+    assert [led.events[("", k)]["state"] for k in "abc"] == ["committed", "pending", "abandoned"]
+    assert led.next_seq == 3
 
 
 def test_ledger_keeps_its_own_copy_of_the_events_it_is_given():
-    src = {"k": _ev_row("k", 0, "committed", ["mem-a"])}
+    src = {("", "k"): _ev_row("k", 0, "committed", ["mem-a"])}
     led = _Ledger(events=src, next_seq=1)
-    src["k"]["state"] = "pending"
-    src["k"]["statement_ids"].append("mem-b")
-    assert led.events["k"]["state"] == "committed" and led.events["k"]["statement_ids"] == ["mem-a"]
+    src[("", "k")]["state"] = "pending"
+    src[("", "k")]["statement_ids"].append("mem-b")
+    assert led.events[("", "k")]["state"] == "committed" and led.events[("", "k")]["statement_ids"] == ["mem-a"]
 
 
 def test_ledger_to_json_hands_out_copies():
-    led = _Ledger(events={"k": _ev_row("k", 0, "committed", ["mem-a"])}, next_seq=1)
+    led = _Ledger(events={("", "k"): _ev_row("k", 0, "committed", ["mem-a"])}, next_seq=1)
     out = led.to_json()
     out["events"][0]["statement_ids"].append("mem-b")
     out["events"][0]["state"] = "abandoned"
-    assert led.events["k"]["statement_ids"] == ["mem-a"] and led.events["k"]["state"] == "committed"
+    assert led.events[("", "k")]["statement_ids"] == ["mem-a"] and led.events[("", "k")]["state"] == "committed"
 
 
 def test_ledger_from_json_does_not_share_rows_with_the_parsed_document():
     doc = json.loads(json.dumps(_doc(_ev_row("k", 0, "committed", ["mem-a"]))))
     led = _Ledger.from_json(doc)
     doc["events"][0]["statement_ids"].append("mem-b")
-    assert led.events["k"]["statement_ids"] == ["mem-a"]
+    assert led.events[("", "k")]["statement_ids"] == ["mem-a"]
 
 
 # ---------------- _Ledger:条目与事件行带主体 ----------------
@@ -134,9 +147,9 @@ def test_ledger_from_json_does_not_share_rows_with_the_parsed_document():
 def test_ledger_recall_filters_by_holder_and_none_means_no_filter():
     led = _Ledger()
     led.begin(MemoryEvent("e#1@pa", "pb：预算砍一半", "pb"), holder="pa")
-    led.commit("e#1@pa")
+    led.commit("e#1@pa", holder="pa")
     led.begin(MemoryEvent("e#0@pb", "pa：我们先谈预算", "pa"), holder="pb")
-    led.commit("e#0@pb")
+    led.commit("e#0@pb", holder="pb")
     assert [h.text for h in led.recall("预算", limit=5, holder="pa")] == ["pb: pb：预算砍一半"]
     assert [h.text for h in led.recall("预算", limit=5, holder="pb")] == ["pa: pa：我们先谈预算"]
     assert len(led.recall("预算", limit=5)) == 2                       # holder=None:不过滤
@@ -155,7 +168,7 @@ def test_the_digest_tells_apart_the_same_content_under_two_holders():
     a, b = _Ledger(), _Ledger()
     for led, who in ((a, "pa"), (b, "pb")):
         led.begin(MemoryEvent("k", "pc：预算不够", "pc"), holder=who)
-        led.commit("k")
+        led.commit("k", holder=who)
     assert [e.to_dict() for e in a.entries] == [e.to_dict() for e in b.entries]
     assert a.digest() != b.digest()
 
@@ -163,7 +176,7 @@ def test_the_digest_tells_apart_the_same_content_under_two_holders():
 def test_ledger_to_json_carries_the_holders_and_round_trips():
     led = _Ledger()
     led.begin(MemoryEvent("e#1@pa", "pb：预算砍一半", "pb"), holder="pa")
-    led.commit("e#1@pa")
+    led.commit("e#1@pa", holder="pa")
     out = led.to_json()
     assert out["events"][0]["holder"] == "pa" and list(out["holders"].values()) == ["pa"]
     clone = _Ledger.from_json(json.loads(json.dumps(out)))
@@ -176,7 +189,7 @@ def test_a_ledger_written_without_holders_loads_with_every_entry_under_the_empty
     entry = MemoryEntry("mem-1", 1, "pb", "预算不够", "2026-01-01T00:00:00Z", 1.0).to_dict()
     old = {"entries": [entry], "events": [_ev_row("k", 0, "pending")], "next_seq": 1}   # 没有 holders,行里没有 holder
     led = _Ledger.from_json(old)
-    assert led.events["k"]["holder"] == ""
+    assert led.events[("", "k")]["holder"] == ""
     assert [h.text for h in led.recall("预算", limit=3, holder="")] == ["pb: 预算不够"]
 
 
@@ -332,7 +345,7 @@ def test_concurrent_writes_from_two_holders_of_one_world_are_all_kept(tmp_path):
     doc = json.loads((tmp_path / "s1.json").read_text(encoding="utf-8"))
     keys = {f"t#{i}@{who}" for i in range(50) for who in ports}
     committed = {r["key"] for r in doc["events"] if r["state"] == "committed"}
-    assert committed | set(store.pending_events("s1")) == keys and len(doc["events"]) == 100
+    assert committed | {p.key for p in store.pending_events("s1")} == keys and len(doc["events"]) == 100
     assert sorted(r["seq"] for r in doc["events"]) == list(range(100)) and doc["next_seq"] == 100
     assert sorted(doc["holders"].values()) == ["pa"] * 50 + ["pb"] * 50
     for port in ports.values():
@@ -374,7 +387,7 @@ def test_a_failed_extraction_leaves_a_pending_row_with_its_text_and_a_retry_comm
     row = _rows(tmp_path)[EV.key]
     assert (row["state"], row["text"], row["interlocutor"], row["seq"], row["failure_category"]) == (
         "pending", EV.text, "pb", 0, "timeout")
-    assert store.pending_events("s1") == [EV.key]
+    assert store.pending_events("s1") == [PendingKey(EV.key, "pa")]
     port = store.open("s1", "pa")
     assert port.recall("预算", limit=3) == []
     flaky.failing.clear()
@@ -402,15 +415,15 @@ def test_conflicts_and_abandon(tmp_path):
     with pytest.raises(MemoryEventConflict):
         store.remember_event("s1", "pa", EV.key, "pb：换了一句", interlocutor="pb")
     with pytest.raises(MemoryEventConflict):
-        store.abandon_event("s1", EV.key)                     # committed 行不许放弃
+        store.abandon_event("s1", "pa", EV.key)               # committed 行不许放弃
     store.remember_event("s1", "pa", "ep-1#2", "pb：人手也不够", interlocutor="pb")
-    store.abandon_event("s1", "ep-1#2")
+    store.abandon_event("s1", "pa", "ep-1#2")
     assert _rows(tmp_path)["ep-1#2"]["state"] == "abandoned"
     assert store.pending_events("s1") == []
     with pytest.raises(MemoryEventConflict):
         store.remember_event("s1", "pa", "ep-1#2", "pb：人手也不够", interlocutor="pb")  # 放弃是终态
     with pytest.raises(MemoryFailureError) as info:
-        store.abandon_event("s1", "never-seen#0")
+        store.abandon_event("s1", "pa", "never-seen#0")
     assert info.value.transient is False
 
 
@@ -420,8 +433,8 @@ def test_an_abandoned_row_counts_only_its_key_and_state_in_the_digest(tmp_path):
     a.remember_event("s1", "pa", "ep-1#0", "pb：一", interlocutor="pb")
     b.remember_event("s1", "pa", "ep-1#0", "pc：完全不同", interlocutor="pc")
     assert a.digest("s1") != b.digest("s1")
-    a.abandon_event("s1", "ep-1#0")
-    b.abandon_event("s1", "ep-1#0")
+    a.abandon_event("s1", "pa", "ep-1#0")
+    b.abandon_event("s1", "pa", "ep-1#0")
     assert a.digest("s1") == b.digest("s1")
 
 
@@ -512,7 +525,7 @@ def test_every_management_call_validates_the_world_id_and_the_holder(tmp_path):
     store = FileTupleStore(tmp_path / "lib")
     calls = (
         lambda: store.remember_event("../x", "pa", "k", "pb：一", interlocutor="pb"),
-        lambda: store.abandon_event("../x", "k"),
+        lambda: store.abandon_event("../x", "pa", "k"),
         lambda: store.pending_events("../x"),
         lambda: store.backup_to("../x", tmp_path / "b.json"),
         lambda: store.restore_from("../x", tmp_path / "b.json"),
@@ -523,6 +536,8 @@ def test_every_management_call_validates_the_world_id_and_the_holder(tmp_path):
             call()
     with pytest.raises(SimpleActioDataError, match="holder"):
         store.remember_event("s1", "../x", "k", "pb：一", interlocutor="pb")
+    with pytest.raises(SimpleActioDataError, match="holder"):
+        store.abandon_event("s1", "../x", "k")
     assert not (tmp_path / "b.json").exists() and not (tmp_path / "lib").exists()   # 构造也不建目录(终审 M-1)
 
 
@@ -538,7 +553,19 @@ def test_pending_events_come_back_in_seq_order(tmp_path):
     store = FileTupleStore(tmp_path, extraction_failure=lambda e: "timeout")
     for key in ("z", "a", "m"):
         store.remember_event("s1", "pa", key, f"pb：{key}", interlocutor="pb")
-    assert store.pending_events("s1") == ["z", "a", "m"]
+    assert store.pending_events("s1") == [PendingKey("z", "pa"), PendingKey("a", "pa"), PendingKey("m", "pa")]
+
+
+def test_a_ledger_row_without_a_holder_reads_as_the_empty_holder_and_is_refused_by_pending_events(tmp_path):
+    store = FileTupleStore(tmp_path)
+    (tmp_path / "s1.json").write_text(json.dumps({
+        "entries": [], "next_seq": 1, "holders": {},
+        "events": [{"key": "k#0", "text": "t", "interlocutor": "pb", "seq": 0, "state": "pending",
+                    "statement_ids": [], "failure_category": None}],
+    }), encoding="utf-8")
+    with pytest.raises(MemoryFailureError, match="has no holder") as info:
+        store.pending_events("s1")
+    assert info.value.transient is False
 
 
 def test_a_failed_save_leaves_no_temp_file_and_the_old_library_intact(tmp_path, monkeypatch):

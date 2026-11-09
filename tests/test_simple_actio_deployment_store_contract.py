@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from simple_actio.memory import FileTupleStore
-from simple_actio.memory_port import MemoryEvent, MemoryFailureError
+from simple_actio.memory_port import MemoryEvent, MemoryFailureError, PendingKey
 from starling_fakes import FakeOpenAI, offline_api_key
 
 KEY = "r1/deploy-m-s-0#1"
@@ -97,12 +97,12 @@ def test_backup_overwrites_an_existing_copy(case, tmp_path):
 def test_abandoning_an_unknown_key_is_a_permanent_failure(case):
     store = case.store
     with pytest.raises(MemoryFailureError) as info:
-        store.abandon_event("s1", KEY)                              # 没有库
+        store.abandon_event("s1", "pa", KEY)                        # 没有库
     _assert_permanent(info)
     assert not case.root.exists()
     store.remember_event("s1", "pa", KEY, TEXT, interlocutor="pb")
     with pytest.raises(MemoryFailureError) as info:
-        store.abandon_event("s1", "never-written#0")                # 有库,没有这个 key
+        store.abandon_event("s1", "pa", "never-written#0")          # 有库,没有这个 key
     _assert_permanent(info)
 
 
@@ -110,11 +110,31 @@ def test_abandoning_an_abandoned_event_again_is_a_no_op(case):
     store = case.store
     case.fail(KEY)
     out = store.remember_event("s1", "pa", KEY, TEXT, interlocutor="pb")
-    assert out.failed and store.pending_events("s1") == [KEY]
-    store.abandon_event("s1", KEY)
+    assert out.failed and store.pending_events("s1") == [PendingKey(KEY, "pa")]
+    store.abandon_event("s1", "pa", KEY)
     after = store.digest("s1")
-    store.abandon_event("s1", KEY)
+    store.abandon_event("s1", "pa", KEY)
     assert store.pending_events("s1") == [] and store.digest("s1") == after
+
+
+def test_the_same_key_under_two_holders_is_two_events(case):
+    store = case.store
+    case.fail(KEY)                                          # 两行都留 pending,好列出来
+    store.remember_event("s1", "pa", KEY, TEXT, interlocutor="pb")
+    store.remember_event("s1", "pb", KEY, "pa：另一句", interlocutor="pa")
+    assert store.pending_events("s1") == [PendingKey(KEY, "pa"), PendingKey(KEY, "pb")]
+
+
+def test_abandoning_under_the_wrong_holder_is_a_permanent_failure(case):
+    store = case.store
+    case.fail(KEY)
+    store.remember_event("s1", "pa", KEY, TEXT, interlocutor="pb")
+    with pytest.raises(MemoryFailureError) as info:
+        store.abandon_event("s1", "pb", KEY)
+    _assert_permanent(info)
+    assert store.pending_events("s1") == [PendingKey(KEY, "pa")]     # 没被碰
+    store.abandon_event("s1", "pa", KEY)
+    assert store.pending_events("s1") == []
 
 
 # ---- 按世界组织:同一世界里的多个主体(设计三 6.2 节) ----

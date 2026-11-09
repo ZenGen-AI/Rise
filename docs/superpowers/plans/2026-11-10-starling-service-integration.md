@@ -146,7 +146,7 @@ git commit -m "chore(deps): 核实 Starling 客户端与服务两行依赖可锁
   - `DeploymentMemoryStore.pending_events(self, world_id: str) -> list[PendingKey]`：全部主体的待处理事件，按 `seq` 升序。`holder` 为空串时抛 `MemoryFailureError(f"pending event {key!r} has no holder", transient=False)`（AC-30：rise 的世界不会有空主体的行，见到就是真问题）。
   - `_Ledger.events: dict[tuple[str, str], dict]`；`_Ledger.begin(event, *, holder)` 的去重键是 `(holder, event.key)`；`_Ledger.abandon(key, *, holder)`、`commit(key, *, holder)`、`fail(key, category, *, holder)`。账本 JSON 里的事件行本来就带 `holder`（`memory.py:271-273`），序列化与摘要不变，读旧账本时没有 `holder` 的行照旧补 `""`。同 `(holder, key)` 重复是 `SimpleActioDataError("memory ledger: duplicate event key ...")`，同 key 不同主体是两行。
 
-- [ ] **Step 1: 写失败的测试**（加进 `tests/test_simple_actio_deployment_store_contract.py`，参数化到两个实现；本任务只要求 `file` 参数通过，`starling` 参数由 Task 3 修）
+- [x] **Step 1: 写失败的测试**（加进 `tests/test_simple_actio_deployment_store_contract.py`，参数化到两个实现；本任务只要求 `file` 参数通过，`starling` 参数由 Task 3 修）
 
 ```python
 from simple_actio.memory_port import PendingKey
@@ -187,12 +187,12 @@ def test_a_ledger_row_without_a_holder_reads_as_the_empty_holder_and_is_refused_
     assert info.value.transient is False
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_simple_actio_deployment_store_contract.py tests/test_simple_actio_file_tuple_store.py -k "file or not starling"`
 Expected: FAIL（`abandon_event()` 参数个数不对；`pending_events` 返回的是 `str`）
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 按 Interfaces 改。`FileTupleStore.pending_events` 在锁外把行转成 `PendingKey`，顺序照旧按 `seq`。`deployment.py` 的提交段改成：
 
@@ -206,12 +206,12 @@ for p in pending:
 
 `admit.py` 两处传 `pid`（循环里本来就有，`admit.py:198`）。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider -k "not starling" tests/test_simple_actio_deployment_store_contract.py tests/test_simple_actio_file_tuple_store.py tests/test_simple_actio_memory_port.py tests/test_simple_actio_memory_experience.py tests/test_simple_actio_instance.py tests/test_simple_actio_memory_contract.py tests/test_factory_memory_translate.py tests/test_factory_interact_wire.py tests/test_ma_admit.py tests/test_ma_deployment.py tests/test_ma_rounds.py`
 Expected: PASS（`-k "not starling"` 去掉的只有 Starling 参数，它们在 Task 3 修）
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/simple_actio/memory_port.py src/simple_actio/memory.py src/mindagent/admit.py src/mindagent/deployment.py tests/test_simple_actio_deployment_store_contract.py tests/test_simple_actio_file_tuple_store.py tests/test_simple_actio_memory_port.py tests/test_simple_actio_memory_experience.py tests/test_simple_actio_instance.py tests/test_factory_memory_translate.py tests/test_factory_interact_wire.py tests/test_ma_admit.py tests/test_ma_deployment.py tests/test_ma_rounds.py

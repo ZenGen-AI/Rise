@@ -22,6 +22,7 @@ from simple_actio.memory_port import (
     MemoryFailureError,
     MemoryHit,
     PERSONA_ID_PATTERN,
+    PendingKey,
     RememberOutcome,
 )
 from simple_actio.text import tokens
@@ -202,7 +203,8 @@ class _Ledger:
     FileTupleStore 把它存成 JSON,所以同样内容在两者上的命中与摘要逐值相等。
 
     条目的 schema 不带 holder,账本另存 holders(条目 id → holder);不在表里的条目(构造时传入的、
-    读旧账本得到的)属于 holder ""。事件行带 holder,commit 落条目时把它记进 holders。
+    读旧账本得到的)属于 holder ""。事件行带 holder,事件表按 (holder, key) 存:同一 key 在两个主体名下是
+    两行(与 Starling 第 2 期起的事件表同语义);commit 落条目时把行的 holder 记进 holders。
 
     账本自己不加锁:begin 读 next_seq 再加一、digest 遍历事件表,两条线程交错就会出错。多线程共用一份账本时,
     由持有者在每次操作外面加锁(TupleMemory 的各视图共用一把锁,FileTupleStore 用 store 的锁)。"""
@@ -210,7 +212,7 @@ class _Ledger:
     def __init__(
         self,
         entries: tuple[MemoryEntry, ...] | list[MemoryEntry] = (),
-        events: dict[str, dict] | None = None,
+        events: dict[tuple[str, str], dict] | None = None,
         next_seq: int = 0,
         holders: dict[str, str] | None = None,
     ) -> None:
@@ -218,7 +220,7 @@ class _Ledger:
             raise SimpleActioDataError(f"entries: expected a tuple or list, got {type(entries).__name__}")
         snapshot(entries)  # 逐条查类型,并让同 id 同版本的冲突在构造时就抛
         self.entries: list[MemoryEntry] = list(entries)
-        self.events: dict[str, dict] = {}  # 不与调用方共享行;没有 holder 的行补 ""
+        self.events: dict[tuple[str, str], dict] = {}  # 键是 (holder, key);不与调用方共享行;没有 holder 的行补 ""
         for key, row in ({} if events is None else events).items():
             self.events[key] = {"holder": "", **deepcopy(row)}
         self.next_seq: int = next_seq
@@ -254,36 +256,37 @@ class _Ledger:
     # ---- 事件表 ----
 
     def begin(self, event: MemoryEvent, *, holder: str) -> tuple[str, ...] | None:
-        """登记事件,记在 holder 名下。去重键仍是 key(key 已带主体)。同 key 已 committed 且文本相同返回
-        存下的语句 id(幂等);pending 且文本相同返回 None,交给调用方再抽一次;已放弃或文本不同抛
-        MemoryEventConflict。新 key 写一行 pending。"""
+        """登记事件,记在 holder 名下。去重键是 (holder, key):同 key 换个主体是另一行。同一行已 committed
+        且文本相同返回存下的语句 id(幂等);pending 且文本相同返回 None,交给调用方再抽一次;已放弃或文本
+        不同抛 MemoryEventConflict。新行写成 pending。"""
         _check.text(event.key, "memory event key")
         _check.text(event.text, "memory event text")
         _check.text(event.interlocutor, "memory event interlocutor")
         _check.text(holder, "memory event holder", allow_empty=True)
-        row = self.events.get(event.key)
+        row = self.events.get((holder, event.key))
         if row is not None:
             if row["state"] == "abandoned":
                 raise MemoryEventConflict(f"memory event {event.key!r} was abandoned")
             if row["text"] != event.text:
                 raise MemoryEventConflict(f"memory event {event.key!r} already exists with a different text")
             return tuple(row["statement_ids"]) if row["state"] == "committed" else None
-        self.events[event.key] = {
+        self.events[(holder, event.key)] = {
             "key": event.key, "text": event.text, "interlocutor": event.interlocutor, "holder": holder,
             "seq": self.next_seq, "state": "pending", "statement_ids": [], "failure_category": None,
         }
         self.next_seq += 1
         return None
 
-    def _row(self, key: str) -> dict:
-        row = self.events.get(key)
+    def _row(self, key: str, holder: str) -> dict:
+        """只找 holder 名下的这一行:别的主体名下同 key 的行不算(与 Starling 的 event_not_found 同类)。"""
+        row = self.events.get((holder, key))
         if row is None:
-            raise MemoryFailureError(f"memory event {key!r} is unknown", transient=False)
+            raise MemoryFailureError(f"memory event {key!r} of holder {holder!r} is unknown", transient=False)
         return row
 
-    def commit(self, key: str) -> tuple[str, ...]:
+    def commit(self, key: str, *, holder: str) -> tuple[str, ...]:
         """按行里的原文追加一条条目,把行改成 committed。已 committed 的行原样返回,不再追加。"""
-        row = self._row(key)
+        row = self._row(key, holder)
         if row["state"] == "abandoned":
             raise MemoryEventConflict(f"memory event {key!r} was abandoned")
         if row["state"] == "pending":
@@ -298,17 +301,17 @@ class _Ledger:
             row["failure_category"] = None
         return tuple(row["statement_ids"])
 
-    def fail(self, key: str, category: str) -> None:
+    def fail(self, key: str, category: str, *, holder: str) -> None:
         """抽取失败:行保持 pending,记下失败类别。"""
         _check.text(category, "memory event failure category")
-        row = self._row(key)
+        row = self._row(key, holder)
         if row["state"] != "pending":
             raise MemoryFailureError(f"memory event {key!r} is not pending", transient=False)
         row["failure_category"] = category
 
-    def abandon(self, key: str) -> None:
-        """pending 改 abandoned;committed 抛 MemoryEventConflict;已 abandoned 是空操作。"""
-        row = self._row(key)
+    def abandon(self, key: str, *, holder: str) -> None:
+        """pending 改 abandoned;committed 抛 MemoryEventConflict;已 abandoned 是空操作。只动 holder 名下的行。"""
+        row = self._row(key, holder)
         if row["state"] == "committed":
             raise MemoryEventConflict(f"memory event {key!r} is committed and cannot be abandoned")
         row["state"] = "abandoned"
@@ -318,17 +321,17 @@ class _Ledger:
     def digest(self) -> str:
         """条目取 snapshot 的结果(召回实际看到的那一份)而不是原始列表:否则两个库的条目去掉 id 后
         多重集相同、按 id 分组的版本归属不同时,摘要相同而召回不同。每条带上自己的 holder,所以主体不同的
-        同内容条目摘要不同;摘要覆盖全部 holder。abandoned 行只计 key 与 state。"""
+        同内容条目摘要不同;摘要覆盖全部 holder。abandoned 行只计 key 与 state。事件行按 (key, holder) 排序:
+        一个 key 只有一行时与只按 key 排序的结果相同,所以已有账本的摘要不变。"""
         entries = sorted(
             ({"holder": self.holders.get(e.id, ""), **{k: v for k, v in e.to_dict().items() if k != "id"}}
              for e in snapshot(self.entries)),
             key=_canon,
         )
-        events = sorted(
-            ({"key": r["key"], "state": r["state"]} if r["state"] == "abandoned" else dict(r)
-             for r in self.events.values()),
-            key=lambda r: r["key"],
-        )
+        events = [
+            {"key": r["key"], "state": r["state"]} if r["state"] == "abandoned" else dict(r)
+            for r in sorted(self.events.values(), key=lambda r: (r["key"], r["holder"]))
+        ]
         return hashlib.sha256(_canon({"entries": entries, "events": events}).encode("utf-8")).hexdigest()
 
     def to_json(self) -> dict:
@@ -353,12 +356,13 @@ class _Ledger:
             if entry_id not in entry_ids:
                 raise SimpleActioDataError(f"memory ledger.holders: {entry_id!r} is not an entry id")
             _check.text(who, f"memory ledger.holders[{entry_id!r}]", allow_empty=True)
-        events: dict[str, dict] = {}
+        events: dict[tuple[str, str], dict] = {}
         for raw in obj["events"]:
-            row = _check_event_row(raw)
-            if row["key"] in events:
-                raise SimpleActioDataError(f"memory ledger: duplicate event key {row['key']!r}")
-            events[row["key"]] = row
+            row = _check_event_row(raw)  # 没有 holder 的行补 "":同 key 不同主体是两行,同 (holder, key) 才重复
+            if (row["holder"], row["key"]) in events:
+                raise SimpleActioDataError(
+                    f"memory ledger: duplicate event key {row['key']!r} of holder {row['holder']!r}")
+            events[(row["holder"], row["key"])] = row
         if len({r["seq"] for r in events.values()}) != len(events):
             raise SimpleActioDataError("memory ledger: duplicate event seq")
         next_seq = _check.integer(obj["next_seq"], "memory ledger.next_seq")
@@ -407,7 +411,7 @@ class TupleMemory:
         with self._lock:  # begin 与 commit 一起做:中间不让别的视图插进来占序号
             ids = ledger.begin(event, holder=self._holder)
             if ids is None:
-                ids = ledger.commit(event.key)
+                ids = ledger.commit(event.key, holder=self._holder)
         return RememberOutcome(ids, False, None)
 
     def embed_pending(self) -> int:
@@ -544,24 +548,33 @@ class FileTupleStore:
         with self._lock:  # ③ 重新读库再改:②期间别的线程可能已经写过这个世界
             ledger = self._load(world_id)
             if category is None:
-                ids = ledger.commit(key)
+                ids = ledger.commit(key, holder=holder)
                 self._save(world_id, ledger)
                 return RememberOutcome(ids, False, None)
-            ledger.fail(key, category)
+            ledger.fail(key, category, holder=holder)
             self._save(world_id, ledger)
         return RememberOutcome((), True, category)
 
-    def abandon_event(self, world_id: str, key: str) -> None:
+    def abandon_event(self, world_id: str, holder: str, key: str) -> None:
+        """只放弃 holder 名下的这一行;别的主体名下同 key 的行不碰,找不到是永久失败。"""
+        _check_name(holder, "holder")
         with self._lock:
             ledger = self._load(world_id)
-            ledger.abandon(key)
+            ledger.abandon(key, holder=holder)
             self._save(world_id, ledger)
 
-    def pending_events(self, world_id: str) -> list[str]:
+    def pending_events(self, world_id: str) -> list[PendingKey]:
+        """全部主体的 pending 行,按 seq 升序。空主体的行只会出自旧账本,rise 的世界里没有,见到就是永久失败
+        (不从 key 里解析主体)。"""
         with self._lock:
             ledger = self._load(world_id)
         rows = [r for r in ledger.events.values() if r["state"] == "pending"]  # 读回的是私有副本,锁外算
-        return [r["key"] for r in sorted(rows, key=lambda r: r["seq"])]
+        out = []
+        for r in sorted(rows, key=lambda r: r["seq"]):
+            if r["holder"] == "":
+                raise MemoryFailureError(f"pending event {r['key']!r} has no holder", transient=False)
+            out.append(PendingKey(r["key"], r["holder"]))
+        return out
 
     def digest(self, world_id: str) -> str:
         with self._lock:

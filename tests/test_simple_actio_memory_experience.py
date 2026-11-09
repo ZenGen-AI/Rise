@@ -356,39 +356,39 @@ def test_tuple_memory_is_a_memory_backend_and_rejects_a_bad_limit():
 def test_ledger_event_state_machine_pending_failed_committed_abandoned():
     led = _Ledger()
     ev = MemoryEvent("ep#1", "pb：预算不够", "pb")
-    assert led.begin(ev, holder="") is None and led.events["ep#1"]["state"] == "pending" and led.next_seq == 1
-    led.fail("ep#1", "timeout")
-    assert led.events["ep#1"]["failure_category"] == "timeout" and led.events["ep#1"]["state"] == "pending"
+    assert led.begin(ev, holder="") is None and led.events[("", "ep#1")]["state"] == "pending" and led.next_seq == 1
+    led.fail("ep#1", "timeout", holder="")
+    assert led.events[("", "ep#1")]["failure_category"] == "timeout" and led.events[("", "ep#1")]["state"] == "pending"
     assert led.begin(ev, holder="") is None and led.next_seq == 1  # pending 同文本:交给调用方再抽,不重复占序号
-    ids = led.commit("ep#1")
-    assert ids == (content_id("pb", "pb：预算不够"),) and led.events["ep#1"]["failure_category"] is None
+    ids = led.commit("ep#1", holder="")
+    assert ids == (content_id("pb", "pb：预算不够"),) and led.events[("", "ep#1")]["failure_category"] is None
     assert led.begin(ev, holder="") == ids and len(led.entries) == 1  # committed 幂等
     with pytest.raises(MemoryEventConflict):
-        led.abandon("ep#1")  # committed 放弃不了
+        led.abandon("ep#1", holder="")  # committed 放弃不了
     assert led.begin(MemoryEvent("ep#2", "pc：好吧", "pc"), holder="") is None
-    led.abandon("ep#2")
-    led.abandon("ep#2")  # 已放弃:空操作
+    led.abandon("ep#2", holder="")
+    led.abandon("ep#2", holder="")  # 已放弃:空操作
     with pytest.raises(MemoryEventConflict):
         led.begin(MemoryEvent("ep#2", "pc：好吧", "pc"), holder="")  # 放弃的 key 同文本也抛
     with pytest.raises(MemoryFailureError) as unknown:
-        led.abandon("ep#nope")
+        led.abandon("ep#nope", holder="")
     assert unknown.value.transient is False and not isinstance(unknown.value, MemoryEventConflict)
 
 
 def test_ledger_digest_keeps_only_key_and_state_for_abandoned_rows_and_round_trips_through_json():
     led = _Ledger()
     led.begin(MemoryEvent("ep#1", "pb：预算不够", "pb"), holder="")
-    led.commit("ep#1")
+    led.commit("ep#1", holder="")
     led.begin(MemoryEvent("ep#2", "pc：好吧", "pc"), holder="")
     before = led.digest()
-    led.abandon("ep#2")
+    led.abandon("ep#2", holder="")
     assert led.digest() != before
-    led.events["ep#2"]["text"] = "任何文本"  # abandoned 行的正文不进摘要
+    led.events[("", "ep#2")]["text"] = "任何文本"  # abandoned 行的正文不进摘要
     assert led.digest() == _digest_of(
         [{**e.to_dict()} for e in led.entries],
-        [led.events["ep#1"], {"key": "ep#2", "state": "abandoned"}],
+        [led.events[("", "ep#1")], {"key": "ep#2", "state": "abandoned"}],
     )
-    led.events["ep#2"]["text"] = "pc：好吧"
+    led.events[("", "ep#2")]["text"] = "pc：好吧"
     clone = _Ledger.from_json(json.loads(json.dumps(led.to_json())))
     assert clone.digest() == led.digest() and clone.next_seq == 2
     assert clone.recall("预算", limit=3) == led.recall("预算", limit=3)

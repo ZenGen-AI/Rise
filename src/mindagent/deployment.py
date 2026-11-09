@@ -317,9 +317,9 @@ def run_deployment_episodes(
     - 等端口全关超时:要恢复时抛 RestoreFailedError(库与快照都保留,等人看);开一次尝试或提交之前抛
       DeferredError(瞬态,轮次留 pending,重入时"快照在就先恢复")。
     - 提交:某次尝试成功后落盘 episode,放弃这条 episode 留下的 pending 行(列世界的,只放弃本轮本条前缀
-      f"{round_id}/{部署 id}#" 的,不分主体;门② 的行归提案),最后删起点快照、再删旁注。删快照就是提交点;
-      崩在它之前,快照还在,这条就算在途。先删快照:崩在两步之间留下的是孤儿旁注,反过来会留下没有旁注的快照,
-      启动检查会把它当成旧布局。
+      f"{round_id}/{部署 id}#" 的,各按行自带的主体放弃,智能体位与对手位的都算;门② 的行归提案),
+      最后删起点快照、再删旁注。删快照就是提交点;崩在它之前,快照还在,这条就算在途。先删快照:崩在两步之间
+      留下的是孤儿旁注,反过来会留下没有旁注的快照,启动检查会把它当成旧布局。
     - 重入:起点快照还在的 episode 先覆盖、核对摘要等于 episode_digests 里记的,再按同一 id 重跑,不重新备份。
       起点快照不在、episode 已落盘且可复用(见 _reusable)的直接复用;技能版本变了的改用
       rerun_episode_id(部署 id, 技能版本) 重跑,原 episode 留在树里。episode_digests 的值是本改动之前的形状
@@ -452,9 +452,9 @@ def run_deployment_episodes(
             write_episode(store, run_id, episode)
             prefix = f"{round_id}/{eid}#"
             pending = _memory_op(f"pending events of world {world}", lambda: memory_store.pending_events(world))
-            for key in pending:
-                if key.startswith(prefix):
-                    _memory_op(f"abandon {key}", lambda: memory_store.abandon_event(world, key))
+            for p in pending:
+                if p.key.startswith(prefix):
+                    _memory_op(f"abandon {p.key}", lambda p=p: memory_store.abandon_event(world, p.holder, p.key))
             _memory_op(f"commit {eid}", snap.unlink)
             _memory_op(f"drop world tag of {eid}", lambda: _tag_path(snap).unlink(missing_ok=True))
             out.append(episode)

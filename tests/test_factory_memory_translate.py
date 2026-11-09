@@ -105,7 +105,7 @@ def test_memory_role_backend_writes_event_keys_under_the_given_holder():
         interlocutors={"a": "pa"}, holder="pb",
     )
     backend.respond(None, None, [TurnRecord(0, "a", "你好")], "b")
-    assert world._live().events.keys() == {"ep-x#0@pb"}
+    assert world._live().events.keys() == {("pb", "ep-x#0@pb")}
 
 
 def test_memory_role_backend_requires_the_holder():
