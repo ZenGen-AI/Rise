@@ -10,7 +10,7 @@ import pytest
 
 from simple_actio.errors import SimpleActioDataError
 from simple_actio.memory_port import (DeploymentMemoryStore, MemoryBackend, MemoryEvent, MemoryEventConflict,
-                               MemoryFailureError)
+                               MemoryFailureError, PendingKey)
 from starling_fakes import FakeOpenAI, offline_api_key
 
 starling = pytest.importorskip("starling")
@@ -77,7 +77,7 @@ def test_world_ids_are_checked_before_any_path_is_built(tmp_path, fake, bad):
     snap = tmp_path / "snap.db"
     calls = (lambda: store.open(bad, "pa"), lambda: store.digest(bad), lambda: store.pending_events(bad),
              lambda: store.remember_event(bad, "pa", KEY, TEXT, interlocutor="pb"),
-             lambda: store.abandon_event(bad, KEY), lambda: store.backup_to(bad, snap),
+             lambda: store.abandon_event(bad, "pa", KEY), lambda: store.backup_to(bad, snap),
              lambda: store.restore_from(bad, snap), lambda: store.wait_closed(bad, 0.01))
     for call in calls:
         with pytest.raises(SimpleActioDataError, match="world_id"):
@@ -89,7 +89,8 @@ def test_world_ids_are_checked_before_any_path_is_built(tmp_path, fake, bad):
 def test_holders_are_checked_before_any_library_is_built(tmp_path, fake, bad):
     store = _store(tmp_path, fake)
     for call in (lambda: store.open("s1", bad),
-                 lambda: store.remember_event("s1", bad, KEY, TEXT, interlocutor="pb")):
+                 lambda: store.remember_event("s1", bad, KEY, TEXT, interlocutor="pb"),
+                 lambda: store.abandon_event("s1", bad, KEY)):
         with pytest.raises(SimpleActioDataError, match="holder"):
             call()
     assert not (tmp_path / "deploy").exists()
@@ -147,14 +148,26 @@ def test_a_failed_admission_stays_pending_and_abandon_closes_it(tmp_path, fake):
     fake.fail_keys.add(KEY)
     out = store.remember_event("s1", "pa", KEY, TEXT, interlocutor="pb")
     assert out.failed and out.stored == ()
-    assert store.pending_events("s1") == [KEY]
-    store.abandon_event("s1", KEY)
+    assert store.pending_events("s1") == [PendingKey(KEY, "pa")]
+    store.abandon_event("s1", "pa", KEY)
     assert store.pending_events("s1") == []
     with pytest.raises(MemoryEventConflict):
         store.remember_event("s1", "pa", KEY, TEXT, interlocutor="pb")
     with pytest.raises(MemoryFailureError) as info:
-        store.abandon_event("s1", "never-written#0")          # 未知 key:KeyError → 非瞬态
+        store.abandon_event("s1", "pa", "never-written#0")    # 未知 key:KeyError → 非瞬态
     assert info.value.transient is False
+
+
+def test_abandon_acts_only_on_the_named_holders_event(tmp_path, fake):
+    store = _store(tmp_path, fake)
+    fake.fail_keys.add(KEY)
+    store.remember_event("s1", "pa", KEY, TEXT, interlocutor="pb")
+    with pytest.raises(MemoryFailureError) as info:
+        store.abandon_event("s1", "pb", KEY)                  # cff319d:别的主体名下的 key 是 KeyError
+    assert info.value.transient is False
+    assert store.pending_events("s1") == [PendingKey(KEY, "pa")]
+    store.abandon_event("s1", "pa", KEY)
+    assert store.pending_events("s1") == []
 
 
 def test_pending_events_come_back_in_the_order_they_were_written(tmp_path, fake):
@@ -162,14 +175,14 @@ def test_pending_events_come_back_in_the_order_they_were_written(tmp_path, fake)
     fake.fail_keys = {KEY, KEY2}
     store.remember_event("s1", "pa", KEY2, TEXT, interlocutor="pb")
     store.remember_event("s1", "pa", KEY, TEXT, interlocutor="pb")
-    assert store.pending_events("s1") == [KEY2, KEY]
+    assert store.pending_events("s1") == [PendingKey(KEY2, "pa"), PendingKey(KEY, "pa")]
 
 
 def test_abandoning_a_committed_event_is_a_conflict(tmp_path, fake):
     store = _store(tmp_path, fake)
     store.remember_event("s1", "pa", KEY, TEXT, interlocutor="pb")
     with pytest.raises(MemoryEventConflict):
-        store.abandon_event("s1", KEY)
+        store.abandon_event("s1", "pa", KEY)
 
 
 def test_remember_event_after_a_crash_before_phase_three_completes_without_extracting_again(tmp_path, fake):
@@ -181,7 +194,7 @@ def test_remember_event_after_a_crash_before_phase_three_completes_without_extra
     committed = store.digest("s1")
     with sqlite3.connect(_lib(tmp_path)) as c:                # 模拟"语句已落、③ 没写成"
         c.execute("UPDATE events SET state='pending', statement_ids_json='[]' WHERE key=?", (KEY,))
-    assert store.pending_events("s1") == [KEY]
+    assert store.pending_events("s1") == [PendingKey(KEY, "pa")]
     calls = fake.chat_calls
     again = store.remember_event("s1", "pa", KEY, TEXT, interlocutor="pb")
     assert again.stored == first.stored and not again.failed
@@ -203,7 +216,7 @@ def test_reading_an_unknown_world_builds_no_file_and_gives_the_empty_library_dig
 def test_abandoning_in_an_unknown_world_is_an_unknown_key_and_builds_no_file(tmp_path, fake):
     store = _store(tmp_path, fake)
     with pytest.raises(MemoryFailureError) as info:
-        store.abandon_event("s1", KEY)
+        store.abandon_event("s1", "pa", KEY)
     assert type(info.value) is MemoryFailureError and info.value.transient is False
     assert not (tmp_path / "deploy").exists()
 
@@ -707,7 +720,7 @@ def test_a_corrupt_library_is_a_non_transient_failure_on_every_management_call(t
     _lib(tmp_path).write_bytes(b"not sqlite")
     for call in (lambda: store.digest("s1"), lambda: store.pending_events("s1"),
                  lambda: store.remember_event("s1", "pa", KEY, TEXT, interlocutor="pb"),
-                 lambda: store.abandon_event("s1", KEY), lambda: store.open("s1", "pa")):
+                 lambda: store.abandon_event("s1", "pa", KEY), lambda: store.open("s1", "pa")):
         with pytest.raises(MemoryFailureError) as info:
             call()
         assert info.value.transient is False and str(tmp_path) not in str(info.value)
@@ -759,7 +772,7 @@ def test_every_short_lived_connection_is_closed_with_the_store_timeout(tmp_path,
     store.digest_of(snap)
     store.restore_from("s1", snap)
     with pytest.raises(MemoryEventConflict):
-        store.abandon_event("s1", KEY)
+        store.abandon_event("s1", "pa", KEY)
     assert len(timeouts) >= 8 and set(timeouts) == {7.5}
 
 
@@ -772,4 +785,4 @@ def test_calls_that_never_extract_do_not_need_the_api_key(tmp_path, fake, monkey
     assert store.digest("s1") == store.digest_of(snap) == d and store.pending_events("s1") == []
     assert store.restore_from("s2", snap) == d
     with pytest.raises(MemoryEventConflict):
-        store.abandon_event("s1", KEY)
+        store.abandon_event("s1", "pa", KEY)

@@ -234,7 +234,7 @@ git commit -m "feat(simple_actio): 放弃事件带主体,pending_events 返回 P
   - `_outcome(memory, res)`：`res.extraction_failed` 为真照旧 `RememberOutcome((), True, category)`；否则 `res.outcome` 不在 `("accepted", "idempotent")` 里时抛 `MemoryFailureError(f"remember: outcome {res.outcome}", transient=False)`（AC-32）；其余照旧换内容 id。端口与管理面共用 `_outcome`，所以两处一起改严。
   - `StarlingMemory.recall` 照旧显式传 `strict=True, include_volatile=True`（`memory_starling.py:189` 已经如此），测试钉住。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 `tests/test_simple_actio_memory_starling.py`（单测用 `FakeStarling`，不起真库）：
 
@@ -280,21 +280,21 @@ def test_abandon_acts_only_on_the_named_holders_event(tmp_path, fake):
 
 已有的 `abandon_event("s1", KEY)` 全部补主体（`:151`、`:156`、`:172`、`:206`、`:710`、`:762`、`:775`），`pending_events` 的断言改成 `PendingKey`。`tests/test_ma_deployment_starling.py:63` 的 `[p.key for p in memory.pending_events()]` 改成 `[(p.key, p.holder) for p in ...]`，`:79`、`:154`、`:187` 的比较同步。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_simple_actio_memory_starling.py tests/test_simple_actio_starling_store.py tests/test_simple_actio_deployment_store_contract.py tests/test_ma_deployment_starling.py`
 Expected: FAIL（写入结果没判；`abandon_event` 参数个数不对；`pending_events` 返回 `str`）
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 先升依赖：`pyproject.toml:15` 换提交，跑 `uv lock` 与 `uv sync --extra dev --extra memory`。只升依赖、不改代码时，在 `cff319d` 上有 8 条用例失败（2026-11-10 在临时 venv 里实测，`293 passed, 8 failed`），全是"以 `agent="world"` 放弃别的主体的事件抛 `KeyError`"及其连锁（如 `test_a_deterministic_admission_extraction_failure_rejects_and_abandons_the_event` 停在 approved），正是本任务要修的。然后按 Interfaces 改 `memory_starling.py`。`_WORLD_AGENT`（`:50`）只剩 `pending_events`、`digest`、`backup_to`、`restore_from` 用。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_simple_actio_memory_starling.py tests/test_simple_actio_starling_store.py tests/test_simple_actio_deployment_store_contract.py tests/test_simple_actio_memory_contract.py tests/test_ma_deployment_starling.py tests/test_factory_training_worlds.py tests/test_factory_memory_runtime.py tests/test_factory_memory_wiring.py tests/test_starling_fakes.py`
 Expected: PASS。这是第 1 步的最后一个任务：控制者在后台跑全量，必须绿。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add pyproject.toml uv.lock src/simple_actio/memory_starling.py tests/starling_fakes.py tests/test_simple_actio_memory_starling.py tests/test_simple_actio_starling_store.py tests/test_simple_actio_deployment_store_contract.py tests/test_ma_deployment_starling.py

@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 starling = pytest.importorskip("starling")
-from simple_actio.memory_port import MemoryEventConflict  # noqa: E402
+from simple_actio.memory_port import MemoryEventConflict, PendingKey  # noqa: E402
 from simple_actio.memory_starling import StarlingDeploymentStore, copy_library  # noqa: E402
 from controlplane.deferred import DeferredError  # noqa: E402
 from controlplane.gitstore import GitStore  # noqa: E402
@@ -52,15 +52,15 @@ def admit_store(tmp_path):
     return s
 
 
-def _pending_in_copy(path: Path) -> list[str]:
-    """库文件(或起点快照)里还有哪些 pending 行,不分主体(与 `pending_events` 同口径)。快照是提交点,
-    字节不能变:拷出来再开。"""
+def _pending_in_copy(path: Path) -> list[tuple[str, str]]:
+    """库文件(或起点快照)里还有哪些 pending 行,列全部主体的 (key, holder)(与 `pending_events` 同口径)。
+    快照是提交点,字节不能变:拷出来再开。"""
     with tempfile.TemporaryDirectory() as tmp:
         copy = Path(tmp) / "peek.db"
         copy_library(path, copy)
         memory = starling.Memory.open(str(copy), agent="peek")
         try:
-            return [p.key for p in memory.pending_events()]
+            return [(p.key, p.holder) for p in memory.pending_events()]
         finally:
             memory.close(timeout=10)
 
@@ -181,17 +181,19 @@ def test_no_pending_rows_survive_an_episode_and_the_next_start_snapshot_is_clean
     abandoned = []
     real = mem.store.abandon_event
 
-    def spy(world, key):
+    def spy(world, holder, key):
         copy = tmp_path / f"before-abandon-{len(abandoned)}.db"
         copy_library(mem.layout.root / "deploy" / f"{world}.db", copy)   # 端口都已关,库静止
-        abandoned.append((key, mem.store.pending_events(world), _pending_in_copy(copy)))
-        real(world, key)
+        abandoned.append((holder, key, mem.store.pending_events(world), _pending_in_copy(copy)))
+        real(world, holder, key)
 
     monkeypatch.setattr(mem.store, "abandon_event", spy)
     probe = _StartProbe(mem)
     eps = _run(store, _Factory(), mem, started=probe, episodes_per_scenario=2)
     assert [e.id for e in eps] == [EID, EID2]
-    assert abandoned == [(KEY0, [KEY0], [KEY0]), (key2, [key2], [key2])]   # 确有 pending 行,每条在提交时只放弃自己的;探针读得到
+    # 确有 pending 行,每条在提交时只放弃自己的,按行自带的主体放弃;探针读得到
+    assert abandoned == [("pa", KEY0, [PendingKey(KEY0, "pa")], [(KEY0, "pa")]),
+                         ("pa", key2, [PendingKey(key2, "pa")], [(key2, "pa")])]
     first, second = probe.seen
     assert (first["eid"], second["eid"]) == (EID, EID2)
     assert first["library_pending"] == second["library_pending"] == []
@@ -236,7 +238,7 @@ def test_a_transient_admission_extraction_failure_defers_and_keeps_the_event_pen
     assert admit_store.read_product(proposal_file(PID)).status == "approved"
     fr = admit_store.read_product(failure_record_file("run-003", f"admit-{PID}"))
     assert (fr.payload["category"], fr.payload["point"]) == ("T1", "mindagent.admit.memory")
-    assert mem.store.pending_events("s1") == [f"{PID}#2"]              # 没被放弃
+    assert mem.store.pending_events("s1") == [PendingKey(f"{PID}#2", "pa")]  # 没被放弃
     assert not admit_store.exists(skill_file("skill-agent-round-zengen-v3-1-1"))   # 记忆先写,技能未落
     mem.failing.clear()                                                # 抽取恢复后重入
     _admit(admit_store, mem)
@@ -257,7 +259,7 @@ def test_a_later_admission_extraction_failure_defers_and_converges(admit_store, 
     assert admit_store.read_product(proposal_file(PID)).status == "approved"
     fr = admit_store.read_product(failure_record_file("run-003", f"admit-{PID}"))
     assert fr.payload["category"] == "T1" and f"{PID}#2" in fr.payload["reason"]
-    assert mem.store.pending_events("s1") == [f"{PID}#2"]              # 留 pending,不放弃
+    assert mem.store.pending_events("s1") == [PendingKey(f"{PID}#2", "pa")]  # 留 pending,不放弃
     assert not admit_store.exists(library_state_file())
     mem.failing.clear()                                                # 抽取恢复后重入
     _admit(admit_store, mem)
@@ -297,7 +299,7 @@ def test_a_deterministic_failure_after_a_commit_is_t3_and_reentry_does_not_extra
     fr = admit_store.read_product(failure_record_file("run-003", f"admit-{PID}-partial"))
     assert (fr.payload["category"], fr.payload["point"]) == ("T3", "mindagent.admit.memory")
     assert fr.payload["reason"] == f"partial admission: {second} unknown after 1 committed"
-    assert mem.store.pending_events("s1") == [second]                  # 不放弃,等人处理
+    assert mem.store.pending_events("s1") == [PendingKey(second, "pa")]  # 不放弃,等人处理
     assert not admit_store.exists(library_state_file())
     calls, head = mem.fake.chat_calls, admit_store._git("rev-parse", "HEAD")
     _admit(admit_store, mem)                                           # 下一个 tick

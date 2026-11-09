@@ -174,7 +174,8 @@ def test_a_negative_statement_gets_the_negation_before_the_predicate():
 
 def test_remember_stores_content_ids_and_passes_the_clock_epoch_explicitly():
     fake = FakeStarling()
-    fake.result = SimpleNamespace(extraction_failed=False, failure_category="", statement_ids=["u-1", "u-2"])
+    fake.result = SimpleNamespace(extraction_failed=False, failure_category="", statement_ids=["u-1", "u-2"],
+                                  outcome="accepted")
     fake.ids = {"u-1": "ab" * 32, "u-2": "cd" * 32}
     out = StarlingMemory(fake).remember(EV)
     assert out == RememberOutcome(("mem-" + "ab" * 8, "mem-" + "cd" * 8), False, None)
@@ -190,12 +191,37 @@ def test_remember_reports_an_extraction_failure_as_a_counted_outcome(category, e
 
 def test_remember_refuses_a_statement_the_library_does_not_know_instead_of_minting_a_fake_id():
     fake = FakeStarling()
-    fake.result = SimpleNamespace(extraction_failed=False, failure_category="", statement_ids=["u-1", "u-2"])
+    fake.result = SimpleNamespace(extraction_failed=False, failure_category="", statement_ids=["u-1", "u-2"],
+                                  outcome="accepted")
     fake.ids = {"u-1": "ab" * 32, "u-2": "missing"}          # 门面对不认得的语句 id 给 "missing"
     with pytest.raises(MemoryFailureError) as info:
         StarlingMemory(fake).remember(EV)
     assert type(info.value) is MemoryFailureError and info.value.transient is False
     assert "mem-missing" not in str(info.value) and "not found" in str(info.value)
+
+
+@pytest.mark.parametrize("outcome", ["no_store", "rejected", "source_missing", ""])
+def test_a_write_whose_outcome_is_not_accepted_or_idempotent_is_a_permanent_failure(outcome):
+    fake = FakeStarling()
+    fake.result = SimpleNamespace(extraction_failed=False, failure_category="", statement_ids=[], outcome=outcome)
+    with pytest.raises(MemoryFailureError, match=f"remember: outcome {outcome}$") as info:
+        StarlingMemory(fake).remember(EV)
+    assert info.value.transient is False
+
+
+@pytest.mark.parametrize("outcome", ["accepted", "idempotent"])
+def test_accepted_and_idempotent_writes_keep_their_statements(outcome):
+    fake = FakeStarling()
+    fake.result = SimpleNamespace(extraction_failed=False, failure_category="", statement_ids=["u-1"], outcome=outcome)
+    fake.ids = {"u-1": "ab" * 32}
+    assert StarlingMemory(fake).remember(EV).stored == ("mem-" + "ab" * 8,)
+
+
+def test_a_failed_extraction_is_still_counted_whatever_the_outcome_says():
+    fake = FakeStarling()        # cff319d 上抽取失败时 outcome 是 accepted、extraction_failed 为真(2026-11-10 实测)
+    fake.result = SimpleNamespace(extraction_failed=True, failure_category="transport_failure", statement_ids=[],
+                                  outcome="accepted")
+    assert StarlingMemory(fake).remember(EV) == RememberOutcome((), True, "transport_failure")
 
 
 def test_the_port_satisfies_the_memory_backend_protocol():

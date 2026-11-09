@@ -34,6 +34,7 @@ from simple_actio.memory_port import (
     MemoryEventConflict,
     MemoryFailureError,
     MemoryHit,
+    PendingKey,
     RememberOutcome,
 )
 
@@ -45,9 +46,13 @@ _EPOCH_AT = datetime.fromisoformat(EPOCH)
 _ID_HEX_CHARS = 16
 # Starling 门面 `content_ids` 对本库没有的语句 id 给的占位值(与摘要里解不出引用时同一个标记)。
 _MISSING_CONTENT_ID = "missing"
-# 世界级操作(pending_events、abandon_event、digest、备份与还原)不属于任何主体,短连接用这个 agent 名开。
+# 世界级操作(pending_events、digest、备份与还原)不属于任何主体,短连接用这个 agent 名开。
 # 这些操作的结果与 agent 无关(`tests/test_simple_actio_starling_store.py` 里有一条用例钉住摘要这一点)。
+# abandon_event 不用它:Starling 第 2 期起门面只放弃本主体名下的事件,要以 agent=<主体> 开。
 _WORLD_AGENT = "world"
+# 写入结果里算"写成了"的两种 outcome(40 篇 AC-32):其余(no_store、rejected、source_missing、空串等)
+# 都没按事件写下语句,当作成功会让门② 与对话事件静默丢记忆。
+_STORED_OUTCOMES = ("accepted", "idempotent")
 
 
 @dataclass(frozen=True)
@@ -108,9 +113,14 @@ def _hit_id(content_id: str) -> str:
 
 
 def _outcome(memory, res) -> RememberOutcome:
-    """`remember_event` 的返回译成 `RememberOutcome`,端口与管理面共用。"""
+    """`remember_event` 的返回译成 `RememberOutcome`,端口与管理面共用,所以写入判据两处一起严。
+
+    抽取失败先判:cff319d 上抽取失败时 outcome 仍是 accepted,只看 extraction_failed。否则 outcome 不是
+    accepted 或 idempotent 就是永久失败(AC-32),消息只带 outcome。"""
     if res.extraction_failed:
         return RememberOutcome((), True, res.failure_category or "unknown")
+    if res.outcome not in _STORED_OUTCOMES:
+        raise MemoryFailureError(f"remember: outcome {res.outcome}", transient=False)
     content_ids = memory.content_ids(list(res.statement_ids))
     if _MISSING_CONTENT_ID in content_ids.values():
         # 门面对本库不认得的语句 id 返回 "missing"。刚写完的语句不该认不得;放行的话
@@ -184,6 +194,7 @@ class StarlingMemory:
         if limit == 0:
             return []
         try:
+            # 两个开关显式传,不靠门面的默认值(40 篇"召回显式传参",接服务后客户端照样传):
             # strict:查询词嵌不出就抛 RecallDegradedError,不退回只有词面的结果。
             # include_volatile:刚嵌入、还没被 tick 晋级的语句也要能召回(实例每轮 remember 后 embed_pending)。
             found = memory.recall(query, k=limit, mode="semantic", strict=True, include_volatile=True)
@@ -358,8 +369,8 @@ def extraction_prompts_digest() -> str:
 class StarlingDeploymentStore:
     """部署记忆的管理面,满足 `DeploymentMemoryStore`:每个世界一个 Starling 库 `<root>/<world_id>.db`
     (组合根传入 `<记忆根>/deploy`,设计三 4.1、6.2 节)。世界里的各主体共用这个库,端口以 `agent=<主体>` 打开,
-    `remember_event` 也以 `agent=<holder>` 开短连接,所以语句记在 holder 名下;pending_events、abandon_event、
-    digest、备份与还原是世界级的,不分主体。
+    `remember_event` 与 `abandon_event` 也以 `agent=<holder>` 开短连接,所以语句与放弃都落在 holder 名下;
+    pending_events、digest、备份与还原是世界级的,不分主体。
 
     **调用方必须持该世界的世界锁(设计三 4.2 节)。** 门面只在单个 `Memory` 内计在途调用,不串行化同一库上的
     多条连接;管理面每次调用另开一条短命连接。同一个库上的并发写由 SQLite 串行化(WAL 加 5 秒 busy_timeout),
@@ -474,19 +485,30 @@ class StarlingDeploymentStore:
                 _embed(memory)
             return outcome
 
-    def abandon_event(self, world_id: str, key: str) -> None:
+    def abandon_event(self, world_id: str, holder: str, key: str) -> None:
+        """以 `agent=holder` 开短连接放弃。门面只放弃本主体名下的行,别的主体名下的 key 抛 `KeyError`
+        (`S:python/starling/memory.py:472-497`),照旧译成永久失败。"""
         path = self._path(world_id)
+        _check_name(holder, "holder")
         if not path.exists():
             raise translate_failure(KeyError(key)) from None            # 没有库就没有这个 key
-        with self._short(path, agent=_WORLD_AGENT) as memory:
+        with self._short(path, agent=holder) as memory:
             memory.abandon_event(key)
 
-    def pending_events(self, world_id: str) -> list[str]:
+    def pending_events(self, world_id: str) -> list[PendingKey]:
+        """全部主体的 pending 行,按 seq 升序(门面的顺序)。主体为空串的行只出自 0039 之前的旧库,
+        rise 的世界里没有,见到就判永久失败(AC-30),不从 key 里解析主体。"""
         path = self._path(world_id)
         if not path.exists():
             return []
         with self._short(path, agent=_WORLD_AGENT) as memory:
-            return [p.key for p in memory.pending_events()]
+            pending = memory.pending_events()
+        out = []
+        for p in pending:
+            if p.holder == "":
+                raise MemoryFailureError(f"pending event {p.key!r} has no holder", transient=False)
+            out.append(PendingKey(p.key, p.holder))
+        return out
 
     def digest(self, world_id: str) -> str:
         path = self._path(world_id)

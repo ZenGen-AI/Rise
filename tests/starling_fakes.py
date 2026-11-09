@@ -4,7 +4,7 @@
 - POST .../embeddings:对 input 逐条用 fake_vector 给向量(余弦只来自共有词面)。
 - POST .../chat/completions:按提示词开头判断是哪一遍抽取。信念抽取把「[key] 说话方：原话」
   抽成一条信念;另外两遍(general fact、episodic)一律回 "[]"。
-- 两个按事件 key 的故障开关,在 Starling 730e415 上得到两种类别:
+- 两个按事件 key 的故障开关,在 Starling cff319d 上得到两种类别(2026-11-10 实测,与 730e415 相同):
   - fail_keys:信念那一遍回 500,Starling 判 transport_failure(rise 当瞬态)。
   - malformed_keys:general fact 那一遍回 200 加一段不是 JSON 数组的内容,事件抽取失败、failure_category
     为空串,rise 的适配器记成 unknown(门② 当确定性)。信念那一遍照常抽出、照常落库。

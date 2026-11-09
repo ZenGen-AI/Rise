@@ -12,7 +12,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "grpcio-tools>=1.84.0"]
-memory = ["starling-memory @ git+https://github.com/ruijieguo/starling@730e415bef327ee9da8989a03444fd0d8269b7eb"]
+memory = ["starling-memory @ git+https://github.com/ruijieguo/starling@cff319d952360727823024ff43c71b15055bd8e3"]
 
 [build-system]
 requires = ["hatchling"]
