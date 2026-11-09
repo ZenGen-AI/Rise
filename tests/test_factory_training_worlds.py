@@ -43,7 +43,8 @@ def case(request, tmp_path):
 
     with FakeOpenAI(dim=256) as fake, offline_api_key():
         layout = StarlingLayout(tmp_path / "mem")
-        seeds = StarlingDeploymentStore(layout.seed_dir("s1"), endpoints=fake.endpoints())
+        seeds = StarlingDeploymentStore(layout.seed_dir("s1"), held_root=tmp_path / "held",     # 建种子不拍快照,两个根不建
+                                        replay_root=tmp_path / "replay", endpoints=fake.endpoints())
         seeds.remember_event("s1", "pa", "seed#0@pa", "pb：人手也不够", interlocutor="pb")
         seeded = seeds.digest("s1")
         assert seeded != empty_digest()

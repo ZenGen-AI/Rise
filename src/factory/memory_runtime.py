@@ -760,10 +760,13 @@ def memory_wiring(repo_root: Path, env: Mapping[str, str], *, deployment: bool) 
     deployment_memory = None
     if deployment:
         deployment_memory = DeploymentMemory(
-            StarlingDeploymentStore(layout.deploy_dir(), endpoints=endpoints),
+            # 过渡布局(第 2、3 步):held 快照在 <记忆根>/held,重放世界在 <记忆根>/replay,都是进程内的库文件
+            StarlingDeploymentStore(layout.deploy_dir(), held_root=config.root / "held",
+                                    replay_root=config.root / "replay", endpoints=endpoints),
             memory_layout,
             copy.deepcopy(runtime),
-            lambda path: StarlingDeploymentStore(path, endpoints=endpoints),
+            lambda path: StarlingDeploymentStore(path, held_root=path / "held", replay_root=path / "replay",
+                                                 endpoints=endpoints),     # Task 7 删
         )
     _log.info("memory backend: starling")
     return MemoryWiring("starling", deployment_memory, starling_memory_resolver(layout, runtime), worlds, worlds.sweep)

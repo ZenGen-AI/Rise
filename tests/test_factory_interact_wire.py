@@ -841,7 +841,8 @@ def test_the_scope_binds_the_configured_seed_and_the_rollout_world_starts_from_t
 
     with FakeOpenAI(dim=256) as fake, offline_api_key():
         layout = StarlingLayout(tmp_path / "mem")
-        seeds = StarlingDeploymentStore(layout.seed_dir("s1"), endpoints=fake.endpoints())
+        seeds = StarlingDeploymentStore(layout.seed_dir("s1"), held_root=tmp_path / "held",     # 建种子不拍快照,两个根不建
+                                        replay_root=tmp_path / "replay", endpoints=fake.endpoints())
         seeds.remember_event("t1", "pa", "seed#0@pa", "pb：人手也不够", interlocutor="pb")
         assert seeds.digest("t1") != empty_digest()                 # 种子有内容,"从种子起"才和"空库"分得开
         worlds = StarlingTrainingWorlds(layout, fake.endpoints(), close_timeout_s=0.2)

@@ -482,7 +482,7 @@ git commit -m "feat(simple_actio): 部署管理面改按快照 id,加 fork_repla
   - 端口计数表按完整世界名：部署端口记在 `rise.deploy.<world_id>` 下，重放端口记在重放世界名下；`wait_closed(world_id, ...)` 拼成部署世界名再查。
   - `StarlingMemory(memory, *, read_only=False, ...)`：只读时 `remember` 抛永久 `MemoryFailureError("world_read_only")`，`embed_pending` 返回 0 且不调门面。
 
-- [ ] **Step 1: 写失败的测试**：Task 4 Step 1 的六条契约用例此时对 `starling` 参数是红的，不另写。`tests/test_simple_actio_starling_store.py` 加过渡布局专有的一条：
+- [x] **Step 1: 写失败的测试**：Task 4 Step 1 的六条契约用例此时对 `starling` 参数是红的，不另写。`tests/test_simple_actio_starling_store.py` 加过渡布局专有的一条：
 
 ```python
 def test_the_transitional_layout_keeps_held_and_replay_files_out_of_deploy(tmp_path, fake):
@@ -512,19 +512,19 @@ def test_a_read_only_port_refuses_writes_and_skips_embedding():
     assert port.embed_pending() == 0 and fake.embed_nows == []
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_simple_actio_deployment_store_contract.py tests/test_simple_actio_starling_store.py tests/test_simple_actio_memory_starling.py`
 Expected: FAIL（`StarlingDeploymentStore` 没有新方法与新构造参数）
 
-- [ ] **Step 3: 实现**：按 Interfaces。`_backup_to`、`_restore_from` 是今天 `backup_to`、`restore_from` 原样改名，文档字符串里写明"第 4 步删"。`held_root`、`replay_root` 由第一次需要时建（构造不碰磁盘，照 `memory_starling.py:377-379`）。
+- [x] **Step 3: 实现**：按 Interfaces。`_backup_to`、`_restore_from` 是今天 `backup_to`、`restore_from` 原样改名，文档字符串里写明"第 4 步删"。`held_root`、`replay_root` 由第一次需要时建（构造不碰磁盘，照 `memory_starling.py:377-379`）。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_simple_actio_deployment_store_contract.py tests/test_simple_actio_starling_store.py tests/test_simple_actio_memory_starling.py tests/test_simple_actio_memory_contract.py`
 Expected: PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/simple_actio/memory_starling.py src/factory/memory_runtime.py tests/test_simple_actio_starling_store.py tests/test_simple_actio_deployment_store_contract.py tests/test_simple_actio_memory_starling.py

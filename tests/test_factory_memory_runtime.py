@@ -184,7 +184,8 @@ def test_the_resolver_digests_seed_worlds_per_scenario_and_empty_starts(tmp_path
     from starling_fakes import FakeOpenAI, offline_api_key
     lay = StarlingLayout(tmp_path)
     with FakeOpenAI(dim=256) as fake, offline_api_key():
-        seeds = StarlingDeploymentStore(tmp_path / "seeds" / "s1", endpoints=fake.endpoints())
+        seeds = StarlingDeploymentStore(tmp_path / "seeds" / "s1", held_root=tmp_path / "held",   # 建种子不拍快照
+                                        replay_root=tmp_path / "replay", endpoints=fake.endpoints())
         seeds.remember_event("t1", "pa", "seed#0@pa", "pb：我担心预算超支", interlocutor="pb")
         seeded = seeds.digest("t1")
         before = (tmp_path / "seeds" / "s1" / "t1.db").read_bytes()
@@ -206,7 +207,8 @@ def test_a_seed_whose_files_match_no_scenario_is_a_readable_t2(tmp_path):
     from factory.memory_runtime import starling_memory_resolver
     from starling_fakes import FakeOpenAI, offline_api_key
     with FakeOpenAI(dim=256) as fake, offline_api_key():
-        seeds = StarlingDeploymentStore(tmp_path / "seeds" / "s1", endpoints=fake.endpoints())
+        seeds = StarlingDeploymentStore(tmp_path / "seeds" / "s1", held_root=tmp_path / "held",   # 建种子不拍快照
+                                        replay_root=tmp_path / "replay", endpoints=fake.endpoints())
         seeds.remember_event("pa", "pa", "seed#0@pa", "pb：我担心预算超支", interlocutor="pb")   # 世界 id 是人格名
         resolve = starling_memory_resolver(StarlingLayout(tmp_path), {"backend": "starling"})
         with pytest.raises(DirectiveFailedError) as info:
@@ -223,7 +225,8 @@ def test_a_seed_that_covers_some_scenarios_starts_the_others_from_the_empty_worl
     from factory.memory_runtime import starling_memory_resolver
     from starling_fakes import FakeOpenAI, offline_api_key
     with FakeOpenAI(dim=256) as fake, offline_api_key():
-        seeds = StarlingDeploymentStore(tmp_path / "seeds" / "s1", endpoints=fake.endpoints())
+        seeds = StarlingDeploymentStore(tmp_path / "seeds" / "s1", held_root=tmp_path / "held",   # 建种子不拍快照
+                                        replay_root=tmp_path / "replay", endpoints=fake.endpoints())
         seeds.remember_event("t1", "pa", "seed#0@pa", "pb：我担心预算超支", interlocutor="pb")
         seeds.remember_event("pa", "pa", "seed#1@pa", "pb：下周再谈", interlocutor="pb")
         seeded = seeds.digest("t1")
@@ -310,7 +313,8 @@ def test_a_changed_embedding_vector_changes_the_seed_digest(tmp_path):
     for salt in ("", "v2"):
         with FakeOpenAI(dim=256) as fake, offline_api_key():
             fake.salt = salt
-            store = StarlingDeploymentStore(tmp_path / salt / "seeds", endpoints=fake.endpoints())
+            store = StarlingDeploymentStore(tmp_path / salt / "seeds", held_root=tmp_path / salt / "held",
+                                            replay_root=tmp_path / salt / "replay", endpoints=fake.endpoints())
             store.remember_event("t1", "pa", "seed#0@pa", "pb：我担心预算超支", interlocutor="pb")
             port = store.open("t1", "pa")
             port.embed_pending()

@@ -7,7 +7,9 @@
 异常信息只放异常类名:原异常的文字可能含端点地址,所以一律 `from None` 改抛。
 
 `StarlingDeploymentStore` 是同一个后端的部署管理面(满足 `DeploymentMemoryStore`):每个世界一个库
-`<root>/<world_id>.db`,世界里的各主体以 `agent=<主体>` 打开端口,管理面的调用各开一条短命连接。"""
+`<root>/<world_id>.db`,世界里的各主体以 `agent=<主体>` 打开端口,管理面的调用各开一条短命连接。
+按快照 id 的快照与重放世界是第 2、3 步的过渡实现(00 篇施工表第 2 行):held 快照与重放世界都是库文件,
+第 4 步换成服务后整体删掉。"""
 from __future__ import annotations
 
 import contextlib
@@ -15,6 +17,7 @@ import functools
 import hashlib
 import json
 import os
+import secrets
 import shutil
 import tempfile
 import threading
@@ -36,6 +39,7 @@ from simple_actio.memory_port import (
     MemoryHit,
     PendingKey,
     RememberOutcome,
+    SnapshotRef,
 )
 
 # 事件时钟的起点(设计源 4.3 节)。每次 `remember_event` 都显式传它,不靠门面的默认值恰好同值:
@@ -53,6 +57,9 @@ _WORLD_AGENT = "world"
 # 写入结果里算"写成了"的两种 outcome(40 篇 AC-32):其余(no_store、rejected、source_missing、空串等)
 # 都没按事件写下语句,当作成功会让门② 与对话事件静默丢记忆。
 _STORED_OUTCOMES = ("accepted", "idempotent")
+# 重放世界名的前缀:`world_prefix` 的缺省值,与替身的 `STAND_IN_WORLD_PREFIX` 同值。另定一份,不从
+# `simple_actio.memory` 导入:适配器不依赖替身。过渡实现不读 world_prefix(第 3 步才有这个配置键)。
+_WORLD_PREFIX = "rise"
 
 
 @dataclass(frozen=True)
@@ -160,27 +167,29 @@ class StarlingMemory:
     """一个主体(holder)在一个 Starling 世界库里的记忆端口,满足 `MemoryBackend`。holder 作 Starling 的
     `agent=`:同一个库里各主体的语句各记在自己名下,召回只看本主体的。
 
-    `memory` 是 `starling.Memory`(单测里是只有用到的几个方法的替身)。`on_close` 在 close 成功后
-    调一次,给部署管理面登记端口已关用。**`on_close` 必须不抛。** 它抛时,门面已经关了、端口已置为
+    `memory` 是 `starling.Memory`(单测里是只有用到的几个方法的替身)。`read_only` 只给 `open_replay` 用:
+    `remember` 抛永久 MemoryFailureError("world_read_only"),`embed_pending` 返回 0 且不调门面。
+    `on_close` 在 close 成功后调一次,给部署管理面登记端口已关用。**`on_close` 必须不抛。** 它抛时,门面已经关了、端口已置为
     关闭,`close()` 把它的异常经 `translate_failure` 改抛(非瞬态),之后再调 `close()` 是空操作,
     不会再调 `on_close`:登记的副作用(例如计数减一)就此丢了。"""
 
-    def __init__(self, memory, *, close_timeout_s: float = 60.0,
+    def __init__(self, memory, *, read_only: bool = False, close_timeout_s: float = 60.0,
                  on_close: Callable[[], None] | None = None) -> None:
         self._memory = memory
+        self._read_only = read_only
         self._close_timeout_s = close_timeout_s
         self._on_close = on_close
         self._closed = False
 
     @classmethod
-    def open(cls, path: Path, *, holder: str, endpoints: StarlingEndpoints,
+    def open(cls, path: Path, *, holder: str, endpoints: StarlingEndpoints, read_only: bool = False,
              close_timeout_s: float = 60.0, on_close: Callable[[], None] | None = None) -> StarlingMemory:
         try:
             memory = starling.Memory.open(
                 str(path), agent=holder, llm=endpoints.make_llm(), embedder=endpoints.make_embedder())
         except Exception as exc:
             raise translate_failure(exc) from None
-        return cls(memory, close_timeout_s=close_timeout_s, on_close=on_close)
+        return cls(memory, read_only=read_only, close_timeout_s=close_timeout_s, on_close=on_close)
 
     def _live(self):
         if self._closed:
@@ -215,6 +224,8 @@ class StarlingMemory:
 
     def remember(self, event: MemoryEvent) -> RememberOutcome:
         memory = self._live()
+        if self._read_only:
+            raise MemoryFailureError("world_read_only", transient=False)
         try:
             # "[key] " 前缀由 Starling 加,这里只传原文。
             res = memory.remember_event(event.key, event.text, interlocutor=event.interlocutor, epoch=EPOCH)
@@ -224,6 +235,8 @@ class StarlingMemory:
 
     def embed_pending(self) -> int:
         memory = self._live()
+        if self._read_only:
+            return 0          # 重放世界只读:不写向量
         try:
             return _embed(memory)
         except Exception as exc:
@@ -266,7 +279,7 @@ _SQLITE_MAGIC = b"SQLite format 3\x00"
 
 def _require_library_file(path: Path, method: str) -> None:
     """拷贝或打开之前先认文件头。SQLite 把已存在的 0 字节文件当成合法的空数据库,不校验的话,
-    0 字节的"备份"(磁盘满、写副本时被 SIGKILL、手工 touch)会让 `restore_from` 把世界库清成空库,
+    0 字节的"备份"(磁盘满、写副本时被 SIGKILL、手工 touch)会让 `_restore_from` 把世界库清成空库,
     而回滚接着删掉副本,原记忆就找不回来。头不对的文件同理:不是库,就不该交给 `Memory.open`。"""
     try:
         with open(path, "rb") as handle:
@@ -281,8 +294,8 @@ def copy_library(src: Path, dst: Path) -> None:
     """把库文件连同同名 -wal(有的话)拷到 dst。端口开着、WAL 没合并时,写入还在 -wal 里,只拷主文件
     算出的摘要会漏掉它们。-shm 不拷:它是 WAL 的索引,打开时由 -wal 重建。
 
-    公开名:`library_digest`、`restore_from` 用它,训练路的 rollout 世界(`factory.memory_runtime.StarlingTrainingWorlds`)
-    也用它从种子取起点。取副本用文件复制而不用 `backup_to`:`backup_to` 要先打开源库,`Memory.open` 会建
+    公开名:`library_digest`、`_restore_from`、`fork_replay` 用它,训练路的 rollout 世界(`factory.memory_runtime.StarlingTrainingWorlds`)
+    也用它从种子取起点。取副本用文件复制而不用 `_backup_to`:`_backup_to` 要先打开源库,`Memory.open` 会建
     -wal、-shm 并跑迁移,种子目录与文件是只读时失败;文件复制只读源,两种权限下摘要都等于 `library_digest`
     给的起点摘要。**源必须静止**(没有连接在写它),约束同 `library_digest`。"""
     shutil.copyfile(src, dst)
@@ -323,7 +336,7 @@ def library_digest(path: Path, *, close_timeout_s: float = 60.0) -> str:
 
     **`path` 必须静止:调用期间没有任何连接在写它。** 主文件与 -wal 分两次拷,在写的库可能拷出
     不对应任何提交点的文件对。端口开着但没在写时,写入还在 -wal 里,连 -wal 一起拷才对;在写时
-    不支持。今天的调用方都满足:`backup_to` 末尾算的是刚写完的副本,解析器与种子算的是只读的种子库。
+    不支持。今天的调用方都满足:`_backup_to` 末尾算的是刚写完的副本,解析器与种子算的是只读的种子库。
     文件不存在、0 字节、文件头不对,都在拷贝之前抛非瞬态。悬空的符号链接算"不存在"。"""
     path = Path(path)
     if not path.exists():
@@ -376,29 +389,51 @@ class StarlingDeploymentStore:
     多条连接;管理面每次调用另开一条短命连接。同一个库上的并发写由 SQLite 串行化(WAL 加 5 秒 busy_timeout),
     所以本类不在每次写外面加锁;"先读后判断再写"这类跨调用的顺序没有保护,靠调用方的世界锁。
     本类只有一把锁,守两样东西:每个世界打开着的端口数 `_open`(端口会在服务端线程关,驱动器线程在另一条
-    线程上 `wait_closed` 或 `restore_from`),以及 `restore_from` 的"查端口数、换文件"。
+    线程上 `wait_closed` 或 `restore`),以及 `_restore_from` 的"查端口数、换文件"。
 
     端口数只在实例内计(与 `FileTupleStore` 一样),所以**组合根只造一个 store,这个假设在这里承重**:
-    另一个 store 实例或另一个进程开着的连接,`restore_from` 看不见,会把它库旁的 -wal、-shm 删掉,
+    另一个 store 实例或另一个进程开着的连接,`_restore_from` 看不见,会把它库旁的 -wal、-shm 删掉,
     它之后的提交落进已经被替换掉的旧文件(unlink 的 inode),丢失,不报错。
 
     库不存在时:`pending_events` 返回 `[]`,`digest` 给空库的摘要,`abandon_event` 当未知 key,都不建文件;
-    `open`、`remember_event`、`backup_to` 要建库,会建。"""
+    `open`、`remember_event`、`snapshot` 要建库,会建。
 
-    def __init__(self, root: Path, *, endpoints: StarlingEndpoints, close_timeout_s: float = 60.0) -> None:
-        # 构造不碰磁盘:根目录由第一次需要建库的调用建。
+    快照与重放世界(过渡布局,00 篇施工表第 2 行、90 篇第 18 条):held 快照是 `<held_root>/<world_id>/<snapshot_id>.db`,
+    重放世界是 `<replay_root>/<重放世界名>.db`(组合根传 `<记忆根>/held`、`<记忆根>/replay`)。这一套到第 4 步整体删掉,
+    只求与替身过同一套契约:快照沿用 `_backup_to`(`VACUUM INTO`),恢复沿用 `_restore_from`(先删日志、后换文件)。
+    端口计数按完整世界名:部署端口记在 `rise.deploy.<world_id>` 下,重放端口记在重放世界名下,两种共用一张表。"""
+
+    def __init__(self, root: Path, *, held_root: Path, replay_root: Path, endpoints: StarlingEndpoints,
+                 close_timeout_s: float = 60.0) -> None:
+        # 构造不碰磁盘:三个根目录各由第一次需要的调用建。
         self._root = Path(root)
+        self._held_root = Path(held_root)
+        self._replay_root = Path(replay_root)
         self._endpoints = endpoints
         self._close_timeout_s = close_timeout_s
-        self._lock = threading.Lock()                         # 守 _open 与 restore_from 的"查数、换文件"
+        self._lock = threading.Lock()                         # 守 _open 与 _restore_from 的"查数、换文件"
         self._all_closed = threading.Condition(self._lock)    # 某个世界的端口数归零时 notify_all
-        self._open: dict[str, int] = {}                       # 每个世界打开着的端口数(不分主体),读写都要持 _lock
+        self._open: dict[str, int] = {}                       # 每个完整世界名打开着的端口数(不分主体),读写都要持 _lock
 
     # ---- 路径与连接 ----
 
     def _path(self, world_id: str) -> Path:
         _check_name(world_id, "world_id")
         return self._root / f"{world_id}.db"
+
+    def _held_path(self, world_id: str, snapshot_id: str) -> Path:
+        _check_name(world_id, "world_id")
+        _check_name(snapshot_id, "snapshot_id")
+        return self._held_root / world_id / f"{snapshot_id}.db"
+
+    def _replay_path(self, replay_world: str) -> Path:
+        _check_name(replay_world, "replay_world")
+        return self._replay_root / f"{replay_world}.db"
+
+    @staticmethod
+    def _deploy_key(world_id: str) -> str:
+        """部署世界在端口计数表里的键:完整世界名 `<前缀>.deploy.<id>`(40 篇方法表 `wait_closed` 一行)。"""
+        return f"{_WORLD_PREFIX}.deploy.{world_id}"
 
     def _ensure_root(self) -> None:
         with _translated():
@@ -413,16 +448,16 @@ class StarlingDeploymentStore:
 
     # ---- 端口计数 ----
 
-    def _port_reserved(self, world_id: str) -> None:
+    def _port_reserved(self, key: str) -> None:
         with self._lock:
-            self._open[world_id] = self._open.get(world_id, 0) + 1
+            self._open[key] = self._open.get(key, 0) + 1
 
-    def _release_once(self, world_id: str) -> Callable[[], None]:
+    def _release_once(self, key: str) -> Callable[[], None]:
         """给一个端口造它的 on_close:计数减一,归零时唤醒 `wait_closed`。只做字典减一与通知,不做任何可能抛的事
         (它抛了,计数减一就丢了)。
 
         **同一个端口只减一次。** 两条线程同时关同一个端口时,`StarlingMemory.close` 的"已关"判断没有锁,on_close
-        会被调两次;多减的那次会把同世界别的端口的计数也扣掉,`restore_from` 就在有端口开着时放行。所以
+        会被调两次;多减的那次会把同世界别的端口的计数也扣掉,`_restore_from` 就在有端口开着时放行。所以
         "是否已减过"的判断与减一在同一把锁里。"""
         done = False
 
@@ -432,40 +467,52 @@ class StarlingDeploymentStore:
                 if done:
                     return
                 done = True
-                left = self._open.get(world_id, 0) - 1
+                left = self._open.get(key, 0) - 1
                 if left > 0:
-                    self._open[world_id] = left
+                    self._open[key] = left
                 else:
-                    self._open.pop(world_id, None)
+                    self._open.pop(key, None)
                     self._all_closed.notify_all()
 
         return release
 
     def _refuse_if_open(self, world_id: str, *, leftover: Path | None = None) -> None:
-        """该世界有任何主体的端口开着就拒绝(非瞬态)。`leftover` 是拒绝前要删掉的半成品。**调用时必须持 `_lock`**:
-        查数要和调用方接着做的事(拒绝,或删日志、换文件)在同一次持锁里。"""
-        if self._open.get(world_id, 0) > 0:
+        """该部署世界有任何主体的端口开着就拒绝(非瞬态)。`leftover` 是拒绝前要删掉的半成品。**调用时必须持 `_lock`**:
+        查数要和调用方接着做的事(拒绝,或删日志、换文件)在同一次持锁里。重放端口记在别的键下,不挡。"""
+        if self._open.get(self._deploy_key(world_id), 0) > 0:
             if leftover is not None:
                 leftover.unlink(missing_ok=True)
-            raise MemoryFailureError("restore_from: world has an open port", transient=False)
+            raise MemoryFailureError("restore: world has an open port", transient=False)
+
+    def _open_port(self, path: Path, key: str, holder: str, *, read_only: bool) -> StarlingMemory:
+        release = self._release_once(key)
+        # 先计数再开库:开库的这段时间里,并发的 _restore_from 就已经看到这个世界有端口,不会把正在被打开的
+        # 文件换掉。开库失败(坏库、打不开)时把这一次计数退掉,失败的端口不算开着。
+        self._port_reserved(key)
+        try:
+            return StarlingMemory.open(
+                path, holder=holder, endpoints=self._endpoints, read_only=read_only,
+                close_timeout_s=self._close_timeout_s, on_close=release)
+        except BaseException:
+            release()
+            raise
 
     # ---- DeploymentMemoryStore ----
 
     def open(self, world_id: str, holder: str) -> StarlingMemory:
+        """只开部署世界 `root/<world_id>.db`,不看名字前缀(40 篇 AC-34)。"""
         path = self._path(world_id)
         _check_name(holder, "holder")
         self._ensure_root()
-        release = self._release_once(world_id)
-        # 先计数再开库:开库的这段时间里,并发的 restore_from 就已经看到这个世界有端口,不会把正在被打开的
-        # 文件换掉。开库失败(坏库、打不开)时把这一次计数退掉,失败的端口不算开着。
-        self._port_reserved(world_id)
-        try:
-            return StarlingMemory.open(
-                path, holder=holder, endpoints=self._endpoints, close_timeout_s=self._close_timeout_s,
-                on_close=release)
-        except BaseException:
-            release()
-            raise
+        return self._open_port(path, self._deploy_key(world_id), holder, read_only=False)
+
+    def open_replay(self, replay_world: str, holder: str) -> StarlingMemory:
+        """在 `fork_replay` 分叉出的重放世界上开只读端口。库文件不在是永久失败(与服务的 world_not_found 同类),不建库。"""
+        path = self._replay_path(replay_world)
+        _check_name(holder, "holder")
+        if not path.exists():
+            raise MemoryFailureError("open_replay: world_not_found", transient=False)
+        return self._open_port(path, replay_world, holder, read_only=True)
 
     def remember_event(
         self, world_id: str, holder: str, key: str, text: str, *, interlocutor: str,
@@ -517,8 +564,55 @@ class StarlingDeploymentStore:
         with self._short(path, agent=_WORLD_AGENT) as memory:
             return memory.digest()
 
-    def backup_to(self, world_id: str, path: Path) -> str:
-        """备份整个世界到 path 并返回副本的摘要。世界还没有库时先建空库,所以起点副本总是存在。
+    def snapshot(self, world_id: str, *, note: str) -> SnapshotRef:
+        """拍 held 快照 `held_root/<world_id>/<snapshot_id>.db`,返回快照 id 与快照的摘要。id 在写之前就定;
+        世界还没有库时照 `_backup_to` 先建空库。`note` 在过渡实现里不落盘(进程内没有看板)。"""
+        if not isinstance(note, str):
+            raise SimpleActioDataError(f"snapshot.note: expected a str, got {type(note).__name__}")
+        snapshot_id = "snap-" + secrets.token_hex(8)
+        digest = self._backup_to(world_id, self._held_path(world_id, snapshot_id))
+        return SnapshotRef(snapshot_id, digest)
+
+    def restore(self, world_id: str, snapshot_id: str) -> str:
+        """用这份快照覆盖该世界的库,返回恢复后的摘要。快照不在是永久失败;有端口开着照 `_restore_from` 拒绝。"""
+        path = self._held_path(world_id, snapshot_id)
+        if not path.exists():
+            raise MemoryFailureError("restore: snapshot_not_found", transient=False)
+        return self._restore_from(world_id, path)
+
+    def delete_snapshot(self, world_id: str, snapshot_id: str) -> None:
+        """删快照文件与它旁边的 -wal、-shm;不在是空操作(Starling 服务回 snapshot_not_found,rise 也当作成功)。"""
+        path = self._held_path(world_id, snapshot_id)
+        with _translated():
+            for f in (path, *(_sidecar(path, s) for s in _WAL_SUFFIXES)):
+                f.unlink(missing_ok=True)
+
+    def fork_replay(self, world_id: str, snapshot_id: str, *, round_id: str) -> str:
+        """从快照分叉一个重放世界:`copy_library` 到 `replay_root/<名字>.db`,返回名字
+        `rise.verify.<round_id>.<world_id>.<8 位十六进制>`。快照不在是永久失败。崩溃留下的库不清,只占磁盘。"""
+        path = self._held_path(world_id, snapshot_id)
+        _check_name(round_id, "round_id")
+        name = f"{_WORLD_PREFIX}.verify.{round_id}.{world_id}.{secrets.token_hex(4)}"
+        target = self._replay_path(name)            # 拼出来超过 128 字符时在这里拒绝,不写任何文件
+        if not path.exists():
+            raise MemoryFailureError("fork_replay: snapshot_not_found", transient=False)
+        _require_library_file(path, "fork_replay")
+        with _translated():
+            self._replay_root.mkdir(parents=True, exist_ok=True)
+            copy_library(path, target)
+        return name
+
+    def release_replay(self, replay_world_id: str) -> None:
+        """删重放世界的库与旁边的 -wal、-shm;不在是空操作。"""
+        path = self._replay_path(replay_world_id)
+        with _translated():
+            for f in (path, *(_sidecar(path, s) for s in _WAL_SUFFIXES)):
+                f.unlink(missing_ok=True)
+
+    def _backup_to(self, world_id: str, path: Path) -> str:
+        """第 4 步删(进程内过渡实现,`snapshot` 用它)。
+
+        备份整个世界到 path 并返回副本的摘要。世界还没有库时先建空库,所以起点副本总是存在。
         path 已存在就覆盖(起点副本由 MindAgent 管,覆盖是它要的语义;Starling 拒绝已存在的目标,
         所以先删),旁边残留的 -wal、-shm 一并删:它们若属于被覆盖的旧文件,会被新文件当成自己的。"""
         library = self._path(world_id)
@@ -531,8 +625,10 @@ class StarlingDeploymentStore:
             memory.backup_to(path)
         return self.digest_of(path)
 
-    def restore_from(self, world_id: str, path: Path) -> str:
-        """用 path 的内容覆盖该世界的库(覆盖全部主体),返回恢复后的逻辑摘要。该世界还有任何主体的端口开着时拒绝,
+    def _restore_from(self, world_id: str, path: Path) -> str:
+        """第 4 步删(进程内过渡实现,`restore` 用它)。
+
+        用 path 的内容覆盖该世界的库(覆盖全部主体),返回恢复后的逻辑摘要。该世界还有任何主体的端口开着时拒绝,
         别的世界开着端口不挡;坏备份(不存在、0 字节、文件头不对、打不开)在碰库与根目录之前就被拒,库原样不动。
 
         端口数查两次:进来先查一次,有端口就在碰任何东西之前拒绝;拷贝与生成 `.restore-partial` 不持锁(它们要开
@@ -552,7 +648,7 @@ class StarlingDeploymentStore:
 
         "换之前崩溃,旧库完整"有一个前提:这里删掉的 -wal 里没有只存在于 WAL 的已提交写入。上一次正常
         关闭时它成立(close 合并 WAL 并删掉日志)。上一次若被 SIGKILL,库旁可能留着含已提交、未合并帧
-        的 -wal,这里会把它删掉。之所以仍然安全,是调用方在任何打开之前都先重试 `restore_from`:
+        的 -wal,这里会把它删掉。之所以仍然安全,是调用方在任何打开之前都先重试 `restore`:
         `mindagent.rounds._close_round` 先回滚再写终态,`mindagent.deployment` 重入时"副本在就先覆盖
         再 open",都在调用方持的锁里。所以不会有别的路径在重试之前先打开这个库,把未合并的帧读成数据。"""
         library = self._path(world_id)
@@ -560,8 +656,8 @@ class StarlingDeploymentStore:
         with self._lock:
             self._refuse_if_open(world_id)
         if not path.exists():
-            raise MemoryFailureError("restore_from: no such backup", transient=False)
-        _require_library_file(path, "restore_from")
+            raise MemoryFailureError("restore: no such backup", transient=False)
+        _require_library_file(path, "restore")
         with _translated(), tempfile.TemporaryDirectory() as tmp:
             copy = Path(tmp) / "source.db"
             copy_library(path, copy)
@@ -579,13 +675,14 @@ class StarlingDeploymentStore:
         return digest
 
     def wait_closed(self, world_id: str, timeout_s: float) -> bool:
-        """等该世界打开着的端口数降到 0:到了返回 True,超过 timeout_s 秒返回 False。端口可以在别的线程上关。
-        不碰磁盘:没有库的世界端口数也是 0,立刻返回 True。"""
+        """等该部署世界打开着的端口数降到 0:到了返回 True,超过 timeout_s 秒返回 False。端口可以在别的线程上关。
+        不碰磁盘:没有库的世界端口数也是 0,立刻返回 True。重放端口记在重放世界名下,不算进来。"""
         self._path(world_id)
         if isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float)) or not timeout_s >= 0:
             raise SimpleActioDataError(f"wait_closed.timeout_s: expected a non-negative number, got {timeout_s!r}")
+        key = self._deploy_key(world_id)
         with self._all_closed:
-            return self._all_closed.wait_for(lambda: self._open.get(world_id, 0) == 0, timeout_s)
+            return self._all_closed.wait_for(lambda: self._open.get(key, 0) == 0, timeout_s)
 
     # ---- 摘要 ----
 

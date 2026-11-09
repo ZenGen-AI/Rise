@@ -1,6 +1,7 @@
 """StarlingDeploymentStore:部署管理面(设计二 4.1、5.3 节,设计三 6.2 节)。契约用例走端口,这里测管理面自己的语义:
 世界 id 与主体校验、一个世界一个库、端口以 agent=<主体> 打开、端口计数与 wait_closed、短命连接、崩溃后重调、
-备份与还原、摘要不改动被读的文件。"""
+备份与还原、摘要不改动被读的文件。按快照 id 的管理面是第 2、3 步的过渡实现,建在私有的 `_backup_to`、`_restore_from`
+之上;这两个方法的崩溃点与坏副本用例直接调它们(第 4 步与它们一起删)。"""
 import os
 import shutil
 import sqlite3
@@ -32,7 +33,8 @@ def fake():
 
 
 def _store(tmp_path, fake, **kw):
-    return StarlingDeploymentStore(tmp_path / "deploy", endpoints=fake.endpoints(), **kw)
+    return StarlingDeploymentStore(tmp_path / "deploy", held_root=tmp_path / "held", replay_root=tmp_path / "replay",
+                                   endpoints=fake.endpoints(), **kw)
 
 
 def _lib(tmp_path, world="s1"):
@@ -77,18 +79,21 @@ def test_world_ids_are_checked_before_any_path_is_built(tmp_path, fake, bad):
     snap = tmp_path / "snap.db"
     calls = (lambda: store.open(bad, "pa"), lambda: store.digest(bad), lambda: store.pending_events(bad),
              lambda: store.remember_event(bad, "pa", KEY, TEXT, interlocutor="pb"),
-             lambda: store.abandon_event(bad, "pa", KEY), lambda: store.backup_to(bad, snap),
-             lambda: store.restore_from(bad, snap), lambda: store.wait_closed(bad, 0.01))
+             lambda: store.abandon_event(bad, "pa", KEY), lambda: store._backup_to(bad, snap),
+             lambda: store._restore_from(bad, snap), lambda: store.wait_closed(bad, 0.01),
+             lambda: store.snapshot(bad, note="n"), lambda: store.restore(bad, "snap-0"),
+             lambda: store.delete_snapshot(bad, "snap-0"), lambda: store.fork_replay(bad, "snap-0", round_id="r1"))
     for call in calls:
         with pytest.raises(SimpleActioDataError, match="world_id"):
             call()
-    assert not (tmp_path / "deploy").exists() and not snap.exists()
+    assert sorted(p.name for p in tmp_path.iterdir()) == []         # 部署、held、replay 都没建,也没写副本
 
 
 @pytest.mark.parametrize("bad", BAD_NAMES)
 def test_holders_are_checked_before_any_library_is_built(tmp_path, fake, bad):
     store = _store(tmp_path, fake)
     for call in (lambda: store.open("s1", bad),
+                 lambda: store.open_replay("rise.verify.r1.s1.00000000", bad),
                  lambda: store.remember_event("s1", bad, KEY, TEXT, interlocutor="pb"),
                  lambda: store.abandon_event("s1", bad, KEY)):
         with pytest.raises(SimpleActioDataError, match="holder"):
@@ -241,7 +246,7 @@ def test_digests_agree_with_the_port_once_statements_have_been_embedded(tmp_path
     assert port.embed_pending() >= 1
     snap = tmp_path / "snap" / "s1.db"
     assert store.digest("s1") == port.digest() == store.digest_of(_lib(tmp_path))
-    assert store.backup_to("s1", snap) == port.digest()
+    assert store._backup_to("s1", snap) == port.digest()
     port.close()
 
 
@@ -309,14 +314,80 @@ def test_the_digest_does_not_depend_on_the_agent_the_library_is_opened_with(tmp_
     assert seen == {store.digest("s1")}
 
 
+def test_the_transitional_layout_keeps_held_and_replay_files_out_of_deploy(tmp_path, fake):
+    root = tmp_path / "mem"
+    store = StarlingDeploymentStore(root / "deploy", held_root=root / "held", replay_root=root / "replay",
+                                    endpoints=fake.endpoints())
+    store.remember_event("s1", "pa", KEY, TEXT, interlocutor="pb")
+    ref = store.snapshot("s1", note="rise episode e1")
+    name = store.fork_replay("s1", ref.snapshot_id, round_id="r1")
+    assert (root / "held" / "s1" / f"{ref.snapshot_id}.db").is_file()
+    assert (root / "replay" / f"{name}.db").is_file()
+    assert sorted(p.name for p in (root / "deploy").iterdir()) == ["s1.db"]
+    store.release_replay(name)
+    store.delete_snapshot("s1", ref.snapshot_id)
+    assert not (root / "replay" / f"{name}.db").exists() and not (root / "held" / "s1" / f"{ref.snapshot_id}.db").exists()
+
+
+def test_constructing_the_store_touches_no_disk(tmp_path, fake):
+    store = _store(tmp_path, fake)
+    assert store.digest("s1") and store.pending_events("s1") == [] and store.wait_closed("s1", 0) is True
+    with pytest.raises(MemoryFailureError):
+        store.open_replay("rise.verify.r1.s1.00000000", "pa")
+    store.delete_snapshot("s1", "snap-0000000000000000")             # 不在是空操作,也不建目录
+    store.release_replay("rise.verify.r1.s1.00000000")
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_replay_world_name_has_the_starling_shape_and_a_replay_port_writes_nothing(tmp_path, fake):
+    store = _store(tmp_path, fake)
+    store.remember_event("s1", "pa", KEY, TEXT, interlocutor="pb")
+    ref = store.snapshot("s1", note="n")
+    a, b = (store.fork_replay("s1", ref.snapshot_id, round_id="agent-round-m") for _ in range(2))
+    assert a != b and a.startswith("rise.verify.agent-round-m.s1.") and len(a.rsplit(".", 1)[1]) == 8
+    port = store.open_replay(a, "pa")
+    assert port.recall("预算", limit=3) and port.embed_pending() == 0
+    with pytest.raises(MemoryFailureError, match="world_read_only"):
+        port.remember(MemoryEvent(KEY2, "pb：下周评审", "pb"))
+    assert port.digest() == ref.digest
+    port.close()
+    store.release_replay(a)
+    store.release_replay(a)                                          # 已删是空操作
+    assert _names(tmp_path / "replay") == [f"{b}.db"]
+
+
+def test_an_open_replay_port_does_not_block_restoring_its_deploy_world(tmp_path, fake):
+    store = _store(tmp_path, fake)
+    ref = store.snapshot("s1", note="n")
+    replay = store.open_replay(store.fork_replay("s1", ref.snapshot_id, round_id="r1"), "pa")
+    store.remember_event("s1", "pa", KEY, TEXT, interlocutor="pb")
+    assert store.wait_closed("s1", 0) is True
+    assert store.restore("s1", ref.snapshot_id) == ref.digest == store.digest("s1")
+    replay.close()
+
+
+def test_a_held_snapshot_that_is_not_a_library_file_is_refused_by_restore_and_fork(tmp_path, fake):
+    store = _store(tmp_path, fake)
+    store.remember_event("s1", "pa", KEY, TEXT, interlocutor="pb")
+    ref = store.snapshot("s1", note="n")
+    before = store.digest("s1")
+    (tmp_path / "held" / "s1" / f"{ref.snapshot_id}.db").write_bytes(b"")
+    for call in (lambda: store.restore("s1", ref.snapshot_id),
+                 lambda: store.fork_replay("s1", ref.snapshot_id, round_id="r1")):
+        with pytest.raises(MemoryFailureError, match="not a library file") as info:
+            call()
+        assert info.value.transient is False
+    assert store.digest("s1") == before and not (tmp_path / "replay").exists()
+
+
 def test_backup_and_restore_return_logical_digests_and_roll_back(tmp_path, fake):
     store = _store(tmp_path, fake)
-    before = store.backup_to("s1", tmp_path / "snap" / "s1.db")     # 世界还没有库:备份空库
+    before = store._backup_to("s1", tmp_path / "snap" / "s1.db")     # 世界还没有库:备份空库
     assert before == store.digest("s1") == store.digest_of(tmp_path / "snap" / "s1.db")
     assert _lib(tmp_path).exists()                                  # 备份先建了空库
     store.remember_event("s1", "pa", KEY, TEXT, interlocutor="pb")
     assert store.digest("s1") != before
-    assert store.restore_from("s1", tmp_path / "snap" / "s1.db") == before == store.digest("s1")
+    assert store._restore_from("s1", tmp_path / "snap" / "s1.db") == before == store.digest("s1")
     again = store.remember_event("s1", "pa", KEY, TEXT, interlocutor="pb")       # 还原后的库照常可写
     assert again.stored and store.digest("s1") != before
 
@@ -324,11 +395,11 @@ def test_backup_and_restore_return_logical_digests_and_roll_back(tmp_path, fake)
 def test_backup_overwrites_an_existing_copy_and_makes_its_parent_directory(tmp_path, fake):
     store = _store(tmp_path, fake)
     snap = tmp_path / "a" / "b" / "s1.db"
-    first = store.backup_to("s1", snap)
+    first = store._backup_to("s1", snap)
     store.remember_event("s1", "pa", KEY, TEXT, interlocutor="pb")
     for suffix in ("-wal", "-shm"):                                 # 旧副本留下的:新文件不能认领它们
         snap.with_name(snap.name + suffix).write_bytes(b"stale")
-    second = store.backup_to("s1", snap)                            # Starling 拒绝已存在的目标,这里先删
+    second = store._backup_to("s1", snap)                            # Starling 拒绝已存在的目标,这里先删
     assert second != first and second == store.digest("s1") == store.digest_of(snap)
     assert _names(snap.parent) == ["s1.db"]
 
@@ -338,56 +409,56 @@ def test_backup_taken_while_a_port_holds_unmerged_writes_carries_them(tmp_path, 
     port = store.open("s1", "pa")
     port.remember(MemoryEvent(KEY, TEXT, "pb"))
     snap = tmp_path / "snap" / "s1.db"
-    assert store.backup_to("s1", snap) == port.digest()
+    assert store._backup_to("s1", snap) == port.digest()
     port.close()
 
 
 def test_restore_refuses_while_a_port_is_open_and_leaves_the_library_alone(tmp_path, fake):
     store = _store(tmp_path, fake)
     snap = tmp_path / "snap.db"
-    store.backup_to("s1", snap)
+    store._backup_to("s1", snap)
     port = store.open("s1", "pa")
     port.remember(MemoryEvent(KEY, TEXT, "pb"))
     d = store.digest("s1")
     with pytest.raises(MemoryFailureError) as info:
-        store.restore_from("s1", snap)
+        store._restore_from("s1", snap)
     assert type(info.value) is MemoryFailureError and info.value.transient is False and store.digest("s1") == d
     port.close()
-    assert store.restore_from("s1", snap) != d
+    assert store._restore_from("s1", snap) != d
 
 
 def test_restore_is_refused_until_every_port_of_the_world_is_closed(tmp_path, fake):
     store = _store(tmp_path, fake)
     snap = tmp_path / "snap.db"
-    store.backup_to("s2", snap)
+    store._backup_to("s2", snap)
 
     def refused():
         with pytest.raises(MemoryFailureError, match="open port"):
-            store.restore_from("s1", snap)
+            store._restore_from("s1", snap)
 
     first, second = store.open("s1", "pa"), store.open("s1", "pa")
     first.close()
     first.close()                                  # 再关是空操作:计数不能被减两次
     refused()
-    store.restore_from("s2", snap)                 # 别的世界不受影响
+    store._restore_from("s2", snap)                 # 别的世界不受影响
     second.close()
     third = store.open("s1", "pa")
     refused()
     third.close()
-    store.restore_from("s1", snap)
+    store._restore_from("s1", snap)
 
 
 def test_restore_needs_every_holder_port_of_the_world_closed_and_other_worlds_do_not_count(tmp_path, fake):
     store = _store(tmp_path, fake)
     snap = tmp_path / "snap.db"
-    store.backup_to("s1", snap)
+    store._backup_to("s1", snap)
     first, second = store.open("s1", "pa"), store.open("s1", "pb")
     other = store.open("s2", "pa")
     first.close()
     with pytest.raises(MemoryFailureError, match="open port"):       # pb 的端口还开着
-        store.restore_from("s1", snap)
+        store._restore_from("s1", snap)
     second.close()
-    store.restore_from("s1", snap)                                   # s2 的端口开着,不挡 s1
+    store._restore_from("s1", snap)                                   # s2 的端口开着,不挡 s1
     other.close()
 
 
@@ -432,7 +503,7 @@ def test_the_open_port_count_survives_closes_from_many_threads(tmp_path, fake):
     扣掉同世界别的端口:这里留一个见证端口不关,其余端口各从两条线程关一次,见证端口的计数必须还在。"""
     store = _store(tmp_path, fake)
     snap = tmp_path / "empty.db"
-    store.backup_to("s1", snap)
+    store._backup_to("s1", snap)
     witness = store.open("s1", "pb")
     ports = [store.open("s1", "pa") for _ in range(8)]
     start = threading.Barrier(len(ports) * 2)
@@ -451,10 +522,10 @@ def test_the_open_port_count_survives_closes_from_many_threads(tmp_path, fake):
         t.join()
     assert store.wait_closed("s1", 0.05) is False     # 见证端口还开着:计数没被多减
     with pytest.raises(MemoryFailureError, match="open port"):
-        store.restore_from("s1", snap)
+        store._restore_from("s1", snap)
     witness.close()
     assert store.wait_closed("s1", 0) is True         # 全关完,计数回到 0
-    store.restore_from("s1", snap)
+    store._restore_from("s1", snap)
 
 
 def test_a_port_opened_while_the_restore_prepares_its_copy_stops_the_swap_and_leaves_the_library_alone(
@@ -463,7 +534,7 @@ def test_a_port_opened_while_the_restore_prepares_its_copy_stops_the_swap_and_le
     就删掉 .restore-partial 后拒绝,库不被换掉。"""
     store = _store(tmp_path, fake)
     snap = tmp_path / "snap.db"
-    store.backup_to("s1", snap)
+    store._backup_to("s1", snap)
     store.remember_event("s1", "pa", KEY, TEXT, interlocutor="pb")
     changed = store.digest("s1")
     opened = []
@@ -475,7 +546,7 @@ def test_a_port_opened_while_the_restore_prepares_its_copy_stops_the_swap_and_le
 
     monkeypatch.setattr("simple_actio.memory_starling.copy_library", copy_then_a_port_opens)
     with pytest.raises(MemoryFailureError, match="open port") as info:
-        store.restore_from("s1", snap)
+        store._restore_from("s1", snap)
     monkeypatch.undo()
     assert info.value.transient is False
     assert not _lib(tmp_path).with_name("s1.db.restore-partial").exists()
@@ -489,7 +560,7 @@ def test_a_restore_that_starts_while_a_port_is_still_being_opened_is_refused(tmp
     不会把正在被打开的文件换掉。"""
     store = _store(tmp_path, fake)
     snap = tmp_path / "snap.db"
-    store.backup_to("s1", snap)
+    store._backup_to("s1", snap)
     seen = []
     original = starling.Memory.open
 
@@ -497,24 +568,24 @@ def test_a_restore_that_starts_while_a_port_is_still_being_opened_is_refused(tmp
         if str(path) == str(_lib(tmp_path)) and not seen:
             seen.append("restore")
             try:
-                store.restore_from("s1", snap)               # 端口还在打开途中
+                store._restore_from("s1", snap)               # 端口还在打开途中
             except MemoryFailureError as exc:
                 seen.append(str(exc))
         return original(path, *args, **kwargs)
 
     monkeypatch.setattr(starling.Memory, "open", staticmethod(spy))
     store.open("s1", "pa").close()
-    assert seen == ["restore", "restore_from: world has an open port"]
+    assert seen == ["restore", "restore: world has an open port"]
 
 
 def test_a_port_that_failed_to_open_does_not_count_as_open(tmp_path, fake):
     store = _store(tmp_path, fake)
     snap = tmp_path / "snap.db"
-    store.backup_to("s2", snap)
+    store._backup_to("s2", snap)
     _lib(tmp_path).write_bytes(b"not sqlite")
     with pytest.raises(MemoryFailureError):
         store.open("s1", "pa")
-    assert store.restore_from("s1", snap) == store.digest("s1")     # 好备份把坏库换掉了
+    assert store._restore_from("s1", snap) == store.digest("s1")     # 好备份把坏库换掉了
 
 
 def test_restore_does_not_open_its_source_in_place(tmp_path, fake):
@@ -524,7 +595,7 @@ def test_restore_does_not_open_its_source_in_place(tmp_path, fake):
     snap = tmp_path / "snap" / "s1.db"
     _raw_copy(_lib(tmp_path), snap)
     before = _snapshot(snap.parent)
-    assert store.restore_from("s2", snap) == expected == store.digest("s2")
+    assert store._restore_from("s2", snap) == expected == store.digest("s2")
     assert _snapshot(snap.parent) == before
 
 
@@ -538,18 +609,18 @@ def test_restore_takes_a_source_that_still_has_its_wal(tmp_path, fake):
     shutil.copyfile(_lib(tmp_path), src / "s1.db")
     shutil.copyfile(_lib(tmp_path).with_name("s1.db-wal"), src / "s1.db-wal")
     port.close()
-    assert store.restore_from("s2", src / "s1.db") == live == store.digest("s2")
+    assert store._restore_from("s2", src / "s1.db") == live == store.digest("s2")
 
 
 def test_restore_swaps_in_one_file_and_clears_what_was_left_beside_the_library(tmp_path, fake):
     store = _store(tmp_path, fake)
     snap = tmp_path / "snap.db"
-    before = store.backup_to("s1", snap)
+    before = store._backup_to("s1", snap)
     store.remember_event("s1", "pa", KEY, TEXT, interlocutor="pb")
     lib = _lib(tmp_path)
     for suffix in ("-wal", "-shm", ".restore-partial"):                # 上一次崩溃留下的
         lib.with_name(lib.name + suffix).write_bytes(b"stale")
-    assert store.restore_from("s1", snap) == before
+    assert store._restore_from("s1", snap) == before
     assert _names(lib.parent) == ["s1.db"]
     assert store.digest("s1") == before
 
@@ -565,7 +636,7 @@ def _library_with_a_stale_wal(tmp_path, store, snapshot_of):
     快照取自哪里,旧日志重放进新库的样子不同:取自本世界自己的库时页布局对不上,开库报
     `malformed database schema`;取自别的库时页布局对得上,重放无声无息,摘要回到还原前的值。"""
     snap = tmp_path / "snap" / "s1.db"
-    snap_digest = store.backup_to(snapshot_of, snap)
+    snap_digest = store._backup_to(snapshot_of, snap)
     port = store.open("s1", "pa")
     port.remember(MemoryEvent(KEY, TEXT, "pb"))
     old_digest = port.digest()
@@ -613,10 +684,10 @@ def test_a_crash_right_after_the_swap_leaves_no_old_wal_to_replay_into_the_resto
     snap, snap_digest, old_digest = _library_with_a_stale_wal(tmp_path, store, snapshot_of)
     _crash_at_replace(monkeypatch, after=True)
     with pytest.raises(_Crash):
-        store.restore_from("s1", snap)
+        store._restore_from("s1", snap)
     monkeypatch.undo()
     assert store.digest("s1") == snap_digest != old_digest         # 重开后是快照,不是还原前的内容
-    assert store.restore_from("s1", snap) == snap_digest           # 重跑回滚照常成功
+    assert store._restore_from("s1", snap) == snap_digest           # 重跑回滚照常成功
     assert _beside_s1(tmp_path) == ["s1.db"]
 
 
@@ -627,11 +698,11 @@ def test_a_crash_after_the_old_wal_is_cleared_but_before_the_swap_leaves_the_old
     snap, snap_digest, old_digest = _library_with_a_stale_wal(tmp_path, store, snapshot_of)
     seen = _crash_at_replace(monkeypatch, after=False)
     with pytest.raises(_Crash):
-        store.restore_from("s1", snap)
+        store._restore_from("s1", snap)
     monkeypatch.undo()
     assert seen == [[]]                                            # 换之前库旁已经没有 -wal、-shm
     assert store.digest("s1") == old_digest                        # 旧库仍完整可开
-    assert store.restore_from("s1", snap) == snap_digest == store.digest("s1")     # 重跑回滚成功
+    assert store._restore_from("s1", snap) == snap_digest == store.digest("s1")     # 重跑回滚成功
     assert _beside_s1(tmp_path) == ["s1.db"]
 
 
@@ -643,7 +714,7 @@ def test_a_corrupt_library_or_backup_is_a_non_transient_failure(tmp_path, fake):
     bad = tmp_path / "bad.db"
     bad.write_bytes(b"not sqlite")
     with pytest.raises(MemoryFailureError) as info:
-        store.restore_from("s1", bad)
+        store._restore_from("s1", bad)
     assert type(info.value) is MemoryFailureError and info.value.transient is False
     assert _snapshot(lib.parent) == kept                            # 原库不被半截覆盖,旁边也没留文件
     with pytest.raises(MemoryFailureError):
@@ -669,7 +740,7 @@ def test_a_source_that_is_not_a_library_file_is_refused_before_the_library_or_ro
     kept = _snapshot(_lib(tmp_path).parent)
     bad = tmp_path / "bad.db"
     bad.write_bytes(content)
-    for method, call in (("restore_from", lambda: store.restore_from("s1", bad)),
+    for method, call in (("restore", lambda: store._restore_from("s1", bad)),
                          ("digest_of", lambda: store.digest_of(bad))):
         with pytest.raises(MemoryFailureError, match=f"{method}: not a library file") as info:
             call()
@@ -685,8 +756,8 @@ def test_a_source_that_is_not_a_library_file_builds_no_root_for_a_world_without_
     store = _store(tmp_path, fake)
     bad = tmp_path / "bad.db"
     bad.write_bytes(content)
-    with pytest.raises(MemoryFailureError, match="restore_from: not a library file"):
-        store.restore_from("s1", bad)
+    with pytest.raises(MemoryFailureError, match="restore: not a library file"):
+        store._restore_from("s1", bad)
     assert not (tmp_path / "deploy").exists()
 
 
@@ -707,9 +778,9 @@ def test_a_corrupt_backup_leaves_no_root_behind_for_a_world_without_a_library(tm
     bad = tmp_path / "bad.db"
     bad.write_bytes(b"not sqlite")
     with pytest.raises(MemoryFailureError):
-        store.restore_from("s1", bad)
+        store._restore_from("s1", bad)
     with pytest.raises(MemoryFailureError) as info:                 # 备份文件不存在
-        store.restore_from("s1", tmp_path / "missing.db")
+        store._restore_from("s1", tmp_path / "missing.db")
     assert info.value.transient is False
     assert not (tmp_path / "deploy").exists()
 
@@ -730,7 +801,7 @@ def test_a_root_that_cannot_be_made_is_a_non_transient_failure_without_the_path(
     (tmp_path / "deploy").write_text("a plain file where the root should be", encoding="utf-8")
     store = _store(tmp_path, fake)
     for call in (lambda: store.open("s1", "pa"), lambda: store.remember_event("s1", "pa", KEY, TEXT, interlocutor="pb"),
-                 lambda: store.backup_to("s1", tmp_path / "snap.db")):
+                 lambda: store._backup_to("s1", tmp_path / "snap.db")):
         with pytest.raises(MemoryFailureError) as info:
             call()
         assert type(info.value) is MemoryFailureError and info.value.transient is False
@@ -768,9 +839,9 @@ def test_every_short_lived_connection_is_closed_with_the_store_timeout(tmp_path,
     store.pending_events("s1")
     store.digest("s1")
     snap = tmp_path / "snap.db"
-    store.backup_to("s1", snap)
+    store._backup_to("s1", snap)
     store.digest_of(snap)
-    store.restore_from("s1", snap)
+    store._restore_from("s1", snap)
     with pytest.raises(MemoryEventConflict):
         store.abandon_event("s1", "pa", KEY)
     assert len(timeouts) >= 8 and set(timeouts) == {7.5}
@@ -781,8 +852,8 @@ def test_calls_that_never_extract_do_not_need_the_api_key(tmp_path, fake, monkey
     store.remember_event("s1", "pa", KEY, TEXT, interlocutor="pb")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     snap = tmp_path / "snap.db"
-    d = store.backup_to("s1", snap)
+    d = store._backup_to("s1", snap)
     assert store.digest("s1") == store.digest_of(snap) == d and store.pending_events("s1") == []
-    assert store.restore_from("s2", snap) == d
+    assert store._restore_from("s2", snap) == d
     with pytest.raises(MemoryEventConflict):
         store.abandon_event("s1", "pa", KEY)
