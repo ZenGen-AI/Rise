@@ -212,6 +212,33 @@ def test_only_simple_actio_memory_starling_imports_starling():
     assert offenders == []
 
 
+STEP3_SERVICE_MODULES = ("factory.starling_names", "factory.starling_service", "factory.starling_session")
+
+
+def test_the_step3_service_modules_are_not_wired_in():
+    """设计四第 3 步"不接线":三个新模块只互相导入;src/ 下别的文件(任何层级,含函数内惰性导入与
+    `from factory import starling_names`)都不导入它们。第 4 步接线时删这一条。"""
+    import ast
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[1] / "src"
+    own = {f"{m.replace('.', '/')}.py" for m in STEP3_SERVICE_MODULES}
+    offenders = []
+    for path in sorted(src.rglob("*.py")):
+        rel = path.relative_to(src).as_posix()
+        if rel in own:
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            names = []
+            if isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+                names = [node.module, *(f"{node.module}.{a.name}" for a in node.names)]
+            offenders += [f"{rel}:{node.lineno} imports {n}" for n in names
+                          if any(n == m or n.startswith(m + ".") for m in STEP3_SERVICE_MODULES)]
+    assert offenders == []
+
+
 def test_only_the_adapter_and_the_service_session_import_starling_client():
     """设计四全局约束:第 3 步起 src/ 下只有适配器与服务会话导入 starling_client(任何层级,含函数内惰性导入)。"""
     from pathlib import Path

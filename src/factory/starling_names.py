@@ -7,7 +7,8 @@
 - rise 设置写出 C++ 结构 WorldSettings 的每一个叶子(`S:include/starling/governance/world_settings.hpp:19-61`):
   建世界与分叉都按叶子合并,没写出的叶子会继承默认世界或来源世界的值,用户在看板一改就不一致。
 
-本模块不导入 `starling`、`starling_client`;只用标准库与 `simple_actio.memory_port.PERSONA_ID_PATTERN`。
+本模块不导入 `starling`、`starling_client`;只用标准库、`simple_actio.memory_port.PERSONA_ID_PATTERN` 与
+`factory.memory_config`(`WORLD_PREFIX_PATTERN` 的单一来源在那里,这里转出;第 3 步 memory_config 不导入本模块)。
 """
 from __future__ import annotations
 
@@ -16,18 +17,14 @@ import json
 import re
 import secrets
 from pathlib import Path
-from typing import TYPE_CHECKING
 
+from factory.memory_config import WORLD_PREFIX_PATTERN, MemoryConfig
 from simple_actio.memory_port import PERSONA_ID_PATTERN
-
-if TYPE_CHECKING:
-    from factory.memory_config import MemoryConfig
 
 WORLD_NAME_MAX = 128
 LONG_ID_DIGEST_CHARS = 24
 SUFFIX_HEX_CHARS = 8
 ROOT_LABEL_CHARS = 16
-WORLD_PREFIX_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,15}")
 _SUFFIX_PATTERN = re.compile(r"[0-9a-f]{8}")
 
 # source lane 的七个叶子:enabled 关掉(进程内 Memory 没有来源 lane,不关就改了召回语义),其余六个照 C++ 默认值,
@@ -131,7 +128,7 @@ def labels(prefix: str, root: str, kind: str, **extra: str) -> dict[str, str]:
     return {"repo": _check_prefix(prefix), "root": root, "kind": kind, **extra}
 
 
-def _endpoint(base_url: str, model: str, dim: int, config: "MemoryConfig") -> dict:
+def _endpoint(base_url: str, model: str, dim: int, config: MemoryConfig) -> dict:
     # provider_name 留空:非空时 Starling 改取那个 provider 的密钥与地址(S:python/starling/dashboard/engine.py:279-283);
     # enable_thinking 按叶子合并删不掉,写死 False,不抄默认世界的值
     return {"provider": "openai", "provider_name": "", "base_url": base_url, "model": model, "dim": dim,
@@ -139,7 +136,7 @@ def _endpoint(base_url: str, model: str, dim: int, config: "MemoryConfig") -> di
             "enable_thinking": False, "thinking_type": ""}
 
 
-def rise_settings(config: "MemoryConfig") -> dict:
+def rise_settings(config: MemoryConfig) -> dict:
     """rise 设置(90 篇世界设置表):建世界、分叉、开句柄都传同一份。每次返回一份新字典。
 
     `chat`、`consolidation`、`gist_thresholds` 写 `None`:rise 不用,`None` 删掉端点、阈值回到 C++ 默认

@@ -17,6 +17,7 @@ import io
 import ipaddress
 import json
 import os
+import re
 import secrets
 import stat
 import time
@@ -29,7 +30,6 @@ import yaml
 
 from factory.configio import key_names
 from factory.errors import FactoryConfigError
-from factory.starling_names import WORLD_PREFIX_PATTERN
 
 MEMORY_CONFIG_ENV = "RISE_MEMORY_CONFIG"
 API_KEY_ENV = "OPENAI_API_KEY"
@@ -49,6 +49,8 @@ REQUIRED_KEYS = (
 )
 OPTIONAL_KEYS = ("timeout_ms", "max_retries", "url", "token_file", "world_prefix")
 DEFAULT_WORLD_PREFIX = "rise"
+# 世界名前缀(00 篇世界名规则):不含 `.`,所以世界名能无歧义地拆开。单一来源在这里,`factory.starling_names` 转出
+WORLD_PREFIX_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,15}")
 
 _OWNER_FILE = ".owner"
 _CODE_PREFIX = "starling/"
