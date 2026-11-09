@@ -1462,7 +1462,7 @@ class ServiceSession:
 - 管理传输：`transport(url_of(), token_of(), ADMIN_TIMEOUT_S)`，缺省 `starling_client.Transport`；请求体不带 `session_id`，所以会话过期后照常可用。管理传输随换会话重建（拉起模式下端口与 token 会变）。客户端异常照 `translate_client_failure`（`port_closed_by_rise=False`、`in_drain_window=False`）。
 - 关闭：`close()` 关当前与尚未关掉的旧客户端（过期的客户端 `close()` 不发 disconnect，客户端自己处理），再关管理传输。拉起服务的停止不在这里，由组合根另登记（Task 16）。
 
-- [ ] **Step 1: 写失败的测试**（假客户端与假传输，不起服务；最后两条用真服务）
+- [x] **Step 1: 写失败的测试**（假客户端与假传输，不起服务；最后两条用真服务）
 
 ```python
 import threading
@@ -1597,19 +1597,19 @@ def test_admin_calls_still_work_after_the_session_expired_against_a_real_service
 
 `FakeTransport(timeout_s)` 记下 `posts`（路径与"请求体里没有 `session_id`"的标记），`_capture(fn)` 返回 `fn` 抛的异常，`_sha256_of_canonical(obj)` 是规范化 JSON 的 sha256；三者写在同一测试文件里，另导入 `from factory.errors import FactoryConfigError`。`service` 是模块级真服务夹具（Task 8）。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_factory_starling_session.py`
 Expected: FAIL（`ServiceSession` 不在）
 
-- [ ] **Step 3: 实现**：按 Interfaces。一把 `threading.Lock` 护代号、各代号的计数、丢失表与致命原因；网络调用（`connect`、`info`、`open`、管理 POST）都在锁外。`extraction_digest` 是 `info()["extraction_config"]` 规范化 JSON 的 sha256，与 `service_runtime` 里的 `prompts` 同一个函数算。`fatal` 的文字只写码或"commit <期望> != <实际>"这样的提交号。
+- [x] **Step 3: 实现**：按 Interfaces。一把 `threading.Lock` 护代号、各代号的计数、丢失表与致命原因；网络调用（`connect`、`info`、`open`、管理 POST）都在锁外。`extraction_digest` 是 `info()["extraction_config"]` 规范化 JSON 的 sha256，与 `service_runtime` 里的 `prompts` 同一个函数算。`fatal` 的文字只写码或"commit <期望> != <实际>"这样的提交号。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_factory_starling_session.py tests/test_factory_starling_service.py tests/test_factory_starling_names.py tests/test_simple_actio_client_errors.py tests/test_factory_cross_plan.py`
 Expected: PASS。这是第 3 步的最后一个任务：控制者在后台跑全量，必须绿；新模块没接线，全量里 Starling 路径仍是进程内。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/factory/starling_session.py tests/test_factory_starling_session.py
