@@ -201,41 +201,14 @@ def test_layer_rules_hold():
     assert not offenders, "layer rules (design §11) violated: " + "; ".join(offenders)
 
 
-def test_only_simple_actio_memory_starling_imports_starling():
-    """设计二全局约束:全 src/ 只有 simple_actio/memory_starling.py 导入 starling(factory 经它间接用)。"""
+def test_nothing_under_src_imports_starling():
+    """设计四全局约束:第 4 步起 src/ 下没有任何文件导入 starling(拉起模式用子进程 `python -m starling.service`,
+    安装来源经 importlib.metadata 读)。"""
     from pathlib import Path
 
     src = Path(__file__).resolve().parents[1] / "src"
     offenders = [f"{p.relative_to(src)}:{n}" for p in sorted(src.rglob("*.py"))
-                 for n, top in _top_level_imports(p)
-                 if top == "starling" and p.relative_to(src).as_posix() != "simple_actio/memory_starling.py"]
-    assert offenders == []
-
-
-STEP3_SERVICE_MODULES = ("factory.starling_names", "factory.starling_service", "factory.starling_session")
-
-
-def test_the_step3_service_modules_are_not_wired_in():
-    """设计四第 3 步"不接线":三个新模块只互相导入;src/ 下别的文件(任何层级,含函数内惰性导入与
-    `from factory import starling_names`)都不导入它们。第 4 步接线时删这一条。"""
-    import ast
-    from pathlib import Path
-
-    src = Path(__file__).resolve().parents[1] / "src"
-    own = {f"{m.replace('.', '/')}.py" for m in STEP3_SERVICE_MODULES}
-    offenders = []
-    for path in sorted(src.rglob("*.py")):
-        rel = path.relative_to(src).as_posix()
-        if rel in own:
-            continue
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            names = []
-            if isinstance(node, ast.Import):
-                names = [a.name for a in node.names]
-            elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
-                names = [node.module, *(f"{node.module}.{a.name}" for a in node.names)]
-            offenders += [f"{rel}:{node.lineno} imports {n}" for n in names
-                          if any(n == m or n.startswith(m + ".") for m in STEP3_SERVICE_MODULES)]
+                 for n, top in _top_level_imports(p) if top == "starling"]
     assert offenders == []
 
 

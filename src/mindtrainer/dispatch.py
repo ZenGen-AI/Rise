@@ -276,7 +276,8 @@ def _resolve_memory(run_id: str, cfg: TrainingConfig, memory_resolver: MemoryRes
     (于是进 config_hash、policy_factory、policy_backend),不写回 directive.yaml:续训时要重新解。
 
     入参情境按配置顺序去重。解析器抛 DirectiveFailedError 就按它的原因重抛(组合根给出可读原因);
-    抛其余任何异常只报类名,不带异常文本(起点库打不开、摘要算不出,文本里可能有端点地址)。
+    抛 DeferredError(记忆服务连不上、超时,30 篇 MT-32)原样上抛,指令留 pending,守护进程退避重试;
+    抛其余任何异常只报类名,不带异常文本(起点世界打不开、摘要算不出,文本里可能有端点地址)。
     回写后再过一次严格校验:解析器给的摘要缺情境、身份缺键,都在这里判 T2。"""
     scenario_ids = tuple(dict.fromkeys(cfg.scenario_ids))
     try:
@@ -284,6 +285,8 @@ def _resolve_memory(run_id: str, cfg: TrainingConfig, memory_resolver: MemoryRes
         # 返回值形状不对(摘要不是映射、身份拷不动)是确定性的错,与解析器自己抛错同样只报类名;
         # 转换放在 try 里,免得 TypeError 逃出 dispatch,让指令留在 pending 里每轮重派
         memory = {"seed": cfg.memory["seed"], "digests": dict(digests), "runtime": copy.deepcopy(runtime)}
+    except DeferredError:
+        raise
     except DirectiveFailedError as exc:
         raise DirectiveFailedError(f"directive {run_id}: {exc.reason}") from exc
     except Exception as exc:

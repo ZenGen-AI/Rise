@@ -3,17 +3,14 @@
 与 `eval_config.py` 同一做法:文件路径由环境变量 `RISE_MEMORY_CONFIG` 给出,必须在控制面仓库之外、
 权限必须是 0600。变量没设或为空串,返回 `None`,装配期照计划 A 的替身走;设了,配置有任何问题都抛
 `FactoryConfigError`(命令行译成退出码 2),不退回替身。报错只写键名、路径与变量名,不回显任何取值:
-端点地址可能带 `user:password@`。密钥不在这份文件里,只从 `OPENAI_API_KEY` 读。
+端点地址可能带 `user:password@`。密钥不在这份文件里:拉起模式下从 `OPENAI_API_KEY` 读并照传给服务进程,
+外部模式下在服务进程的环境里。
 
-本模块不导入 `starling`(全仓库只有 `simple_actio/memory_starling.py` 导入它),安装信息一律经
-`importlib.metadata` 读。
+本模块不导入 `starling` 与 `starling_client`,安装信息一律经 `importlib.metadata` 读。
 """
 from __future__ import annotations
 
-import csv
-import hashlib
 import importlib.metadata
-import io
 import ipaddress
 import json
 import os
@@ -33,6 +30,7 @@ from factory.errors import FactoryConfigError
 
 MEMORY_CONFIG_ENV = "RISE_MEMORY_CONFIG"
 API_KEY_ENV = "OPENAI_API_KEY"
+CLIENT_DIST = "starling-client"
 STARLING_DIST = "starling-memory"
 DEFAULT_TIMEOUT_MS = 4000
 DEFAULT_MAX_RETRIES = 0
@@ -53,7 +51,6 @@ DEFAULT_WORLD_PREFIX = "rise"
 WORLD_PREFIX_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,15}")
 
 _OWNER_FILE = ".owner"
-_CODE_PREFIX = "starling/"
 _OWNER_POLL_S = 0.02
 
 
@@ -344,45 +341,32 @@ def _direct_url(dist: importlib.metadata.Distribution) -> dict:
     return data
 
 
-def starling_install_source(*, distribution: importlib.metadata.Distribution | None = None) -> str:
-    """返回已装 Starling 的来源标识:`git:<commit_id>` 或 `record:<sha256>`。
+def client_install_commit(dist_name: str, *,
+                          distribution: importlib.metadata.Distribution | None = None) -> str:
+    """已装发行包 `dist_name`(`starling-client` 或 `starling-memory`)的 git 提交(90 篇第 15、16 条)。
 
-    未安装、editable、没有 `RECORD` 都抛 `FactoryConfigError`:editable 的代码会在指令运行中改变,
-    没有 `RECORD` 则认不出装的是哪份代码。
-    """
+    未安装、editable、`direct_url.json` 里没有 `vcs_info.commit_id`,都抛 `FactoryConfigError`:editable 的代码会在
+    指令运行中改变;没有提交就无法与服务 `info()` 报的提交比对。不再按 RECORD 认代码(`record:` 来源已取消)。"""
     dist = distribution
     if dist is None:
         try:
-            dist = importlib.metadata.distribution(STARLING_DIST)
+            dist = importlib.metadata.distribution(dist_name)
         except importlib.metadata.PackageNotFoundError:
             raise FactoryConfigError(
-                f"{MEMORY_CONFIG_ENV} is set but Starling is not installed; "
+                f"{MEMORY_CONFIG_ENV} is set but {dist_name} is not installed; "
                 "run pip install '.[memory]' (or uv sync --extra memory)"
             ) from None
     direct = _direct_url(dist)
     dir_info, vcs_info = direct.get("dir_info"), direct.get("vcs_info")
     if isinstance(dir_info, dict) and dir_info.get("editable"):
         raise FactoryConfigError(
-            "Starling is an editable install; its code can change under a running directive, "
-            "so install it from git or a wheel (pip install '.[memory]')"
+            f"{dist_name} is an editable install; its code can change under a running directive, "
+            "so install it from git (pip install '.[memory]')"
         )
     commit = vcs_info.get("commit_id") if isinstance(vcs_info, dict) else None
-    if isinstance(commit, str) and commit:
-        return f"git:{commit}"
-
-    record = dist.read_text("RECORD")
-    if record is None:
-        raise FactoryConfigError("Starling's install has no RECORD; cannot identify the installed code")
-    # 只认 `import starling` 会加载的文件:路径在 starling/ 下、带哈希。*.dist-info(INSTALLER、REQUESTED、
-    # direct_url.json、uv_cache.json 描述的是怎么装的)、include/ 与 lib/(C++ 头文件和静态库)、../ 开头的脚本行
-    # 会随安装器、venv 变,同一份代码就会换标识。按路径排序,免得安装顺序不同也换标识。
-    rows = sorted(
-        [row[0], row[1]] for row in csv.reader(io.StringIO(record))
-        if len(row) >= 2 and row[1] and row[0].startswith(_CODE_PREFIX)
-    )
-    if not rows:
+    if not isinstance(commit, str) or not commit:
         raise FactoryConfigError(
-            f"Starling's RECORD lists no hashed files under {_CODE_PREFIX}; cannot identify the installed code"
+            f"{dist_name} was not installed from a git commit; rise compares that commit with the memory service's, "
+            "so install it from git (pip install '.[memory]')"
         )
-    digest = hashlib.sha256(json.dumps(rows, separators=(",", ":")).encode("utf-8")).hexdigest()
-    return f"record:{digest}"
+    return commit

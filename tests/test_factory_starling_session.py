@@ -352,6 +352,19 @@ def test_a_restart_runs_before_the_new_connect():
     assert order == ["restart", "connect"]
 
 
+def test_an_unreachable_service_marks_the_generation_lost_so_the_next_call_reconnects():
+    """服务进程不在了(ServiceUnavailable):这一代标为丢失,下一次需要服务时(拉起模式下先 restart)换会话。"""
+    down = FakeTransport(0, error=errors.ServiceUnavailable("service unreachable"))
+    order = []
+    s, made = _session([FakeClient(INFO), FakeClient(INFO)], transports=[down, FakeTransport(0)],
+                       restart=lambda: order.append("restart"))
+    with pytest.raises(MemoryFailureError) as info:
+        s.admin("digest", {"world": "w"})
+    assert info.value.transient is True and s.generation == 1
+    s.admin("digest", {"world": "w"})
+    assert s.generation == 2 and order == ["restart"]
+
+
 def test_admin_calls_go_through_a_sessionless_transport_with_the_long_timeout():
     s, _ = _session([FakeClient(INFO)])
     s.admin("list_worlds", {"labels": None, "page": 1, "page_size": 50, "with_digest": False})

@@ -1,5 +1,6 @@
 """记忆端口的共享契约(设计二 4.1 节、M17)。用例只经 MemoryBackend 的五个方法访问实现,
-不碰任何实现的内部;计划 B 往 PORT_FACTORIES 加 "starling"(Starling 未装时跳过)。"""
+不碰任何实现的内部。Starling 参数连模块级共用的真 starling-serve(没装客户端或服务端时跳过),
+每个端口一个世界前缀,彼此看不见。"""
 import re
 from pathlib import Path
 
@@ -8,40 +9,49 @@ import yaml
 
 from simple_actio.memory import FileTupleStore, TupleMemory
 from simple_actio.memory_port import MemoryClosedError, MemoryEvent, MemoryEventConflict, MemoryHit
-from starling_fakes import offline_api_key, shared_fake_openai
+from starling_fakes import shared_fake_openai
 
 SAMPLE = yaml.safe_load(Path(__file__).with_name("memory_contract_sample.yaml").read_text(encoding="utf-8"))
 
 
-def _starling_port(fresh_dir):
-    pytest.importorskip("starling")            # 未装时这一参数跳过,契约只跑替身(设计源第 11 节)
-    from simple_actio.memory_starling import StarlingMemory
-    fresh_dir.mkdir(parents=True)
-    with offline_api_key():                      # C++ 适配器在构造时读 OPENAI_API_KEY
-        return StarlingMemory.open(fresh_dir / "pa.db", holder="pa",
-                                   endpoints=shared_fake_openai().endpoints())
+@pytest.fixture(scope="module")
+def service(tmp_path_factory):
+    pytest.importorskip("starling_client"); pytest.importorskip("starling.service")
+    from starling_service import start_service
+
+    proc = start_service(tmp_path_factory.mktemp("svc"))
+    yield proc
+    proc.kill()
 
 
-PORT_FACTORIES = {
-    "tuple": lambda fresh_dir: TupleMemory().world("pa"),
-    "file": lambda fresh_dir: FileTupleStore(fresh_dir / "deploy", held_root=fresh_dir / "held",
-                                             replay_root=fresh_dir / "replay").open("s1", "pa"),
-    "starling": _starling_port,
-}
-
-
-@pytest.fixture(params=sorted(PORT_FACTORIES))
+@pytest.fixture(params=["file", "starling", "tuple"])
 def make_port(request, tmp_path):
-    made = []
+    made, sessions = [], []
+
+    def starling_port(fresh_dir):
+        from starling_service import deployment_store, open_session
+
+        session = open_session(request.getfixturevalue("service"))
+        sessions.append(session)
+        return deployment_store(session, shared_fake_openai(), fresh_dir / "deploy").open("s1", "pa")
+
+    factories = {
+        "tuple": lambda fresh_dir: TupleMemory().world("pa"),
+        "file": lambda fresh_dir: FileTupleStore(fresh_dir / "deploy", held_root=fresh_dir / "held",
+                                                 replay_root=fresh_dir / "replay").open("s1", "pa"),
+        "starling": starling_port,
+    }
 
     def make():
-        port = PORT_FACTORIES[request.param](tmp_path / f"port-{len(made)}")
+        port = factories[request.param](tmp_path / f"port-{len(made)}")
         made.append(port)
         return port
 
     yield make
     for port in made:
         port.close()  # close 可重复调用
+    for session in sessions:
+        session.close()
 
 
 def _event(d):

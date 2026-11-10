@@ -1636,7 +1636,7 @@ git commit -m "feat(factory): 服务会话:代号与按代号的端口计数、�
   - `close()`：已关返回；`session.owns_generation(generation)` 为假时不发请求，直接当作已关（置位、调 `release`）；否则 `remote.close(timeout=close_timeout_s)`，收到 `SessionExpired` 或 `MemoryClosed` 也当作已关；`TimeoutError` 照旧抛非瞬态 `MemoryFailureError`、端口保持打开（今天的语义，`memory_starling.py:228-243`）。
   - `_resolve_memory`：解析器抛 `DeferredError` 原样上抛，指令留 pending（30 篇 MT-32）。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 # tests/test_simple_actio_memory_starling.py
@@ -1707,19 +1707,19 @@ def test_a_resolver_that_defers_leaves_the_directive_pending(store, live):
 
 `tests/test_mt_dispatch.py` 顶部补 `from controlplane.deferred import DeferredError`（若还没有）。派发器的调用形式照同文件里直接调派发器的现有用例。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_simple_actio_memory_starling.py tests/test_mt_dispatch.py`
 Expected: FAIL（`StarlingMemory` 不收 `generation`；`DeferredError` 被译成 T2）
 
-- [ ] **Step 3: 实现**：按 Interfaces。`memory_starling.py` 模块层的 `import starling` 换成 `import starling_client`（`StarlingDeploymentStore` 在 Task 14 改，本任务里它暂时坏着，属于分支上的红窗口）。
+- [x] **Step 3: 实现**：按 Interfaces。`memory_starling.py` 模块层的 `import starling` 换成 `import starling_client`（`StarlingDeploymentStore` 在 Task 14 改，本任务里它暂时坏着，属于分支上的红窗口）。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: 同 Step 2
 Expected: PASS
 
-- [ ] **Step 5: 提交**（分支 `design4-step4`）
+- [x] **Step 5: 提交**（分支 `design4-step4`）
 
 ```bash
 git add src/simple_actio/memory_starling.py src/mindtrainer/dispatch.py tests/test_simple_actio_memory_starling.py tests/test_mt_dispatch.py
@@ -1761,7 +1761,7 @@ class StarlingDeploymentStore:
 - `ensure_world(world_id)`：①有创建标记 `marker_dir/<world_id>.created` 而 `list_worlds` 里没有这个世界 → 永久失败 `"deploy world <名字> was deleted"`（装配期另报退出码 2，Task 16）；②`create_world(name, labels=labels(prefix, root, "deploy", scenario_id=world_id), settings=settings, seed=False)`，成功就写创建标记（临时文件加改名）；③收到 `world_exists`：`list_worlds(labels={"repo": prefix, "kind": "deploy", "scenario_id": world_id})` 翻完所有页找这个名字，找不到、`seed` 或 `read_only` 为真、`kind`、`repo` 不对 → 永久 `"world <名字> was not created by rise"`；`root` 标签不等于本记忆根 → 永久 `"world <名字> belongs to another memory root"`；对得上且标记不在就补写标记。同一进程内对每个世界只做一次（记一个集合）。
 - 空种子 `ensure_empty_seed()`（同一类里，装配期调）：同样三步，世界名 `<前缀>.seed-empty`，`seed=True`，标签 `kind=seed-empty`；返回它的摘要（`list_worlds(with_digest=True)` 里的 `digest`）。
 
-- [ ] **Step 1: 写失败的测试**（`tests/test_simple_actio_starling_store.py`，模块级真服务；每条用例用唯一前缀 `t<n>`，彼此不干扰）
+- [x] **Step 1: 写失败的测试**（`tests/test_simple_actio_starling_store.py`，模块级真服务；每条用例用唯一前缀 `t<n>`，彼此不干扰）
 
 ```python
 pytest.importorskip("starling_client"); pytest.importorskip("starling.service")
@@ -1838,19 +1838,19 @@ def test_after_an_external_restart_an_old_port_reads_handle_closed_as_a_lost_ses
 
 `store_factory(prefix=None, root_label=None, marker_dir=None)` 在模块级真服务上造 `ServiceSession` 与 `StarlingDeploymentStore`（前缀缺省取递增的 `t<n>`），返回 `(store, marker_dir, admin)`；`admin(op, body)` 直接调 `session.admin`，不经管理面；`restartable()` 另起一个本条用例独占的真服务（`start_service(..., port=<固定空闲端口>)`），`service.restart()` 在同一端口重起。`_delete_world_through_the_dashboard_route(name)` 用 httpx（`trust_env=False`、带 bearer token）发 `DELETE /api/worlds/<name>?confirm=<name>`（`S:python/starling/dashboard/routes/worlds.py:396-404`；路由前缀以 `S:python/starling/dashboard/app.py` 的挂载为准，实现时核对；客户端没有删世界的接口，只有测试这样做）。契约文件 `tests/test_simple_actio_deployment_store_contract.py` 的 `starling` 参数改为同一套夹具，Task 2、4 写下的契约用例对两个后端都跑。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_simple_actio_starling_store.py tests/test_simple_actio_deployment_store_contract.py`
 Expected: FAIL（`StarlingDeploymentStore` 还是进程内的签名）
 
-- [ ] **Step 3: 实现**：按 Interfaces。管理调用的异常都经 `translate_client_failure(..., port_closed_by_rise=False, in_drain_window=False)`；会话致命时 `session.admin` 已经抛瞬态失败，这里不另判。删掉的进程内函数若还有调用方（`src/factory/memory_runtime.py` 的 `StarlingTrainingWorlds`、`starling_memory_resolver`），它们在 Task 15、16 改，分支上暂时坏着。
+- [x] **Step 3: 实现**：按 Interfaces。管理调用的异常都经 `translate_client_failure(..., port_closed_by_rise=False, in_drain_window=False)`；会话致命时 `session.admin` 已经抛瞬态失败，这里不另判。删掉的进程内函数若还有调用方（`src/factory/memory_runtime.py` 的 `StarlingTrainingWorlds`、`starling_memory_resolver`），它们在 Task 15、16 改，分支上暂时坏着。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_simple_actio_starling_store.py tests/test_simple_actio_deployment_store_contract.py tests/test_simple_actio_memory_starling.py tests/test_ma_deployment_starling.py`
 Expected: PASS（`tests/test_ma_deployment_starling.py` 的恢复分码用例在真服务上钉住 Review Focus 最后一条）
 
-- [ ] **Step 5: 提交**（分支 `design4-step4`）
+- [x] **Step 5: 提交**（分支 `design4-step4`）
 
 ```bash
 git add src/simple_actio/memory_starling.py tests/test_simple_actio_starling_store.py tests/test_simple_actio_deployment_store_contract.py tests/test_ma_deployment_starling.py
@@ -1879,7 +1879,7 @@ git commit -m "feat(simple_actio): 部署管理面改走记忆服务:ensure_worl
   - 没有 `sweep`；`MemoryWiring.sweep` 为 `None`（Task 16）。
   - `starling_memory_resolver(session, *, prefix, root_label, empty_seed, runtime)`：`seed` 为 None 时每个情境取 `empty_seed[1]`；`seed` 非空本步抛 `DirectiveFailedError(f"memory.seed {seed!r}: seeds arrive in step 5")`（第 5 步换成真查）。服务瞬态失败抛 `DeferredError`（30 篇 MT-32、Task 13）；其余照 `DirectiveFailedError` 只报类名。
 
-- [ ] **Step 1: 写失败的测试**（`tests/test_factory_training_worlds.py`）
+- [x] **Step 1: 写失败的测试**（`tests/test_factory_training_worlds.py`）
 
 ```python
 class TimeoutOnceAfterCreating:
@@ -1951,19 +1951,19 @@ def test_a_seeded_run_is_refused_until_step_5(starling_worlds):
 
 `starling_worlds(prefix=None, admin_wrap=None)` 夹具在模块级真服务上造会话、`ensure_empty_seed`，再造 `StarlingTrainingWorlds` 并 `bind("run-1", None)`；`admin_wrap` 给了就包住传给世界的管理调用。`tests/test_factory_memory_runtime.py` 加：解析器 `seed=None` 时每个情境都是空种子摘要；会话的管理调用抛瞬态失败时解析器抛 `DeferredError`。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_factory_training_worlds.py tests/test_factory_memory_runtime.py`
 Expected: FAIL（`StarlingTrainingWorlds` 还在按路径复制）
 
-- [ ] **Step 3: 实现**：按 Interfaces。端口对象暴露 `_remote` 只为测试读物理世界名；物理世界名另写进 `close_rollout` 的 warning（90 篇分叉表"成功"一行）。`_RolloutWorlds` 的表逻辑（`memory_runtime.py:351-542`）不改。
+- [x] **Step 3: 实现**：按 Interfaces。端口对象暴露 `_remote` 只为测试读物理世界名；物理世界名另写进 `close_rollout` 的 warning（90 篇分叉表"成功"一行）。`_RolloutWorlds` 的表逻辑（`memory_runtime.py:351-542`）不改。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: 同 Step 2，再加 `tests/test_factory_interact_wire.py tests/test_mt_dispatch.py`
 Expected: PASS（替身参数的用例照旧全过）
 
-- [ ] **Step 5: 提交**（分支 `design4-step4`）
+- [x] **Step 5: 提交**（分支 `design4-step4`）
 
 ```bash
 git add src/factory/memory_runtime.py tests/test_factory_training_worlds.py tests/test_factory_memory_runtime.py
@@ -1988,7 +1988,7 @@ git commit -m "feat(factory): rollout 世界改为从空种子分叉、只关不
   - 致命停机（90 篇"停守护进程分两半"、FC-47）：`_guard(fn, session)` 包住派发器与每个处理器：调用返回或抛出之后查 `session.fatal`，非空就抛 `FactoryConfigError(f"memory service: {session.fatal}; see service.log")`（外部模式不写 `service.log`）。调和循环不接它，命令行译成退出码 2。
   - `deploy_turn_timeout_s` 不变（40 秒按服务端每次至多 4 秒折算，客户端超时 30 秒只在服务卡住时生效，90 篇"客户端超时"表）。
 
-- [ ] **Step 1: 写失败的测试**（`tests/test_factory_memory_wiring.py`；真服务用例用拉起模式，`root` 在 `tmp_path` 下）
+- [x] **Step 1: 写失败的测试**（`tests/test_factory_memory_wiring.py`；真服务用例用拉起模式，`root` 在 `tmp_path` 下）
 
 ```python
 def _service_env(tmp_path, **extra):
@@ -2063,19 +2063,19 @@ def test_closing_stops_the_spawned_service_last_and_releases_the_ownership_lock(
 
 `_agent_yaml`、`_first_run_creates_the_deploy_world`、`_FakeDist` 写在同一测试文件里。`tests/test_factory_memory_wiring.py:177-232` 关于 `sweep` 的用例改写成 `on_locked`：`run` 把 `a.on_locked` 传给 `run_daemon(on_locked=)`、`assemble` 不调它、`reconcile` 锁内第一个动作之前调它、它抛错时关掉装配且不跑 tick。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_factory_memory_wiring.py tests/test_factory_memory_config.py`
 Expected: FAIL
 
-- [ ] **Step 3: 实现**：按 Interfaces。`assemble` 里 `memory_wiring` 抛错时，已拉起的服务要停掉：`memory_wiring` 内部在第 5 步之后的任何失败先调已造好的 `closers` 再上抛。
+- [x] **Step 3: 实现**：按 Interfaces。`assemble` 里 `memory_wiring` 抛错时，已拉起的服务要停掉：`memory_wiring` 内部在第 5 步之后的任何失败先调已造好的 `closers` 再上抛。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_factory_memory_wiring.py tests/test_factory_memory_config.py tests/test_factory_handlers.py tests/test_factory_interact_wire.py tests/test_factory_interact_e2e.py tests/test_factory_cli.py`
 Expected: PASS
 
-- [ ] **Step 5: 提交**（分支 `design4-step4`）
+- [x] **Step 5: 提交**（分支 `design4-step4`）
 
 ```bash
 git add src/factory/memory_config.py src/factory/memory_runtime.py src/factory/wire.py tests/test_factory_memory_wiring.py tests/test_factory_memory_config.py tests/test_factory_handlers.py tests/test_factory_interact_wire.py
@@ -2096,7 +2096,7 @@ git commit -m "feat(factory): 记忆装配改连服务:新顺序、持锁后的�
 - Consumes: Task 13 至 16。
 - Produces: `src/` 下没有 `import starling`；`starling_client` 只在两个文件里；`MemoryLayout.legacy_entries(known, *, backend: Literal["stand-in", "starling"])`。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 # tests/test_factory_cross_plan.py
@@ -2131,19 +2131,19 @@ def test_half_written_and_runtime_files_never_block_a_stand_in_start(store):
     memory_wiring(store.repo_root, {}, deployment=True)                  # 替身在造部署记忆时查,不抛
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_factory_cross_plan.py tests/test_factory_memory_wiring.py tests/test_ma_memory_layout.py`
 Expected: FAIL（还有文件导入 `starling`；过渡规则仍在）
 
-- [ ] **Step 3: 实现**：删代码、改白名单、改 `legacy_entries`。`grep -rn "import starling\b\|from starling\b" src` 应为空；`grep -rn "starling_client" src` 只列出两个文件。
+- [x] **Step 3: 实现**：删代码、改白名单、改 `legacy_entries`。`grep -rn "import starling\b\|from starling\b" src` 应为空；`grep -rn "starling_client" src` 只列出两个文件。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `uv run --offline pytest -q -m 'not slow' -p no:cacheprovider`
 Expected: 0 failed（第 4 步的最后一个任务，在分支上跑全量；真服务的用例都真跑，不是 skip：`uv run --offline pytest -q -rs -m 'not slow' -p no:cacheprovider tests/test_simple_actio_starling_store.py tests/test_factory_starling_service.py tests/test_factory_training_worlds.py` 的跳过原因里不应有 `starling_client`）
 
-- [ ] **Step 5: 在分支上提交，全量绿就压成 main 上的一个提交，保留分支，继续第 5 步**
+- [x] **Step 5: 在分支上提交，全量绿就压成 main 上的一个提交，保留分支，继续第 5 步**
 
 ```bash
 git add src/mindagent/memory_layout.py src/factory/memory_runtime.py tests/test_factory_cross_plan.py tests/test_simple_actio_instance.py tests/test_memory_live.py tests/test_ma_memory_layout.py tests/test_factory_memory_wiring.py

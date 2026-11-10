@@ -140,7 +140,7 @@ def test_lists_survive_missing_directories(tmp_path):
     lay = MemoryLayout(tmp_path)
     assert lay.any_uncommitted_snapshots() == [] and lay.round_snapshots("r1") == []
     assert lay.uncommitted_snapshots("s1") == []
-    for backend in ("stand-in", "starling-inprocess", "starling"):
+    for backend in ("stand-in", "starling"):
         assert lay.legacy_entries([], backend=backend) == []
 
 
@@ -159,8 +159,6 @@ def test_the_world_lock_is_exclusive_and_released(tmp_path):
 @pytest.mark.parametrize("backend, legacy", [
     ("stand-in", ["deploy/pa.json", "deploy/s1.db", "deploy/s1.rec.json", "runs", "seeds",
                   "snapshots/r1/deploy-m-1.db", "snapshots/r1/deploy-m-2.json", "snapshots/r1/deploy-m-3.world"]),
-    ("starling-inprocess", ["deploy/pa.json", "deploy/s1.json", "deploy/s1.rec.json", "snapshots/r1/deploy-m-1.db",
-                            "snapshots/r1/deploy-m-2.json", "snapshots/r1/deploy-m-3.world"]),
     ("starling", ["deploy/pa.json", "deploy/s1.db", "deploy/s1.json", "deploy/s1.rec.json", "held/s1/snap-1.db",
                   "replay/y.db", "runs", "seeds",
                   "snapshots/r1/deploy-m-1.db", "snapshots/r1/deploy-m-2.json", "snapshots/r1/deploy-m-3.world"]),
@@ -169,7 +167,7 @@ def test_the_same_root_is_judged_by_its_backend(tmp_path, backend, legacy):
     for rel in ("deploy/s1.lock", "deploy/pa.json", "deploy/s1.json", "deploy/s1.db", "deploy/s1.rec.json",
                 "snapshots/r1/deploy-m-1.db", "snapshots/r1/deploy-m-2.json", "snapshots/r1/deploy-m-3.world",
                 "snapshots/r1/deploy-m-4.rec.json", "held/s1/snap-0.json", "replay/x.json",
-                "held/s1/snap-1.db", "replay/y.db",                          # 第 2、3 步过渡留下的
+                "held/s1/snap-1.db", "replay/y.db",                          # 进程内时期留下的
                 "seeds/k/s1.db", "runs/run-1/e.db", "service.log", ".owner",
                 "deploy/s1.db-wal", "deploy/s1.db-shm", "deploy/s1.json.tmp"):   # 不带数据后缀的文件不报
         (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True); (tmp_path / rel).write_text("{}")
@@ -190,7 +188,7 @@ def test_legacy_entries_ignore_verify_directories_subdirectories_of_deploy_and_s
     for rel in ("deploy/sub/pb.json", "snapshots/r1/verify/0/deploy-inner.json", "snapshots/r1/verify-s1.rec.json",
                 "snapshots/stray.json", "service/x.db", "service.pid", "service.owner.lock", "service.token"):
         (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True); (tmp_path / rel).write_text("{}")
-    for backend in ("stand-in", "starling-inprocess", "starling"):
+    for backend in ("stand-in", "starling"):
         assert lay.legacy_entries(["s1"], backend=backend) == []
     assert lay.legacy_entries(iter(()), backend="stand-in") == []      # 可迭代对象即可,不要求是列表
 
@@ -200,9 +198,10 @@ def test_legacy_entries_report_seeds_and_runs_once_even_when_they_are_files(tmp_
     (tmp_path / "runs").mkdir(); (tmp_path / "runs" / "a").mkdir(); (tmp_path / "runs" / "a" / "b.db").write_text("")
     lay = MemoryLayout(tmp_path)
     assert lay.legacy_entries([], backend="stand-in") == ["runs", "seeds"]
-    assert lay.legacy_entries([], backend="starling-inprocess") == []
+    assert lay.legacy_entries([], backend="starling") == ["runs", "seeds"]
 
 
-def test_an_unknown_backend_is_refused(tmp_path):
+@pytest.mark.parametrize("backend", ["sqlite", "starling-inprocess"])
+def test_an_unknown_backend_is_refused(tmp_path, backend):
     with pytest.raises(ValueError, match="backend"):
-        MemoryLayout(tmp_path).legacy_entries([], backend="sqlite")
+        MemoryLayout(tmp_path).legacy_entries([], backend=backend)

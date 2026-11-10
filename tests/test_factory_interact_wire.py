@@ -783,76 +783,92 @@ def test_leaving_a_rollout_closes_its_instance_even_when_the_rollout_raises(worl
             backend.respond(None, None, [], "a")
 
 
-def test_the_trained_slot_gets_a_starling_world_per_rollout_and_it_is_removed_after(world, tmp_path, stub):
-    """rollout 世界(设计 5.1 节):scope 绑定种子、每条 rollout 一个世界、退出即删,scope 退出后解绑。
-    importorskip 在函数体内:写在模块顶层,没装 Starling 时整个文件的替身路径用例都会被跳过。"""
-    pytest.importorskip("starling")
-    from factory.memory_runtime import StarlingLayout, StarlingTrainingWorlds
-    from starling_fakes import FakeOpenAI, offline_api_key
+@pytest.fixture
+def starling_training_worlds(tmp_path_factory):
+    """真 starling-serve 上的 `StarlingTrainingWorlds`(空种子起点)。返回 `(worlds, session)`。
+    importorskip 在夹具里:写在模块顶层,没装客户端时整个文件的替身路径用例都会被跳过。"""
+    pytest.importorskip("starling_client"); pytest.importorskip("starling.service")
+    from factory import starling_names
+    from factory.memory_runtime import StarlingTrainingWorlds
+    from simple_actio.memory_starling import ensure_empty_seed
+    from starling_fakes import FakeOpenAI
+    from starling_service import fake_memory_config, open_session, start_service, unique_prefix
 
-    with FakeOpenAI(dim=256) as fake, offline_api_key():
-        layout = StarlingLayout(tmp_path / "mem")
-        worlds = StarlingTrainingWorlds(layout, fake.endpoints(), close_timeout_s=0.2)
-        _, _, factory, _ = _unit(world, tmp_path, stub, training_worlds=worlds)
-        first, second = f"{RUN}-grpo0-t1-r0", f"{RUN}-grpo0-t1-r1"
+    tmp = tmp_path_factory.mktemp("svc")
+    proc = start_service(tmp / "svc")
+    session = open_session(proc)
+    try:
+        with FakeOpenAI(dim=256) as fake:
+            prefix, label = unique_prefix(), starling_names.root_label(tmp / "mem")
+            settings = starling_names.rise_settings(fake_memory_config(fake, tmp / "mem"))
+            seed = ensure_empty_seed(session, names=starling_names, prefix=prefix, root_label=label,
+                                     settings=settings)
+            yield StarlingTrainingWorlds(session, prefix=prefix, root_label=label, settings=settings,
+                                         empty_seed=seed, close_timeout_s=0.2), session
+    finally:
+        session.close()
+        proc.kill()
+
+
+def _open_rollouts(session, prefix):
+    rows = session.admin("list_worlds", {"labels": {"repo": prefix, "kind": "rollout"}, "page": 1,
+                                         "page_size": 50, "with_digest": False})["worlds"]
+    return {w["name"]: w["status"] for w in rows}
+
+
+def test_the_trained_slot_gets_a_starling_world_per_rollout_and_it_is_closed_after(
+        world, tmp_path, stub, starling_training_worlds):
+    """rollout 世界(设计 5.1 节):scope 绑定种子、每条 rollout 分叉一个世界、退出即关,scope 退出后解绑。"""
+    worlds, session = starling_training_worlds
+    _, _, factory, _ = _unit(world, tmp_path, stub, training_worlds=worlds)
+    first, second = f"{RUN}-grpo0-t1-r0", f"{RUN}-grpo0-t1-r1"
+    with factory(RUN, _cfg()) as policy_for_rollout:
+        assert worlds.seed_of(RUN) is None
+        with policy_for_rollout(first, "t1") as backend:
+            assert type(backend.instance.memory).__name__ == "StarlingMemory"
+            name = backend.instance.memory._remote.world
+            assert _open_rollouts(session, worlds.prefix)[name] == "open"
+        assert _open_rollouts(session, worlds.prefix)[name] == "closed"
+        with policy_for_rollout(second, "t1") as other:
+            assert other.instance.memory is not backend.instance.memory
+            assert other.instance.memory._remote.world != name
+            assert other.instance.memory.digest() == worlds.empty_seed[1]
+    with pytest.raises(KeyError):
+        worlds.seed_of(RUN)
+
+
+def test_a_rollout_that_raises_still_closes_its_world_and_the_scope_unbinds_on_a_training_exception(
+        world, tmp_path, stub, starling_training_worlds):
+    worlds, session = starling_training_worlds
+    runtime, _, factory, _ = _unit(world, tmp_path, stub, training_worlds=worlds)
+    episode = f"{RUN}-grpo0-t1-r0"
+    with pytest.raises(RuntimeError, match="boom"):
         with factory(RUN, _cfg()) as policy_for_rollout:
-            assert worlds.seed_of(RUN) is None
-            with policy_for_rollout(first, "t1") as backend:
-                assert type(backend.instance.memory).__name__ == "StarlingMemory"
-                assert layout.rollout_world(RUN, first).exists()
-            assert not layout.rollout_world(RUN, first).exists()
-            with policy_for_rollout(second, "t1") as other:
-                assert other.instance.memory is not backend.instance.memory
-                assert layout.rollout_world(RUN, second).exists()
-            assert not layout.rollout_world(RUN, second).exists()
-        with pytest.raises(KeyError):
-            worlds.seed_of(RUN)
+            with pytest.raises(RuntimeError, match="rollout broke"):
+                with policy_for_rollout(episode, "t1"):
+                    raise RuntimeError("rollout broke")
+            assert set(_open_rollouts(session, worlds.prefix).values()) == {"closed"}
+            raise RuntimeError("boom")
+    with pytest.raises(KeyError):
+        worlds.seed_of(RUN)
+    assert runtime._sessions == {}
 
 
-def test_a_rollout_that_raises_still_removes_its_world_and_the_scope_unbinds_on_a_training_exception(
-        world, tmp_path, stub):
-    pytest.importorskip("starling")
-    from factory.memory_runtime import StarlingLayout, StarlingTrainingWorlds
-    from starling_fakes import FakeOpenAI, offline_api_key
+def test_a_seeded_run_fails_the_trained_slot_as_a_deterministic_memory_failure_until_step_5(
+        world, tmp_path, stub, starling_training_worlds):
+    from factory.memory_translate import FactoryMemoryFailureError
 
-    with FakeOpenAI(dim=256) as fake, offline_api_key():
-        layout = StarlingLayout(tmp_path / "mem")
-        worlds = StarlingTrainingWorlds(layout, fake.endpoints(), close_timeout_s=0.2)
-        runtime, _, factory, _ = _unit(world, tmp_path, stub, training_worlds=worlds)
-        episode = f"{RUN}-grpo0-t1-r0"
-        with pytest.raises(RuntimeError, match="boom"):
-            with factory(RUN, _cfg()) as policy_for_rollout:
-                with pytest.raises(RuntimeError, match="rollout broke"):
-                    with policy_for_rollout(episode, "t1"):
-                        raise RuntimeError("rollout broke")
-                assert not layout.rollout_world(RUN, episode).exists()
-                raise RuntimeError("boom")
-        with pytest.raises(KeyError):
-            worlds.seed_of(RUN)
-        assert runtime._sessions == {}
-
-
-def test_the_scope_binds_the_configured_seed_and_the_rollout_world_starts_from_the_scenario_seed(
-        world, tmp_path, stub):
-    pytest.importorskip("starling")
-    from simple_actio.memory_starling import StarlingDeploymentStore, empty_digest
-    from factory.memory_runtime import StarlingLayout, StarlingTrainingWorlds
-    from starling_fakes import FakeOpenAI, offline_api_key
-
-    with FakeOpenAI(dim=256) as fake, offline_api_key():
-        layout = StarlingLayout(tmp_path / "mem")
-        seeds = StarlingDeploymentStore(layout.seed_dir("s1"), held_root=tmp_path / "held",     # 建种子不拍快照,两个根不建
-                                        replay_root=tmp_path / "replay", endpoints=fake.endpoints())
-        seeds.remember_event("t1", "pa", "seed#0@pa", "pb：人手也不够", interlocutor="pb")
-        assert seeds.digest("t1") != empty_digest()                 # 种子有内容,"从种子起"才和"空库"分得开
-        worlds = StarlingTrainingWorlds(layout, fake.endpoints(), close_timeout_s=0.2)
-        _, _, factory, _ = _unit(world, tmp_path, stub, training_worlds=worlds)
-        with factory(RUN, _cfg(memory=unresolved_memory("s1"))) as policy_for_rollout:
-            assert worlds.seed_of(RUN) == "s1"
-            with policy_for_rollout(f"{RUN}-grpo0-t1-r0", "t1") as backend:
-                assert backend.instance.memory.digest() == seeds.digest("t1")     # 整个世界从情境 t1 的种子起
-            with policy_for_rollout(f"{RUN}-grpo0-t2-r0", "t2") as other:
-                assert other.instance.memory.digest() == empty_digest()           # t2 没有种子世界
+    worlds, session = starling_training_worlds
+    _, _, factory, _ = _unit(world, tmp_path, stub, training_worlds=worlds)
+    episode = f"{RUN}-grpo0-t1-r0"
+    with factory(RUN, _cfg(memory=unresolved_memory("s1"))) as policy_for_rollout:
+        assert worlds.seed_of(RUN) == "s1"
+        with pytest.raises(FactoryMemoryFailureError):
+            with policy_for_rollout(episode, "t1"):
+                pytest.fail("the body must not run")
+        assert _open_rollouts(session, worlds.prefix) == {}             # 没分叉
+        with pytest.raises(MemoryFailureError):                          # 表里也没留下它
+            worlds.join_rollout(episode, "pb")
 
 
 class _FailingWorlds:
@@ -913,28 +929,6 @@ def test_a_retry_while_the_server_still_holds_the_world_is_a_transient_memory_fa
         worlds.release_session(episode, [server])
         with policy_for_rollout(episode, "t1") as again:
             assert again.instance.memory.digest() == TupleMemory().digest()   # 先删后建:从起点重来
-
-
-def test_a_corrupt_seed_fails_the_trained_slot_as_a_deterministic_memory_failure(world, tmp_path, stub):
-    pytest.importorskip("starling")
-    from factory.memory_runtime import StarlingLayout, StarlingTrainingWorlds
-    from factory.memory_translate import FactoryMemoryFailureError
-    from starling_fakes import FakeOpenAI, offline_api_key
-
-    with FakeOpenAI(dim=256) as fake, offline_api_key():
-        layout = StarlingLayout(tmp_path / "mem")
-        layout.seed_dir("s1").mkdir(parents=True)
-        layout.seed("s1", "t1").write_bytes(b"this is not a sqlite library")
-        worlds = StarlingTrainingWorlds(layout, fake.endpoints(), close_timeout_s=0.2)
-        _, _, factory, _ = _unit(world, tmp_path, stub, training_worlds=worlds)
-        episode = f"{RUN}-grpo0-t1-r0"
-        with factory(RUN, _cfg(memory=unresolved_memory("s1"))) as policy_for_rollout:
-            with pytest.raises(FactoryMemoryFailureError):
-                with policy_for_rollout(episode, "t1"):
-                    pytest.fail("the body must not run")
-            assert not layout.rollout_world(RUN, episode).exists()
-            with pytest.raises(MemoryFailureError):                          # 表里也没留下它
-                worlds.join_rollout(episode, "pb")
 
 
 def test_an_interact_directive_records_v2_traces_on_the_trained_slot(world, tmp_path, stub, fake_serve):

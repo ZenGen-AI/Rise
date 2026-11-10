@@ -32,8 +32,8 @@ _RECORD_KEYS = {"world_id", "snapshot_id", "digest"}
 # 判旧布局只看这四种数据后缀(90 篇第 18 条):`.tmp`、`-wal`、`-shm`、`.lock` 是写到一半或运行时的文件,
 # 不是世界数据,拒绝它们会让一次崩溃变成无法启动。`.rec.json` 也以 `.json` 结尾,列出来是为了与文档逐字对应。
 _DATA_SUFFIXES = (".json", ".db", ".created", _RECORD_SUFFIX)
-# 每个后端在 deploy/ 下允许的 `<已知情境><后缀>`。"starling-inprocess" 是第 2、3 步的过渡后端,第 4 步删。
-_DEPLOY_SUFFIX = {"stand-in": ".json", "starling-inprocess": ".db", "starling": ".created"}
+# 每个后端在 deploy/ 下允许的 `<已知情境><后缀>`:替身是世界账本,Starling 是创建标记(世界本身在服务里)。
+_DEPLOY_SUFFIX = {"stand-in": ".json", "starling": ".created"}
 
 
 def _check_segment(name: str, value: str) -> str:
@@ -168,13 +168,13 @@ class MemoryLayout:
 
     def legacy_entries(self, known_scenarios: Iterable[str], *, backend: str) -> list[str]:
         """记忆根下按 backend 判属于旧布局的条目,相对记忆根的 POSIX 路径,排序(90 篇第 18 条与第 4 章布局表)。
-        backend 取 "stand-in"、"starling-inprocess"(第 2、3 步的过渡)、"starling" 之一。
+        backend 取 "stand-in" 或 "starling"。
 
         - `deploy/` 直属文件只看四种数据后缀:不是 `<已知情境><本后端的后缀>` 的都报。按完整文件名比允许名单,
           所以 `s1.rec.json` 不会被当成情境 s1 的账本。其余文件(`.lock`、`.tmp`、`-wal`、`-shm` 等)不查。
-        - `seeds/`、`runs/`:除了过渡后端(训练世界仍在进程内)都报目录本身,不展开里面的文件。
+        - `seeds/`、`runs/`:两个后端都报目录本身,不展开里面的文件(接服务后种子与 rollout 世界都在服务里)。
         - `snapshots/*/` 下的 `.db`、`.world` 与不带 `.rec` 的 `deploy-*.json`:三个后端都报。记录与 `verify/` 目录合法。
-        - `held/`、`replay/` 下的 `.db`:服务后端逐个文件报(第 2、3 步过渡留下的);其余后端与其余文件不查。
+        - `held/`、`replay/` 下的 `.db`:Starling 逐个文件报(进程内时期留下的);替身的 `.json` 与其余文件不查。
         - 服务文件(`service*`、`.owner`)不查。
 
         读不出的在途记录不在这里报,由组合根逐份 `read_record` 报。"""
@@ -186,8 +186,7 @@ class MemoryLayout:
         if deploy.is_dir():
             found += (p for p in deploy.iterdir()
                       if p.is_file() and p.name.endswith(_DATA_SUFFIXES) and p.name not in allowed)
-        if backend != "starling-inprocess":
-            found += (p for p in (self.root / "seeds", self.root / "runs") if os.path.lexists(p))
+        found += (p for p in (self.root / "seeds", self.root / "runs") if os.path.lexists(p))
         base = self.root / "snapshots"
         if base.is_dir():
             for d in base.iterdir():

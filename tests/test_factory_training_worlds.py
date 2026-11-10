@@ -1,6 +1,8 @@
 """训练 rollout 世界(设计 5.1、5.2、6.3 节):一条 rollout 一个世界,训练位与对手位都是世界里的主体。
-客户端建世界、开训练位端口;服务端按 episode id 加入、开对手位端口;客户端等服务端端口关完才删世界,
-等不到就留在保留表里,同名重试判瞬态。替身与 Starling 两个实现过同一套契约。"""
+客户端建世界、开训练位端口;服务端按 episode id 加入、开对手位端口;客户端等服务端端口关完才收尾世界(替身删,
+Starling 只关),等不到就留在保留表里,同名重试判瞬态。替身与 Starling 两个实现过同一套契约。
+
+Starling 参数连模块级共用的真 starling-serve,每条用例一个世界前缀;rollout 世界从空种子分叉(90 篇分叉的命名与重试表)。"""
 from __future__ import annotations
 
 import logging
@@ -13,7 +15,7 @@ import pytest
 
 from simple_actio.memory import TupleMemory
 from simple_actio.memory_port import MemoryClosedError, MemoryEvent, MemoryFailureError
-from factory.memory_runtime import StandInTrainingWorlds, StarlingLayout
+from factory.memory_runtime import StandInTrainingWorlds
 
 EP = "run-1-grpo0-s1-r0"
 EV = MemoryEvent(f"{EP}#1@pa", "pb：我担心预算超支", "pb")
@@ -23,34 +25,68 @@ EV = MemoryEvent(f"{EP}#1@pa", "pb：我担心预算超支", "pb")
 class Case:
     worlds: object
     start: str                       # 这个 run 的 rollout 世界的起点摘要
-    layout: StarlingLayout | None    # 只有 Starling 有
+    session: object | None           # 只有 Starling 有
     fake: object | None
 
 
+@pytest.fixture(scope="module")
+def service(tmp_path_factory):
+    pytest.importorskip("starling_client"); pytest.importorskip("starling.service")
+    from starling_service import start_service
+
+    proc = start_service(tmp_path_factory.mktemp("svc"))
+    yield proc
+    proc.kill()
+
+
+@pytest.fixture
+def starling_worlds(service, tmp_path):
+    """`make(prefix=None, admin_wrap=None, **kw)` 在真服务上造会话、空种子与 `StarlingTrainingWorlds`,并 `bind("run-1", None)`;
+    返回 `(worlds, session, admin)`。`admin_wrap` 给了就用它包住会话的管理调用、交给世界,`admin` 是包好的那个
+    (没给就是 `session.admin`)。同名重试等保留世界的期限压到 0.1 秒。"""
+    from factory import starling_names
+    from factory.memory_runtime import StarlingTrainingWorlds
+    from simple_actio.memory_starling import ensure_empty_seed
+    from starling_fakes import FakeOpenAI
+    from starling_service import fake_memory_config, open_session, unique_prefix
+
+    made = []
+    fake = FakeOpenAI(dim=256).start()
+
+    def make(prefix=None, admin_wrap=None, **kw):
+        session = open_session(service)
+        made.append(session)
+        prefix = prefix or unique_prefix()
+        root = tmp_path / "mem"
+        label = starling_names.root_label(root)
+        settings = starling_names.rise_settings(fake_memory_config(fake, root))
+        seed = ensure_empty_seed(session, names=starling_names, prefix=prefix, root_label=label, settings=settings)
+        admin = admin_wrap(session) if admin_wrap is not None else session.admin
+        kw.setdefault("close_timeout_s", 0.2)
+        kw.setdefault("held_wait_s", 0.1)
+        worlds = StarlingTrainingWorlds(session, prefix=prefix, root_label=label, settings=settings,
+                                        empty_seed=seed, admin=admin, **kw)
+        worlds.bind("run-1", None)
+        return worlds, session, admin
+
+    make.fake = fake
+    yield make
+    for session in made:
+        session.close()
+    fake.stop()
+
+
 @pytest.fixture(params=["stand-in", "starling"])
-def case(request, tmp_path):
-    """run-1 已绑定。替身从空世界起;Starling 绑种子 s1,情境 s1 的种子世界里有 pa 的一条记忆,
-    所以"复制了种子"和"建了空库"分得开。同名重试等保留世界的期限压到 0.1 秒,省得撞保留表的用例真等 70 秒。"""
+def case(request):
+    """run-1 已绑定,从空世界起。同名重试等保留世界的期限压到 0.1 秒,省得撞保留表的用例真等 70 秒。"""
     if request.param == "stand-in":
         worlds = StandInTrainingWorlds(held_wait_s=0.1)
         worlds.bind("run-1", None)
         yield Case(worlds, TupleMemory().digest(), None, None)
         return
-    pytest.importorskip("starling")
-    from simple_actio.memory_starling import StarlingDeploymentStore, empty_digest
-    from factory.memory_runtime import StarlingTrainingWorlds
-    from starling_fakes import FakeOpenAI, offline_api_key
-
-    with FakeOpenAI(dim=256) as fake, offline_api_key():
-        layout = StarlingLayout(tmp_path / "mem")
-        seeds = StarlingDeploymentStore(layout.seed_dir("s1"), held_root=tmp_path / "held",     # 建种子不拍快照,两个根不建
-                                        replay_root=tmp_path / "replay", endpoints=fake.endpoints())
-        seeds.remember_event("s1", "pa", "seed#0@pa", "pb：人手也不够", interlocutor="pb")
-        seeded = seeds.digest("s1")
-        assert seeded != empty_digest()
-        worlds = StarlingTrainingWorlds(layout, fake.endpoints(), close_timeout_s=0.2, held_wait_s=0.1)
-        worlds.bind("run-1", "s1")
-        yield Case(worlds, seeded, layout, fake)
+    make = request.getfixturevalue("starling_worlds")
+    worlds, session, _ = make()
+    yield Case(worlds, worlds.empty_seed[1], session, make.fake)
 
 
 @pytest.fixture
@@ -163,8 +199,6 @@ def test_a_world_kept_after_the_wait_is_logged_by_its_episode_id_only(case, capl
     with caplog.at_level(logging.WARNING, logger="factory.memory_runtime"):
         assert worlds.close_rollout(EP, [a], wait_s=0.05) is False
     assert EP in caplog.text and "kept" in caplog.text
-    if case.layout is not None:
-        assert str(case.layout.root) not in caplog.text
     worlds.release_session(EP, [b])
 
 
@@ -229,9 +263,8 @@ def test_closing_a_rollout_that_was_never_opened_is_fine(worlds):
 
 # ---------------- 替身 ----------------
 
-def test_the_stand_in_sweeps_nothing_and_refuses_a_seed():
+def test_the_stand_in_refuses_a_seed():
     worlds = StandInTrainingWorlds()
-    assert worlds.sweep() == 0
     worlds.bind("run-1", "s1")
     with pytest.raises(MemoryFailureError) as caught:
         worlds.open_rollout("run-1", "s1", EP, "pa")
@@ -242,149 +275,157 @@ def test_the_stand_in_sweeps_nothing_and_refuses_a_seed():
 
 # ---------------- Starling ----------------
 
-@pytest.fixture
-def starling(case):
-    if case.layout is None:
-        pytest.skip("Starling only")
-    return case
+def _errors():
+    from starling_client import errors
+    return errors
 
 
-def test_the_rollout_world_is_one_file_under_runs_and_goes_after_close(starling):
-    worlds, layout = starling.worlds, starling.layout
-    a = worlds.open_rollout("run-1", "s1", EP, "pa")
-    path = layout.rollout_world("run-1", EP)
-    assert path == layout.root / "runs" / "run-1" / f"{EP}.db" and path.exists()
-    assert worlds.close_rollout(EP, [a], wait_s=1.0) is True
-    assert sorted(p.name for p in path.parent.iterdir()) == []      # 连 -wal、-shm 一起删
+class TimeoutOnceAfterCreating:
+    """fork 在服务端照常做完,第一次却对客户端抛 service_timeout(超时发生在响应回来之前)。"""
+
+    def __init__(self, session):
+        self.session, self.fired, self.names = session, False, []
+
+    def __call__(self, op, body):
+        out = self.session.admin(op, body)
+        if op == "fork":
+            self.names.append(body["name"])
+            if not self.fired:
+                self.fired = True
+                raise _errors().ServiceTimeout("service request timed out")
+        return out
 
 
-def test_a_scenario_without_a_seed_file_starts_empty(starling):
-    from simple_actio.memory_starling import empty_digest
-    a = starling.worlds.open_rollout("run-1", "s2", "run-1-grpo0-s2-r0", "pa")
-    assert a.digest() == empty_digest()
-    starling.worlds.close_rollout("run-1-grpo0-s2-r0", [a], wait_s=1.0)
+def _rollouts(session, prefix):
+    return session.admin("list_worlds", {"labels": {"repo": prefix, "kind": "rollout"}, "page": 1, "page_size": 50,
+                                         "with_digest": True})["worlds"]
 
 
-def test_a_read_only_seed_is_still_copied_and_stays_untouched(starling):
-    """种子只读:从种子取世界用文件复制,不经 backup_to(它要在种子上建 -wal、-shm、跑迁移,只读时失败)。"""
-    worlds, layout = starling.worlds, starling.layout
-    seed, seed_dir = layout.seed("s1", "s1"), layout.seed_dir("s1")
-    before, mtime = seed.read_bytes(), seed.stat().st_mtime_ns
-    names = sorted(p.name for p in seed_dir.iterdir())
-    os.chmod(seed, 0o444)
-    os.chmod(seed_dir, 0o555)
-    try:
-        port = worlds.open_rollout("run-1", "s1", EP, "pa")
-        try:
-            assert port.digest() == starling.start
-        finally:
-            worlds.close_rollout(EP, [port], wait_s=1.0)
-        assert sorted(p.name for p in seed_dir.iterdir()) == names   # 种子旁没多出东西
-    finally:
-        os.chmod(seed_dir, 0o755)                                   # 不改回来 tmp_path 清理会失败
-        os.chmod(seed, 0o644)
-    assert seed.read_bytes() == before and seed.stat().st_mtime_ns == mtime
+def test_a_fork_that_timed_out_after_creating_its_world_is_reused_by_exact_name(starling_worlds):
+    worlds, session, admin = starling_worlds(admin_wrap=TimeoutOnceAfterCreating)
+    port = worlds.open_rollout("run-1", "s1", "run-1-grpo1-s1-r1", "pa")
+    assert len(admin.names) == 1 and port._remote.world == admin.names[0]          # 只分叉一次
+    assert [w["name"] for w in _rollouts(session, worlds.prefix)] == admin.names
+    worlds.close_rollout("run-1-grpo1-s1-r1", [port])
 
 
-def test_a_world_that_cannot_be_made_is_a_permanent_failure_and_leaves_nothing(starling, monkeypatch):
-    """磁盘满、权限不够:复制抛的 OSError 译成非瞬态,文字只含类名;不留半建的文件,也不占表项。"""
-    worlds, layout = starling.worlds, starling.layout
+def test_a_world_found_by_name_with_another_digest_is_not_reused(starling_worlds):
+    def wrap(session):
+        inner = TimeoutOnceAfterCreating(session)
 
-    def full(src, dst):
-        dst.write_bytes(b"half")
-        raise OSError(28, "No space left on device")
+        def written_meanwhile(op, body):
+            out = inner(op, body)
+            if op == "list_worlds":
+                for item in out["worlds"]:
+                    item["digest"] = "f" * 64                              # 这个名字的世界已有别的内容
+            return out
 
-    monkeypatch.setattr("simple_actio.memory_starling.copy_library", full)
-    with pytest.raises(MemoryFailureError) as caught:
+        written_meanwhile.names = inner.names
+        return written_meanwhile
+
+    worlds, session, admin = starling_worlds(admin_wrap=wrap)
+    port = worlds.open_rollout("run-1", "s1", "run-1-grpo1-s1-r1", "pa")
+    assert len(admin.names) == 2 and port._remote.world == admin.names[1]          # 换后缀重建
+    worlds.close_rollout("run-1-grpo1-s1-r1", [port])
+
+
+def test_a_previous_processs_world_for_the_same_episode_is_never_claimed(starling_worlds):
+    worlds, session, admin = starling_worlds(admin_wrap=TimeoutOnceAfterCreating)
+    old, _, _ = starling_worlds(prefix=worlds.prefix)                    # 上一个进程:同 episode,attempt=1
+    left = old.open_rollout("run-1", "s1", "run-1-grpo1-s1-r1", "pa")
+    left.remember(MemoryEvent("run-1-grpo1-s1-r1#0@pa", "pb：上一个进程写的", "pb"))
+    left.close()
+    port = worlds.open_rollout("run-1", "s1", "run-1-grpo1-s1-r1", "pa")
+    assert port._remote.world != left._remote.world and port.digest() == worlds.empty_seed[1]
+    worlds.close_rollout("run-1-grpo1-s1-r1", [port])
+
+
+def test_world_exists_takes_another_suffix_up_to_three_times(starling_worlds, monkeypatch):
+    from factory import starling_names
+    worlds, session, _ = starling_worlds()
+    taken = starling_names.rollout_world(worlds.prefix, EP, "0" * 8)
+    session.admin("fork", {"source": worlds.empty_seed[0], "name": taken, "labels": {"repo": "other"},
+                           "reclaimable": True, "settings": worlds._settings})
+    suffixes = iter(["0" * 8, "0" * 8, "1" * 8])
+    monkeypatch.setattr(starling_names, "new_suffix", lambda: next(suffixes))
+    port = worlds.open_rollout("run-1", "s1", EP, "pa")
+    assert port._remote.world == starling_names.rollout_world(worlds.prefix, EP, "1" * 8)
+    worlds.close_rollout(EP, [port])
+    monkeypatch.setattr(starling_names, "new_suffix", lambda: "0" * 8)       # 每次都撞上同一个名字
+    with pytest.raises(MemoryFailureError, match="fork failed 3 times") as info:
         worlds.open_rollout("run-1", "s1", EP, "pa")
-    assert caught.value.transient is False and "OSError" in str(caught.value)
-    assert "No space" not in str(caught.value) and str(layout.root) not in str(caught.value)
-    assert not layout.rollout_world("run-1", EP).exists()
-    monkeypatch.undo()
-    port = worlds.open_rollout("run-1", "s1", EP, "pa")             # 表里没留下它
-    assert worlds.close_rollout(EP, [port], wait_s=1.0) is True
+    assert info.value.transient is False
 
 
-def test_a_failed_removal_is_logged_and_the_retry_recreates_the_world(starling, caplog, monkeypatch):
-    worlds, layout = starling.worlds, starling.layout
-    a = worlds.open_rollout("run-1", "s1", EP, "pa")
-    a.remember(EV)
+def test_closing_a_rollout_only_closes_its_world_with_rise_labels(starling_worlds):
+    worlds, session, _ = starling_worlds()
+    port = worlds.open_rollout("run-1", "s1", "run-1-grpo1-s1-r1", "pa")
+    name = port._remote.world
+    assert worlds.close_rollout("run-1-grpo1-s1-r1", [port]) is True
+    (item,) = [w for w in _rollouts(session, worlds.prefix) if w["name"] == name]
+    assert item["reclaimable"] is True and item["retention_group"] == "run-1" and item["status"] == "closed"
+    assert item["labels"] == {"repo": worlds.prefix, "root": worlds._root_label, "kind": "rollout",
+                              "run_id": "run-1", "scenario_id": "s1", "episode_id": "run-1-grpo1-s1-r1",
+                              "seed_id": "", "attempt": "1"}                # 世界还在,只是关了
 
-    def refuse(path):
-        raise OSError(f"cannot remove {path}")
 
-    monkeypatch.setattr("factory.memory_runtime._remove_library", refuse)
+def test_a_close_world_failure_is_only_a_warning_naming_the_world(starling_worlds, caplog):
+    def wrap(session):
+        def refuse_close(op, body):
+            if op == "close_world":
+                raise _errors().WorldError("world_busy", code="world_busy", transient=True)
+            return session.admin(op, body)
+        return refuse_close
+
+    worlds, _, _ = starling_worlds(admin_wrap=wrap)
+    port = worlds.open_rollout("run-1", "s1", EP, "pa")
+    name = port._remote.world
     with caplog.at_level(logging.WARNING, logger="factory.memory_runtime"):
-        assert worlds.close_rollout(EP, [a], wait_s=1.0) is False
-    assert EP in caplog.text and "OSError" in caplog.text and str(layout.root) not in caplog.text
-    assert layout.rollout_world("run-1", EP).exists()
-    monkeypatch.undo()
-    again = worlds.open_rollout("run-1", "s1", EP, "pa")             # 端口都关上了:不在保留表里
-    assert again.digest() == starling.start
-    assert worlds.close_rollout(EP, [again], wait_s=1.0) is True
+        assert worlds.close_rollout(EP, [port], wait_s=1.0) is True
+    assert name in caplog.text and "world_busy" in caplog.text
 
 
-def test_a_client_port_whose_starling_call_has_not_returned_holds_the_world(starling):
-    """close(timeout) 等不到在途调用:端口不算关上,世界不删、留在保留表里,同名重试判瞬态;
+def test_a_kept_world_is_logged_with_its_physical_name(starling_worlds, caplog):
+    worlds, _, _ = starling_worlds()
+    a = worlds.open_rollout("run-1", "s1", EP, "pa")
+    b = worlds.join_rollout(EP, "pb")
+    with caplog.at_level(logging.WARNING, logger="factory.memory_runtime"):
+        assert worlds.close_rollout(EP, [a], wait_s=0.05) is False
+    assert f"{EP} (world {a._remote.world}) kept" in caplog.text
+    worlds.release_session(EP, [b])
+
+
+def test_a_seeded_run_is_refused_until_step_5(starling_worlds):
+    worlds, _, _ = starling_worlds()
+    worlds.bind("run-2", "k")
+    with pytest.raises(MemoryFailureError) as info:
+        worlds.open_rollout("run-2", "s1", "run-2-grpo1-s1-r1", "pa")
+    assert info.value.transient is False
+
+
+def test_a_client_port_whose_call_has_not_returned_holds_the_world(starling_worlds):
+    """close(timeout) 等不到在途调用:端口不算关上,世界留在保留表里,同名重试判瞬态;
     调用返回后再关一次端口,计数归零,重试从起点重建。"""
-    worlds, layout, fake = starling.worlds, starling.layout, starling.fake
+    worlds, _, _ = starling_worlds()
+    fake = starling_worlds.fake
     a = worlds.open_rollout("run-1", "s1", EP, "pa")
     fake.chat_delay_s = 1.0
     t = threading.Thread(target=a.remember, args=(EV,))
     t.start()
-    fake.wait_for_chat_call(timeout_s=2)
-    with pytest.raises(MemoryFailureError):
-        worlds.close_rollout(EP, [a], wait_s=3.0)
-    with pytest.raises(MemoryFailureError) as held:
-        worlds.open_rollout("run-1", "s1", EP, "pa")
-    assert held.value.transient is True and layout.rollout_world("run-1", EP).exists()
-    t.join()
-    fake.chat_delay_s = 0.0
+    try:
+        fake.wait_for_chat_call(timeout_s=5)
+        with pytest.raises(MemoryFailureError):
+            worlds.close_rollout(EP, [a], wait_s=3.0)
+        with pytest.raises(MemoryFailureError) as held:
+            worlds.open_rollout("run-1", "s1", EP, "pa")
+        assert held.value.transient is True
+    finally:
+        t.join()
+        fake.chat_delay_s = 0.0
     a.close()
     again = worlds.open_rollout("run-1", "s1", EP, "pa")
-    assert again.digest() == starling.start
+    assert again.digest() == worlds.empty_seed[1] and again._remote.world != a._remote.world
     assert worlds.close_rollout(EP, [again], wait_s=1.0) is True
-
-
-def test_sweep_only_empties_runs(starling):
-    worlds, layout = starling.worlds, starling.layout
-    worlds.open_rollout("run-1", "s1", EP, "pa").close()             # 没走 close_rollout:像崩溃留下的
-    (layout.root / "snapshots" / "r1").mkdir(parents=True)
-    assert worlds.sweep() == 1
-    assert list(layout.runs_dir().iterdir()) == []
-    assert layout.seed_dir("s1").exists() and (layout.root / "snapshots" / "r1").exists()
-
-
-def test_sweep_with_no_runs_directory_removes_nothing(starling):
-    assert not starling.layout.runs_dir().exists() and starling.worlds.sweep() == 0
-
-
-def test_sweep_unlinks_a_symlink_and_never_follows_it(starling, tmp_path):
-    """Python 3.14 的 shutil.rmtree 对符号链接抛 OSError;跟着链接删更会删到 runs/ 之外。"""
-    worlds, layout = starling.worlds, starling.layout
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    (outside / "keep.txt").write_text("keep")
-    layout.runs_dir().mkdir(parents=True)
-    (layout.runs_dir() / "run-link").symlink_to(outside, target_is_directory=True)
-    (layout.runs_dir() / "stray.txt").write_text("stray")
-    assert worlds.sweep() == 2
-    assert list(layout.runs_dir().iterdir()) == []
-    assert outside.is_dir() and (outside / "keep.txt").read_text() == "keep"
-
-
-def test_sweep_refuses_a_runs_directory_that_is_itself_a_symlink(starling, tmp_path):
-    """runs/ 本身是指向别处的符号链接时,遍历会跟进去,启动一次就清空那个目录。"""
-    worlds, layout = starling.worlds, starling.layout
-    outside = tmp_path / "outside"
-    (outside / "sub").mkdir(parents=True)
-    (outside / "keep.txt").write_text("keep")
-    layout.runs_dir().symlink_to(outside, target_is_directory=True)
-    with pytest.raises(MemoryFailureError, match="symlink") as caught:
-        worlds.sweep()
-    assert caught.value.transient is False
-    assert (outside / "keep.txt").read_text() == "keep" and (outside / "sub").is_dir()
-    assert layout.runs_dir().is_symlink()
 
 
 # ---------------- 接到运行时上 ----------------
