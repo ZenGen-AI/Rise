@@ -2359,19 +2359,19 @@ git commit -m "feat(factory): bind 收解出的起点摘要并按它钉住种子
 - Modify: `docs/design/00-overview.md`、`20-socialsimulator.md`、`30-mindtrainer.md`、`40-simple-actio.md`、`50-mindagent.md`、`90-factory-and-cli.md`、`docs/design/_shared/context-block.md`（若有接服务的内容）
 - Modify: 本计划（勾选；「已定」一节里的哪条在施工中有偏差就照实改写）
 
-- [ ] **Step 1: 跑全量**
+- [x] **Step 1: 跑全量**
 
 Run: `uv run --offline pytest -q -m 'not slow' -p no:cacheprovider`
 Expected: 0 failed；另跑 `uv run --offline pytest -q -rs -m 'not slow' -p no:cacheprovider 2>&1 | grep -i "starling_client\|starling.service"`，期望空输出（没有因为没装客户端或服务端而跳过的用例）
 
-- [ ] **Step 2: 改文档状态**：Task 1 至 19 落地的每一行，[计划中] 改 [已落地]；"今天……[已落地]；接服务后……[计划中]"的成对写法改成只写现在的行为（`STYLE.md`：现在时、不写评审过程）。被取代的旧决策（SYS-27、FC-27、FC-35、MA-16 等里"按路径打开库""启动清扫 `runs/`""`record:` 安装来源"）改成"已由 X 取代"。00 篇施工表六行标 [已落地]；风险 32、37 已在 Task 1 改过，其余风险（28 至 31、33 至 36）仍 [计划中]，不动。90 篇第 9 章测试表"记忆服务（接服务后）"一行填实测的文件与用例数（`uv run --offline pytest --collect-only -q <文件> | tail -1`），"新增测试文件，施工计划定"改成实际文件名：`tests/test_factory_starling_names.py`、`tests/test_factory_starling_service.py`、`tests/test_factory_starling_session.py`、`tests/test_simple_actio_client_errors.py`、`tests/test_factory_seed.py`、`tests/test_factory_seed_pinning.py`、`tests/test_starling_service_fixture.py`。90 篇模块表"记忆服务的新模块（接服务后）"一行换成三行：`factory.starling_names`、`factory.starling_service`、`factory.starling_session`，各写导出与依赖（照本计划 Task 9、11、12 的 Interfaces）。
+- [x] **Step 2: 改文档状态**：Task 1 至 19 落地的每一行，[计划中] 改 [已落地]；"今天……[已落地]；接服务后……[计划中]"的成对写法改成只写现在的行为（`STYLE.md`：现在时、不写评审过程）。被取代的旧决策（SYS-27、FC-27、FC-35、MA-16 等里"按路径打开库""启动清扫 `runs/`""`record:` 安装来源"）改成"已由 X 取代"。00 篇施工表六行标 [已落地]；风险 32、37 已在 Task 1 改过，其余风险（28 至 31、33 至 36）仍 [计划中]，不动。90 篇第 9 章测试表"记忆服务（接服务后）"一行填实测的文件与用例数（`uv run --offline pytest --collect-only -q <文件> | tail -1`），"新增测试文件，施工计划定"改成实际文件名：`tests/test_factory_starling_names.py`、`tests/test_factory_starling_service.py`、`tests/test_factory_starling_session.py`、`tests/test_simple_actio_client_errors.py`、`tests/test_factory_seed.py`、`tests/test_factory_seed_pinning.py`、`tests/test_starling_service_fixture.py`。90 篇模块表"记忆服务的新模块（接服务后）"一行换成三行：`factory.starling_names`、`factory.starling_service`、`factory.starling_session`，各写导出与依赖（照本计划 Task 9、11、12 的 Interfaces）。
 
-- [ ] **Step 3: 跑文档检查**
+- [x] **Step 3: 跑文档检查**
 
 Run: `python3 docs/design/tools/sync_docs.py && python3 docs/design/tools/check_docs.py && python3 docs/design/tools/check_consistency.py`
 Expected: 三者都是 0 个错误；`ServiceSession`、`fork_replay`、`open_replay`、`PendingKey`、`SnapshotRef` 的符号告警消失
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git add docs/design docs/superpowers/plans/2026-11-10-starling-service-integration.md

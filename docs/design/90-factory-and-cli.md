@@ -1014,6 +1014,7 @@ factory 是第九个工作包,前八个全部落地后才施工。前置关系:1
 | 世界名与 rise 设置 | 五类世界名、超长名字换摘要、标签、rise 设置写出全部叶子 | 无 | `tests/test_factory_starling_names.py` | 9 [已落地] |
 | `factory seed` | 外部与拉起两种模式各跑真服务;世界名、标签与摘要;`--new-version`;多情境按 id 排序;`--snapshot`;在途 episode、世界锁被占、请求不合规、替身、归属锁被占各退出码 2;不取仓库锁、不写树;分叉超时查得到当成功、查不到提示重跑;失败文字不含 token、端点与记忆根 | 真 `starling-serve` 子进程、假抽取与嵌入端点 | `tests/test_factory_seed.py` | 19 [已落地] |
 | 钉住种子版本 | `bind` 钉住解析时那一版,之后建的新版本不换起点;解析器取最新版本,rollout 带 `seed_id` 标签;摘要对不上判永久;没有种子的情境从空种子起;种子落后于 schema 与分叉摘要不符判永久 | 真 `starling-serve` 子进程、假抽取与嵌入端点 | `tests/test_factory_seed_pinning.py` | 8 [已落地] |
+| 真服务夹具 | 测试用的 `starling-serve` 子进程报的提交等于钉住的提交,日志不含 token;服务的 HOME 目录一直为空 | 真 `starling-serve` 子进程 | `tests/test_starling_service_fixture.py` | 2 [已落地] |
 | 世界装配 | 配置在场时,旧布局在每个需要记忆的入口拒绝启动,先于导入 Starling;替身在造部署记忆时拒绝;`agent.yaml` 人格重复退出码 2;部署管理面只造一个,交给轮次处理器、门② 与 `AgentRuntime`;真实服务端上跑一轮部署,对手位写进情境世界 | 临时目录、替身部署世界 | `tests/test_factory_memory_wiring.py`、`tests/test_factory_handlers.py`(见上) | 已计入上表 [已落地] |
 | 转换后端 | 瞬态记忆失败改抛 `FactoryMemoryUnavailableError`,其余改抛 `FactoryMemoryFailureError`,`close` 里的失败按确定性;非记忆异常原样透传;文字只含类名 | 假记忆端口 | `tests/test_factory_memory_translate.py` | 14 [已落地] |
 | 替身路径、部署路与对手包 SimpleActio | `--interact` 一条 run 的训练记录有 `memory` 块、启动日志写 `memory backend: stand-in`、每个对手位是带记忆的 SimpleActio 实例(三种驱动,`ExternalApiBackend` 每个会话新造,`scripted` 台词与未包时逐字相同);部署路的轮次与收录处理器共用同一个替身部署记忆、重装配后根目录仍在 | 本机 HTTP 替身 vLLM、假 serve、替身记忆 | 并在 `tests/test_factory_interact_wire.py`、`tests/test_factory_handlers.py`、`tests/test_factory_interact_e2e.py`(见上) | 已计入上表 [已落地] |
