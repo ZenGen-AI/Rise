@@ -308,7 +308,7 @@ def make_policy_factory(
     外部对手的地址与模型不在这里传:每次进入上下文时从 `store` 里的 training_defaults.yaml 读(见 _opponent_section)。
     opponent_timeout_s 同时是站内 vLLM 对手与外部 API 对手的单次 HTTP 上限。
     training_worlds 必须是 `runtime` 手里的同一个对象(组合根只造一个,替身或 Starling):客户端在这里建 rollout 世界,
-    服务端在运行时里按 episode id 加入它。进入上下文先 bind(run_id, 种子),退出时在注销情境之后 unbind;
+    服务端在运行时里按 episode id 加入它。进入上下文先 bind(run_id, 种子, 起点摘要),退出时在注销情境之后 unbind;
     每条 rollout 一个世界,退出时等服务端端口关完再删(见 policy_for_rollout)。"""
 
     @contextmanager
@@ -390,7 +390,15 @@ def make_policy_factory(
                         training_worlds.close_rollout(episode_id, [backend])
 
                 registered: list[str] = []
-                training_worlds.bind(run_id, cfg.memory["seed"])      # 先绑定再交出 policy_for_rollout:建世界要查种子
+                # 先绑定再交出 policy_for_rollout:建世界要从钉住的种子分叉。digests 是派发器解出的起点摘要,
+                # bind 按它钉住解析时那一版种子。这时还没有训练记录:永久失败(一份种子都对不上)直接判 T2,
+                # 瞬态(服务连不上)延后;不译的话裸异常让指令留 pending 每轮重派。文字只有码、种子 id 与情境 id
+                try:
+                    training_worlds.bind(run_id, cfg.memory["seed"], cfg.memory["digests"])
+                except MemoryFailureError as exc:
+                    if exc.transient:
+                        raise DeferredError(f"directive {run_id}: memory service: {exc}") from None
+                    raise _failed(run_id, exc) from None
                 try:
                     # 先登记再放行第一个会话
                     for sid in cfg.scenario_ids:

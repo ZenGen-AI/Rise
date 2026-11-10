@@ -57,7 +57,7 @@ def test_importing_the_module_does_not_need_the_client():
         f"sys.path.insert(0, {str(SRC)!r})\n"
         "from factory.memory_runtime import StandInTrainingWorlds, StarlingTrainingWorlds, starling_memory_resolver\n"
         "assert 'simple_actio.memory_starling' not in sys.modules\n"
-        "w = StandInTrainingWorlds(); w.bind('r', None)\n"
+        "w = StandInTrainingWorlds(); w.bind('r', None, {})\n"
         "w.close_rollout('e', [w.open_rollout('r', 's1', 'e', 'pa')], wait_s=1.0)\n"
         "print('ok')\n"
     )
@@ -81,7 +81,7 @@ class _Session:
 
 def _resolver(session, runtime=None):
     from factory.memory_runtime import starling_memory_resolver
-    return starling_memory_resolver(session, prefix="rise", empty_seed_world="rise.seed-empty",
+    return starling_memory_resolver(session, prefix="rise", root_label="r" * 16, empty_seed_world="rise.seed-empty",
                                     runtime={"backend": "starling"} if runtime is None else runtime)
 
 
@@ -93,9 +93,61 @@ def test_without_a_seed_every_scenario_starts_from_the_empty_seed_digest():
     assert op == "list_worlds" and body["labels"] == {"repo": "rise", "kind": "seed-empty"} and body["with_digest"]
 
 
-def test_a_seed_is_refused_until_step_5_as_a_readable_t2():
-    with pytest.raises(DirectiveFailedError, match="memory.seed 'k': seeds arrive in step 5") as info:
-        _resolver(_Session())("k", ("t1",))
+class _SeedSession(_Session):
+    """空种子之外,按 `kind=seed` 查时回 `seeds[scenario_id]` 那几项;分页按请求的 page_size 切。"""
+
+    def __init__(self, seeds, **kw):
+        super().__init__(**kw)
+        self.seeds = seeds
+
+    def admin(self, op, body):
+        if body["labels"].get("kind") != "seed":
+            return super().admin(op, body)
+        self.calls.append((op, body))
+        rows = self.seeds.get(body["labels"]["scenario_id"], [])
+        size = body["page_size"]
+        return {"worlds": rows[(body["page"] - 1) * size: body["page"] * size], "total": len(rows)}
+
+
+def _seed_row(version, digest, *, created_at="2026-11-10T00:00:00Z", name=None, seed=True):
+    return {"name": name or f"rise.seed.k.t1.v{version}", "digest": digest, "seed": seed, "created_at": created_at,
+            "labels": {"repo": "rise", "root": "r" * 16, "kind": "seed", "seed_id": "k", "scenario_id": "t1",
+                       "version": str(version)}}
+
+
+def test_a_seed_takes_the_newest_version_per_scenario_and_the_empty_seed_where_there_is_none():
+    session = _SeedSession({"t1": [_seed_row(1, "a" * 64), _seed_row(3, "c" * 64), _seed_row(2, "b" * 64)]})
+    digests, _ = _resolver(session)("k", ("t1", "t2"))
+    assert digests == {"t1": "c" * 64, "t2": "e" * 64}
+    seed_queries = [body for _, body in session.calls if body["labels"].get("kind") == "seed"]
+    assert seed_queries[0]["labels"] == {"repo": "rise", "root": "r" * 16, "kind": "seed", "seed_id": "k",
+                                         "scenario_id": "t1"}
+    assert all(q["with_digest"] and q["page_size"] == 500 for q in seed_queries)
+
+
+def test_same_version_seeds_are_ordered_by_created_at_then_name_and_non_seeds_are_skipped():
+    from factory.memory_runtime import find_seeds
+    rows = [_seed_row(2, "a" * 64, created_at="2026-11-10T00:00:01Z", name="rise.seed.k.t1.v2"),
+            _seed_row(2, "b" * 64, created_at="2026-11-10T00:00:02Z", name="rise.seed.k.t1.v2-up"),
+            _seed_row(2, "c" * 64, created_at="2026-11-10T00:00:02Z", name="rise.seed.k.t1.v2-zz"),
+            _seed_row(5, "d" * 64, seed=False), _seed_row(1, "e" * 64)]
+    rows[-1]["labels"]["version"] = "x"                                  # 版本不是正整数:不是 rise 建的
+    found = find_seeds(_SeedSession({"t1": rows}), prefix="rise", root_label="r" * 16, seed_id="k", scenario_id="t1")
+    assert [w["digest"] for w in found] == ["c" * 64, "b" * 64, "a" * 64]
+
+
+def test_find_seeds_pages_through_every_page():
+    from factory.memory_runtime import find_seeds
+    rows = [_seed_row(v, f"{v:064d}") for v in range(1, 1203)]
+    session = _SeedSession({"t1": rows})
+    found = find_seeds(session, prefix="rise", root_label="r" * 16, seed_id="k", scenario_id="t1")
+    assert len(found) == 1202 and found[0]["labels"]["version"] == "1202"
+    assert [body["page"] for _, body in session.calls] == [1, 2, 3]
+
+
+def test_a_seed_id_with_no_seed_in_any_scenario_is_a_readable_t2():
+    with pytest.raises(DirectiveFailedError, match="memory.seed 'k': no seed world under this id") as info:
+        _resolver(_SeedSession({}))("k", ("t1", "t2"))
     assert info.value.category == "T2"
 
 
@@ -147,7 +199,7 @@ def test_the_resolver_reads_the_empty_seed_on_the_real_service(service, tmp_path
         with FakeOpenAI(dim=256) as fake:
             store = deployment_store(session, fake, tmp_path / "mem" / "deploy")
             from factory.memory_runtime import starling_memory_resolver
-            resolve = starling_memory_resolver(session, prefix=store.prefix,
+            resolve = starling_memory_resolver(session, prefix=store.prefix, root_label=store.root_label,
                                                empty_seed_world=f"{store.prefix}.seed-empty",
                                                runtime={"backend": "starling"})
             assert resolve(None, ("t1",))[0] == {"t1": store.empty_seed_digest}

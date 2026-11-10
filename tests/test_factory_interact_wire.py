@@ -854,21 +854,54 @@ def test_a_rollout_that_raises_still_closes_its_world_and_the_scope_unbinds_on_a
     assert runtime._sessions == {}
 
 
-def test_a_seeded_run_fails_the_trained_slot_as_a_deterministic_memory_failure_until_step_5(
+def test_a_seed_that_cannot_be_pinned_fails_the_directive_before_any_rollout(
         world, tmp_path, stub, starling_training_worlds):
-    from factory.memory_translate import FactoryMemoryFailureError
-
+    """绑了种子而服务上一份对得上解出摘要的种子都没有:bind 永久失败,进上下文就判 T2,不分叉、不登记会话。"""
     worlds, session = starling_training_worlds
+    runtime, _, factory, _ = _unit(world, tmp_path, stub, training_worlds=worlds)
+    memory = {"seed": "s1", "digests": {"t1": "0" * 64, "t2": "0" * 64}, "runtime": {}}
+    with pytest.raises(DirectiveFailedError, match="MemoryFailureError: no seed world of 's1'") as info:
+        with factory(RUN, _cfg(memory=memory)):
+            pytest.fail("the body must not run")
+    assert info.value.category == "T2"
+    assert _open_rollouts(session, worlds.prefix) == {}                 # 没分叉
+    assert runtime._sessions == {}
+    with pytest.raises(KeyError):
+        worlds.seed_of(RUN)
+
+
+class _RecordingWorlds(StandInTrainingWorlds):
+    """记下 bind 收到的三个参数。"""
+
+    def __init__(self):
+        super().__init__()
+        self.bound = []
+
+    def bind(self, run_id, seed, digests):
+        self.bound.append((run_id, seed, dict(digests)))
+        super().bind(run_id, seed, digests)
+
+
+def test_bind_gets_the_digests_the_dispatcher_resolved(world, tmp_path, stub):
+    from memory_fixtures import resolved_memory
+
+    worlds = _RecordingWorlds()
     _, _, factory, _ = _unit(world, tmp_path, stub, training_worlds=worlds)
-    episode = f"{RUN}-grpo0-t1-r0"
-    with factory(RUN, _cfg(memory=unresolved_memory("s1"))) as policy_for_rollout:
-        assert worlds.seed_of(RUN) == "s1"
-        with pytest.raises(FactoryMemoryFailureError):
-            with policy_for_rollout(episode, "t1"):
-                pytest.fail("the body must not run")
-        assert _open_rollouts(session, worlds.prefix) == {}             # 没分叉
-        with pytest.raises(MemoryFailureError):                          # 表里也没留下它
-            worlds.join_rollout(episode, "pb")
+    memory = resolved_memory(["t1", "t2"], digest=TupleMemory().digest())
+    with factory(RUN, _cfg(memory=memory)):
+        assert worlds.bound == [(RUN, None, {"t1": TupleMemory().digest(), "t2": TupleMemory().digest()})]
+
+
+def test_a_transient_failure_while_pinning_defers_the_directive(world, tmp_path, stub):
+    class _Unreachable(StandInTrainingWorlds):
+        def bind(self, run_id, seed, digests):
+            raise MemoryFailureError("starling service_unavailable (ServiceUnavailable)", transient=True)
+
+    _, _, factory, _ = _unit(world, tmp_path, stub, training_worlds=_Unreachable())
+    from controlplane.deferred import DeferredError
+    with pytest.raises(DeferredError, match="service_unavailable"):
+        with factory(RUN, _cfg()):
+            pytest.fail("the body must not run")
 
 
 class _FailingWorlds:
@@ -877,7 +910,7 @@ class _FailingWorlds:
     def __init__(self, exc: Exception) -> None:
         self._exc = exc
 
-    def bind(self, run_id, seed):
+    def bind(self, run_id, seed, digests):
         pass
 
     def unbind(self, run_id):

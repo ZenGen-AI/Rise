@@ -5,7 +5,8 @@
 
 - 替身:每个情境都从空世界起步,没有任何种子世界可用。
 - Starling(`starling_memory_resolver`、`StarlingTrainingWorlds`,按 RISE_MEMORY_CONFIG 装配):经服务会话连记忆服务,
-  世界、快照、分叉都按名字交给服务,rise 不打开库文件。本步只接受 `seed` 为空,起点是空种子 `<前缀>.seed-empty`。
+  世界、快照、分叉都按名字交给服务,rise 不打开库文件。`seed` 为空或某个情境没有种子时,起点是空种子
+  `<前缀>.seed-empty`;否则按标签找种子(`find_seeds`),`bind` 按解出的起点摘要钉住那一版。
 
 训练路的记忆是 rollout 世界(设计 5.1、5.2、6.3 节,`TrainingWorlds`):一条 rollout 一个世界,训练位与对手位都是
 世界里的主体。客户端(`factory.interact_policy` 的 `policy_for_rollout`)建世界并开训练位端口,服务端
@@ -165,13 +166,14 @@ def stand_in_deployment_memory(repo_root: Path) -> DeploymentMemory:
 # ---------------- Starling 那一路 ----------------
 
 def starling_memory_resolver(
-    session, *, prefix: str, empty_seed_world: str, runtime: dict,
+    session, *, prefix: str, root_label: str, empty_seed_world: str, runtime: dict,
 ) -> Callable[[str | None, tuple[str, ...]], tuple[dict[str, str], dict]]:
     """Starling 的 `memory_resolver`:派发器进策略上下文之前调用,给每个情境的起点世界摘要。
 
     - `seed` 为 None:每个情境都从空种子 `<前缀>.seed-empty` 起,摘要每次向服务现取(rollout 世界从它分叉,分叉出的摘要
       与它相等)。
-    - `seed` 非空:本步拒绝,`DirectiveFailedError`(原因写种子 id);按标签找种子在第 5 步。
+    - `seed` 非空:每个情境按标签找种子(`find_seeds`),取版本最大那份的摘要;该情境没有种子就用空种子的摘要。
+      这个 `seed_id` 一个情境都没有种子:`DirectiveFailedError`(30 篇失败表,原因写种子 id)。
     - 服务的瞬态失败(连不上、超时、会话致命)抛 `DeferredError`,派发器原样上抛、指令留 pending(30 篇 MT-32);
       永久失败抛 `MemoryFailureError` 不接,派发器只报类名、判 T2。
 
@@ -182,15 +184,19 @@ def starling_memory_resolver(
     def resolve(seed: str | None, scenario_ids: tuple[str, ...]) -> tuple[dict[str, str], dict]:
         from simple_actio.memory_starling import world_digest
 
-        if seed is not None:
-            raise DirectiveFailedError(f"memory.seed {seed!r:.60}: seeds arrive in step 5")
         try:
             empty = world_digest(session, name=empty_seed_world, labels={"repo": prefix, "kind": "seed-empty"})
+            found = {} if seed is None else {
+                s: find_seeds(session, prefix=prefix, root_label=root_label, seed_id=seed, scenario_id=s)
+                for s in scenario_ids}
         except MemoryFailureError as exc:
             if exc.transient:
                 raise DeferredError(f"memory service: {exc}") from None
             raise
-        return {s: empty for s in scenario_ids}, copy.deepcopy(identity)
+        if seed is not None and not any(found.values()):
+            raise DirectiveFailedError(f"memory.seed {seed!r:.60}: no seed world under this id")
+        return ({s: found[s][0]["digest"] if found.get(s) else empty for s in scenario_ids},
+                copy.deepcopy(identity))
 
     return resolve
 
@@ -220,16 +226,17 @@ def find_seeds(session, *, prefix: str, root_label: str, seed_id: str, scenario_
 class TrainingWorlds(Protocol):
     """训练路的 rollout 世界(设计 5.1、5.2、6.3 节):一条 rollout 一个世界,训练位与对手位都是世界里的主体。
 
-    - `bind(run_id, seed)`、`unbind(run_id)`、`seed_of(run_id)`:训练 run 进入策略上下文时绑定种子 id,退出时解绑。
-    - `open_rollout(run_id, scenario_id, episode_id, holder)`:客户端建世界(先删后建,从这个 run 的种子里该情境的
-      种子世界复制起点,没有就是空世界),登记进 `episode_id → 世界` 表,开训练位主体的端口。同名世界在保留表里
+    - `bind(run_id, seed, digests)`、`unbind(run_id)`、`seed_of(run_id)`:训练 run 进入策略上下文时绑定种子 id 与派发器
+      解出的起点摘要 `memory.digests`(按情境),退出时解绑。Starling 按摘要为每个情境钉住一份种子;替身只存不用。
+    - `open_rollout(run_id, scenario_id, episode_id, holder)`:客户端建世界(替身是空世界;Starling 从钉住的种子分叉),
+      登记进 `episode_id → 世界` 表,开训练位主体的端口。同名世界在保留表里
       (服务端端口没关上)时先有界等它的端口关上(默认 70 秒),仍没关上才抛瞬态 `MemoryFailureError`。
     - `join_rollout(episode_id, holder)`:服务端在已登记的世界里开对手位主体的端口;表里没有抛非瞬态 `MemoryFailureError`。
     - `release_session(episode_id, ports)`:服务端在会话终态关自己的端口。
     - `close_rollout(episode_id, ports, *, wait_s)`:客户端关训练位端口,等服务端端口关完,删(替身)或关(Starling)世界、
       摘表项,返回真;等不到就把世界移进保留表、记 warning、返回假,不抛。"""
 
-    def bind(self, run_id: str, seed: str | None) -> None: ...
+    def bind(self, run_id: str, seed: str | None, digests: Mapping[str, str]) -> None: ...
 
     def unbind(self, run_id: str) -> None: ...
 
@@ -286,28 +293,42 @@ class _RolloutWorlds:
     def __init__(self, *, held_wait_s: float = SESSION_CLOSE_WAIT_S) -> None:
         self._lock = threading.Lock()
         self._seeds: dict[str, str | None] = {}
+        self._pins: dict[str, dict[str, tuple[str, str]]] = {}     # run_id → {scenario_id: (起点世界名, 摘要)}
         self._worlds: dict[str, _World] = {}
         self._held: dict[str, _World] = {}
         self.held_wait_s = held_wait_s          # open_rollout 等保留世界端口关上的期限;测试传小值
 
     # ---- 绑定表 ----
 
-    def bind(self, run_id: str, seed: str | None) -> None:
-        """记下这个 run 的种子 id(None 即从空世界起)。同 run 再绑则覆盖。"""
+    def bind(self, run_id: str, seed: str | None, digests: Mapping[str, str]) -> None:
+        """记下这个 run 的种子 id(None 即从空世界起)与起点摘要。同 run 再绑则覆盖。子类的 `_pin` 先算出每个情境
+        钉住的起点,失败时整个不绑(表里没有这个 run)。"""
+        pins = self._pin(run_id, seed, dict(digests))
         with self._lock:
             self._seeds[run_id] = seed
+            self._pins[run_id] = pins
 
     def unbind(self, run_id: str) -> None:
         """没绑过也不报错。已经开出的世界不受影响,各自随 rollout 的终态删除。"""
         with self._lock:
             self._seeds.pop(run_id, None)
+            self._pins.pop(run_id, None)
 
     def seed_of(self, run_id: str) -> str | None:
         """没绑定抛 `KeyError`:策略上下文还没进入,或者已经退出。"""
         with self._lock:
             return self._seeds[run_id]
 
+    def _pinned(self, run_id: str, scenario_id: str) -> tuple[str, str] | None:
+        """这个 run 为该情境钉住的 `(起点世界名, 摘要)`;没钉(替身,或 bind 时没给这个情境)返回 None。"""
+        with self._lock:
+            return self._pins.get(run_id, {}).get(scenario_id)
+
     # ---- 子类实现 ----
+
+    def _pin(self, run_id: str, seed: str | None, digests: dict[str, str]) -> dict[str, tuple[str, str]]:
+        """bind 时为每个情境定下起点;缺省不钉。"""
+        return {}
 
     def _create(self, run_id: str, scenario_id: str, episode_id: str, seed: str | None) -> object:
         raise NotImplementedError
@@ -493,7 +514,7 @@ class _CountedPort:
 class StandInTrainingWorlds(_RolloutWorlds):
     """替身的 rollout 世界(设计 5.1 节):每条 rollout 一份内存里的 `TupleMemory`,各主体经 `world(holder)` 在同一份
     账本上开视图,不落盘,删世界就是摘表项。起点是空世界:替身不支持种子,绑了种子的 run 开世界时抛非瞬态
-    `MemoryFailureError`(派发器的替身解析器早已拒绝过种子,走不到这里)。"""
+    `MemoryFailureError`(派发器的替身解析器早已拒绝过种子,走不到这里)。`bind` 收到的起点摘要不用:起点恒是空世界。"""
 
     def _create(self, run_id: str, scenario_id: str, episode_id: str, seed: str | None) -> TupleMemory:
         if seed is not None:
@@ -516,10 +537,14 @@ class StarlingTrainingWorlds(_RolloutWorlds):
     `<前缀>.ro.<episode_id>.<后缀>`,`retention_group` 是 run id,传完整的 rise 设置;各主体在当前服务会话里开句柄。
     rollout 收尾只关世界不删(客户端没有删世界的接口),可回收世界留给 Starling 清理,所以没有启动清扫。
 
-    本步只接受 `seed` 为空:起点是空种子 `empty_seed = (世界名, 摘要)`,绑了种子的 run 开世界时抛永久失败;按种子分叉在第 5 步。
+    起点(`bind` 时钉住,`_pin`):`seed` 为 None 时每个情境是空种子 `empty_seed = (世界名, 摘要)`;否则每个情境在
+    `find_seeds` 的结果里取摘要等于派发器解出的 `digests[sid]` 的版本最大的那份,钉住它的世界名与摘要。解析之后有人
+    `factory seed --new-version` 建了新版本,在跑的 run 也不换起点。该情境没有对得上的种子而 `digests[sid]` 等于空种子摘要
+    时钉空种子;一份都对不上判永久失败,不绑。
 
-    分叉(`_create`):调用之前定下 8 位后缀与确切世界名,`attempt` 标签在进程内按 episode id 从 1 递增,只给人看。
-    - 成功:返回摘要不等于起点摘要判永久;否则用它。
+    分叉(`_create`):从钉住的起点分叉。调用之前定下 8 位后缀与确切世界名,`attempt` 标签在进程内按 episode id 从 1 递增,只给人看。
+    - 成功:返回摘要不等于钉住的摘要判永久(第二道);否则用它。
+    - `world_schema_behind`:种子落后于当前 schema,判永久,原因写"在看板里升级种子"。
     - `world_exists`:换后缀重试,至多 `FORK_ATTEMPTS` 次。
     - `service_timeout`:服务端可能已经建好了。按确切世界名查 `list_worlds`(`repo`、`root`、`kind=rollout`、`episode_id`
       标签,带摘要),查到且摘要等于起点摘要才用,否则换后缀重建。不按 `(episode_id, attempt)` 认:续训重跑同一 step 时
@@ -565,19 +590,38 @@ class StarlingTrainingWorlds(_RolloutWorlds):
         rows = list_all_worlds(_Admin(self._call), labels, with_digest=True)
         return any(w.get("name") == name and w.get("digest") == digest for w in rows)
 
+    def _pin(self, run_id: str, seed: str | None, digests: dict[str, str]) -> dict[str, tuple[str, str]]:
+        if seed is None:
+            return {sid: self.empty_seed for sid in digests}
+        pins: dict[str, tuple[str, str]] = {}
+        for sid in sorted(digests):
+            rows = find_seeds(_Admin(self._call), prefix=self.prefix, root_label=self._root_label, seed_id=seed,
+                              scenario_id=sid)
+            match = next((w for w in rows if w.get("digest") == digests[sid]), None)      # 已按版本降序
+            if match is not None:
+                pins[sid] = (match["name"], match["digest"])
+            elif digests[sid] == self.empty_seed[1]:
+                pins[sid] = self.empty_seed
+            else:
+                raise MemoryFailureError(
+                    f"no seed world of {seed!r:.60} for scenario {sid} has the resolved start digest", transient=False)
+        return pins
+
     def _create(self, run_id: str, scenario_id: str, episode_id: str, seed: str | None) -> str:
         from factory import starling_names
 
-        if seed is not None:
-            raise MemoryFailureError("seeded rollouts arrive in step 5", transient=False)
-        source, start = self.empty_seed
+        pin = self._pinned(run_id, scenario_id)
+        if pin is None and seed is not None:
+            raise MemoryFailureError(f"rollout world for {episode_id}: scenario {scenario_id} has no pinned seed",
+                                     transient=False)
+        source, start = self.empty_seed if pin is None else pin
         for _ in range(FORK_ATTEMPTS):
             name = starling_names.rollout_world(self.prefix, episode_id, starling_names.new_suffix())
             attempt = self._next_attempt(episode_id)
             body = {"source": source, "name": name, "snapshot_id": None,
                     "labels": starling_names.labels(self.prefix, self._root_label, "rollout", run_id=run_id,
-                                                    scenario_id=scenario_id, episode_id=episode_id, seed_id="",
-                                                    attempt=str(attempt)),
+                                                    scenario_id=scenario_id, episode_id=episode_id,
+                                                    seed_id=seed or "", attempt=str(attempt)),
                     "retention_group": run_id, "reclaimable": True, "seed": False, "settings": self._settings}
             try:
                 out = self._call("fork", body)
@@ -589,6 +633,12 @@ class StarlingTrainingWorlds(_RolloutWorlds):
                     return name
                 if code == "service_timeout":
                     continue
+                if code == "world_schema_behind":
+                    behind = MemoryFailureError(
+                        f"seed world {source} is behind the current schema; upgrade the seed in the dashboard",
+                        transient=False)
+                    behind.code = code
+                    raise behind from None
                 raise
             if out.get("digest") != start:
                 self._discard(name)
@@ -832,8 +882,8 @@ def memory_wiring(repo_root: Path, env: Mapping[str, str], *, deployment: bool) 
                                         empty_seed_digest=service.empty_seed[1])
         worlds = StarlingTrainingWorlds(session, prefix=prefix, root_label=label, settings=settings,
                                         empty_seed=service.empty_seed)
-        resolver = starling_memory_resolver(session, prefix=prefix, empty_seed_world=service.empty_seed[0],
-                                            runtime=service.runtime)
+        resolver = starling_memory_resolver(session, prefix=prefix, root_label=label,
+                                            empty_seed_world=service.empty_seed[0], runtime=service.runtime)
     except BaseException:
         _close_quietly(service.closers)
         raise

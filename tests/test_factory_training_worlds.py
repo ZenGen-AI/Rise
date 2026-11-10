@@ -41,7 +41,7 @@ def service(tmp_path_factory):
 
 @pytest.fixture
 def starling_worlds(service, tmp_path):
-    """`make(prefix=None, admin_wrap=None, **kw)` 在真服务上造会话、空种子与 `StarlingTrainingWorlds`,并 `bind("run-1", None)`;
+    """`make(prefix=None, admin_wrap=None, **kw)` 在真服务上造会话、空种子与 `StarlingTrainingWorlds`,并 `bind("run-1", None, ...)`;
     返回 `(worlds, session, admin)`。`admin_wrap` 给了就用它包住会话的管理调用、交给世界,`admin` 是包好的那个
     (没给就是 `session.admin`)。同名重试等保留世界的期限压到 0.1 秒。"""
     from factory import starling_names
@@ -66,7 +66,7 @@ def starling_worlds(service, tmp_path):
         kw.setdefault("held_wait_s", 0.1)
         worlds = StarlingTrainingWorlds(session, prefix=prefix, root_label=label, settings=settings,
                                         empty_seed=seed, admin=admin, **kw)
-        worlds.bind("run-1", None)
+        worlds.bind("run-1", None, {"s1": seed[1]})
         return worlds, session, admin
 
     make.fake = fake
@@ -81,7 +81,7 @@ def case(request):
     """run-1 已绑定,从空世界起。同名重试等保留世界的期限压到 0.1 秒,省得撞保留表的用例真等 70 秒。"""
     if request.param == "stand-in":
         worlds = StandInTrainingWorlds(held_wait_s=0.1)
-        worlds.bind("run-1", None)
+        worlds.bind("run-1", None, {"s1": TupleMemory().digest()})
         yield Case(worlds, TupleMemory().digest(), None, None)
         return
     make = request.getfixturevalue("starling_worlds")
@@ -249,7 +249,7 @@ def test_an_unbound_run_has_no_seed_and_cannot_open_a_rollout(worlds):
         worlds.seed_of("run-2")
     with pytest.raises(KeyError):
         worlds.open_rollout("run-2", "s1", "run-2-grpo0-s1-r0", "pa")
-    worlds.bind("run-2", None)
+    worlds.bind("run-2", None, {})
     assert worlds.seed_of("run-2") is None
     worlds.unbind("run-2")
     worlds.unbind("run-2")                                         # 解绑两次不报错
@@ -265,11 +265,11 @@ def test_closing_a_rollout_that_was_never_opened_is_fine(worlds):
 
 def test_the_stand_in_refuses_a_seed():
     worlds = StandInTrainingWorlds()
-    worlds.bind("run-1", "s1")
+    worlds.bind("run-1", "s1", {"s1": "d" * 64})                 # 摘要只存不用:替身没有种子
     with pytest.raises(MemoryFailureError) as caught:
         worlds.open_rollout("run-1", "s1", EP, "pa")
     assert caught.value.transient is False
-    worlds.bind("run-1", None)
+    worlds.bind("run-1", None, {"s1": TupleMemory().digest()})
     assert worlds.close_rollout(EP, [worlds.open_rollout("run-1", "s1", EP, "pa")], wait_s=1.0) is True
 
 
@@ -395,12 +395,14 @@ def test_a_kept_world_is_logged_with_its_physical_name(starling_worlds, caplog):
     worlds.release_session(EP, [b])
 
 
-def test_a_seeded_run_is_refused_until_step_5(starling_worlds):
+def test_a_seed_id_without_any_seed_world_cannot_be_bound(starling_worlds):
+    """绑了种子而服务上一份都对不上:bind 判永久,不绑;按种子分叉的用例在 test_factory_seed_pinning。"""
     worlds, _, _ = starling_worlds()
-    worlds.bind("run-2", "k")
     with pytest.raises(MemoryFailureError) as info:
-        worlds.open_rollout("run-2", "s1", "run-2-grpo1-s1-r1", "pa")
+        worlds.bind("run-2", "k", {"s1": "0" * 64})
     assert info.value.transient is False
+    with pytest.raises(KeyError):
+        worlds.seed_of("run-2")
 
 
 def test_a_client_port_whose_call_has_not_returned_holds_the_world(starling_worlds):

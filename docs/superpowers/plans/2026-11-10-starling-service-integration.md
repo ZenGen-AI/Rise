@@ -2292,7 +2292,7 @@ git commit -m "feat(factory): factory seed 从部署世界分叉种子,世界锁
   - 解析器：`seed` 为 None → 每个情境空种子摘要；否则每个情境取 `find_seeds(...)[0]["digest"]`，该情境没有种子 → 空种子摘要；**这个 `seed_id` 一个情境都没有** → `DirectiveFailedError(f"memory.seed {seed!r}: no seed world under this id")`（30 篇失败表）。
   - `StarlingTrainingWorlds.bind`：`seed` 为 None 时每个情境钉空种子；否则每个情境在 `find_seeds` 里取**摘要等于 `digests[sid]` 的版本最大的那份**，钉住它的 `(世界名, 摘要)`；该情境没有种子而 `digests[sid]` 等于空种子摘要时钉空种子；一份都对不上 → 永久 `MemoryFailureError(f"no seed world of {seed!r} for scenario {sid} has the resolved start digest")`（policy 工厂把它译成 T2）。`_create` 从钉住的那份分叉，返回摘要不等于钉住的摘要判永久（第二道）。`fork` 回 `world_schema_behind` → 永久，原因写"需要在看板里升级种子"。
 
-- [ ] **Step 1: 写失败的测试**（`tests/test_factory_seed_pinning.py`，拉起模式的真服务）
+- [x] **Step 1: 写失败的测试**（`tests/test_factory_seed_pinning.py`，拉起模式的真服务）
 
 ```python
 pytest.importorskip("starling_client"); pytest.importorskip("starling.service")
@@ -2334,19 +2334,19 @@ def test_a_seed_id_with_no_world_at_all_fails_the_directive(seed_env):
 
 `seed_env(scenarios=("s1",))` 夹具：拉起服务，造会话、空种子、`StarlingTrainingWorlds` 与解析器；`make_seed(seed_id, sid, text, new_version=False)` 往部署世界写一条事件后调 `build_seeds`，返回 `SeedResult`。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_factory_seed_pinning.py tests/test_factory_training_worlds.py`
 Expected: FAIL（`bind` 只收两参；种子还被拒绝）
 
-- [ ] **Step 3: 实现**：按 Interfaces。删 Task 15 的"seeds arrive in step 5"两处。
+- [x] **Step 3: 实现**：按 Interfaces。删 Task 15 的"seeds arrive in step 5"两处。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_factory_seed_pinning.py tests/test_factory_training_worlds.py tests/test_factory_memory_runtime.py tests/test_factory_interact_wire.py tests/test_factory_interact_e2e.py tests/test_mt_dispatch.py tests/test_factory_seed.py`
 Expected: PASS。这是第 5 步的最后一个功能任务：控制者在后台跑全量，必须绿。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/factory/memory_runtime.py src/factory/interact_policy.py tests/test_factory_seed_pinning.py tests/test_factory_training_worlds.py tests/test_factory_memory_runtime.py tests/test_factory_interact_wire.py
