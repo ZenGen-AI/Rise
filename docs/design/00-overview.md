@@ -408,7 +408,16 @@ checkpoint 等大体量内容不进 git,只存引用 `{uri, sha256, size_bytes, 
 
 `--interact` 下服务端等客户端提交一轮改为 150 秒,后端单次调用改为 90 秒,客户端等相邻两条服务端消息的上限是 120 秒。超时视作 `timeout`,整条重跑。这组值是真机测过单轮延迟之后定的(2026-11-02):eager、两个适配器时每轮 20 到 65 秒。
 
-记忆的每次网络调用至多 4 秒,一轮最坏合计 20 秒。含记忆的对手一轮最坏 80 秒(HTTP 60 秒加记忆 20 秒),低于 `--interact` 下后端单次调用的 90 秒。
+记忆调用的时限分两种模式。拉起模式由 rise 配置给端点,每次网络调用至多 4 秒,各层是固定值。外部模式的端点在用户的看板里,rise 按 Starling 的真实最坏耗时推出各层,每层严格包住内层(`factory.memory_budget`)。Starling 一侧的公式:
+
+| 项 | 最坏 |
+|---|---|
+| 一次 HTTP | `(r + 1) × t` 加退避 `Σ_{i<r} min(1000 × 2^i, 30000)` 毫秒;`t` 缺取 60 秒,`r` 缺取 3 |
+| 一次 remember_event | 抽取 7 次:信念 3、一般事实 3、情节 1 |
+| 一次 embed_pending | 嵌入 4 次:一批 32 行,每次 10 条 |
+| 一轮记忆 | recall 1 次嵌入、remember_event 2 次、embed_pending 1 次 |
+
+拉起模式按这个公式一轮最坏 76 秒,部署等提交仍是 40 秒,固定值不包住它;外部模式的各层由公式推出,包住。
 
 部署路(MindAgent)的预算随记忆放宽。只开 `--enable agent` 且是 Starling 时,部署会话的服务端等提交取 40 秒,整条流按 max_turns × 40 秒折算。替身时保持现值:等提交 5 秒,整条流 15 秒。开着 `--interact` 时服务端等提交取 150 秒,两个开关同开也取 150 秒:两条路共用一个运行时,取较大值;后端单次调用的 90 秒同理,同开时部署会话的对手也按 90 秒等。整条流的 deadline 由调用方经 `client_factory(deadline_s=)` 传,两个开关同开时各用各的:训练 max_turns_per_episode × 150 秒,部署(Starling 时)max_turns × 40 秒。
 
@@ -708,14 +717,14 @@ Starling 一侧 [已落地]:rollout 世界从种子世界分叉,标为可回收,
 | 环境配置 [已落地] | 远程服务器的路径与阈值:工作目录、基座与留出集路径、依赖源码副本的父目录(`host_deps_root`,只有 `--executor roll` 要)、预检阈值、轮询间隔与作业超时。ROLL 代码不再由人放上主机:`--executor roll` 从本仓库的 submodule 部署钉住的版本,端点里的 `roll_root` 与 `sft_template` 只剩 `--interact` 与 SoMEval 在用 | `control-plane/compute/endpoints.yaml` | 进,不含秘密;人工写,`install_defaults` 不安装 |
 | ROLL 运行环境 [已落地] | ROLL4ZenGen 的版本(rise 仓库 HEAD 里 `third_party/ROLL4ZenGen` 的 gitlink)、训练镜像 id、Megatron-LM 与 fla 源码副本的内容指纹、容器参数 | ROLL 是 git submodule;其余是 `src/compute/roll_env.py` 的代码常量 | 进:改任何一项要改代码、过评审,训练记录的 `policy_backend` 记下实际用的那一份 |
 | 主机映射 [已落地] | `endpoint_id` 到 ssh 别名,主机、端口、用户与密钥都在 `~/.ssh/config` | 本机文件,路径由环境变量 `RISE_COMPUTE_HOSTS` 指定 | 不进:地址一旦进了提交就清不掉 |
-| 本机记忆配置 | 记忆根目录、抽取与嵌入的端点和模型、服务地址 `url`、`token_file` 与世界名前缀 `world_prefix` [已落地] | 树外,路径由 `RISE_MEMORY_CONFIG` 指定,权限 0600;`token_file` 同样在仓库外、0600 | 不进;密钥是 `OPENAI_API_KEY`,外部模式下由服务进程持有 |
+| 本机记忆配置 | 记忆根目录与世界名前缀 `world_prefix`;外部模式另有服务地址 `url` 与 `token_file`,拉起模式另有抽取与嵌入的端点和模型 [已落地] | 树外,路径由 `RISE_MEMORY_CONFIG` 指定,权限 0600;`token_file` 同样在仓库外、0600 | 不进;拉起模式的密钥是 `OPENAI_API_KEY`;外部模式的端点、模型与密钥都在看板默认世界的 provider 里 |
 | 凭证 | API token、SSH 口令 | 环境变量或被忽略的本地文件 | 绝不进 |
 
 配置只写环境变量名。加载器按变量名解析,缺失就明确报错;树里出现凭证值字段就拒绝加载;写日志前过脱敏函数。
 
-记忆配置照同一思路另写一份。配置里不放密钥,抽取与嵌入的密钥是 Starling 固定读取的 `OPENAI_API_KEY`。启动时只检查它非空,报错只写变量名。端点地址带用户名口令时读取即拒绝。`RISE_MEMORY_CONFIG` 未设时才用替身,训练路与部署路都是,并在启动日志里写 `memory backend: stand-in`。设了而文件不在、权限不是 0600、在仓库内、缺键多键、依赖未装,或记忆根下的 `runs/` 是符号链接或不是目录,装配期一律退出码 2。
+记忆配置照同一思路另写一份。配置里不放密钥。拉起模式下抽取与嵌入的密钥是 Starling 固定读取的 `OPENAI_API_KEY`,启动时只检查它非空,报错只写变量名;外部模式下端点、模型、密钥、超时、重试都取看板默认世界的角色端点,配置里出现端点键即拒绝。端点地址带用户名口令时读取即拒绝。`RISE_MEMORY_CONFIG` 未设时才用替身,训练路与部署路都是,并在启动日志里写 `memory backend: stand-in`。设了而文件不在、权限不是 0600、在仓库内、缺键多键、依赖未装,或记忆根下的 `runs/` 是符号链接或不是目录,装配期一律退出码 2。
 
-记忆服务的两种模式 [已落地]:给了 `url` 与 `token_file` 就连外部服务(缺省连看板服务,rise 不管它的起停,也查不到它的密钥);两者都不给就由 rise 以子进程拉起一个,只给测试与没有看板的机器用。客户端与服务的提交不一致、协议不一致或 token 错,装配期退出码 2;文字不含端点地址与 token。
+记忆服务的两种模式 [已落地]:给了 `url` 与 `token_file` 就连外部服务(缺省连看板服务,rise 不管它的起停,也查不到它的密钥;抽取与嵌入跟它默认世界的 provider 走);两者都不给就由 rise 以子进程拉起一个,只给测试与没有看板的机器用。客户端与服务的提交不一致、协议不一致或 token 错,装配期退出码 2;文字不含端点地址与 token。
 
 ### 7.3 面向 V2 的四项扩展性税
 

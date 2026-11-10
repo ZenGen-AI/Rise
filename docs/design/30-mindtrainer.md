@@ -573,9 +573,9 @@ vLLM 服务按指令起停,不常驻。一条 interact 指令派发时起服务,
 | 客户端等相邻两条服务端消息 | 不限,只有整条流的 deadline | 120 秒(`INTERACT_MESSAGE_TIMEOUT_S`),高于后端调用的 90 秒;超时视作 `timeout`(T1,按条重跑)并 abort 会话 |
 | 整条 gRPC 流的 deadline | 固定 15 秒(`src/factory/agent.py` 的 `INTERACT_DEADLINE_S`) | 由轨迹源按 `max_turns_per_episode × 150 秒` 算(常量 `PER_TURN_DEADLINE_S` 取 150 秒,不低于等提交与后端调用两个上限),经 `client_factory(deadline_s=)` 传入;不改运行时的 `interact_deadline_s`,所以同开时部署会话不借用训练的值 |
 | HTTP 上限:训练位策略、对手 | 不适用,只在 `--interact` 下用 | 训练位 120 秒(`src/factory/vllm_policy.py` 的 `POLICY_TIMEOUT_S`),对手 60 秒(`src/factory/interact_policy.py` 的 `OPPONENT_TIMEOUT_S`)[已落地] |
-| 记忆单次网络调用 | 不适用 | 4 秒:Starling 的 `timeout_ms` 配 4000、`max_retries` 配 0。一轮五次:召回嵌入查询词一次,写入抽取三次,嵌入一批 |
+| 记忆单次网络调用 | 不适用 | 拉起模式 4 秒:Starling 的 `timeout_ms` 配 4000、`max_retries` 配 0;外部模式按看板端点的 `timeout_ms` 与 `max_retries`,由组合根推出各层(`factory.memory_budget`) |
 | 创建会话 | 10 秒(`create_timeout_s`) | 不变 |
-| 一轮的最坏耗时 | 不适用 | 对手位约 80 秒(HTTP 60 秒加记忆最坏 20 秒),低于服务端后端调用的 90 秒;训练位约 140 秒(HTTP 120 秒加记忆最坏 20 秒),低于服务端等提交的 150 秒 |
+| 一轮的最坏耗时 | 不适用 | 对手位是 HTTP 60 秒加一轮记忆,训练位是 HTTP 120 秒加一轮记忆。一轮记忆的最坏按 Starling 的端点算:recall 嵌入 1 次,remember 2 次各抽取至多 7 次,embed_pending 嵌入 4 次。拉起模式的后端调用 90 秒、等提交 150 秒;外部模式由组合根推出,严格包住这两项 |
 | 服务端收尾等在途线程的 `join` | 60 秒(`resource_join_timeout_s`) | 不变:准入退避预算 `ADMISSION_WAIT_S` 65 秒以它加 5 秒为前提;被放弃的对手调用跑得比它久时,线程进滞留表,由回收线程收走 |
 | 训练位端口 close 的等待 | 不适用 | 60 秒,与服务端 join 同值;超时抛 FactoryMemoryFailureError(RoleMemoryFailureError 的子类),编排器判 T2,这条 rollout 不重试。close 抛其他异常同样译成它、不重试,即使 rollout 本身已结束:close 失败说明世界状态不可信 |
 | 收尾 rollout 世界前等服务端端口全关 [已落地] | 不适用 | `SESSION_CLOSE_WAIT_S` 70 秒,即服务端 join 的 60 秒加 10 秒余量;等不到时世界进保留表:端口还开着时同名重试先有界等待(默认 70 秒)端口关上,仍没关上才判瞬态;rollout 照常结束 |
