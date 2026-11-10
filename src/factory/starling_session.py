@@ -38,26 +38,38 @@ ADMIN_TIMEOUT_S = 300.0
 DRAIN_WINDOW_S = 60.0
 
 
+def _service_leaves(endpoint: dict) -> dict:
+    """外部模式下进身份的端点叶子:rise 设置里实际写出的那些,不含地址(rise 设置本来就不写)与密钥(从不在设置里)。"""
+    return {key: value for key, value in endpoint.items() if key != "base_url"}
+
+
 def service_runtime(info: dict, settings: dict, config: MemoryConfig) -> dict:
     """接服务后的记忆运行时身份(90 篇运行时身份表):五个顶层键不变,所以替身的身份常量不用动。
 
     - `starling_version` 取服务 `info()` 的版本、提交与协议;安装来源不再进身份,只在装配期与服务报的提交比对。
-    - `extraction.prompts` 改为 `info()["extraction_config"]` 规范化 JSON 的 sha256;另加 `world_settings`:rise 设置的摘要。
-    - 两个端点地址用配置里已规范化的值;`config.root` 不进身份。
-    每次返回一份新字典。"""
+    - `extraction.prompts` 是 `info()["extraction_config"]` 规范化 JSON 的 sha256;`world_settings`:rise 设置的摘要。
+    - 拉起模式:两个端点的地址用配置里已规范化的值,加模型、维度、超时、重试。
+    - 外部模式:两个端点取 rise 设置里实际写出的叶子(`provider_name`、`provider`、`model`、`dim`、`max_tokens`、
+      `timeout_ms`、`max_retries`、`enable_thinking`、`thinking_type`,服务没给的不写),不含地址与密钥。
+      看板里换模型或换绑 provider,身份随之变;换密钥不变。
+    `config.root` 不进身份。每次返回一份新字典。"""
+    if config.mode == "external":
+        extraction = _service_leaves(settings["extraction"])
+        embedding = _service_leaves(settings["embedding"])
+    else:
+        extraction = {"base_url": config.extraction_base_url, "model": config.extraction_model,
+                      "timeout_ms": config.timeout_ms, "max_retries": config.max_retries}
+        embedding = {"base_url": config.embedding_base_url, "model": config.embedding_model,
+                     "dim": config.embedding_dim, "timeout_ms": config.timeout_ms, "max_retries": config.max_retries}
     return {
         "backend": "starling",
         "starling_version": f"{info['version']}+git:{info['commit']}+protocol:{info['protocol']}",
         "extraction": {
-            "base_url": config.extraction_base_url, "model": config.extraction_model,
-            "timeout_ms": config.timeout_ms, "max_retries": config.max_retries,
+            **extraction,
             "prompts": canonical_digest(info["extraction_config"]),
             "world_settings": settings_digest(settings),
         },
-        "embedding": {
-            "base_url": config.embedding_base_url, "model": config.embedding_model, "dim": config.embedding_dim,
-            "timeout_ms": config.timeout_ms, "max_retries": config.max_retries,
-        },
+        "embedding": embedding,
         "trace_schema": TRACE_SCHEMA_V2,
     }
 

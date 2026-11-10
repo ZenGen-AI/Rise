@@ -4,8 +4,10 @@
   字母或数字、其余 `[A-Za-z0-9._-]`、1 到 128 个字符(`S:src/governance/world_store.cpp:47-60`)。
 - 超过 128 个字符时把中间的 id 段换成它的 sha256 前 24 位;标签里照旧是完整的 id。
 - 不提供"按名字判世界种类"的函数:重放世界只经管理面的 `open_replay` 打开,部署世界只经 `open`(40 篇 AC-34)。
-- rise 设置写出 C++ 结构 WorldSettings 的每一个叶子(`S:include/starling/governance/world_settings.hpp:19-61`):
+- rise 设置写出 C++ 结构 WorldSettings 的每一个顶层段(`S:include/starling/governance/world_settings.hpp:19-61`):
   建世界与分叉都按叶子合并,没写出的叶子会继承默认世界或来源世界的值,用户在看板一改就不一致。
+  抽取与嵌入两个端点按模式取:拉起模式由记忆配置显式给出(`provider_name` 空串);外部模式原样拷贝服务
+  `info()["default_settings"]` 里这两个角色的端点(看板绑定的 provider、模型、超时、重试),不写 `base_url`。
 
 本模块不导入 `starling`、`starling_client`;只用标准库、`simple_actio.memory_port.PERSONA_ID_PATTERN` 与
 `factory.memory_config`(`WORLD_PREFIX_PATTERN` 的单一来源在那里,这里转出;第 3 步 memory_config 不导入本模块)。
@@ -18,6 +20,7 @@ import re
 import secrets
 from pathlib import Path
 
+from factory.errors import FactoryConfigError
 from factory.memory_config import WORLD_PREFIX_PATTERN, MemoryConfig
 from simple_actio.memory_port import PERSONA_ID_PATTERN
 
@@ -128,22 +131,69 @@ def labels(prefix: str, root: str, kind: str, **extra: str) -> dict[str, str]:
     return {"repo": _check_prefix(prefix), "root": root, "kind": kind, **extra}
 
 
+# 端点的角色:rise 只用这两个
+ENDPOINT_ROLES = ("extraction", "embedding")
+
+
 def _endpoint(base_url: str, model: str, dim: int, config: MemoryConfig) -> dict:
-    # provider_name 留空:非空时 Starling 改取那个 provider 的密钥与地址(S:python/starling/dashboard/engine.py:279-283);
-    # enable_thinking 按叶子合并删不掉,写死 False,不抄默认世界的值
+    """拉起模式的端点:rise 显式给全部叶子。provider_name 留空:rise 私有的服务没有 provider 表,密钥取服务进程的
+    OPENAI_API_KEY(S:python/starling/dashboard/engine.py:279-283);enable_thinking 按叶子合并删不掉,写死 False。"""
     return {"provider": "openai", "provider_name": "", "base_url": base_url, "model": model, "dim": dim,
             "max_tokens": 0, "timeout_ms": config.timeout_ms, "max_retries": config.max_retries,
             "enable_thinking": False, "thinking_type": ""}
 
 
-def rise_settings(config: MemoryConfig) -> dict:
-    """rise 设置(90 篇世界设置表):建世界、分叉、开句柄都传同一份。每次返回一份新字典。
+def _unbound(role: str) -> FactoryConfigError:
+    return FactoryConfigError(
+        f"memory service: the default world's {role} role has no provider bound or no key; "
+        f"bind a provider with an API key to {role} in the Starling dashboard"
+    )
 
-    `chat`、`consolidation`、`gist_thresholds` 写 `None`:rise 不用,`None` 删掉端点、阈值回到 C++ 默认
-    (`S:include/starling/governance/world_settings.hpp:67-68`)。"""
+
+def _service_endpoint(role: str, info: dict) -> dict:
+    """外部模式的端点:原样拷贝 `info()["default_settings"][role]` 的叶子(服务已删掉 `base_url`,
+    S:python/starling/dashboard/routes/client.py:276-280),不写 `base_url`。
+
+    `provider_name` 非空时 Starling 在建世界时从默认世界继承地址(S:src/governance/registry_db.cpp:525-530)、
+    比较设置前清掉它(S:src/governance/world_settings.cpp:319-337),密钥取那个 provider 的。
+    `enable_thinking` 服务没给时写 False:它是可选叶子,按叶子合并删不掉。
+    角色没绑定、`provider_name` 为空、`key_set` 不为真,或嵌入的 `dim` 不是正整数:`FactoryConfigError`,只写角色名。"""
+    endpoint = (info.get("default_settings") or {}).get(role)
+    if not isinstance(endpoint, dict) or not endpoint.get("provider_name") \
+            or (info.get("key_set") or {}).get(role) is not True:
+        raise _unbound(role)
+    out = {key: value for key, value in endpoint.items() if key != "base_url"}
+    out.setdefault("enable_thinking", False)
+    if role == "embedding":
+        dim = out.get("dim")
+        if isinstance(dim, bool) or not isinstance(dim, int) or dim <= 0:
+            raise FactoryConfigError(
+                "memory service: the default world's embedding endpoint has no positive dim; "
+                "set the embedding provider's dim in the Starling dashboard"
+            )
+    return out
+
+
+def endpoints(config: MemoryConfig, info: dict | None = None) -> dict[str, dict]:
+    """抽取与嵌入两个端点:拉起模式取记忆配置,外部模式取服务默认世界(`info` 必给)。每次返回新字典。"""
+    if config.mode == "external":
+        if info is None:
+            raise ValueError("external mode needs the memory service's info() to build its endpoints")
+        return {role: _service_endpoint(role, info) for role in ENDPOINT_ROLES}
     return {
         "extraction": _endpoint(config.extraction_base_url, config.extraction_model, 0, config),
         "embedding": _endpoint(config.embedding_base_url, config.embedding_model, config.embedding_dim, config),
+    }
+
+
+def rise_settings(config: MemoryConfig, info: dict | None = None) -> dict:
+    """rise 设置(90 篇世界设置表):建世界、分叉、开句柄都传同一份。每次返回一份新字典。
+
+    抽取与嵌入两个端点见 `endpoints`:外部模式要 `info`(服务 `info()` 的结果),拉起模式不看它。
+    `chat`、`consolidation`、`gist_thresholds` 写 `None`:rise 不用,`None` 删掉端点、阈值回到 C++ 默认
+    (`S:include/starling/governance/world_settings.hpp:67-68`)。"""
+    return {
+        **endpoints(config, info),
         "chat": None, "consolidation": None, "gist_thresholds": None,
         "vector_backend": "sqlite",
         "source_lane": dict(_SOURCE_LANE),

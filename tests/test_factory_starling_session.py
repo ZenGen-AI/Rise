@@ -43,6 +43,26 @@ def test_the_runtime_identity_keeps_five_top_level_keys_and_names_the_service(me
                                "timeout_ms": 4000, "max_retries": 0}
 
 
+def test_the_external_identity_takes_the_endpoint_leaves_rise_actually_wrote():
+    """外部模式:身份里的两个端点是 rise 设置里写出的叶子(没有地址与密钥);换模型身份就变。"""
+    from factory.starling_names import rise_settings
+    cfg = MemoryConfig(root=Path("/m"), timeout_ms=None, max_retries=None, url="http://127.0.0.1:8787",
+                       token_file=Path("/t"))
+    endpoint = {"provider": "openai", "provider_name": "default", "model": "m1", "dim": 0, "max_tokens": 0,
+                "timeout_ms": 120000, "thinking_type": ""}
+    embed = {**endpoint, "provider_name": "embedder", "model": "e1", "dim": 1024, "timeout_ms": 0}
+    info = {**RUNTIME_INFO, "default_settings": {"extraction": endpoint, "embedding": embed},
+            "key_set": {"extraction": True, "embedding": True}}
+    settings = rise_settings(cfg, info)
+    rt = service_runtime(info, settings, cfg)
+    assert rt["extraction"] == {**endpoint, "enable_thinking": False, "prompts": rt["extraction"]["prompts"],
+                                "world_settings": settings_digest(settings)}
+    assert rt["embedding"] == {**embed, "enable_thinking": False}
+    assert "base_url" not in rt["extraction"] and "base_url" not in rt["embedding"]
+    other = {**info, "default_settings": {"extraction": {**endpoint, "model": "m2"}, "embedding": embed}}
+    assert service_runtime(other, rise_settings(cfg, other), cfg)["extraction"]["model"] == "m2" != rt["extraction"]["model"]
+
+
 def test_the_identity_changes_with_the_extraction_config_and_the_settings(memory_config):
     a = service_runtime(RUNTIME_INFO, {"x": 1}, memory_config)
     assert a != service_runtime({**RUNTIME_INFO, "extraction_config": {"b": 2}}, {"x": 1}, memory_config)

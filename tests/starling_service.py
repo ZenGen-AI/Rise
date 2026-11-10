@@ -183,6 +183,15 @@ def fake_memory_config(fake, root: Path):
                         timeout_ms=2000, max_retries=0)
 
 
+def provider_starling_json(fake, *, timeout_ms: int = 2000, max_retries: int = 0) -> dict:
+    """模拟用户看板的 `starling.json`:两个 provider `p`(抽取)与 `e`(嵌入)指向假端点,密钥是占位值。外部模式的用例
+    把它交给 `start_service(starling_json=)`:rise 在外部模式下取默认世界里这两个角色的端点。"""
+    provider = {"provider": "openai", "model": "fake-extract", "base_url": fake.base_url,
+                "api_key": OFFLINE_API_KEY, "dim": fake.dim, "timeout_ms": timeout_ms, "max_retries": max_retries}
+    return {"providers": {"p": provider, "e": {**provider, "model": "fake-embed"}},
+            "roles": {"extraction": "p", "embedding": "e"}}
+
+
 def open_session(proc: ServiceProc, **kw):
     """连 `proc` 的服务会话,钉客户端包自己的提交。"""
     import starling_client

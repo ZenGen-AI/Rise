@@ -420,23 +420,69 @@ def _token_file(tmp_path, mode=0o600, name="dash.token"):
     return path
 
 
+def _external(tmp_path, **over):
+    """外部模式的配置:只有 root、url、token_file(与可选的 world_prefix)。"""
+    data = {"root": str(tmp_path / "mem"), "url": "http://127.0.0.1:8787", "token_file": str(_token_file(tmp_path))}
+    data.update(over)
+    return {k: v for k, v in data.items() if v is not ...}
+
+
 def test_both_service_keys_mean_external_mode_and_neither_means_spawn(tmp_path):
     token = _token_file(tmp_path)
-    cfg = _read(tmp_path, _write(tmp_path, _payload(tmp_path, url="http://127.0.0.1:8787/", token_file=str(token))))
+    cfg = _read(tmp_path, _write(tmp_path, _external(tmp_path, url="http://127.0.0.1:8787/", token_file=str(token))))
     assert (cfg.mode, cfg.url, cfg.token_file, cfg.world_prefix) == ("external", "http://127.0.0.1:8787", token, "rise")
+    assert (cfg.extraction_base_url, cfg.extraction_model, cfg.embedding_base_url, cfg.embedding_model,
+            cfg.embedding_dim, cfg.timeout_ms, cfg.max_retries) == (None,) * 7      # 端点跟 Starling 走
     spawn = _read(tmp_path, _write(tmp_path, _payload(tmp_path, world_prefix="lab_2")))
     assert (spawn.mode, spawn.url, spawn.token_file, spawn.world_prefix) == ("spawn", None, None, "lab_2")
 
 
+@pytest.mark.parametrize("key", ["extraction_base_url", "extraction_model", "embedding_base_url", "embedding_model",
+                                 "embedding_dim", "timeout_ms", "max_retries"])
+def test_external_mode_refuses_every_endpoint_and_call_key_naming_only_the_key(tmp_path, key):
+    """外部模式下抽取、嵌入的端点、模型、超时、重试都取自 Starling 默认世界:配置里出现任一个都拒绝,只报键名。"""
+    secret = "https://alice:s3cret@embed.example/v1"
+    with pytest.raises(FactoryConfigError) as info:
+        _read(tmp_path, _write(tmp_path, _external(tmp_path, **{key: secret})))
+    msg = str(info.value)
+    assert key in msg and "default world" in msg and "s3cret" not in msg and "alice" not in msg
+
+
+def test_external_mode_needs_only_root_url_and_token_file(tmp_path):
+    msg = _refused_external(tmp_path, root=...)
+    assert "missing ['root']" in msg
+    msg = _refused_external(tmp_path, extra=1)
+    assert "unknown ['extra']" in msg
+    cfg = _read(tmp_path, _write(tmp_path, _external(tmp_path, world_prefix="lab_2")))
+    assert cfg.world_prefix == "lab_2"
+
+
+def test_external_mode_skips_the_four_second_spawn_check(tmp_path):
+    """4 秒那条只管拉起模式:外部模式没有 timeout_ms 与 max_retries,也就没有可查的。"""
+    cfg = _read(tmp_path, _write(tmp_path, _external(tmp_path)))
+    assert cfg.mode == "external" and cfg.timeout_ms is None and cfg.max_retries is None
+
+
+def _refused_external(tmp_path, **change):
+    with pytest.raises(FactoryConfigError) as info:
+        _read(tmp_path, _write(tmp_path, _external(tmp_path, **change)))
+    return str(info.value)
+
+
 @pytest.mark.parametrize("url", ["http://localhost:8787", "http://127.0.0.2:8787", "http://[::1]:8787"])
 def test_every_loopback_host_is_accepted(tmp_path, url):
-    cfg = _read(tmp_path, _write(tmp_path, _payload(tmp_path, url=url, token_file=str(_token_file(tmp_path)))))
+    cfg = _read(tmp_path, _write(tmp_path, _external(tmp_path, url=url)))
     assert cfg.mode == "external"
 
 
 def _refused(tmp_path, **change):
+    """服务键的错误:给了 url 或 token_file 就按外部模式写(不带端点键),否则按拉起模式。"""
+    if {"url", "token_file"} & set(change):
+        payload = {k: v for k, v in {"root": str(tmp_path / "mem"), **change}.items() if v is not ...}
+    else:
+        payload = _payload(tmp_path, **change)
     with pytest.raises(FactoryConfigError) as info:
-        _read(tmp_path, _write(tmp_path, _payload(tmp_path, **change)))
+        _read(tmp_path, _write(tmp_path, payload))
     return str(info.value)
 
 
@@ -482,6 +528,5 @@ def test_a_token_file_too_open_inside_the_repo_or_missing_is_refused_naming_only
 
 
 def test_the_token_file_content_is_never_read_by_the_config_reader(tmp_path):
-    cfg = _read(tmp_path, _write(tmp_path, _payload(tmp_path, url="http://127.0.0.1:8787",
-                                                    token_file=str(_token_file(tmp_path)))))
+    cfg = _read(tmp_path, _write(tmp_path, _external(tmp_path)))
     assert "tok-s3cret" not in repr(cfg)

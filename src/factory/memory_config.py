@@ -3,8 +3,13 @@
 与 `eval_config.py` 同一做法:文件路径由环境变量 `RISE_MEMORY_CONFIG` 给出,必须在控制面仓库之外、
 权限必须是 0600。变量没设或为空串,返回 `None`,装配期照计划 A 的替身走;设了,配置有任何问题都抛
 `FactoryConfigError`(命令行译成退出码 2),不退回替身。报错只写键名、路径与变量名,不回显任何取值:
-端点地址可能带 `user:password@`。密钥不在这份文件里:拉起模式下从 `OPENAI_API_KEY` 读并照传给服务进程,
-外部模式下在服务进程的环境里。
+端点地址可能带 `user:password@`。
+
+两种模式的键不同(90 篇记忆配置键表):
+- 拉起模式(不给 `url` 与 `token_file`):rise 私有的服务没有 provider 表,抽取与嵌入的端点、模型、维度、超时、重试
+  都由这份配置给,密钥从 `OPENAI_API_KEY` 读并照传给服务进程。
+- 外部模式(两者都给):端点、模型、密钥、超时、重试一律跟 Starling 默认世界的角色端点走(`factory.starling_names.rise_settings`),
+  这份配置里出现任何端点键都拒绝。
 
 本模块不导入 `starling` 与 `starling_client`,安装信息一律经 `importlib.metadata` 读。
 """
@@ -34,18 +39,20 @@ CLIENT_DIST = "starling-client"
 STARLING_DIST = "starling-memory"
 DEFAULT_TIMEOUT_MS = 4000
 DEFAULT_MAX_RETRIES = 0
-# 一次记忆网络调用(含重试)的最坏耗时上限:timeout_ms × (max_retries + 1) 不得超过它。外层时限都按"每次至多 4 秒"
-# 折算,写死在三处:factory.memory_runtime.DEPLOY_MEMORY_TURN_TIMEOUT_S(部署 40 秒)、
-# factory.interact_policy.OPPONENT_TIMEOUT_S(对手 60 秒,低于 INTERACT_BACKEND_TIMEOUT_S 的 90 秒)、
-# factory.wire.INTERACT_TURN_TIMEOUT_S(--interact 150 秒)。
-# 放宽这里之前先改那三处,否则内层不再先于外层超时。
+# 拉起模式下一次记忆网络调用的超时乘尝试数上限:timeout_ms × (max_retries + 1) 不得超过它。拉起模式的外层时限是常量
+# (`factory.memory_budget.SPAWN_LAYERS`),按"每次至多 4 秒"定的;外部模式的外层时限按 Starling 的端点推出,不受它限。
 MAX_MEMORY_CALL_MS = 4000
 
-REQUIRED_KEYS = (
-    "root", "extraction_base_url", "extraction_model",
-    "embedding_base_url", "embedding_model", "embedding_dim",
-)
-OPTIONAL_KEYS = ("timeout_ms", "max_retries", "url", "token_file", "world_prefix")
+ENDPOINT_KEYS = ("extraction_base_url", "extraction_model", "embedding_base_url", "embedding_model", "embedding_dim")
+CALL_KEYS = ("timeout_ms", "max_retries")
+SERVICE_KEYS = ("url", "token_file")
+# 拉起模式
+REQUIRED_KEYS = ("root", *ENDPOINT_KEYS)
+OPTIONAL_KEYS = (*CALL_KEYS, "world_prefix")
+# 外部模式:端点与调用参数跟 Starling 走,出现就拒绝
+EXTERNAL_REQUIRED_KEYS = ("root", *SERVICE_KEYS)
+EXTERNAL_OPTIONAL_KEYS = ("world_prefix",)
+EXTERNAL_FORBIDDEN_KEYS = (*ENDPOINT_KEYS, *CALL_KEYS)
 DEFAULT_WORLD_PREFIX = "rise"
 # 世界名前缀(00 篇世界名规则):不含 `.`,所以世界名能无歧义地拆开。单一来源在这里,`factory.starling_names` 转出
 WORLD_PREFIX_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,15}")
@@ -56,19 +63,20 @@ _OWNER_POLL_S = 0.02
 
 @dataclass(frozen=True)
 class MemoryConfig:
-    """本机记忆配置。`root` 是绝对路径;两个 `*_base_url` 存规范化后的值(不带 `user:password@`)。
+    """本机记忆配置。`root` 是绝对路径。
 
-    接记忆服务后:`url` 与 `token_file` 同给同不给;给了是外部模式(连用户在跑的看板服务),都不给是拉起模式。
-    `url` 存规范化后的值。`world_prefix` 是世界名前缀。"""
+    `url` 与 `token_file` 同给同不给;给了是外部模式(连用户在跑的看板服务),都不给是拉起模式。`url` 存规范化后的值。
+    端点五项与 `timeout_ms`、`max_retries` 只在拉起模式下有值(两个 `*_base_url` 存规范化后的值,不带
+    `user:password@`);外部模式下都是 None,端点取自服务的默认世界。`world_prefix` 是世界名前缀。"""
 
     root: Path
-    extraction_base_url: str
-    extraction_model: str
-    embedding_base_url: str
-    embedding_model: str
-    embedding_dim: int
-    timeout_ms: int = DEFAULT_TIMEOUT_MS
-    max_retries: int = DEFAULT_MAX_RETRIES
+    extraction_base_url: str | None = None
+    extraction_model: str | None = None
+    embedding_base_url: str | None = None
+    embedding_model: str | None = None
+    embedding_dim: int | None = None
+    timeout_ms: int | None = DEFAULT_TIMEOUT_MS
+    max_retries: int | None = DEFAULT_MAX_RETRIES
     url: str | None = None
     token_file: Path | None = None
     world_prefix: str = DEFAULT_WORLD_PREFIX
@@ -221,12 +229,32 @@ def read_memory_config(*, env: Mapping[str, str] | None = None, repo_root: Path)
     if not isinstance(data, dict):
         raise FactoryConfigError(f"{path} must be a mapping")
     keys = set(data)
-    missing = set(REQUIRED_KEYS) - keys
-    unknown = keys - set(REQUIRED_KEYS) - set(OPTIONAL_KEYS)
+    if ("url" in keys) != ("token_file" in keys):
+        raise FactoryConfigError("memory config: url and token_file must be given together (or both left out)")
+    external = "url" in keys
+    if external:
+        forbidden = keys & set(EXTERNAL_FORBIDDEN_KEYS)
+        if forbidden:
+            raise FactoryConfigError(
+                f"{path}: in external mode (url and token_file given) the extraction and embedding endpoints, "
+                f"models, keys, timeouts and retries come from the memory service's default world; "
+                f"remove {key_names(forbidden)}"
+            )
+        required, optional = EXTERNAL_REQUIRED_KEYS, EXTERNAL_OPTIONAL_KEYS
+    else:
+        required, optional = REQUIRED_KEYS, OPTIONAL_KEYS
+    missing = set(required) - keys
+    unknown = keys - set(required) - set(optional)
     if missing or unknown:
         raise FactoryConfigError(f"{path}: missing {key_names(missing)}, unknown {key_names(unknown)}")
 
     root = _check_root(data["root"], repo_root=repo_root)
+    world_prefix = _check_world_prefix(data.get("world_prefix", DEFAULT_WORLD_PREFIX))
+    if external:
+        url = _check_service_url(data["url"])
+        token_file = _check_token_file(data["token_file"], repo_root=repo_root)
+        return MemoryConfig(root=root, timeout_ms=None, max_retries=None, url=url, token_file=token_file,
+                            world_prefix=world_prefix)
     extraction_base_url = normalize_base_url("extraction_base_url", data["extraction_base_url"])
     embedding_base_url = normalize_base_url("embedding_base_url", data["embedding_base_url"])
     extraction_model = _check_model("extraction_model", data["extraction_model"])
@@ -237,18 +265,13 @@ def read_memory_config(*, env: Mapping[str, str] | None = None, repo_root: Path)
     if timeout_ms * (max_retries + 1) > MAX_MEMORY_CALL_MS:
         raise FactoryConfigError(
             f"memory config: timeout_ms × (max_retries + 1) must not exceed {MAX_MEMORY_CALL_MS} ms; "
-            "outer turn budgets assume at most 4 s per memory call"
+            "spawn-mode turn budgets assume at most 4 s per memory call"
         )
-    if ("url" in data) != ("token_file" in data):
-        raise FactoryConfigError("memory config: url and token_file must be given together (or both left out)")
-    url = _check_service_url(data["url"]) if "url" in data else None
-    token_file = _check_token_file(data["token_file"], repo_root=repo_root) if "token_file" in data else None
-    world_prefix = _check_world_prefix(data.get("world_prefix", DEFAULT_WORLD_PREFIX))
     return MemoryConfig(
         root=root, extraction_base_url=extraction_base_url, extraction_model=extraction_model,
         embedding_base_url=embedding_base_url, embedding_model=embedding_model,
         embedding_dim=embedding_dim, timeout_ms=timeout_ms, max_retries=max_retries,
-        url=url, token_file=token_file, world_prefix=world_prefix,
+        world_prefix=world_prefix,
     )
 
 

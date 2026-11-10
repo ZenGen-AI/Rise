@@ -34,10 +34,11 @@ def fake():
 
 
 @pytest.fixture(scope="module")
-def service(tmp_path_factory):
+def service(tmp_path_factory, fake):
+    """模拟看板服务:默认世界的抽取与嵌入绑到指向假端点的 provider(外部模式的端点跟它走)。"""
     pytest.importorskip("starling_client"); pytest.importorskip("starling.service")
-    from starling_service import start_service
-    proc = start_service(tmp_path_factory.mktemp("svc"))
+    from starling_service import provider_starling_json, start_service
+    proc = start_service(tmp_path_factory.mktemp("svc"), starling_json=provider_starling_json(fake))
     yield proc
     proc.kill()
 
@@ -56,8 +57,9 @@ def _memory_env(tmp_path, fake, mode, service=None):
     payload = {"root": str(tmp_path / "mem"), "extraction_base_url": fake.base_url, "extraction_model": "fake-extract",
                "embedding_base_url": fake.base_url, "embedding_model": "fake-embed", "embedding_dim": 256}
     env = {"PATH": os.environ["PATH"]}
-    if mode == EXTERNAL:
-        payload.update(url=service.url, token_file=str(service.token_path), world_prefix=unique_prefix())
+    if mode == EXTERNAL:            # 端点跟服务的默认世界走,配置里不写
+        payload = {"root": payload["root"], "url": service.url, "token_file": str(service.token_path),
+                   "world_prefix": unique_prefix()}
     else:
         env["OPENAI_API_KEY"] = "offline-test-key"
     path = tmp_path / "memory.yaml"

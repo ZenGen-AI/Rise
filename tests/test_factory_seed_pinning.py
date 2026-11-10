@@ -30,10 +30,11 @@ def fake():
 
 
 @pytest.fixture(scope="module")
-def service(tmp_path_factory):
+def service(tmp_path_factory, fake):
+    """模拟看板服务:默认世界的抽取与嵌入绑到指向假端点的 provider(外部模式的端点跟它走)。"""
     pytest.importorskip("starling_client"); pytest.importorskip("starling.service")
-    from starling_service import start_service
-    proc = start_service(tmp_path_factory.mktemp("svc"))
+    from starling_service import provider_starling_json, start_service
+    proc = start_service(tmp_path_factory.mktemp("svc"), starling_json=provider_starling_json(fake))
     yield proc
     proc.kill()
 
@@ -58,10 +59,9 @@ def seed_env(tmp_path, service, fake):
         write_config(store, AGENT_CONFIG, "agent", dict(DEFAULT_AGENT_CONFIG, scenario_ids=list(scenarios)),
                      "test: agent.yaml")
         path = tmp_path / "memory.yaml"
-        path.write_text(yaml.safe_dump({
-            "root": str(tmp_path / "mem"), "extraction_base_url": fake.base_url, "extraction_model": "fake-extract",
-            "embedding_base_url": fake.base_url, "embedding_model": "fake-embed", "embedding_dim": 256,
-            "url": service.url, "token_file": str(service.token_path), "world_prefix": unique_prefix(),
+        path.write_text(yaml.safe_dump({            # 外部模式:端点跟服务的默认世界走
+            "root": str(tmp_path / "mem"), "url": service.url, "token_file": str(service.token_path),
+            "world_prefix": unique_prefix(),
         }), encoding="utf-8")
         os.chmod(path, 0o600)
         env = {MEMORY_CONFIG_ENV: str(path), "PATH": os.environ["PATH"]}

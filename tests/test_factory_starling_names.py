@@ -7,9 +7,33 @@ from pathlib import Path
 
 import pytest
 
+from factory.errors import FactoryConfigError
 from factory.memory_config import MemoryConfig
 from factory.starling_names import (WORLD_NAME_MAX, deploy_world, empty_seed_world, labels, new_suffix, replay_world,
                                     rise_settings, rollout_world, root_label, seed_world, settings_digest)
+
+# 8787 现在的默认世界(info()["default_settings"] 的两段,服务已删掉 base_url)与 key_set
+EXTRACTION_8787 = {"provider": "openai", "provider_name": "default", "model": "deepseek-v4-pro", "dim": 0,
+                   "max_tokens": 0, "timeout_ms": 120000, "thinking_type": ""}
+EMBEDDING_8787 = {"provider": "openai", "provider_name": "embedder", "model": "text-embedding-v4", "dim": 1024,
+                  "max_tokens": 0, "timeout_ms": 0, "thinking_type": ""}
+
+
+def _info(extraction=EXTRACTION_8787, embedding=EMBEDDING_8787, key_set=None):
+    defaults = {"vector_backend": "sqlite", "chat": dict(EXTRACTION_8787)}
+    if extraction is not None:
+        defaults["extraction"] = dict(extraction)
+    if embedding is not None:
+        defaults["embedding"] = dict(embedding)
+    keys = {"extraction": True, "embedding": True, "chat": True} if key_set is None else key_set
+    return {"version": "0.0.1", "commit": "c" * 40, "protocol": 1, "extraction_config": {},
+            "default_settings": defaults, "key_set": keys}
+
+
+@pytest.fixture
+def external_config():
+    return MemoryConfig(root=Path("/m"), timeout_ms=None, max_retries=None, url="http://127.0.0.1:8787",
+                        token_file=Path("/t"))
 
 
 @pytest.fixture
@@ -72,6 +96,54 @@ def test_rise_settings_write_every_leaf_and_never_name_a_provider(memory_config)
                                "auto_snapshot": {"on_session": False, "interval_hours": 0}}
     assert settings_digest(s) == settings_digest(dict(reversed(list(s.items()))))     # 与键序无关
     assert rise_settings(memory_config) is not s                                      # 每次一份新字典
+
+
+def test_external_rise_settings_copy_the_default_worlds_endpoints_without_an_address(external_config):
+    s = rise_settings(external_config, _info())
+    assert s["extraction"] == {**EXTRACTION_8787, "enable_thinking": False}          # 服务没给就补 False
+    assert s["embedding"] == {**EMBEDDING_8787, "enable_thinking": False}
+    assert "base_url" not in s["extraction"] and "base_url" not in s["embedding"]
+    assert "max_retries" not in s["extraction"]                                        # 服务没给就不写,C++ 缺省 3
+    assert (s["chat"], s["consolidation"], s["gist_thresholds"]) == (None, None, None)
+    assert s["source_lane"]["enabled"] is False and s["background"]["ingest"] is False
+    assert set(s) == set(rise_settings(MemoryConfig(root=Path("/m"), extraction_base_url="http://127.0.0.1:9/v1",
+                                                    extraction_model="x", embedding_base_url="http://127.0.0.1:9/v1",
+                                                    embedding_model="e", embedding_dim=64)))
+
+
+def test_external_rise_settings_keep_the_services_own_leaves_and_drop_a_stray_address(external_config):
+    tuned = {**EXTRACTION_8787, "max_retries": 0, "enable_thinking": True, "base_url": "https://leak.example/v1"}
+    s = rise_settings(external_config, _info(extraction=tuned))
+    assert s["extraction"]["max_retries"] == 0 and s["extraction"]["enable_thinking"] is True
+    assert "base_url" not in s["extraction"]
+    info = _info()
+    rise_settings(external_config, info)["extraction"]["model"] = "changed"
+    assert info["default_settings"]["extraction"]["model"] == "deepseek-v4-pro"       # 不改服务给的那份
+
+
+@pytest.mark.parametrize("info, role", [
+    (_info(extraction=None), "extraction"),                                             # 角色没绑定
+    (_info(embedding=None), "embedding"),
+    (_info(extraction={**EXTRACTION_8787, "provider_name": ""}), "extraction"),         # 显式端点,不是 provider
+    (_info(key_set={"extraction": False, "embedding": True}), "extraction"),            # 没有密钥
+    (_info(key_set={"extraction": True}), "embedding"),
+])
+def test_an_unbound_or_keyless_role_is_a_config_error_naming_the_role(external_config, info, role):
+    with pytest.raises(FactoryConfigError) as caught:
+        rise_settings(external_config, info)
+    msg = str(caught.value)
+    assert f"default world's {role} role has no provider bound or no key" in msg and "dashboard" in msg
+
+
+@pytest.mark.parametrize("dim", [0, -1, None, True])
+def test_an_embedding_endpoint_without_a_positive_dim_is_a_config_error(external_config, dim):
+    with pytest.raises(FactoryConfigError, match="embedding endpoint has no positive dim"):
+        rise_settings(external_config, _info(embedding={**EMBEDDING_8787, "dim": dim}))
+
+
+def test_external_rise_settings_need_the_service_info(external_config):
+    with pytest.raises(ValueError, match="info"):
+        rise_settings(external_config)
 
 
 def test_labels_always_carry_repo_and_root():

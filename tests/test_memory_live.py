@@ -29,6 +29,8 @@ def live_port(tmp_path):
 
     cfg = read_memory_config(env=os.environ, repo_root=Path(__file__).resolve().parents[1])
     assert cfg is not None, "RISE_MEMORY_CONFIG must point at a real config"
+    if cfg.mode == "external":          # 外部模式的端点在看板服务里,这条用例要拉起模式的显式端点
+        pytest.skip("RISE_MEMORY_CONFIG is an external-mode config; this test needs spawn-mode endpoints")
     check_api_key(os.environ)
     cfg = replace(cfg, root=tmp_path / "mem", url=None, token_file=None)     # 端点用真配置,服务与世界都在 tmp 下
     service = spawn_service(cfg.root, os.environ)

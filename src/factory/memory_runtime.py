@@ -844,7 +844,7 @@ def open_memory_service(repo_root: Path, env: Mapping[str, str]) -> ServiceHandl
         url_of, token_of, restart = _service_endpoint(config, env, closers)
         session = ServiceSession(url_of=url_of, token_of=token_of, pinned_commit=pinned, restart=restart)
         closers.insert(0, session.close)                 # 先关会话,再停服务
-        settings = starling_names.rise_settings(config)
+        settings = starling_names.rise_settings(config, session.info)     # 外部模式的端点取自服务默认世界
         runtime = service_runtime(session.info, settings, config)
         prefix, label = config.world_prefix, starling_names.root_label(config.root)
         try:

@@ -46,15 +46,17 @@ def fake():
 
 
 def _memory_env(tmp_path, root=None, *, base_url="http://127.0.0.1:9/v1", **extra):
-    """拉起模式的记忆配置(不给 url 与 token_file)。`extra` 里的配置键写进文件,其余当环境变量。"""
+    """记忆配置:缺省是拉起模式(不给 url 与 token_file)。`extra` 里的配置键写进文件,其余当环境变量。
+    给了 `url` 就是外部模式,端点键不写(它们跟 Starling 走)。"""
     keys = {k: extra.pop(k) for k in list(extra) if k in ("embedding_model", "timeout_ms", "max_retries",
                                                           "url", "token_file", "world_prefix")}
     path = tmp_path / "memory.yaml"
-    path.write_text(yaml.safe_dump({
-        "root": str(root or tmp_path / "mem"), "extraction_base_url": base_url,
-        "extraction_model": "fake-extract", "embedding_base_url": base_url,
-        "embedding_model": keys.pop("embedding_model", "fake-embed"), "embedding_dim": 256, **keys,
-    }), encoding="utf-8")
+    data = {"root": str(root or tmp_path / "mem")}
+    if "url" not in keys:
+        data.update({"extraction_base_url": base_url, "extraction_model": "fake-extract",
+                     "embedding_base_url": base_url, "embedding_model": keys.pop("embedding_model", "fake-embed"),
+                     "embedding_dim": 256})
+    path.write_text(yaml.safe_dump({**data, **keys}), encoding="utf-8")
     os.chmod(path, 0o600)
     return {MEMORY_CONFIG_ENV: str(path), "OPENAI_API_KEY": "offline-test-key", "PATH": os.environ["PATH"], **extra}
 
@@ -248,21 +250,24 @@ def test_assembly_opens_no_deploy_world_handle_and_the_check_runs_under_the_lock
 
 
 _ROUND_MEMORY: list = []
+_ROUND_RUNTIME: list = []
 
 
 @pytest.fixture(autouse=True)
 def _remember_round_memory(monkeypatch):
-    """记下装配交给轮次处理器的部署记忆(`_round_memory` 用);处理器本身照常造。"""
+    """记下装配交给轮次处理器的部署记忆与运行时身份(`_round_memory` 用);处理器本身照常造。"""
     import factory.handlers as fh
     real = fh.make_start_round_handler
 
     def spy(**kw):
         _ROUND_MEMORY.append(kw["memory_store"])
+        _ROUND_RUNTIME.append(kw["memory_runtime"])
         return real(**kw)
 
     monkeypatch.setattr(fh, "make_start_round_handler", spy)
     yield
     _ROUND_MEMORY.clear()
+    _ROUND_RUNTIME.clear()
 
 
 def _round_store(asm):
@@ -718,3 +723,67 @@ def test_the_stand_in_without_deployment_memory_checks_nothing(store):
     """--interact 单独用时替身不造部署记忆、不碰磁盘,记忆根里有旧文件也不拦。"""
     _touch(_stand_in_root(store), "deploy/pa.json")
     assert memory_wiring(store.repo_root, {}, deployment=False).deployment is None
+
+
+# ---------------- 外部模式:端点跟 Starling 默认世界走(设计四补丁) ----------------
+
+@pytest.fixture
+def provider_service(tmp_path_factory, fake):
+    """tmp 下的 starling-serve,`starling.json` 里有一个 provider 绑到抽取与嵌入,地址指向假端点,密钥是占位值。
+    模拟用户的看板服务:rise 外部模式连它,不给任何端点键。"""
+    pytest.importorskip("starling_client"); pytest.importorskip("starling.service")
+    from starling_service import provider_starling_json, start_service
+    proc = start_service(tmp_path_factory.mktemp("ext"), starling_json=provider_starling_json(fake))
+    yield proc
+    proc.kill()
+
+
+def _external_env(tmp_path, proc, monkeypatch):
+    """外部模式的配置:只有 root、url、token_file。安装来源打桩成服务报的提交;密钥变量不给。"""
+    import starling_client
+    _pass_install_checks(monkeypatch, commit=starling_client.COMMIT)
+    path = tmp_path / "memory.yaml"
+    path.write_text(yaml.safe_dump({"root": str(tmp_path / "mem"), "url": proc.url,
+                                    "token_file": str(proc.token_path)}), encoding="utf-8")
+    os.chmod(path, 0o600)
+    return {MEMORY_CONFIG_ENV: str(path), "PATH": os.environ["PATH"]}
+
+
+@needs_service
+def test_external_mode_takes_the_default_worlds_endpoints_and_a_changed_model_exits_2(
+        store, tmp_path, provider_service, monkeypatch, capsys):
+    from starling_service import dashboard
+    env = _external_env(tmp_path, provider_service, monkeypatch)
+    asm = assemble(store, FactoryOptions(switches=("agent",)), env=env)
+    try:
+        mem = _round_store(asm)
+        settings = mem._settings
+        assert settings["extraction"]["provider_name"] == "p" and settings["embedding"]["provider_name"] == "e"
+        assert "base_url" not in settings["extraction"] and settings["embedding"]["dim"] == 256
+        runtime = _ROUND_RUNTIME[-1]
+        assert runtime["extraction"]["model"] == "fake-extract" and "base_url" not in runtime["extraction"]
+        mem.remember_event("factory-deploy-s1", "pa", "k#0@pa", "pb：你好", interlocutor="pb")   # 建世界、写一条
+        asm.on_locked()                                         # 带 rise 设置开只读句柄比较:一致
+    finally:
+        asm.close()
+    with dashboard(provider_service) as http:                  # 人在看板里换了抽取模型
+        http.post("/api/config", json={"providers": {"p": {"model": "fake-extract-2"}}}).raise_for_status()
+    assert main(["reconcile", str(store.repo_root), "--once", "--enable", "agent"], env=env) == 2
+    err = capsys.readouterr().err
+    assert "world_settings_mismatch" in err and "rise.deploy.factory-deploy-s1" in err
+    assert provider_service.token not in err and "127.0.0.1" not in err
+
+
+@needs_service
+def test_external_mode_refuses_a_default_world_whose_embedding_role_is_unbound(
+        store, tmp_path, provider_service, monkeypatch):
+    from starling_service import dashboard
+    env = _external_env(tmp_path, provider_service, monkeypatch)
+    with dashboard(provider_service) as http:
+        http.post("/api/config", json={"roles": {"embedding": ""}}).raise_for_status()
+    try:
+        with pytest.raises(FactoryConfigError, match="default world's embedding role has no provider bound"):
+            memory_wiring(store.repo_root, env, deployment=True)
+    finally:
+        with dashboard(provider_service) as http:
+            http.post("/api/config", json={"roles": {"embedding": "e"}}).raise_for_status()
