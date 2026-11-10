@@ -53,6 +53,7 @@ from controlplane.deferred import DeferredError
 from controlplane.gitstore import GitStore
 from controlplane.lock import git_dir
 from factory.errors import FactoryConfigError
+from factory.memory_budget import SPAWN_LAYERS, MemoryTimeBudget, memory_time_budget, spawn_time_budget
 from factory.memory_config import (
     MEMORY_CONFIG_ENV,
     MemoryConfig,
@@ -98,6 +99,7 @@ class DeploymentMemory:
     store: DeploymentMemoryStore
     layout: MemoryLayout
     runtime: dict
+    budget: MemoryTimeBudget = SPAWN_LAYERS      # 各层时限;外部模式按服务端点推出
 
 
 def stand_in_memory_root(repo_root: Path) -> Path:
@@ -247,7 +249,7 @@ class TrainingWorlds(Protocol):
     def join_rollout(self, episode_id: str, holder: str) -> MemoryBackend: ...
 
     def close_rollout(self, episode_id: str, ports: Sequence[object], *,
-                      wait_s: float = SESSION_CLOSE_WAIT_S) -> bool: ...
+                      wait_s: float | None = None) -> bool: ...
 
     def release_session(self, episode_id: str, ports: Sequence[object]) -> None: ...
 
@@ -290,13 +292,15 @@ class _RolloutWorlds:
     子类实现 `_create`(建一个世界)、`_port`(在世界里开一个主体的端口)、`_discard`(删或关世界),可选 `_describe`
     (日志里的物理世界名)。异常与日志文字不含路径、端点与密钥:只有 episode id、世界名与异常类名或码。"""
 
-    def __init__(self, *, held_wait_s: float = SESSION_CLOSE_WAIT_S) -> None:
+    def __init__(self, *, held_wait_s: float = SESSION_CLOSE_WAIT_S,
+                 close_wait_s: float = SESSION_CLOSE_WAIT_S) -> None:
         self._lock = threading.Lock()
         self._seeds: dict[str, str | None] = {}
         self._pins: dict[str, dict[str, tuple[str, str]]] = {}     # run_id → {scenario_id: (起点世界名, 摘要)}
         self._worlds: dict[str, _World] = {}
         self._held: dict[str, _World] = {}
         self.held_wait_s = held_wait_s          # open_rollout 等保留世界端口关上的期限;测试传小值
+        self.close_wait_s = close_wait_s        # close_rollout 不给 wait_s 时等服务端端口关完的期限(外部模式按预算推出)
 
     # ---- 绑定表 ----
 
@@ -417,8 +421,8 @@ class _RolloutWorlds:
         return port
 
     def close_rollout(self, episode_id: str, ports: Sequence[object], *,
-                      wait_s: float = SESSION_CLOSE_WAIT_S) -> bool:
-        """关客户端的端口,等这个世界的端口计数归零(服务端在会话终态关自己的端口),摘表项、删世界,返回真。
+                      wait_s: float | None = None) -> bool:
+        """`wait_s` 不给取 `close_wait_s`。关客户端的端口,等这个世界的端口计数归零(服务端在会话终态关自己的端口),摘表项、删世界,返回真。
 
         - 计数在 `wait_s` 内没归零:世界移进保留表,记 warning(只有 episode id),返回假,不抛。这条 rollout 的轨迹
           已经拿到了,照常结束;同名重试在端口全关之前判瞬态,世界文件留给重试的先删后建或启动清扫。
@@ -426,6 +430,7 @@ class _RolloutWorlds:
           记 warning,重抛第一个异常(调用方据此判训练位记忆失败)。
         - 世界删不掉(`OSError`):端口都已关上,不进保留表,记 warning,返回假,不抛。
         - 表里没有这个世界(从没开成,或已经收过尾):关完端口返回真。"""
+        wait_s = self.close_wait_s if wait_s is None else wait_s
         first = _close_all(ports)
         with self._lock:
             rec = self._worlds.get(episode_id)
@@ -555,8 +560,9 @@ class StarlingTrainingWorlds(_RolloutWorlds):
 
     def __init__(self, session, *, prefix: str, root_label: str, settings: dict, empty_seed: tuple[str, str],
                  close_timeout_s: float = 60.0, held_wait_s: float = SESSION_CLOSE_WAIT_S,
+                 close_wait_s: float = SESSION_CLOSE_WAIT_S,
                  admin: Callable[[str, dict], dict] | None = None) -> None:
-        super().__init__(held_wait_s=held_wait_s)
+        super().__init__(held_wait_s=held_wait_s, close_wait_s=close_wait_s)
         self._session = session
         self.prefix = prefix
         self._root_label = root_label
@@ -684,11 +690,8 @@ class _Admin:
 
 # ---------------- 组合根选后端 ----------------
 
-# 设计二 6.4 节、FC-31:接上 Starling 后部署的一轮最坏多 20 秒(recall 嵌入 1 次,remember 抽取 3 次,embed_pending 嵌入 1 批,
-# 每次至多 4 秒),所以服务端等一次提交放宽到 40 秒,整条流的 deadline 按 max_turns × 每轮 40 秒折算。替身没有网络调用,
-# 保持 AgentRuntime 默认的 5 秒与 15 秒。
-DEPLOY_MEMORY_TURN_TIMEOUT_S = 40.0
-DEPLOY_MEMORY_PER_TURN_S = 40.0
+# 部署路的等提交与整条流的每轮(设计二 6.4 节、FC-31、FC-51)在 `MemoryWiring.budget`:拉起模式 40 秒与 40 秒
+# (`factory.memory_budget.SPAWN_LAYERS`),外部模式按服务的端点推出。替身没有网络调用,保持 AgentRuntime 默认的 5 秒与 15 秒。
 
 _INSTALL_HINT = "run pip install '.[memory]' (or uv sync --extra memory)"
 
@@ -702,7 +705,8 @@ class MemoryWiring:
     - `on_locked`:持仓库锁之后才跑的检查(90 篇"世界设置"一段、FC-48、第 23 条),只交出函数、不在装配时调
       (`run_daemon(on_locked=)`、`reconcile_one_tick` 的锁内)。第二个进程撞锁之前不能开过任何句柄。
     - `closers`:按登记顺序是关会话、拉起模式下停服务;组合根最先登记,逆序执行时最后跑。
-    - `session`:服务会话,组合根据它查致命状态。"""
+    - `session`:服务会话,组合根据它查致命状态。
+    - `budget`:各层时限(`factory.memory_budget`)。替身与拉起模式是固定的 `SPAWN_LAYERS`,外部模式按服务的端点推出。"""
 
     backend: str
     deployment: DeploymentMemory | None
@@ -711,6 +715,7 @@ class MemoryWiring:
     on_locked: Callable[[], None] | None = None
     closers: tuple[Callable[[], None], ...] = ()
     session: object | None = None
+    budget: MemoryTimeBudget = SPAWN_LAYERS
 
 
 def _known_scenarios(repo_root: Path) -> tuple[str, ...]:
@@ -787,6 +792,7 @@ class ServiceHandle:
     runtime: dict
     empty_seed: tuple[str, str]
     closers: tuple[Callable[[], None], ...]
+    budget: MemoryTimeBudget = SPAWN_LAYERS
 
     def close(self) -> None:
         first: Exception | None = None
@@ -813,7 +819,8 @@ def open_memory_service(repo_root: Path, env: Mapping[str, str]) -> ServiceHandl
     ① 读 RISE_MEMORY_CONFIG:没设(或空串)返回 None(替身),不导入 `starling_client`、不拉起服务;② 安装来源:
     `starling-client` 非 editable、有 git 提交,拉起模式下 `starling-memory` 也要且两者同一提交;③ 拉起模式下
     `OPENAI_API_KEY` 非空;④ 认领记忆根、查旧布局;⑤ 拉起或连接服务,造服务会话(协议、token、提交不一致在这里退出码 2);
-    ⑥ 算 rise 设置与运行时身份;⑦ `ensure_world` 空种子。**不**开任何部署世界的句柄。⑤ 之后任何一步失败,先关会话、
+    ⑥ 算 rise 设置、运行时身份与各层时限(外部模式按服务端点推出,并据此换上会话的句柄超时与排空窗口);
+    ⑦ `ensure_world` 空种子。**不**开任何部署世界的句柄。⑤ 之后任何一步失败,先关会话、
     停服务再上抛。配置有任何问题都是 `FactoryConfigError`(退出码 2)。"""
     config = read_memory_config(env=env, repo_root=repo_root)
     if config is None:
@@ -846,6 +853,9 @@ def open_memory_service(repo_root: Path, env: Mapping[str, str]) -> ServiceHandl
         closers.insert(0, session.close)                 # 先关会话,再停服务
         settings = starling_names.rise_settings(config, session.info)     # 外部模式的端点取自服务默认世界
         runtime = service_runtime(session.info, settings, config)
+        budget = _time_budget(config, settings)
+        session.retune(handle_timeout_s=budget.handle_s, drain_window_s=budget.drain_window_s)
+        _log.info("%s", budget.describe())
         prefix, label = config.world_prefix, starling_names.root_label(config.root)
         try:
             empty_seed = ensure_empty_seed(session, names=starling_names, prefix=prefix, root_label=label,
@@ -855,7 +865,15 @@ def open_memory_service(repo_root: Path, env: Mapping[str, str]) -> ServiceHandl
     except BaseException:
         _close_quietly(closers)
         raise
-    return ServiceHandle(session, config, settings, prefix, label, memory_layout, runtime, empty_seed, tuple(closers))
+    return ServiceHandle(session, config, settings, prefix, label, memory_layout, runtime, empty_seed, tuple(closers),
+                         budget)
+
+
+def _time_budget(config: MemoryConfig, settings: dict) -> MemoryTimeBudget:
+    """⑥ 之后:外部模式按 rise 设置里的两个端点推出各层(FC-51),拉起模式是固定的 `SPAWN_LAYERS`(算出的最坏只进日志)。"""
+    if config.mode == "external":
+        return memory_time_budget(settings["extraction"], settings["embedding"])
+    return spawn_time_budget(settings["extraction"], settings["embedding"])
 
 
 def memory_wiring(repo_root: Path, env: Mapping[str, str], *, deployment: bool) -> MemoryWiring:
@@ -877,11 +895,13 @@ def memory_wiring(repo_root: Path, env: Mapping[str, str], *, deployment: bool) 
         from simple_actio.memory_starling import StarlingDeploymentStore
 
         session, prefix, label, settings = service.session, service.prefix, service.root_label, service.settings
+        budget = service.budget
         store = StarlingDeploymentStore(session, names=starling_names, prefix=prefix, root_label=label,
                                         settings=settings, marker_dir=config.root / "deploy",
-                                        empty_seed_digest=service.empty_seed[1])
+                                        empty_seed_digest=service.empty_seed[1], close_timeout_s=budget.port_close_s)
         worlds = StarlingTrainingWorlds(session, prefix=prefix, root_label=label, settings=settings,
-                                        empty_seed=service.empty_seed)
+                                        empty_seed=service.empty_seed, close_timeout_s=budget.port_close_s,
+                                        held_wait_s=budget.close_wait_s, close_wait_s=budget.close_wait_s)
         resolver = starling_memory_resolver(session, prefix=prefix, root_label=label,
                                             empty_seed_world=service.empty_seed[0], runtime=service.runtime)
     except BaseException:
@@ -889,8 +909,8 @@ def memory_wiring(repo_root: Path, env: Mapping[str, str], *, deployment: bool) 
         raise
     deployment_memory = None
     if deployment:
-        deployment_memory = DeploymentMemory(store, service.layout, copy.deepcopy(service.runtime))
+        deployment_memory = DeploymentMemory(store, service.layout, copy.deepcopy(service.runtime), budget)
     _log.info("memory backend: starling")
     return MemoryWiring("starling", deployment_memory, resolver, worlds,
                         on_locked=deploy_world_check(session, store, repo_root) if deployment else None,
-                        closers=service.closers, session=session)
+                        closers=service.closers, session=session, budget=budget)

@@ -31,10 +31,11 @@ _log = logging.getLogger(__name__)
 _ADMIN_PATH = "/api/v1/client/admin/"
 _STOPPING = "starling session is stopping"
 
-# 90 篇"客户端超时"表(FC-46):句柄调用用 connect 的缺省 30 秒;管理调用(建世界、分叉、快照、恢复)要拷库,给 300 秒
+# 90 篇"客户端超时"表(FC-46):句柄调用缺省 30 秒;管理调用(建世界、分叉、快照、恢复)要拷库,给 300 秒。
+# 外部模式下句柄超时与排空窗口由 `factory.memory_budget` 按服务的端点推出,装配期经 `retune` 换上(FC-51)
 HANDLE_TIMEOUT_S = 30.0
 ADMIN_TIMEOUT_S = 300.0
-# 排空窗口:一个会话丢失后 60 秒内,在它丢失时有可写句柄的世界上开句柄收到 world_held 判瞬态
+# 排空窗口:一个会话丢失后这么久之内,在它丢失时有可写句柄的世界上开句柄收到 world_held 判瞬态
 DRAIN_WINDOW_S = 60.0
 
 
@@ -149,6 +150,8 @@ class ServiceSession:
         self._transport_factory = transport if transport is not None else starling_client.Transport
         self._protocol = starling_client.PROTOCOL
         self._restart, self._clock = restart, clock
+        self._handle_timeout_s = HANDLE_TIMEOUT_S
+        self._drain_window_s = DRAIN_WINDOW_S
         self._lock = threading.Lock()
         self._switching = threading.Lock()                 # 同一时刻只有一条线程换会话
         self._fatal: str | None = None
@@ -165,6 +168,46 @@ class ServiceSession:
             self._close_quietly(client)
             raise FactoryConfigError(f"memory service admin transport failed: starling {_code_of(exc)}") from None
         self._current = _Generation(1, client, transport)
+
+    @property
+    def handle_timeout_s(self) -> float:
+        return self._handle_timeout_s
+
+    @property
+    def drain_window_s(self) -> float:
+        return self._drain_window_s
+
+    def retune(self, *, handle_timeout_s: float, drain_window_s: float) -> None:
+        """装配期换上按服务端点推出的句柄超时与排空窗口(FC-51),只在还没开过端口、没换过会话时调。
+
+        句柄超时编在客户端的传输里,换它要重连:先连一个新客户端(同一 URL 与 token,新超时),核对 `info()` 与第 1 代
+        相同,再关掉旧的。核对不过、连不上:`FactoryConfigError`(装配错误),旧客户端照常留着,由 `close()` 收。"""
+        if not (handle_timeout_s > 0 and drain_window_s > 0):
+            raise ValueError("handle_timeout_s and drain_window_s must be positive")
+        with self._lock:
+            gen = self._current
+            if gen.number != 1 or gen.ports or gen.admin_calls or gen.lost or self._closed or self._fatal:
+                raise RuntimeError("retune is only allowed at assembly, before any port is opened")
+            same = handle_timeout_s == self._handle_timeout_s
+            self._drain_window_s = float(drain_window_s)
+        if same:
+            return
+        try:
+            client = self._connect(self._url_of(), token=self._token_of(), timeout_s=float(handle_timeout_s))
+        except Exception as exc:
+            raise FactoryConfigError(f"memory service connection refused: starling {_code_of(exc)}") from None
+        try:
+            why = _mismatch(self.identity, _identity(client.info()))
+        except Exception as exc:
+            self._close_quietly(client)
+            raise FactoryConfigError(f"memory service info() failed: starling {_code_of(exc)}") from None
+        if why is not None:
+            self._close_quietly(client)
+            raise FactoryConfigError(f"memory service changed during assembly: {why}")
+        with self._lock:
+            old, gen.client = gen.client, client
+            self._handle_timeout_s = float(handle_timeout_s)
+        self._close_quietly(old)
 
     @property
     def _admin_transport(self) -> object:
@@ -238,7 +281,7 @@ class ServiceSession:
                 raise MemoryFailureError(f"starling service restart failed: {type(exc).__name__}",
                                          transient=True) from None
         try:
-            client = self._connect(self._url_of(), token=self._token_of(), timeout_s=HANDLE_TIMEOUT_S)
+            client = self._connect(self._url_of(), token=self._token_of(), timeout_s=self._handle_timeout_s)
         except (errors.Unauthorized, errors.ProtocolMismatch) as exc:
             self._turn_fatal(f"reconnect refused: {exc.code}")
         except Exception as exc:
@@ -364,10 +407,10 @@ class ServiceSession:
             self._drain.append((self._clock(), reported | frozenset(gen.writers)))
 
     def in_drain_window(self, world: str) -> bool:
-        """有一个已丢失的代号在丢失时于 `world`(完整世界名)上有可写句柄,且距丢失不到 60 秒。"""
+        """有一个已丢失的代号在丢失时于 `world`(完整世界名)上有可写句柄,且距丢失不到排空窗口(缺省 60 秒)。"""
         now = self._clock()
         with self._lock:
-            self._drain = [(at, worlds) for at, worlds in self._drain if now - at < DRAIN_WINDOW_S]
+            self._drain = [(at, worlds) for at, worlds in self._drain if now - at < self._drain_window_s]
             return any(world in worlds for _, worlds in self._drain)
 
     def owns_generation(self, generation: int) -> bool:

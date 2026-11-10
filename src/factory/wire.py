@@ -161,7 +161,8 @@ class Assembly:
 
 
 # --interact 的时间预算(设计源 6.4 节),外层必须高于内层的最坏耗时,内层才先超时、外层看到分类过的失败。
-# 真机(eager,两适配器)每轮 20 到 65 秒,2026-11-02 从 60/25/60/90/90 整体放宽到下面这组。
+# 真机(eager,两适配器)每轮 20 到 65 秒,2026-11-02 从 60/25/60/90/90 整体放宽到下面这组。这是替身与拉起模式的值;
+# 外部模式由 factory.memory_budget 按记忆服务的端点推出(FC-51),经 MemoryWiring.budget 交给装配,只会更长。
 INTERACT_TURN_TIMEOUT_S = 150.0     # 服务端等一次提交:训练位策略 HTTP 120 秒加一轮记忆最坏 20 秒;默认的 5 秒是给罐头后端定的
 INTERACT_BACKEND_TIMEOUT_S = 90.0   # 服务端单次后端调用:对手 HTTP 60 秒加一轮记忆最坏 20 秒
 INTERACT_MESSAGE_TIMEOUT_S = 120.0  # 客户端相邻两条服务端消息:间隔以一个对手轮为界,高于后端调用上限
@@ -177,24 +178,46 @@ def memory_wiring(repo_root: Path, env: Mapping[str, str], *, deployment: bool) 
     return _impl(repo_root, env, deployment=deployment)
 
 
-def deploy_turn_timeout_s(*, interact: bool, starling: bool) -> float | None:
-    """共用运行时里「服务端等一次提交」的上限(设计二 6.4 节、FC-31);None 即保持 AgentRuntime 的默认 5 秒。
+def deploy_turn_timeout_s(*, interact: bool, starling: bool, budget=None) -> float | None:
+    """共用运行时里「服务端等一次提交」的上限(设计二 6.4 节、FC-31、FC-51);None 即保持 AgentRuntime 的默认 5 秒。
 
-    `--interact` 开着取 90 秒(训练位策略 HTTP 加记忆最坏的一轮),与 `--enable agent` 同开也是它:两条路共用一个运行时,
-    取较大值。只有 `--enable agent` 且是 Starling 时取 40 秒(`DEPLOY_MEMORY_TURN_TIMEOUT_S`,单一来源在
-    `factory.memory_runtime`)。替身没有网络调用,保持现值。"""
+    `budget` 是 `factory.memory_budget.MemoryTimeBudget`,缺省是拉起模式的固定值。`--interact` 开着取它的
+    `interact_turn_s`(拉起 150 秒),与 `--enable agent` 同开也是它:两条路共用一个运行时,取较大值。只有 `--enable agent`
+    且是 Starling 时取 `deploy_turn_s`(拉起 40 秒)。替身没有网络调用,保持现值。"""
+    if budget is None:
+        from factory.memory_budget import SPAWN_LAYERS
+
+        budget = SPAWN_LAYERS
     if interact:
-        return INTERACT_TURN_TIMEOUT_S
+        return max(INTERACT_TURN_TIMEOUT_S, budget.interact_turn_s)
     if starling:
-        from factory.memory_runtime import DEPLOY_MEMORY_TURN_TIMEOUT_S   # 惰性:拖进 mindagent(Ruling 16)
-
-        return DEPLOY_MEMORY_TURN_TIMEOUT_S
+        return budget.deploy_turn_s
     return None
+
+
+def _runtime_timeouts(options: FactoryOptions, keys: frozenset[str], memory) -> dict:
+    """交给 AgentRuntime 的服务端与客户端时限。替身与拉起模式与接服务之前相同:`--interact` 时后端调用 90 秒、相邻消息
+    120 秒,收尾 join 用服务端缺省 60 秒;只开部署路时都用缺省。外部模式(`budget.derived`)四项都取推出的值:
+    部署路的对手位也是带记忆的实例,后端调用与收尾 join 同样要包住一轮记忆。"""
+    budget = None if memory is None else memory.budget
+    out: dict = {}
+    timeout = deploy_turn_timeout_s(interact=options.interact,
+                                    starling=memory is not None and memory.backend == "starling", budget=budget)
+    if timeout is not None:
+        out["turn_timeout_s"] = timeout
+    derived = budget is not None and budget.derived
+    if options.interact or derived:
+        out["backend_timeout_s"] = budget.backend_s if derived else INTERACT_BACKEND_TIMEOUT_S
+    if options.interact:
+        out["message_timeout_s"] = budget.message_s if derived else INTERACT_MESSAGE_TIMEOUT_S
+    if derived:
+        out["resource_join_timeout_s"] = budget.join_s
+    return out
 
 
 def _shared_runtime(
     store: GitStore, options: FactoryOptions, keys: frozenset[str],
-    *, turn_timeout_s: float | None, training_worlds: TrainingWorlds | None,
+    *, timeouts: Mapping[str, float], training_worlds: TrainingWorlds | None,
     deployment_store: DeploymentMemoryStore | None = None,
 ) -> tuple[AgentRuntime | None, OpponentSwitch | None]:
     """`--interact` 或 `--enable agent` 时造那唯一的 AgentRuntime(进程内 loopback 实时服务端),否则 (None, None)。
@@ -207,7 +230,7 @@ def _shared_runtime(
     所以运行时先带着空开关造好,策略上下文进入时装上真工厂、退出时卸下(见 factory.interact_policy)。
     卸下的开关给的是运行时原来的罐头后端,所以共用运行时上的部署会话行为不变。
 
-    turn_timeout_s 为 None 时不传,保持 AgentRuntime 的默认值(见 `deploy_turn_timeout_s`)。training_worlds 只在
+    timeouts 是 `_runtime_timeouts` 给的时限,没出现的键不传,保持 AgentRuntime 的默认值。training_worlds 只在
     --interact 时传,且必须是交给策略工厂的同一个对象(客户端在它里面建 rollout 世界,服务端按 episode id 加入):
     部署会话没登记给训练 run,用不到它。deployment_store 只在启用了 start_agent_round 时传
     (部署记忆的那一个管理面,与轮次处理器、门② 同一个对象):运行时据此在部署世界里开对手位的端口。"""
@@ -216,16 +239,15 @@ def _shared_runtime(
     from factory.agent import AGENT_CONFIG, AgentRuntime, read_agent_settings   # 惰性:拖进 grpc 与 mindagent
 
     lines = read_agent_settings(store)[1] if store.exists(AGENT_CONFIG) else ()
-    kwargs: dict = {} if turn_timeout_s is None else {"turn_timeout_s": turn_timeout_s}
+    kwargs: dict = dict(timeouts)
     if deployment_store is not None:
         kwargs["deployment_store"] = deployment_store
     if options.interact:
         from factory.interact_policy import OpponentSwitch
 
         switch = OpponentSwitch(lines)
-        return AgentRuntime(store, lines, message_timeout_s=INTERACT_MESSAGE_TIMEOUT_S,
-                            backend_timeout_s=INTERACT_BACKEND_TIMEOUT_S,
-                            opponent_backend_factory=switch, training_worlds=training_worlds, **kwargs), switch
+        return AgentRuntime(store, lines, opponent_backend_factory=switch, training_worlds=training_worlds,
+                            **kwargs), switch
     return AgentRuntime(store, lines, **kwargs), None
 
 
@@ -248,15 +270,23 @@ def _interact_wiring(
     # opponent 段不在这里取,策略上下文每次进入时自己从树里重读(装配之后改了也生效)
     endpoint = select_endpoint(read_endpoints_config(store), options.endpoint)
     client = build_compute_client(endpoint, read_host_map(env=environ))
+    budget = memory.budget
+    # 训练位与对手的 HTTP 上限:替身与拉起模式用 make_policy_factory 的缺省(与接服务之前相同);外部模式传预算里的值,
+    # 后端调用与等提交两层正是按它们加一轮记忆推出的
+    limits = {"policy_timeout_s": budget.policy_s, "opponent_timeout_s": budget.opponent_s} if budget.derived else {}
     policy_factory = make_policy_factory(
         store=store, runtime=runtime, switch=switch, client=client, endpoint=endpoint, env=environ,
-        training_worlds=memory.training_worlds,
+        training_worlds=memory.training_worlds, **limits,
     )
-    return {
+    wiring = {
         "policy_factory": policy_factory,
         "policy_endpoint": endpoint.endpoint_id,
         "memory_resolver": memory.memory_resolver,
     }
+    if budget.derived:          # 外部模式:流 deadline 与准入退避随服务端的 join 一起放长;其余入口用轨迹源的缺省
+        wiring["source_options"] = {"per_turn_deadline_s": budget.per_turn_deadline_s,
+                                    "admission_wait_s": budget.admission_wait_s}
+    return wiring
 
 
 def _dispatcher(options: FactoryOptions, runtime: AgentRuntime | None, **kwargs):
@@ -450,8 +480,7 @@ def assemble(
         closers = list(memory.closers)              # 服务的收尾最先登记、最后执行
         try:
             runtime, switch = _shared_runtime(
-                store, options, keys,
-                turn_timeout_s=deploy_turn_timeout_s(interact=True, starling=memory.backend == "starling"),
+                store, options, keys, timeouts=_runtime_timeouts(options, keys, memory),
                 training_worlds=memory.training_worlds,
             )
             closers.append(runtime.close)
@@ -485,9 +514,7 @@ def assemble(
         deployment_store = memory.deployment.store
     try:
         runtime, switch = _shared_runtime(
-            store, options, keys,
-            turn_timeout_s=deploy_turn_timeout_s(
-                interact=options.interact, starling=memory is not None and memory.backend == "starling"),
+            store, options, keys, timeouts=_runtime_timeouts(options, keys, memory),
             training_worlds=None if memory is None else memory.training_worlds,
             deployment_store=deployment_store,
         )

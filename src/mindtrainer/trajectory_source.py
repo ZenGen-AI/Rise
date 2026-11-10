@@ -24,7 +24,8 @@ from simulator.store_adapter import read_persona, read_scenario
 PolicyForRollout = Callable[[str, str], AbstractContextManager[ModelBackend]]
 
 # 一轮的最坏耗时取各轮上限中较大的那个:训练位的服务端等提交 150 秒(对手轮 90 秒),见 factory.wire。
-# 按 max_turns_per_episode 乘出整条会话的流 deadline。
+# 按 max_turns_per_episode 乘出整条会话的流 deadline。这是缺省值:组合根在记忆服务的端点更慢时经构造参数
+# per_turn_deadline_s 传更长的(本包不导入 factory)。
 PER_TURN_DEADLINE_S = 150.0
 
 
@@ -226,11 +227,16 @@ class InteractTrajectorySource:
         run_id: str,
         start_step: int = 0,
         admission_wait_s: float = ADMISSION_WAIT_S,
+        per_turn_deadline_s: float = PER_TURN_DEADLINE_S,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         ensure_valid_config(config)
         self._admission_wait_s = _check_admission_wait(admission_wait_s)
+        if isinstance(per_turn_deadline_s, bool) or not isinstance(per_turn_deadline_s, (int, float)) \
+                or not math.isfinite(per_turn_deadline_s) or per_turn_deadline_s <= 0:
+            raise ValueError(f"per_turn_deadline_s must be a finite positive number, got {per_turn_deadline_s!r}")
+        self._per_turn_deadline_s = float(per_turn_deadline_s)
         self._sleep = sleep
         self._clock = clock
         if config.mode != "interact":
@@ -357,7 +363,7 @@ class InteractTrajectorySource:
         backoff = ADMISSION_FIRST_BACKOFF_S
         while True:
             client = self._client_factory(
-                deadline_s=self._cfg.max_turns_per_episode * PER_TURN_DEADLINE_S
+                deadline_s=self._cfg.max_turns_per_episode * self._per_turn_deadline_s
             )
             try:
                 client.create_session(

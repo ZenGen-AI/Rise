@@ -142,7 +142,8 @@ class AgentRuntime:
     TupleMemory(见 _backends)。情境从树里读(scenario_resolver)。
     每条 Interact 流带 deadline(DeadlineStub);流 deadline 可由调用方逐个给(client_factory(deadline_s=...)),
     interact_deadline_s 只是没给时的缺省。message_timeout_s 是客户端相邻两条服务端消息的最长间隔,运行时级,
-    给每个客户端(None 即不设,与过去相同)。stub_factory 只为测试注入。
+    给每个客户端(None 即不设,与过去相同)。backend_timeout_s 与 resource_join_timeout_s 是服务端单次后端调用与
+    收尾 join 的上限,None 用服务端的缺省 60 秒。stub_factory 只为测试注入。
 
     opponent_backend_factory(binding, scenario) 给 vllm 与 external_api 驱动的对手位造后端,只服务登记给训练 run 的会话;
     没传(None)或会话没登记(MindAgent 部署会话)时,这两种也和过去一样用 ScriptedBackend 说 opponent_lines:
@@ -175,6 +176,7 @@ class AgentRuntime:
                  interact_deadline_s: float = INTERACT_DEADLINE_S,
                  message_timeout_s: float | None = None,
                  backend_timeout_s: float | None = None,
+                 resource_join_timeout_s: float | None = None,
                  stub_factory=pb2_grpc.EnvironmentServiceStub,
                  opponent_backend_factory: Callable[[RoleBinding, Scenario], ModelBackend] | None = None,
                  training_worlds: TrainingWorlds | None = None,
@@ -194,6 +196,7 @@ class AgentRuntime:
         self._deadline = interact_deadline_s
         self._message_timeout = message_timeout_s
         self._backend_timeout = backend_timeout_s     # None:服务端的默认 60 秒
+        self._join_timeout = resource_join_timeout_s  # None:服务端收尾 join 的默认 60 秒
         self._stub_factory = stub_factory
         self._opponent_backend_factory = opponent_backend_factory
         self._training_worlds = training_worlds
@@ -400,9 +403,11 @@ class AgentRuntime:
             if self._server is None:
                 self._server = create_server(
                     self._backends, port=0, turn_timeout_s=self._timeout,
-                    # 只放宽后端调用上限,收尾的 join 仍是服务端默认 60 秒:准入退避的 65 秒预算以它为前提
-                    # (ADMISSION_WAIT_S ≥ join + 5)。等不到的在途线程进滞留表,由回收线程重试
+                    # 拉起模式只放宽后端调用上限,收尾的 join 仍是服务端默认 60 秒:准入退避的 65 秒预算以它为前提
+                    # (ADMISSION_WAIT_S ≥ join + 5)。外部模式三者由 factory.memory_budget 一起推出、一起传。
+                    # 等不到的在途线程进滞留表,由回收线程重试
                     **({} if self._backend_timeout is None else {"backend_timeout_s": self._backend_timeout}),
+                    **({} if self._join_timeout is None else {"resource_join_timeout_s": self._join_timeout}),
                     scenario_resolver=lambda sid: read_scenario(self._store, sid),
                     on_session_closed=self._on_session_closed,
                 )

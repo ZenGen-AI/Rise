@@ -493,3 +493,48 @@ def test_a_real_port_opened_through_the_session_counts_against_its_generation(se
             remote.close(); release()
     finally:
         s.close()
+
+
+# ---------------- retune(FC-51):外部模式按预算换上句柄超时与排空窗口 ----------------
+
+def test_retune_reconnects_with_the_new_handle_timeout_and_keeps_the_identity():
+    seen = []
+
+    def connect(url, *, token, timeout_s):
+        seen.append(timeout_s)
+        return FakeClient(INFO)
+
+    s = ServiceSession(url_of=lambda: "http://127.0.0.1:1", token_of=lambda: "t", pinned_commit="c" * 40,
+                       connect=connect, transport=lambda url, token, timeout_s: FakeTransport(timeout_s))
+    first = s._current.client
+    s.retune(handle_timeout_s=3439.0, drain_window_s=3449.0)
+    assert seen == [HANDLE_TIMEOUT_S, 3439.0] and first.closed and s._current.client is not first
+    assert (s.handle_timeout_s, s.drain_window_s, s._current.number) == (3439.0, 3449.0, 1)
+    s.close()
+
+
+def test_retune_refuses_a_service_that_changed_and_keeps_the_old_client():
+    made = [FakeClient(INFO), FakeClient({**INFO, "commit": "d" * 40})]
+    queue = list(made)
+    s = ServiceSession(url_of=lambda: "http://127.0.0.1:1", token_of=lambda: "t", pinned_commit="c" * 40,
+                       connect=lambda url, *, token, timeout_s: queue.pop(0),
+                       transport=lambda url, token, timeout_s: FakeTransport(timeout_s))
+    with pytest.raises(FactoryConfigError, match="changed during assembly"):
+        s.retune(handle_timeout_s=99.0, drain_window_s=99.0)
+    assert made[1].closed and not made[0].closed and s._current.client is made[0]
+    assert s.handle_timeout_s == HANDLE_TIMEOUT_S
+    s.close()
+
+
+def test_retune_with_the_same_timeout_does_not_reconnect_and_only_moves_the_window():
+    s, made = _session([FakeClient(INFO)])
+    s.retune(handle_timeout_s=HANDLE_TIMEOUT_S, drain_window_s=120.0)
+    assert len(made) == 1 and s.drain_window_s == 120.0
+    s.close()
+
+
+def test_retune_after_a_port_was_opened_is_a_programming_error():
+    s, _ = _session([FakeClient(INFO)])
+    s.open_port("w", "pa", read_only=False, settings={}, wrap=lambda remote, release, gen: remote)
+    with pytest.raises(RuntimeError, match="only allowed at assembly"):
+        s.retune(handle_timeout_s=99.0, drain_window_s=99.0)

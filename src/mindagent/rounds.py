@@ -57,7 +57,9 @@ from controlplane.states import assert_transition
 from inference_bridge import BridgeError
 from mindagent.analysis import analyze
 from mindagent.config import AgentConfig, agent_slot_of
-from mindagent.deployment import SESSION_CLOSE_WAIT_S, DeploymentFailedError, drop_snapshot, run_deployment_episodes
+from mindagent.deployment import (
+    ADMISSION_WAIT_S, SESSION_CLOSE_WAIT_S, DeploymentFailedError, drop_snapshot, run_deployment_episodes,
+)
 from mindagent.errors import AgentRoundFailedError, MindAgentDataError, ProposalParseError, RestoreFailedError
 from mindagent.failures import UNREADABLE, fail_once, read_or_none
 from mindagent.library import LibraryState, load_library
@@ -309,13 +311,17 @@ def make_start_round_handler(
     stream_deadline_s: float | None = None,
     register_episode: Callable[[str, str], None] = lambda eid, rid: None,
     unregister_episode: Callable[[str], None] = lambda eid: None,
+    close_wait_s: float = SESSION_CLOSE_WAIT_S,
+    admission_wait_s: float = ADMISSION_WAIT_S,
 ) -> Handler:
     """backend_factory(model_id, checkpoint_ref) 每次调用返回一个新的模型后端(普通或带指导语的);
     personas_loader(store, persona_ids) 返回 {persona_id: Persona}。bridge 缺省走规则模板。
     memory_store 与 memory_layout 是部署记忆(与门② 共用同一份,验证重放也只经它分叉重放世界);memory_runtime 是
     记忆运行时身份,装配时深拷贝一次。stream_deadline_s、
     register_episode(部署 id, round_id)与 unregister_episode(部署 id)原样交给部署驱动器:stream_deadline_s 为
-    None 时客户端工厂用它自己的现值;两个登记回调让服务端给部署会话的对手位在同一世界里开端口,缺省什么都不做。"""
+    None 时客户端工厂用它自己的现值;两个登记回调让服务端给部署会话的对手位在同一世界里开端口,缺省什么都不做。
+    close_wait_s(回滚与部署驱动器等世界端口全关的上限)与 admission_wait_s(准入退避的总等待)缺省是本包的常量;
+    组合根在外部模式下按服务端点推出更长的值传进来(服务端收尾的 join 随之放长)。"""
     generator = RULE_GENERATOR if bridge is None else BRIDGE_GENERATOR
     runtime = copy.deepcopy(memory_runtime)
 
@@ -373,8 +379,8 @@ def make_start_round_handler(
             for path, rec in records.items():
                 world = rec.world_id
                 what = f"rollback {path.name} in world {world}"
-                if not memory_store.wait_closed(world, SESSION_CLOSE_WAIT_S):
-                    raise RestoreFailedError(f"{what}: memory ports still open after {SESSION_CLOSE_WAIT_S:g}s",
+                if not memory_store.wait_closed(world, close_wait_s):
+                    raise RestoreFailedError(f"{what}: memory ports still open after {close_wait_s:g}s",
                                              point="mindagent.deployment.restore")
                 try:
                     memory_store.restore(world, rec.snapshot_id)
@@ -471,6 +477,7 @@ def make_start_round_handler(
             max_retries_per_episode=config.max_retries_per_episode,
             stream_deadline_s=stream_deadline_s,
             register_episode=register_episode, unregister_episode=unregister_episode,
+            close_wait_s=close_wait_s, admission_wait_s=admission_wait_s,
         )
         findings = analyze(episodes, min_support=config.min_support, min_ratio=config.min_ratio, skills=lib.skills)
         drafts = propose(findings, bridge=bridge, run_id=run_id, task_id=f"{task_id_for(model_id)}-propose",

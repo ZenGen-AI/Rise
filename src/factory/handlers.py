@@ -28,7 +28,6 @@ from factory.agent import (
 )
 from factory.configio import preflight, read_tree_config
 from factory.errors import FactoryConfigError
-from factory.memory_runtime import DEPLOY_MEMORY_PER_TURN_S, DEPLOY_MEMORY_TURN_TIMEOUT_S
 from mindagent.admit import make_admit_proposal_handler
 from mindagent.errors import MindAgentDataError
 from mindagent.library import check_memory_library_empty
@@ -96,20 +95,25 @@ def _agent(ctx) -> Handler:
     config, lines = read_agent_settings(ctx.store)
     mem = ctx.deployment_memory
     starling = mem.runtime["backend"] == "starling"
+    budget = mem.budget
     runtime = ctx.runtime
     if runtime is None:
-        # assemble 总会造共用运行时;走到这里的是手工拼的 BuildContext。等提交的上限与 wire.deploy_turn_timeout_s
-        # 在 interact=False 时同一个判法(这里不导入 factory.wire:wire 在函数内导入本模块,反过来就成环)
-        timeout_s = DEPLOY_MEMORY_TURN_TIMEOUT_S if starling else None
-        runtime = AgentRuntime(ctx.store, lines, deployment_store=mem.store,
-                               **({} if timeout_s is None else {"turn_timeout_s": timeout_s}))
+        # assemble 总会造共用运行时;走到这里的是手工拼的 BuildContext。时限与 wire._runtime_timeouts 在 interact=False
+        # 时同一个判法(这里不导入 factory.wire:wire 在函数内导入本模块,反过来就成环)
+        timeouts: dict = {"turn_timeout_s": budget.deploy_turn_s} if starling else {}
+        if budget.derived:
+            timeouts.update(backend_timeout_s=budget.backend_s, resource_join_timeout_s=budget.join_s)
+        runtime = AgentRuntime(ctx.store, lines, deployment_store=mem.store, **timeouts)
         ctx.register_closer(runtime.close)
     # ctx.runtime 非空时是 assemble 造的共用运行时(--interact 与 agent 开关同开),它的收尾已登记过,
     # 部署管理面也已是这里的 mem.store。轮次处理器、门② 与运行时共用这一个管理面:端口数是它的实例内状态
     bridge = ctx.bridge("agent") if _has_bridge_role(ctx.store, "agent") else None
-    # Starling:整条流的 deadline 按 max_turns × 40 秒折算(FC-31),训练路的 max_turns × 90 由轨迹源自己传;
-    # 替身不传,保持 AgentRuntime 的缺省
-    extra = {"stream_deadline_s": config.max_turns * DEPLOY_MEMORY_PER_TURN_S} if starling else {}
+    # Starling:整条流的 deadline 按 max_turns × 每轮折算(拉起 40 秒,FC-31;外部模式按服务端点推出,FC-51),
+    # 训练路的流 deadline 由轨迹源自己传;替身不传,保持 AgentRuntime 的缺省。外部模式另传等端口全关与准入退避的上限,
+    # 两者随服务端收尾的 join 一起放长
+    extra: dict = {"stream_deadline_s": config.max_turns * budget.deploy_per_turn_s} if starling else {}
+    if budget.derived:
+        extra.update(close_wait_s=budget.close_wait_s, admission_wait_s=budget.admission_wait_s)
     return make_start_round_handler(
         config=config,
         client_factory=runtime.client_factory,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager, ExitStack, nullcontext
 
 from controlplane.daemon import DirectiveFailedError, Dispatcher
@@ -235,6 +235,7 @@ def _interact_sources(
     client_factory: Callable[..., object],
     policy_for_rollout: PolicyForRollout,
     run_id: str,
+    source_options: Mapping[str, float] | None = None,
 ) -> Callable[[int], dict[str, TrajectorySource]]:
     """interact 的 grpo_opd 来自实时会话,只有 sft 用清单。清单由调用方先读好(_batch_manifests):
     缺失、读不出这类确定性的错要在占用推理服务之前就判,不能等策略上下文进入之后。"""
@@ -245,7 +246,8 @@ def _interact_sources(
         }
         if cfg.grpo_steps > 0:
             sources["grpo_opd"] = InteractTrajectorySource(
-                client_factory, policy_for_rollout, store, cfg, run_id=run_id, start_step=start
+                client_factory, policy_for_rollout, store, cfg, run_id=run_id, start_step=start,
+                **dict(source_options or {}),
             )
         return sources
 
@@ -331,6 +333,7 @@ def make_mindtrainer_dispatcher(
     policy_endpoint: str | None = None,
     memory_resolver: MemoryResolver | None = None,
     repo_commit: str | None = None,
+    source_options: Mapping[str, float] | None = None,
 ) -> Dispatcher:
     """构造 MindTrainer 派发器。它只做一件事:把一条 pending 的 directive 跑成候选。
 
@@ -360,6 +363,8 @@ def make_mindtrainer_dispatcher(
     - repo_commit:本次派发推进训练所用的 rise 代码版本,写进 training_run.code_versions(新建时写入,
       续训或重启时追加;同值只记一次)。只记不拦:config_hash 续训判定与 T3 规则一概不动。
       派发器不得导入 factory 自己查,由装配方给;取不到就是 None,记录不改。
+    - source_options:原样交给 InteractTrajectorySource 的时限参数(`admission_wait_s`、`per_turn_deadline_s`);
+      没给用轨迹源的缺省。组合根在记忆服务的端点更慢时给更长的值(派发器不知道记忆)。
     """
     if policy is not None and policy_factory is not None:
         raise ValueError("pass either policy or policy_factory to make_mindtrainer_dispatcher, not both")
@@ -416,7 +421,7 @@ def make_mindtrainer_dispatcher(
                         else policy_factory(run_id, cfg)
                     )
                     make_sources = _interact_sources(
-                        store, cfg, manifests, client_factory, stack.enter_context(scope), run_id
+                        store, cfg, manifests, client_factory, stack.enter_context(scope), run_id, source_options
                     )
                     # 只有 interact 记推理后端;batch 不传,由执行器自己的后端记账补上(见 resume_or_run)
                     extra["policy_backend"] = _policy_backend(cfg, policy_endpoint)

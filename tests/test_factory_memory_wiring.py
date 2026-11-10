@@ -787,3 +787,53 @@ def test_external_mode_refuses_a_default_world_whose_embedding_role_is_unbound(
     finally:
         with dashboard(provider_service) as http:
             http.post("/api/config", json={"roles": {"embedding": "e"}}).raise_for_status()
+
+
+# ---------------- 外部模式的时间预算(FC-51):各层按服务端点推出,经组合根传到每一层 ----------------
+
+def _derived_wiring(budget):
+    from simple_actio.memory import FileTupleStore
+    from factory.memory_runtime import DeploymentMemory
+    from mindagent.memory_layout import MemoryLayout
+
+    def make(repo_root, env, *, deployment):
+        root = repo_root.parent / "mem-derived"
+        mem = DeploymentMemory(FileTupleStore(root / "deploy", held_root=root / "held", replay_root=root / "replay"),
+                               MemoryLayout(root), {"backend": "starling"}, budget) if deployment else None
+        return MemoryWiring(backend="starling", deployment=mem, memory_resolver=stand_in_memory_resolver,
+                            training_worlds=StandInTrainingWorlds(), budget=budget)
+    return make
+
+
+def test_external_mode_passes_every_derived_layer_to_the_runtime_and_the_round_handler(store, monkeypatch):
+    from factory.memory_budget import memory_time_budget
+    import factory.handlers as fh
+    import factory.memory_runtime as mr
+    budget = memory_time_budget({"timeout_ms": 120000}, {"timeout_ms": 0})
+    monkeypatch.setattr(mr, "memory_wiring", _derived_wiring(budget))
+    seen = {}
+    monkeypatch.setattr(fh, "make_start_round_handler", lambda **kw: seen.setdefault("round", kw) and None or (lambda s, a: None))
+    asm = assemble(store, FactoryOptions(switches=("agent",)), env={})
+    try:
+        r = seen["round"]
+        runtime = r["client_factory"].__self__
+        assert (runtime._timeout, runtime._backend_timeout, runtime._join_timeout) == (8073.0, 8123.0, 8133.0)
+        assert runtime._message_timeout is None                          # 只开部署路时不设相邻消息上限
+        assert r["stream_deadline_s"] == r["config"].max_turns * 8123.0
+        assert (r["close_wait_s"], r["admission_wait_s"]) == (8143.0, 8138.0)
+    finally:
+        asm.close()
+
+
+def test_spawn_mode_and_the_stand_in_pass_no_derived_layer(store, monkeypatch):
+    import factory.handlers as fh
+    seen = {}
+    monkeypatch.setattr(fh, "make_start_round_handler", lambda **kw: seen.setdefault("round", kw) and None or (lambda s, a: None))
+    asm = assemble(store, FactoryOptions(switches=("agent",)), env={})
+    try:
+        r = seen["round"]
+        runtime = r["client_factory"].__self__
+        assert (runtime._backend_timeout, runtime._join_timeout) == (None, None)
+        assert "close_wait_s" not in r and "admission_wait_s" not in r
+    finally:
+        asm.close()
