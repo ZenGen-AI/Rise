@@ -1636,7 +1636,7 @@ git commit -m "feat(factory): 服务会话:代号与按代号的端口计数、�
   - `close()`：已关返回；`session.owns_generation(generation)` 为假时不发请求，直接当作已关（置位、调 `release`）；否则 `remote.close(timeout=close_timeout_s)`，收到 `SessionExpired` 或 `MemoryClosed` 也当作已关；`TimeoutError` 照旧抛非瞬态 `MemoryFailureError`、端口保持打开（今天的语义，`memory_starling.py:228-243`）。
   - `_resolve_memory`：解析器抛 `DeferredError` 原样上抛，指令留 pending（30 篇 MT-32）。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 # tests/test_simple_actio_memory_starling.py
@@ -1707,19 +1707,19 @@ def test_a_resolver_that_defers_leaves_the_directive_pending(store, live):
 
 `tests/test_mt_dispatch.py` 顶部补 `from controlplane.deferred import DeferredError`（若还没有）。派发器的调用形式照同文件里直接调派发器的现有用例。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_simple_actio_memory_starling.py tests/test_mt_dispatch.py`
 Expected: FAIL（`StarlingMemory` 不收 `generation`；`DeferredError` 被译成 T2）
 
-- [ ] **Step 3: 实现**：按 Interfaces。`memory_starling.py` 模块层的 `import starling` 换成 `import starling_client`（`StarlingDeploymentStore` 在 Task 14 改，本任务里它暂时坏着，属于分支上的红窗口）。
+- [x] **Step 3: 实现**：按 Interfaces。`memory_starling.py` 模块层的 `import starling` 换成 `import starling_client`（`StarlingDeploymentStore` 在 Task 14 改，本任务里它暂时坏着，属于分支上的红窗口）。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: 同 Step 2
 Expected: PASS
 
-- [ ] **Step 5: 提交**（分支 `design4-step4`）
+- [x] **Step 5: 提交**（分支 `design4-step4`）
 
 ```bash
 git add src/simple_actio/memory_starling.py src/mindtrainer/dispatch.py tests/test_simple_actio_memory_starling.py tests/test_mt_dispatch.py

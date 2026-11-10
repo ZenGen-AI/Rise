@@ -21,13 +21,14 @@ import secrets
 import shutil
 import tempfile
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Protocol
 
-import starling
+import starling_client
+from starling_client import errors as _client_errors
 
 from simple_actio.errors import SimpleActioDataError
 from simple_actio.memory_port import (
@@ -118,11 +119,17 @@ def translate_client_failure(exc: BaseException, *, port_closed_by_rise: bool,
     `Unauthorized`、`ProtocolMismatch` 走"其余"(非瞬态);它们在装配期与重连时由会话模块先接住。
     `TimeoutError`(`RemoteMemory.close` 超时)与其他异常都是永久失败,只写类名。
 
-    第 3 步惰性导入 `starling_client.errors`(模块层导入的仍是进程内的 `starling`),第 4 步换成模块层导入。"""
-    from starling_client import errors
-
+    返回的异常带 `code` 属性(客户端异常的码):管理面据此认出 `world_exists`、`world_not_found`、`snapshot_not_found`,
+    不解析消息文字。"""
     if isinstance(exc, MemoryFailureError):
         return exc
+    out = _map_client(exc, port_closed_by_rise=port_closed_by_rise, in_drain_window=in_drain_window)
+    out.code = getattr(exc, "code", None) or None
+    return out
+
+
+def _map_client(exc: BaseException, *, port_closed_by_rise: bool, in_drain_window: bool) -> MemoryFailureError:
+    errors = _client_errors
     name = type(exc).__name__
     if not isinstance(exc, errors.StarlingClientError):
         return MemoryFailureError(f"starling client failed: {name}", transient=False)
@@ -197,50 +204,70 @@ def _check_name(value: object, what: str) -> str:
     return value
 
 
+class SessionView(Protocol):
+    """端口对服务会话的最小依赖,按结构声明(`simple_actio` 不导入 `factory`)。组合根的
+    `factory.starling_session.ServiceSession` 满足它。"""
+
+    def owns_generation(self, generation: int) -> bool: ...
+
+    def mark_lost(self, generation: int, *, writable_worlds: Iterable[str]) -> None: ...
+
+
+# 收到这几类异常说明这一代会话已经不能用了:SessionExpired(租约过期)、rise 没关的端口收到 handle_closed(外部服务
+# 重启后不认旧句柄),以及 ServiceUnavailable(服务进程不在了)。最后一种也报会话丢失:否则拉起模式下服务退出后
+# 没有人触发重新拉起(会话只在代号丢失后的下一次调用里 restart),每次调用都只会再得到一次 ServiceUnavailable。
+_LOST = (_client_errors.SessionExpired, _client_errors.ServiceUnavailable)
+
+
 class StarlingMemory:
-    """一个主体(holder)在一个 Starling 世界库里的记忆端口,满足 `MemoryBackend`。holder 作 Starling 的
-    `agent=`:同一个库里各主体的语句各记在自己名下,召回只看本主体的。
+    """一个主体(holder)在一个 Starling 世界里的记忆端口,满足 `MemoryBackend`。包客户端的 `RemoteMemory`
+    (一个世界上以一个主体开的句柄):召回只看本主体名下的语句,写入记在本主体名下。
 
-    `memory` 是 `starling.Memory`(单测里是只有用到的几个方法的替身)。`read_only` 只给 `open_replay` 用:
-    `remember` 抛永久 MemoryFailureError("world_read_only"),`embed_pending` 返回 0 且不调门面。
-    `on_close` 在 close 成功后调一次,给部署管理面登记端口已关用。**`on_close` 必须不抛。** 它抛时,门面已经关了、端口已置为
-    关闭,`close()` 把它的异常经 `translate_failure` 改抛(非瞬态),之后再调 `close()` 是空操作,
-    不会再调 `on_close`:登记的副作用(例如计数减一)就此丢了。"""
+    `generation` 是句柄所属会话的代号,`session` 是那个会话(`SessionView`)。`release` 在端口关闭或"当作已关"时
+    调一次,给会话与管理面减端口计数用;**它必须不抛**,抛了照样算关上,异常改抛成非瞬态。
+    `read_only` 只给管理面的 `open_replay` 用:`remember` 抛永久 MemoryFailureError("world_read_only"),
+    `embed_pending` 返回 0 且不发请求。
 
-    def __init__(self, memory, *, read_only: bool = False, close_timeout_s: float = 60.0,
-                 on_close: Callable[[], None] | None = None) -> None:
-        self._memory = memory
+    调用收到 SessionExpired、ServiceUnavailable,或 rise 没关的端口收到 handle_closed:先报这一代会话丢失
+    (可写端口报出自己的世界,排空窗口按它算),再抛瞬态的 MemoryFailureError。"""
+
+    def __init__(self, remote, *, generation: int, session: SessionView, release: Callable[[], None],
+                 read_only: bool = False, close_timeout_s: float = 60.0) -> None:
+        self._remote = remote
+        self._generation = generation
+        self._session = session
+        self._release = release
         self._read_only = read_only
         self._close_timeout_s = close_timeout_s
-        self._on_close = on_close
+        self._closing = False       # rise 已开始关它:之后收到的 handle_closed 是 rise 关的
         self._closed = False
-
-    @classmethod
-    def open(cls, path: Path, *, holder: str, endpoints: StarlingEndpoints, read_only: bool = False,
-             close_timeout_s: float = 60.0, on_close: Callable[[], None] | None = None) -> StarlingMemory:
-        try:
-            memory = starling.Memory.open(
-                str(path), agent=holder, llm=endpoints.make_llm(), embedder=endpoints.make_embedder())
-        except Exception as exc:
-            raise translate_failure(exc) from None
-        return cls(memory, read_only=read_only, close_timeout_s=close_timeout_s, on_close=on_close)
 
     def _live(self):
         if self._closed:
             raise MemoryClosedError("memory port is closed")
-        return self._memory
+        return self._remote
+
+    def _lost(self) -> None:
+        self._session.mark_lost(self._generation, writable_worlds=[] if self._read_only else [self._remote.world])
+
+    def _failure(self, exc: Exception) -> MemoryFailureError:
+        """客户端异常译成 MemoryFailureError;会话已不能用时先报丢失。"""
+        by_rise = self._closing or self._closed
+        if isinstance(exc, _LOST) or (isinstance(exc, _client_errors.MemoryClosed) and not by_rise):
+            self._lost()
+        return translate_client_failure(exc, port_closed_by_rise=by_rise, in_drain_window=False)
 
     def recall(self, query: str, *, limit: int) -> list[MemoryHit]:
-        memory = self._live()
+        remote = self._live()
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
             raise SimpleActioDataError(f"recall.limit: expected a non-negative int, got {limit!r}")
         if limit == 0:
             return []
         try:
-            # 两个开关显式传,不靠门面的默认值(40 篇"召回显式传参",接服务后客户端照样传):
+            # 三个开关显式传,不靠服务端的默认值(40 篇"召回显式传参"):
             # strict:查询词嵌不出就抛 RecallDegradedError,不退回只有词面的结果。
             # include_volatile:刚嵌入、还没被 tick 晋级的语句也要能召回(实例每轮 remember 后 embed_pending)。
-            found = memory.recall(query, k=limit, mode="semantic", strict=True, include_volatile=True)
+            found = remote.recall(query, k=limit, mode="semantic", strict=True, include_volatile=True)
             hits: list[MemoryHit] = []
             seen: set[str] = set()
             for item in found:
@@ -254,50 +281,56 @@ class StarlingMemory:
                 hits.append(MemoryHit(hit_id, _render(item["row"])))
             return hits
         except Exception as exc:
-            raise translate_failure(exc) from None
+            raise self._failure(exc) from None
 
     def remember(self, event: MemoryEvent) -> RememberOutcome:
-        memory = self._live()
+        remote = self._live()
         if self._read_only:
             raise MemoryFailureError("world_read_only", transient=False)
         try:
             # "[key] " 前缀由 Starling 加,这里只传原文。
-            res = memory.remember_event(event.key, event.text, interlocutor=event.interlocutor, epoch=EPOCH)
-            return _outcome(memory, res)
+            res = remote.remember_event(event.key, event.text, interlocutor=event.interlocutor, epoch=EPOCH)
+            return _outcome(remote, res)
         except Exception as exc:
-            raise translate_failure(exc) from None
+            raise self._failure(exc) from None
 
     def embed_pending(self) -> int:
-        memory = self._live()
+        remote = self._live()
         if self._read_only:
             return 0          # 重放世界只读:不写向量
         try:
-            return _embed(memory)
+            return _embed(remote)
         except Exception as exc:
-            raise translate_failure(exc) from None
+            raise self._failure(exc) from None
 
     def digest(self) -> str:
-        memory = self._live()
+        remote = self._live()
         try:
-            return memory.digest()
+            return remote.digest()
         except Exception as exc:
-            raise translate_failure(exc) from None
+            raise self._failure(exc) from None
 
     def close(self) -> None:
+        """关句柄,再调 `release`。三种情形不发请求或不看回答,直接当作已关:端口的代号已不是会话的当前代号
+        (旧会话丢失后服务认不得它的句柄);关的时候收到 SessionExpired;收到 handle_closed。后两种同时报会话丢失。
+        `TimeoutError`(在途调用在期限内没返回)抛非瞬态 MemoryFailureError,端口保持打开,返回后可以再关一次:
+        训练路 rollout 世界的收尾靠这一点决定世界进不进保留表。"""
         if self._closed:
             return
-        try:
-            self._memory.close(timeout=self._close_timeout_s)
-        except Exception as exc:
-            # 不置 _closed:超时意味着在途调用还没返回,门面仍开着,返回后可以再关一次。
-            # 训练路 rollout 世界的收尾靠这一点决定删不删世界。
-            raise translate_failure(exc) from None
-        self._closed = True       # 门面确实已经关了:先置位,on_close 抛了端口也不能再用
-        if self._on_close is not None:
+        if self._session.owns_generation(self._generation):
+            self._closing = True
             try:
-                self._on_close()
+                self._remote.close(timeout=self._close_timeout_s)
+            except (_client_errors.SessionExpired, _client_errors.MemoryClosed):
+                self._lost()
             except Exception as exc:
-                raise translate_failure(exc) from None
+                self._closing = False
+                raise translate_client_failure(exc, port_closed_by_rise=True, in_drain_window=False) from None
+        self._closed = True       # 句柄确实不在了:先置位,release 抛了端口也不能再用
+        try:
+            self._release()
+        except Exception as exc:
+            raise translate_client_failure(exc, port_closed_by_rise=True, in_drain_window=False) from None
 
 
 _WAL_SUFFIXES = ("-wal", "-shm")

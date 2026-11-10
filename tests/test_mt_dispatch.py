@@ -8,6 +8,7 @@ import grpc
 import pytest
 
 from controlplane.daemon import DirectiveFailedError, reconcile_once
+from controlplane.deferred import DeferredError
 from controlplane.envelope import BigRef, Envelope, OwnerRef
 from controlplane.gitstore import GitStore
 from controlplane.paths import candidate_checkpoint_file, dataset_manifest_file, run_dir
@@ -1132,6 +1133,20 @@ def test_a_resolver_exception_fails_the_directive_with_its_class_name_only(store
     assert env.status == "failed" and env.payload["failure"]["category"] == "T2"
     assert "memory resolver failed: RuntimeError" in reason and "memory.example" not in reason
     assert trace == []
+
+
+def test_a_resolver_that_defers_leaves_the_directive_pending(store, live):
+    """记忆服务连不上、超时是瞬态(30 篇 MT-32):解析器抛 DeferredError,派发器原样上抛,不判 T2。"""
+    def busy(seed, scenario_ids):
+        raise DeferredError("memory service unreachable")
+
+    _interact_directive(store, memory=unresolved_memory())
+    trace = []
+    with pytest.raises(DeferredError):
+        make_mindtrainer_dispatcher(client_factory=live().client_factory,
+                                    policy_factory=lambda run_id, cfg: _Scope(trace, None),
+                                    memory_resolver=busy)(store, store.read_product(f"{run_dir(RUN)}/directive.yaml"))
+    assert store.read_product(f"{run_dir(RUN)}/directive.yaml").status == "pending" and trace == []
 
 
 def test_a_resolver_that_refuses_with_a_reason_keeps_that_reason(store, live):
