@@ -2096,7 +2096,7 @@ git commit -m "feat(factory): 记忆装配改连服务:新顺序、持锁后的�
 - Consumes: Task 13 至 16。
 - Produces: `src/` 下没有 `import starling`；`starling_client` 只在两个文件里；`MemoryLayout.legacy_entries(known, *, backend: Literal["stand-in", "starling"])`。
 
-- [ ] **Step 1: 写失败的测试**
+- [x] **Step 1: 写失败的测试**
 
 ```python
 # tests/test_factory_cross_plan.py
@@ -2131,12 +2131,12 @@ def test_half_written_and_runtime_files_never_block_a_stand_in_start(store):
     memory_wiring(store.repo_root, {}, deployment=True)                  # 替身在造部署记忆时查,不抛
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_factory_cross_plan.py tests/test_factory_memory_wiring.py tests/test_ma_memory_layout.py`
 Expected: FAIL（还有文件导入 `starling`；过渡规则仍在）
 
-- [ ] **Step 3: 实现**：删代码、改白名单、改 `legacy_entries`。`grep -rn "import starling\b\|from starling\b" src` 应为空；`grep -rn "starling_client" src` 只列出两个文件。
+- [x] **Step 3: 实现**：删代码、改白名单、改 `legacy_entries`。`grep -rn "import starling\b\|from starling\b" src` 应为空；`grep -rn "starling_client" src` 只列出两个文件。
 
 - [ ] **Step 4: 跑测试确认通过**
 

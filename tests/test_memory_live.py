@@ -1,8 +1,10 @@
 """设计源 §13 的两项未核实:真端点的单次延迟、真嵌入下的召回质量。连真网络、要真密钥,不进 CI:
-只有 RISE_MEMORY_LIVE=1 且 RISE_MEMORY_CONFIG 指向真配置时才跑。"""
+只有 RISE_MEMORY_LIVE=1 且 RISE_MEMORY_CONFIG 指向真配置时才跑。接服务后经拉起模式的记忆服务开端口
+(服务的数据目录在 tmp 下,不碰真配置里的记忆根);密钥照传给服务进程。"""
 import os
 import statistics
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -11,23 +13,37 @@ pytestmark = [
     pytest.mark.memory_live,
     pytest.mark.skipif(os.environ.get("RISE_MEMORY_LIVE") != "1", reason="set RISE_MEMORY_LIVE=1 to run"),
 ]
-pytest.importorskip("starling")
+pytest.importorskip("starling_client"); pytest.importorskip("starling.service")
 
 TURNS = [f"pb：第{i}轮,我担心预算超支,人手也不够" for i in range(10)]
 
 
 @pytest.fixture
 def live_port(tmp_path):
-    from simple_actio.memory_starling import StarlingEndpoints, StarlingMemory
+    import starling_client
+    from factory import starling_names
     from factory.memory_config import check_api_key, read_memory_config
+    from factory.starling_service import spawn_service
+    from factory.starling_session import ServiceSession
+    from simple_actio.memory_starling import StarlingDeploymentStore, ensure_empty_seed
+
     cfg = read_memory_config(env=os.environ, repo_root=Path(__file__).resolve().parents[1])
     assert cfg is not None, "RISE_MEMORY_CONFIG must point at a real config"
     check_api_key(os.environ)
-    port = StarlingMemory.open(tmp_path / "live.db", holder="pa", endpoints=StarlingEndpoints(
-        cfg.extraction_base_url, cfg.extraction_model, cfg.embedding_base_url, cfg.embedding_model,
-        cfg.embedding_dim, cfg.timeout_ms, cfg.max_retries))
+    cfg = replace(cfg, root=tmp_path / "mem", url=None, token_file=None)     # 端点用真配置,服务与世界都在 tmp 下
+    service = spawn_service(cfg.root, os.environ)
+    session = ServiceSession(url_of=lambda: service.url, token_of=lambda: service.token,
+                             pinned_commit=starling_client.COMMIT, restart=service.restart)
+    settings = starling_names.rise_settings(cfg)
+    label = starling_names.root_label(cfg.root)
+    _, digest = ensure_empty_seed(session, names=starling_names, prefix="live", root_label=label, settings=settings)
+    store = StarlingDeploymentStore(session, names=starling_names, prefix="live", root_label=label, settings=settings,
+                                    marker_dir=cfg.root / "deploy", empty_seed_digest=digest)
+    port = store.open("s1", "pa")
     yield port, cfg.timeout_ms / 1000.0
     port.close()
+    session.close()
+    service.close()
 
 
 def _timed(took, name, call):

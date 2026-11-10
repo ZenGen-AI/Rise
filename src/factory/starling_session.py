@@ -8,9 +8,9 @@
 
 管理调用走另一个不带会话的传输(请求体不带 `session_id`,服务端路由也不查会话),超时 300 秒,会话过期后照常可用。
 
-第 3 步不接线:装配不导入本模块。`starling_client` 只由本模块与 `simple_actio/memory_starling.py` 导入
-(`tests/test_factory_cross_plan.py` 守着),且一律在函数里惰性导入;`translate_client_failure` 也在用到时才从
-`simple_actio.memory_starling` 取(第 3 步那个模块在模块层导入进程内的 `starling`):没装 extra `memory` 时本模块照样能导入。
+`starling_client` 只由本模块与 `simple_actio/memory_starling.py` 导入(`tests/test_factory_cross_plan.py` 守着),且一律在
+函数里惰性导入;`translate_client_failure` 也在用到时才从 `simple_actio.memory_starling` 取(那个模块在模块层导入客户端):
+没装 extra `memory` 时本模块照样能导入。组合根(`factory.memory_runtime.memory_wiring`)只在设了记忆配置时才导入它。
 """
 from __future__ import annotations
 

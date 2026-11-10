@@ -655,13 +655,10 @@ _ALLOWED = ("simple_actio", "simulator.datamodel", "__future__", "copy", "datacl
             "pathlib", "re", "typing")
 
 
-# memory_starling.py 是全 src/ 里唯一导入 starling 的文件;第 3 步起它也导入 starling_client(客户端异常的映射,
-# 第 4 步删 starling)。os、tempfile、shutil 供原子替换、空库摘要与
-# 临时副本用,contextlib 与 collections.abc 供短命连接与异常翻译的上下文管理器(及其返回类型注解)用,
-# functools 供空库摘要的进程内缓存用,threading 供部署管理面守端口计数(与 memory.py 同一个理由),
-# secrets 给快照 id 与重放世界名的随机后缀用,都是标准库,只对本文件放宽
-_ALLOWED_MEMORY_STARLING = _ALLOWED + ("starling", "starling_client", "os", "tempfile", "shutil", "contextlib",
-                                       "collections.abc", "functools", "threading", "secrets")
+# memory_starling.py 是 simple_actio 里唯一导入 starling_client 的文件(客户端异常的映射与 RemoteMemory 的包装)。
+# os 供创建标记的原子替换用,threading 供部署管理面守端口计数(与 memory.py 同一个理由),collections.abc 供类型注解,
+# 都是标准库,只对本文件放宽
+_ALLOWED_MEMORY_STARLING = _ALLOWED + ("starling_client", "os", "collections.abc", "threading")
 
 # memory.py 的 FileTupleStore 用 threading.Lock 与 Condition 守端口计数:端口在服务端线程关,驱动器在另一条线程上等;
 # secrets 给快照 id 与重放世界名的随机后缀用(40 篇 5.1 节)
