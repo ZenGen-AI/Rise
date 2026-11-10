@@ -1879,7 +1879,7 @@ git commit -m "feat(simple_actio): 部署管理面改走记忆服务:ensure_worl
   - 没有 `sweep`；`MemoryWiring.sweep` 为 `None`（Task 16）。
   - `starling_memory_resolver(session, *, prefix, root_label, empty_seed, runtime)`：`seed` 为 None 时每个情境取 `empty_seed[1]`；`seed` 非空本步抛 `DirectiveFailedError(f"memory.seed {seed!r}: seeds arrive in step 5")`（第 5 步换成真查）。服务瞬态失败抛 `DeferredError`（30 篇 MT-32、Task 13）；其余照 `DirectiveFailedError` 只报类名。
 
-- [ ] **Step 1: 写失败的测试**（`tests/test_factory_training_worlds.py`）
+- [x] **Step 1: 写失败的测试**（`tests/test_factory_training_worlds.py`）
 
 ```python
 class TimeoutOnceAfterCreating:
@@ -1951,19 +1951,19 @@ def test_a_seeded_run_is_refused_until_step_5(starling_worlds):
 
 `starling_worlds(prefix=None, admin_wrap=None)` 夹具在模块级真服务上造会话、`ensure_empty_seed`，再造 `StarlingTrainingWorlds` 并 `bind("run-1", None)`；`admin_wrap` 给了就包住传给世界的管理调用。`tests/test_factory_memory_runtime.py` 加：解析器 `seed=None` 时每个情境都是空种子摘要；会话的管理调用抛瞬态失败时解析器抛 `DeferredError`。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_factory_training_worlds.py tests/test_factory_memory_runtime.py`
 Expected: FAIL（`StarlingTrainingWorlds` 还在按路径复制）
 
-- [ ] **Step 3: 实现**：按 Interfaces。端口对象暴露 `_remote` 只为测试读物理世界名；物理世界名另写进 `close_rollout` 的 warning（90 篇分叉表"成功"一行）。`_RolloutWorlds` 的表逻辑（`memory_runtime.py:351-542`）不改。
+- [x] **Step 3: 实现**：按 Interfaces。端口对象暴露 `_remote` 只为测试读物理世界名；物理世界名另写进 `close_rollout` 的 warning（90 篇分叉表"成功"一行）。`_RolloutWorlds` 的表逻辑（`memory_runtime.py:351-542`）不改。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: 同 Step 2，再加 `tests/test_factory_interact_wire.py tests/test_mt_dispatch.py`
 Expected: PASS（替身参数的用例照旧全过）
 
-- [ ] **Step 5: 提交**（分支 `design4-step4`）
+- [x] **Step 5: 提交**（分支 `design4-step4`）
 
 ```bash
 git add src/factory/memory_runtime.py tests/test_factory_training_worlds.py tests/test_factory_memory_runtime.py

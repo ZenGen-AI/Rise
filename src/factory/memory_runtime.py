@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import copy
 import logging
-import shutil
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -44,7 +43,6 @@ from typing import TYPE_CHECKING, Protocol
 
 from simple_actio.memory import FileTupleStore, TupleMemory
 from simple_actio.memory_port import (
-    PERSONA_ID_PATTERN,
     DeploymentMemoryStore,
     MemoryBackend,
     MemoryEvent,
@@ -54,6 +52,7 @@ from simple_actio.memory_port import (
 )
 from simple_actio.trace import TRACE_SCHEMA_V2
 from controlplane.daemon import DirectiveFailedError
+from controlplane.deferred import DeferredError
 from controlplane.gitstore import GitStore
 from controlplane.lock import git_dir
 from factory.errors import FactoryConfigError
@@ -68,7 +67,6 @@ from factory.memory_config import (
 from mindagent.deployment import SESSION_CLOSE_WAIT_S
 from mindagent.errors import MindAgentDataError
 from mindagent.memory_layout import MemoryLayout
-from simulator.realtime.validation import validate_episode_id
 
 if TYPE_CHECKING:       # 只给类型注解用:运行时不导入 simple_actio.memory_starling(它导入 starling)
     from simple_actio.memory_starling import StarlingEndpoints
@@ -197,103 +195,33 @@ def starling_memory_runtime(config: MemoryConfig, *, version: str, install_sourc
     }
 
 
-def _segment(name: str, value: object) -> str:
-    """拼进路径的一段名字:与 CreateSession.episode_id 同一份白名单(`[A-Za-z0-9._-]{1,128}`,不是 `.`、`..`)。"""
-    reason = "must be a str" if not isinstance(value, str) else validate_episode_id(value)
-    if reason is not None:
-        raise ValueError(f"{name} {value!r:.60}: {reason}")
-    return value
-
-
-@dataclass(frozen=True)
-class StarlingLayout:
-    """记忆根目录下的路径布局(设计二 5.3 节,设计 5.1 节)。每一段名字拼路径之前都校验,不合法抛 `ValueError`
-    (种子 id 例外,见 `seed_dir`)。只算路径,不碰磁盘。"""
-
-    root: Path
-
-    def deploy_dir(self) -> Path:
-        return self.root / "deploy"
-
-    def runs_dir(self) -> Path:
-        return self.root / "runs"
-
-    def seed_dir(self, seed_id: str) -> Path:
-        """`seeds/<seed_id>`。种子 id 来自指令配置,不合法是人写错了配置,所以抛 `DirectiveFailedError`
-        (派发器原样保留原因、判 T2),而不是只报类名的 `ValueError`。原因里只有种子 id,不含根目录。"""
-        if not isinstance(seed_id, str) or validate_episode_id(seed_id) is not None:
-            raise DirectiveFailedError(f"memory.seed {seed_id!r:.60} is not a safe directory name")
-        return self.root / "seeds" / seed_id
-
-    def seed(self, seed_id: str, scenario_id: str) -> Path:
-        """`seeds/<seed_id>/<scenario_id>.db`:一个情境的种子世界,解析器算起点摘要、rollout 世界复制起点都读它,只读。"""
-        seed_dir = self.seed_dir(seed_id)
-        return seed_dir / f"{self._named('scenario_id', scenario_id)}.db"
-
-    def rollout_world(self, run_id: str, episode_id: str) -> Path:
-        """`runs/<run_id>/<episode_id>.db`:一条 rollout 的世界,训练位与对手位都在里面。"""
-        return self.runs_dir() / _segment("run_id", run_id) / f"{_segment('episode_id', episode_id)}.db"
-
-    @staticmethod
-    def _named(what: str, value: object) -> str:
-        """情境 id 过 `PERSONA_ID_PATTERN`(部署库的世界 id 白名单)。用 fullmatch:模式以 `$` 结尾,match 会放过 "t1\n"。"""
-        if not isinstance(value, str) or not PERSONA_ID_PATTERN.fullmatch(value):
-            raise ValueError(f"{what} {value!r:.60}: expected 1 to 128 characters of [A-Za-z0-9._-] "
-                             "starting with a letter or digit")
-        return value
-
-
 def starling_memory_resolver(
-    layout: StarlingLayout, runtime: dict,
+    session, *, prefix: str, empty_seed_world: str, runtime: dict,
 ) -> Callable[[str | None, tuple[str, ...]], tuple[dict[str, str], dict]]:
-    """Starling 的 `memory_resolver`:派发器进策略上下文之前调用,按种子世界算每个情境的起点摘要。
+    """Starling 的 `memory_resolver`:派发器进策略上下文之前调用,给每个情境的起点世界摘要。
 
-    - `seed` 为 None:每个情境都是空世界的摘要。
-    - 否则 `seeds/<seed>/` 必须是目录。其中有 `<scenario_id>.db` 的情境,摘要取这个世界(只读,在临时副本上算);
-      没有的情境从空世界起,与 `seed: null` 对单个情境的含义相同。种子只覆盖部分情境是合法的;一个配置情境都
-      对不上、目录里却有 `*.db`(多半是以人格命名的旧种子库)时抛 `DirectiveFailedError`,原因写种子 id 与至多
-      5 个文件主名。目录里一个库都没有时仍是全部从空世界起。
-
-    种子 id 不合法或目录不在,抛 `DirectiveFailedError`(原因里只有种子 id,不含根目录路径)。库文件打不开、
-    不是库、摘要算不出,抛 `MemoryFailureError` 且不接:派发器对普通异常只报类名、判 T2。**库文件在但坏,
-    绝不能当成"没有这个库"而悄悄从空世界起**,所以只有 lstat 报 `FileNotFoundError`(文件根本不存在)才走空世界,
-    悬空的符号链接与读不了的目录都不算。
+    - `seed` 为 None:每个情境都从空种子 `<前缀>.seed-empty` 起,摘要每次向服务现取(rollout 世界从它分叉,分叉出的摘要
+      与它相等)。
+    - `seed` 非空:本步拒绝,`DirectiveFailedError`(原因写种子 id);按标签找种子在第 5 步。
+    - 服务的瞬态失败(连不上、超时、会话致命)抛 `DeferredError`,派发器原样上抛、指令留 pending(30 篇 MT-32);
+      永久失败抛 `MemoryFailureError` 不接,派发器只报类名、判 T2。
 
     `runtime` 在这里拷一份,每次返回再拷一份:调用方改返回值、装配方事后改原字典,都不影响解出的身份。
-    `simple_actio.memory_starling` 在本函数里才导入(它导入 `starling`),所以没装 Starling 时装配期就抛 ImportError。"""
-    from simple_actio.memory_starling import empty_digest, library_digest
-
+    `simple_actio.memory_starling` 在被调用时才导入(它导入 `starling_client`)。"""
     identity = copy.deepcopy(runtime)
 
     def resolve(seed: str | None, scenario_ids: tuple[str, ...]) -> tuple[dict[str, str], dict]:
-        if seed is None:
-            empty = empty_digest()
-            return {s: empty for s in scenario_ids}, copy.deepcopy(identity)
-        seed_dir = layout.seed_dir(seed)
-        if not seed_dir.is_dir():
-            raise DirectiveFailedError(f"memory.seed {seed!r} has no directory under the memory root's seeds/")
-        digests: dict[str, str] = {}
-        missing = 0
-        for scenario_id in scenario_ids:
-            path = layout.seed(seed, scenario_id)
-            try:
-                path.lstat()        # 不跟符号链接:悬空的链接算"有这个库",交给 library_digest 抛错
-            except FileNotFoundError:
-                digests[scenario_id] = empty_digest()         # 只有"确实没有这个文件"才从空世界起
-                missing += 1
-                continue
-            digests[scenario_id] = library_digest(path)      # 其余 OSError(如目录无权限)原样上抛,不当空世界
-        if scenario_ids and missing == len(scenario_ids):
-            # 一个情境都对不上、目录里却有库:多半是按人格命名的旧种子,拒绝,不让整批悄悄从空世界起
-            stems = sorted(p.stem for p in seed_dir.glob("*.db"))
-            if stems:
-                shown = ", ".join(stems[:_SHOWN_ENTRIES])
-                if len(stems) > _SHOWN_ENTRIES:
-                    shown += f" and {len(stems) - _SHOWN_ENTRIES} more"
-                raise DirectiveFailedError(
-                    f"memory.seed {seed!r} matches none of the configured scenarios but holds libraries ({shown}); "
-                    "seed worlds are now named by scenario id (seeds/<seed>/<scenario_id>.db)")
-        return digests, copy.deepcopy(identity)
+        from simple_actio.memory_starling import world_digest
+
+        if seed is not None:
+            raise DirectiveFailedError(f"memory.seed {seed!r:.60}: seeds arrive in step 5")
+        try:
+            empty = world_digest(session, name=empty_seed_world, labels={"repo": prefix, "kind": "seed-empty"})
+        except MemoryFailureError as exc:
+            if exc.transient:
+                raise DeferredError(f"memory service: {exc}") from None
+            raise
+        return {s: empty for s in scenario_ids}, copy.deepcopy(identity)
 
     return resolve
 
@@ -307,9 +235,8 @@ class TrainingWorlds(Protocol):
       (服务端端口没关上)时先有界等它的端口关上(默认 70 秒),仍没关上才抛瞬态 `MemoryFailureError`。
     - `join_rollout(episode_id, holder)`:服务端在已登记的世界里开对手位主体的端口;表里没有抛非瞬态 `MemoryFailureError`。
     - `release_session(episode_id, ports)`:服务端在会话终态关自己的端口。
-    - `close_rollout(episode_id, ports, *, wait_s)`:客户端关训练位端口,等服务端端口关完,删世界、摘表项,返回真;
-      等不到就把世界移进保留表、记 warning、返回假,不抛。
-    - `sweep()`:启动清扫,返回删了几项。"""
+    - `close_rollout(episode_id, ports, *, wait_s)`:客户端关训练位端口,等服务端端口关完,删(替身)或关(Starling)世界、
+      摘表项,返回真;等不到就把世界移进保留表、记 warning、返回假,不抛。"""
 
     def bind(self, run_id: str, seed: str | None) -> None: ...
 
@@ -326,11 +253,9 @@ class TrainingWorlds(Protocol):
 
     def release_session(self, episode_id: str, ports: Sequence[object]) -> None: ...
 
-    def sweep(self) -> int: ...
-
 
 class _World:
-    """表里的一项:世界本身(替身是 TupleMemory,Starling 是库文件路径)、开着的端口数、等端口全关用的 Condition。
+    """表里的一项:世界本身(替身是 TupleMemory,Starling 是完整世界名)、开着的端口数、等端口全关用的 Condition。
     `ready` 在世界建好、训练位端口开出来之后才置真,之前服务端加入不进来。三个可变字段只在持表锁时改。"""
 
     def __init__(self, lock: threading.Lock) -> None:
@@ -364,8 +289,8 @@ class _RolloutWorlds:
     晚于客户端的等待期限才关端口,轨迹源的重试又没有间隔,不等的话重试预算一下子就用完。等到端口全关就先删后建,
     等不到才拒绝(瞬态);服务端不能再加入保留的世界。
 
-    子类实现 `_create`(先删后建一个世界)、`_port`(在世界里开一个主体的端口)、`_discard`(删世界)与 `sweep`。
-    异常与日志文字不含路径、端点与密钥:只有 episode id 与异常类名。"""
+    子类实现 `_create`(建一个世界)、`_port`(在世界里开一个主体的端口)、`_discard`(删或关世界),可选 `_describe`
+    (日志里的物理世界名)。异常与日志文字不含路径、端点与密钥:只有 episode id、世界名与异常类名或码。"""
 
     def __init__(self, *, held_wait_s: float = SESSION_CLOSE_WAIT_S) -> None:
         self._lock = threading.Lock()
@@ -401,6 +326,10 @@ class _RolloutWorlds:
 
     def _discard(self, world: object) -> None:
         raise NotImplementedError
+
+    def _describe(self, world: object) -> str:
+        """warning 里跟在 episode id 后面的物理世界名;替身没有。"""
+        return ""
 
     # ---- 计数 ----
 
@@ -500,18 +429,20 @@ class _RolloutWorlds:
                     self._held[episode_id] = rec
         if first is not None:
             if rec is not None:
-                _log.warning("rollout world %s kept: a client port did not close (%s)",
-                             episode_id, type(first).__name__)
+                _log.warning("rollout world %s%s kept: a client port did not close (%s)",
+                             episode_id, self._describe(rec.world), type(first).__name__)
             raise first
         if rec is None:
             return True
         if not done:
-            _log.warning("rollout world %s kept: server ports were still open after %gs", episode_id, wait_s)
+            _log.warning("rollout world %s%s kept: server ports were still open after %gs",
+                         episode_id, self._describe(rec.world), wait_s)
             return False
         try:
             self._discard(rec.world)
         except OSError as exc:
-            _log.warning("rollout world %s kept: removal failed (%s)", episode_id, type(exc).__name__)
+            _log.warning("rollout world %s%s kept: removal failed (%s)",
+                         episode_id, self._describe(rec.world), type(exc).__name__)
             return False
         return True
 
@@ -542,8 +473,6 @@ class _RolloutWorlds:
             _log.warning("rollout world %s: a server port did not close (%s)", episode_id, type(first).__name__)
             raise first
 
-    def sweep(self) -> int:
-        raise NotImplementedError
 
 
 class _CountedPort:
@@ -591,90 +520,129 @@ class StandInTrainingWorlds(_RolloutWorlds):
         return 0
 
 
-_LIBRARY_SIDECARS = ("-wal", "-shm")
-
-
-def _remove_library(path: Path) -> None:
-    """删库文件与它的 -wal、-shm;不存在的不算错。"""
-    for victim in (path, *(path.with_name(path.name + suffix) for suffix in _LIBRARY_SIDECARS)):
-        victim.unlink(missing_ok=True)
+# 分叉回 `world_exists` 时换后缀重试的次数上限(90 篇分叉的命名与重试表)
+FORK_ATTEMPTS = 3
 
 
 class StarlingTrainingWorlds(_RolloutWorlds):
-    """Starling 的 rollout 世界(设计 5.1 节):世界是 `runs/<run_id>/<episode_id>.db`,各主体用 `StarlingMemory.open`
-    在同一个库上开端口(holder 作 Starling 的 agent 名),`on_close` 减计数。
+    """Starling 的 rollout 世界(90 篇"接服务后 StarlingTrainingWorlds 的变化"表):每条 rollout 从起点分叉一个可回收世界
+    `<前缀>.ro.<episode_id>.<后缀>`,`retention_group` 是 run id,传完整的 rise 设置;各主体在当前服务会话里开句柄。
+    rollout 收尾只关世界不删(客户端没有删世界的接口),可回收世界留给 Starling 清理,所以没有启动清扫。
 
-    起点:绑了种子且 `seeds/<seed>/<scenario>.db` 在就**用文件复制**取世界(`simple_actio.memory_starling.copy_library`),
-    没有就新建空库。不用 `backup_to`:它要先把种子打开,`Memory.open` 会建 -wal、-shm 并跑迁移,种子目录与文件只读时
-    失败。种子没有写者,复制 `.db` 加 `-wal` 是一致的。同一组 rollout 因此从同一个起点出发,又彼此看不见对方写的东西。
-    只有 lstat 报 `FileNotFoundError`(确实没有这个文件)才从空库起,悬空的符号链接交给复制去报错。
+    本步只接受 `seed` 为空:起点是空种子 `empty_seed = (世界名, 摘要)`,绑了种子的 run 开世界时抛永久失败;按种子分叉在第 5 步。
 
-    复制、建目录、删旧世界抛的 `OSError` 译成非瞬态的 `MemoryFailureError`(文字只含类名);裸 `OSError` 不会被训练位
-    一侧当成记忆失败。"""
+    分叉(`_create`):调用之前定下 8 位后缀与确切世界名,`attempt` 标签在进程内按 episode id 从 1 递增,只给人看。
+    - 成功:返回摘要不等于起点摘要判永久;否则用它。
+    - `world_exists`:换后缀重试,至多 `FORK_ATTEMPTS` 次。
+    - `service_timeout`:服务端可能已经建好了。按确切世界名查 `list_worlds`(`repo`、`root`、`kind=rollout`、`episode_id`
+      标签,带摘要),查到且摘要等于起点摘要才用,否则换后缀重建。不按 `(episode_id, attempt)` 认:续训重跑同一 step 时
+      逻辑 episode id 不变,会认领上一个进程留下、已有写入的世界。
+    - 其余失败照客户端码表映射后抛。
 
-    def __init__(self, layout: StarlingLayout, endpoints: StarlingEndpoints, *,
-                 close_timeout_s: float = 60.0, held_wait_s: float = SESSION_CLOSE_WAIT_S) -> None:
+    `admin` 缺省是 `session.admin`;测试包一层注入超时。日志文字只有 episode id、世界名与码。"""
+
+    def __init__(self, session, *, prefix: str, root_label: str, settings: dict, empty_seed: tuple[str, str],
+                 close_timeout_s: float = 60.0, held_wait_s: float = SESSION_CLOSE_WAIT_S,
+                 admin: Callable[[str, dict], dict] | None = None) -> None:
         super().__init__(held_wait_s=held_wait_s)
-        self._layout = layout
-        self._endpoints = endpoints
+        self._session = session
+        self.prefix = prefix
+        self._root_label = root_label
+        self._settings = settings
+        self.empty_seed = empty_seed
         self._close_timeout_s = close_timeout_s
+        self._admin = admin if admin is not None else session.admin
+        self._attempts: dict[str, int] = {}
+        self._attempts_lock = threading.Lock()
 
-    def _create(self, run_id: str, scenario_id: str, episode_id: str, seed: str | None) -> Path:
-        from simple_actio.memory_starling import copy_library, translate_failure
+    def _next_attempt(self, episode_id: str) -> int:
+        with self._attempts_lock:
+            n = self._attempts.get(episode_id, 0) + 1
+            self._attempts[episode_id] = n
+            return n
 
-        path = self._layout.rollout_world(run_id, episode_id)      # 名字不合法在这里抛 ValueError
-        source = None if seed is None else self._layout.seed(seed, scenario_id)
+    def _call(self, op: str, body: dict) -> dict:
+        """管理调用;注入的 `admin` 可能抛未译的客户端异常,在这里一并译成带 `code` 的 MemoryFailureError。"""
+        from simple_actio.memory_starling import translate_client_failure
+
         try:
-            _remove_library(path)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            if source is not None:
-                try:
-                    source.lstat()      # 与解析器同一判法:只有"确实没有这个文件"才从空库起
-                except FileNotFoundError:
-                    pass
-                else:
-                    copy_library(source, path)
-        except OSError as exc:
+            return self._admin(op, body)
+        except Exception as exc:
+            raise translate_client_failure(exc, port_closed_by_rise=False, in_drain_window=False) from None
+
+    def _found(self, name: str, episode_id: str, digest: str) -> bool:
+        """分叉超时之后:名字等于 `name` 的 rollout 世界在,且摘要等于起点摘要。"""
+        from simple_actio.memory_starling import list_all_worlds
+
+        labels = {"repo": self.prefix, "root": self._root_label, "kind": "rollout", "episode_id": episode_id}
+        rows = list_all_worlds(_Admin(self._call), labels, with_digest=True)
+        return any(w.get("name") == name and w.get("digest") == digest for w in rows)
+
+    def _create(self, run_id: str, scenario_id: str, episode_id: str, seed: str | None) -> str:
+        from factory import starling_names
+
+        if seed is not None:
+            raise MemoryFailureError("seeded rollouts arrive in step 5", transient=False)
+        source, start = self.empty_seed
+        for _ in range(FORK_ATTEMPTS):
+            name = starling_names.rollout_world(self.prefix, episode_id, starling_names.new_suffix())
+            attempt = self._next_attempt(episode_id)
+            body = {"source": source, "name": name, "snapshot_id": None,
+                    "labels": starling_names.labels(self.prefix, self._root_label, "rollout", run_id=run_id,
+                                                    scenario_id=scenario_id, episode_id=episode_id, seed_id="",
+                                                    attempt=str(attempt)),
+                    "retention_group": run_id, "reclaimable": True, "seed": False, "settings": self._settings}
             try:
-                _remove_library(path)       # 复制到一半的文件不留
-            except OSError:
-                pass
-            raise translate_failure(exc) from None
-        return path
+                out = self._call("fork", body)
+            except MemoryFailureError as exc:
+                code = getattr(exc, "code", None)
+                if code == "world_exists":
+                    continue
+                if code == "service_timeout" and self._found(name, episode_id, start):
+                    return name
+                if code == "service_timeout":
+                    continue
+                raise
+            if out.get("digest") != start:
+                self._discard(name)
+                raise MemoryFailureError(f"rollout world {name}: fork digest does not match the pinned start",
+                                         transient=False)
+            return name
+        raise MemoryFailureError(f"rollout world for {episode_id}: fork failed {FORK_ATTEMPTS} times", transient=False)
 
     def _port(self, world: object, holder: str, release: Callable[[], None]) -> MemoryBackend:
         from simple_actio.memory_starling import StarlingMemory
 
-        return StarlingMemory.open(world, holder=holder, endpoints=self._endpoints,
-                                   close_timeout_s=self._close_timeout_s, on_close=release)
+        session, timeout = self._session, self._close_timeout_s
+
+        def wrap(remote, session_release, generation):
+            def both() -> None:
+                try:
+                    session_release()
+                finally:
+                    release()
+
+            return StarlingMemory(remote, generation=generation, session=session, release=both,
+                                  close_timeout_s=timeout)
+
+        return session.open_port(world, holder, read_only=False, settings=self._settings, wrap=wrap)
 
     def _discard(self, world: object) -> None:
-        _remove_library(world)
-
-    def sweep(self) -> int:
-        """删掉 `runs/` 下的每个子项,返回删了几项;`deploy/`、`seeds/`、`snapshots/` 不碰。启动时在仓库锁里调用:
-        上一个进程崩溃时留下的世界在这里清掉。`runs/` 下的符号链接只删链接本身,不跟进去(跟着删会删到
-        `runs/` 之外,而且 `shutil.rmtree` 对符号链接直接抛 OSError)。`runs/` 自己是符号链接时抛非瞬态
-        `MemoryFailureError`、什么都不删:遍历会跟进链接,清空它指向的目录。某一项删不掉记 warning 并继续。"""
-        runs = self._layout.runs_dir()
-        if runs.is_symlink():
-            raise MemoryFailureError("memory root runs/ is a symlink; refusing to sweep", transient=False)
+        """关世界,只关不删。失败只记 warning(码与世界名),不抛:`close_rollout` 只接 `OSError`,世界关不上不影响这条 rollout。"""
         try:
-            entries = list(runs.iterdir())
-        except FileNotFoundError:
-            return 0
-        removed = 0
-        for entry in entries:
-            try:
-                if entry.is_symlink() or not entry.is_dir():
-                    entry.unlink()
-                else:
-                    shutil.rmtree(entry)
-            except OSError as exc:
-                _log.warning("memory sweep kept %s (%s)", entry.name, type(exc).__name__)
-                continue
-            removed += 1
-        return removed
+            self._call("close_world", {"world": world})
+        except MemoryFailureError as exc:
+            _log.warning("rollout world %s: close_world failed (%s)", world, getattr(exc, "code", None) or exc)
+
+    def _describe(self, world: object) -> str:
+        return f" (world {world})" if isinstance(world, str) else ""
+
+
+class _Admin:
+    """把一个 `admin(op, body)` 函数包成 `list_all_worlds` 要的会话形状。"""
+
+    def __init__(self, admin: Callable[[str, dict], dict]) -> None:
+        self.admin = admin
 
 
 # ---------------- 组合根选后端 ----------------

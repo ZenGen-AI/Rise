@@ -370,6 +370,15 @@ def _ensure(session: AdminSession, *, name: str, kind: str, ids: dict[str, str],
             name=name, kind=kind, prefix=prefix, root_label=root_label, seed=seed)
 
 
+def world_digest(session: AdminSession, *, name: str, labels: dict[str, str]) -> str:
+    """按标签查到名字等于 `name` 的世界,返回它的摘要(`list_worlds(with_digest=True)`)。找不到判永久。
+    不开句柄:解析器在进策略上下文之前调它,那时不该占任何世界。"""
+    for item in list_all_worlds(session, labels, with_digest=True):
+        if item.get("name") == name and item.get("digest"):
+            return item["digest"]
+    raise MemoryFailureError(f"world {name} has no digest", transient=False)
+
+
 def ensure_empty_seed(session: AdminSession, *, names: WorldNames, prefix: str, root_label: str,
                       settings: dict) -> tuple[str, str]:
     """建或核对空种子 `<前缀>.seed-empty`(装配期调,00 篇世界表),返回 `(世界名, 摘要)`。没有种子的情境从它分叉;
@@ -378,11 +387,7 @@ def ensure_empty_seed(session: AdminSession, *, names: WorldNames, prefix: str, 
     kind = "seed-empty"
     _ensure(session, name=name, kind=kind, ids={}, prefix=prefix, root_label=root_label,
             labels=names.labels(prefix, root_label, kind), settings=settings, seed=True)
-    rows = [w for w in list_all_worlds(session, {"repo": prefix, "kind": kind}, with_digest=True)
-            if w.get("name") == name]
-    if not rows or not rows[0].get("digest"):
-        raise MemoryFailureError(f"world {name} has no digest", transient=False)
-    return name, rows[0]["digest"]
+    return name, world_digest(session, name=name, labels={"repo": prefix, "kind": kind})
 
 
 class StarlingDeploymentStore:
