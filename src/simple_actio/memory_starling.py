@@ -444,26 +444,41 @@ class StarlingDeploymentStore:
             tmp.unlink(missing_ok=True)
             raise MemoryFailureError(f"creation marker for {name}: {type(exc).__name__}", transient=False) from None
 
+    @property
+    def settings(self) -> dict:
+        """rise 设置(建世界、分叉、开句柄都传它)。"""
+        return self._settings
+
+    def verify_world(self, world_id: str) -> str | None:
+        """只读地核对部署世界,不建:世界在就核对 ②③ 并返回完整世界名;不在而创建标记在,判永久"部署世界被删";
+        不在也没有标记,返回 None(第一次用时再建)。持仓库锁之后的装配核对用它(90 篇第 23 条)。"""
+        name = self._deploy(world_id)
+        item = _find(self._session, name=name, kind="deploy", ids={"scenario_id": world_id}, prefix=self.prefix)
+        if item is None:
+            if self._marker(world_id).exists():
+                # 看板删世界的路由不经过 rise,静默重建会让部署记忆悄悄从空开始(FC-49)
+                raise MemoryFailureError(
+                    f"deploy world {name} was deleted; to start it from empty, delete deploy/{world_id}.created",
+                    transient=False)
+            return None
+        _verify(item, name=name, kind="deploy", prefix=self.prefix, root_label=self.root_label, seed=False)
+        return name
+
     def ensure_world(self, world_id: str) -> str:
-        """部署世界的 `ensure_world`,返回完整世界名。见类说明;标记在而世界不在判永久,原因写"部署世界被删"。"""
+        """部署世界的 `ensure_world`,返回完整世界名。有创建标记时世界必须还在(`verify_world`);没有标记时走三步,
+        建成或核对过就写标记(标记丢了就补写)。同一进程内对每个世界只做一次。"""
         name = self._deploy(world_id)
         with self._lock:
             if world_id in self._ensured:
                 return name
-        kind, ids = "deploy", {"scenario_id": world_id}
         if self._marker(world_id).exists():
-            # 标记在:世界必须还在。看板删世界的路由不经过 rise,静默重建会让部署记忆悄悄从空开始(FC-49)
-            item = _find(self._session, name=name, kind=kind, ids=ids, prefix=self.prefix)
-            if item is None:
-                raise MemoryFailureError(
-                    f"deploy world {name} was deleted; to start it from empty, delete deploy/{world_id}.created",
-                    transient=False)
-            _verify(item, name=name, kind=kind, prefix=self.prefix, root_label=self.root_label, seed=False)
+            self.verify_world(world_id)
         else:
-            _ensure(self._session, name=name, kind=kind, ids=ids, prefix=self.prefix, root_label=self.root_label,
-                    labels=self._names.labels(self.prefix, self.root_label, kind, scenario_id=world_id),
+            _ensure(self._session, name=name, kind="deploy", ids={"scenario_id": world_id}, prefix=self.prefix,
+                    root_label=self.root_label,
+                    labels=self._names.labels(self.prefix, self.root_label, "deploy", scenario_id=world_id),
                     settings=self._settings, seed=False)
-            self._write_marker(world_id, name)          # 建成,或已在而核对过(标记丢了就补写)
+            self._write_marker(world_id, name)
         with self._lock:
             self._ensured.add(world_id)
         return name

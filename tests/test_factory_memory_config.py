@@ -14,7 +14,7 @@ import yaml
 from factory.errors import FactoryConfigError
 from factory.memory_config import (
     MEMORY_CONFIG_ENV, MemoryConfig, check_api_key, claim_memory_root, normalize_base_url,
-    read_memory_config, starling_install_source,
+    read_memory_config, client_install_commit,
 )
 
 SRC = Path(__file__).resolve().parents[1] / "src"
@@ -199,40 +199,44 @@ class _Dist:
         return self.files_.get(name)
 
 
-def test_install_source_comes_from_the_git_commit_or_the_record():
-    commit = "a" * 40
-    git = _Dist({"direct_url.json": json.dumps({"url": "https://github.com/x/starling", "vcs_info": {"vcs": "git", "commit_id": commit}})})
-    assert starling_install_source(distribution=git) == f"git:{commit}"
-    record = "starling/__init__.py,sha256=AAA,10\nstarling/_core.so,sha256=BBB,99\nstarling-0.0.1.dist-info/RECORD,,\n"
-    a = starling_install_source(distribution=_Dist({"direct_url.json": json.dumps({"url": "file:///src", "dir_info": {}}), "RECORD": record}))
-    b = starling_install_source(distribution=_Dist({"RECORD": "\n".join(reversed(record.strip().split("\n")))}))
-    assert a == b and a.startswith("record:") and len(a) == len("record:") + 64
-    assert starling_install_source(distribution=_Dist({"RECORD": record.replace("BBB", "CCC")})) != a
+def _git(commit="a" * 40, **extra):
+    return _Dist({"direct_url.json": json.dumps({"url": "https://github.com/x/starling",
+                                                 "vcs_info": {"vcs": "git", "commit_id": commit}, **extra})})
 
 
-def test_an_editable_or_unknown_install_is_refused():
-    editable = _Dist({"direct_url.json": json.dumps({"url": "file:///src", "dir_info": {"editable": True}})})
-    with pytest.raises(FactoryConfigError, match="editable"):
-        starling_install_source(distribution=editable)
-    with pytest.raises(FactoryConfigError, match="RECORD"):
-        starling_install_source(distribution=_Dist({}))
+def test_the_install_commit_comes_from_the_git_vcs_info():
+    assert client_install_commit("starling-client", distribution=_git()) == "a" * 40
 
 
-def test_a_missing_starling_is_refused_with_the_install_hint(monkeypatch):
-    """Review Focus:设了记忆配置但 Starling 未安装 → 装配期退出码 2,信息说明 pip install '.[memory]'。"""
+@pytest.mark.parametrize("dist, needle", [
+    (_Dist({"direct_url.json": json.dumps({"url": "file:///src", "dir_info": {"editable": True}})}), "editable"),
+    (_Dist({"RECORD": "starling_client/__init__.py,sha256=x,1\n"}), "git commit"),           # record: 不再接受
+    (_Dist({"direct_url.json": json.dumps({"url": "file:///src", "dir_info": {}})}), "git commit"),
+    (_Dist({}), "git commit"),
+    (_git(""), "git commit"),
+])
+def test_an_editable_or_non_git_install_is_refused(dist, needle):
+    with pytest.raises(FactoryConfigError, match=needle) as info:
+        client_install_commit("starling-client", distribution=dist)
+    assert "starling-client" in str(info.value)
+
+
+def test_a_missing_client_is_refused_with_the_install_hint(monkeypatch):
+    """Review Focus:设了记忆配置但客户端未安装 → 装配期退出码 2,信息说明 pip install '.[memory]'。"""
     import importlib.metadata as md
     monkeypatch.setattr(md, "distribution", lambda name: (_ for _ in ()).throw(md.PackageNotFoundError(name)))
     with pytest.raises(FactoryConfigError) as info:
-        starling_install_source()
+        client_install_commit("starling-client")
     assert "pip install '.[memory]'" in str(info.value) and MEMORY_CONFIG_ENV in str(info.value)
 
 
-def test_the_installed_starling_reports_a_git_commit():
-    """本机真装的 Starling 是按提交装的:不传参时走 direct_url.json 的 vcs_info.commit_id。"""
-    pytest.importorskip("starling")
-    out = starling_install_source()
-    assert out.startswith("git:") and len(out) == len("git:") + 40
-    int(out[len("git:"):], 16)
+def test_the_installed_client_and_server_report_the_same_git_commit():
+    """本机真装的两个包按同一提交装:不传 distribution 时走 direct_url.json 的 vcs_info.commit_id。"""
+    pytest.importorskip("starling_client")
+    out = client_install_commit("starling-client")
+    assert len(out) == 40 and int(out, 16) >= 0
+    pytest.importorskip("starling.service")
+    assert client_install_commit("starling-memory") == out
 
 
 @pytest.mark.parametrize("body", [
@@ -309,59 +313,6 @@ def test_an_owner_file_filled_in_during_the_wait_is_honoured(tmp_path):
         claim_memory_root(root, repo, read_back_timeout_s=2.0)
     finally:
         timer.join()
-
-
-def test_record_rows_without_a_hash_are_ignored():
-    base = "starling/__init__.py,sha256=AAA,10\n"
-    noisy = base + "starling/__pycache__/x.pyc,,\nstarling-0.0.1.dist-info/RECORD,,\n"
-    assert starling_install_source(distribution=_Dist({"RECORD": base})) == \
-        starling_install_source(distribution=_Dist({"RECORD": noisy}))
-    with pytest.raises(FactoryConfigError, match="RECORD"):
-        starling_install_source(distribution=_Dist({"RECORD": "starling-0.0.1.dist-info/RECORD,,\n"}))
-
-
-# ---- 评审后补的用例 -----------------------------------------------------------------------------------
-
-_CODE = "starling/__init__.py,sha256=AAA,10\nstarling/_core.so,sha256=BBB,99\n"
-_UV = (
-    "starling_memory-0.0.1.dist-info/INSTALLER,sha256=UVUV,3\n"
-    "starling_memory-0.0.1.dist-info/REQUESTED,sha256=EMPTY,0\n"
-    "starling_memory-0.0.1.dist-info/direct_url.json,sha256=URL1,80\n"
-    "starling_memory-0.0.1.dist-info/uv_cache.json,sha256=CACHE1,50\n"
-    "starling_memory-0.0.1.dist-info/RECORD,,\n"
-    "include/starling/api.h,sha256=HDR1,5\n"
-    "lib/libstarling_core.a,sha256=LIB1,9\n"
-    "../../../bin/starling-tool,sha256=BIN1,7\n"
-)
-_PIP = (
-    "starling_memory-0.0.1.dist-info/INSTALLER,sha256=PIPPIP,4\n"
-    "starling_memory-0.0.1.dist-info/direct_url.json,sha256=URL2,90\n"
-    "include/starling/api.h,sha256=HDR2,5\n"
-    "lib/libstarling_core.a,sha256=LIB2,9\n"
-    "../../bin/other-tool,sha256=BIN2,8\n"
-)
-
-
-def _identity(record):
-    return starling_install_source(distribution=_Dist({"RECORD": record}))
-
-
-def test_install_identity_covers_only_the_importable_code():
-    """INSTALLER、direct_url.json、头文件、静态库、脚本描述的是怎么装的,不是 import starling 加载什么。"""
-    assert _identity(_CODE) == _identity(_CODE + _UV) == _identity(_PIP + _CODE)
-
-
-def test_install_identity_changes_with_any_file_under_starling():
-    base = _identity(_CODE)
-    assert _identity(_CODE + "starling/extra.py,sha256=NEW,1\n") != base
-    assert _identity(_CODE.replace("starling/__init__.py,sha256=AAA,10\n", "")) != base
-    assert _identity(_CODE.replace("AAA", "ZZZ")) != base
-    assert _identity(_CODE.replace("starling/_core.so", "starling/_core2.so")) != base
-
-
-def test_a_record_with_nothing_under_starling_is_refused():
-    with pytest.raises(FactoryConfigError, match="RECORD"):
-        _identity(_UV)
 
 
 _PAIRS = "root: {root}\nextraction_base_url: https://extract.example/v1\nextraction_model: m\n" \

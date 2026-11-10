@@ -1988,7 +1988,7 @@ git commit -m "feat(factory): rollout 世界改为从空种子分叉、只关不
   - 致命停机（90 篇"停守护进程分两半"、FC-47）：`_guard(fn, session)` 包住派发器与每个处理器：调用返回或抛出之后查 `session.fatal`，非空就抛 `FactoryConfigError(f"memory service: {session.fatal}; see service.log")`（外部模式不写 `service.log`）。调和循环不接它，命令行译成退出码 2。
   - `deploy_turn_timeout_s` 不变（40 秒按服务端每次至多 4 秒折算，客户端超时 30 秒只在服务卡住时生效，90 篇"客户端超时"表）。
 
-- [ ] **Step 1: 写失败的测试**（`tests/test_factory_memory_wiring.py`；真服务用例用拉起模式，`root` 在 `tmp_path` 下）
+- [x] **Step 1: 写失败的测试**（`tests/test_factory_memory_wiring.py`；真服务用例用拉起模式，`root` 在 `tmp_path` 下）
 
 ```python
 def _service_env(tmp_path, **extra):
@@ -2063,19 +2063,19 @@ def test_closing_stops_the_spawned_service_last_and_releases_the_ownership_lock(
 
 `_agent_yaml`、`_first_run_creates_the_deploy_world`、`_FakeDist` 写在同一测试文件里。`tests/test_factory_memory_wiring.py:177-232` 关于 `sweep` 的用例改写成 `on_locked`：`run` 把 `a.on_locked` 传给 `run_daemon(on_locked=)`、`assemble` 不调它、`reconcile` 锁内第一个动作之前调它、它抛错时关掉装配且不跑 tick。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_factory_memory_wiring.py tests/test_factory_memory_config.py`
 Expected: FAIL
 
-- [ ] **Step 3: 实现**：按 Interfaces。`assemble` 里 `memory_wiring` 抛错时，已拉起的服务要停掉：`memory_wiring` 内部在第 5 步之后的任何失败先调已造好的 `closers` 再上抛。
+- [x] **Step 3: 实现**：按 Interfaces。`assemble` 里 `memory_wiring` 抛错时，已拉起的服务要停掉：`memory_wiring` 内部在第 5 步之后的任何失败先调已造好的 `closers` 再上抛。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_factory_memory_wiring.py tests/test_factory_memory_config.py tests/test_factory_handlers.py tests/test_factory_interact_wire.py tests/test_factory_interact_e2e.py tests/test_factory_cli.py`
 Expected: PASS
 
-- [ ] **Step 5: 提交**（分支 `design4-step4`）
+- [x] **Step 5: 提交**（分支 `design4-step4`）
 
 ```bash
 git add src/factory/memory_config.py src/factory/memory_runtime.py src/factory/wire.py tests/test_factory_memory_wiring.py tests/test_factory_memory_config.py tests/test_factory_handlers.py tests/test_factory_interact_wire.py

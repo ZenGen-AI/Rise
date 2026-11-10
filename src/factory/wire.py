@@ -111,6 +111,28 @@ def _close_all(closers) -> None:
         raise RuntimeError("closer(s) failed: " + "; ".join(failures))
 
 
+def _guard(fn: Callable, session) -> Callable:
+    """致命停机的组合根那一半(90 篇"停守护进程分两半"、FC-47):调用返回或抛出之后查服务会话的致命状态,查到就抛
+    `FactoryConfigError`。调和循环不接它,命令行译成退出码 2。会话没进致命状态时原样返回或原样上抛。"""
+    def guarded(*args, **kwargs):
+        try:
+            out = fn(*args, **kwargs)
+        except BaseException:
+            _raise_if_fatal(session)
+            raise
+        _raise_if_fatal(session)
+        return out
+
+    return guarded
+
+
+def _raise_if_fatal(session) -> None:
+    reason = session.fatal
+    if reason is not None:
+        tail = "" if "service.log" in reason else "; see service.log"
+        raise FactoryConfigError(f"memory service: {reason}{tail}") from None
+
+
 HandlerBuilder = Callable[[BuildContext], Handler]
 
 
@@ -124,9 +146,10 @@ class Assembly:
     # --executor roll 时才有(设计 FC-15);mock 路径下两者都是 None,Assembly 与改动前等价
     executor_factory: Callable[[str], object] | None = None
     converter: object | None = None
-    # Starling 时清扫 rollout 世界的函数(返回删了几项);替身与不需要记忆的路径是 None。
-    # assemble 只交出它、不调它:清扫要等持仓库锁,由 run(经 run_daemon 的 on_locked)与 reconcile_one_tick 调用。
-    sweep: Callable[[], int] | None = None
+    # Starling 且启用部署记忆时,持仓库锁之后才跑的部署世界核对(90 篇第 23 条);替身与不需要的路径是 None。
+    # assemble 只交出它、不调它:第二个进程撞锁之前不能开过任何句柄,由 run(经 run_daemon 的 on_locked)与
+    # reconcile_one_tick 在锁内调用。
+    on_locked: Callable[[], None] | None = None
 
     def close(self) -> None:
         """逆序收尾。一个收尾函数抛异常不能跳过其余几个,也不能盖住装配中途的原异常。"""
@@ -424,18 +447,25 @@ def assemble(
     if not keys:
         # --interact 单独用:没有处理器和评估器,但有运行时要收尾
         memory = memory_wiring(store.repo_root, environ, deployment=False)        # 配置有问题在这里退出码 2,先于造运行时
-        runtime, switch = _shared_runtime(
-            store, options, keys,
-            turn_timeout_s=deploy_turn_timeout_s(interact=True, starling=memory.backend == "starling"),
-            training_worlds=memory.training_worlds,
-        )
+        closers = list(memory.closers)              # 服务的收尾最先登记、最后执行
         try:
+            runtime, switch = _shared_runtime(
+                store, options, keys,
+                turn_timeout_s=deploy_turn_timeout_s(interact=True, starling=memory.backend == "starling"),
+                training_worlds=memory.training_worlds,
+            )
+            closers.append(runtime.close)
             wiring = _interact_wiring(store, options, runtime, switch, environ, memory)
         except BaseException:
-            runtime.close()          # 还没起过服务端,关它只是把状态收干净
+            try:
+                _close_all(closers)          # 还没起过服务端,关它只是把状态收干净
+            except Exception:
+                pass
             raise
-        return Assembly(_dispatcher(options, runtime, **wiring), {}, None, False,
-                        closers=(runtime.close,), sweep=memory.sweep)
+        dispatcher = _dispatcher(options, runtime, **wiring)
+        if memory.session is not None:
+            dispatcher = _guard(dispatcher, memory.session)
+        return Assembly(dispatcher, {}, None, False, closers=tuple(closers), on_locked=memory.on_locked)
     table = default_builders() if builders is None else builders
     missing = sorted(keys - set(table))
     if missing:
@@ -447,17 +477,26 @@ def assemble(
     memory = None
     if options.interact or needs_deployment:
         memory = memory_wiring(store.repo_root, environ, deployment=needs_deployment)
+    # 服务的收尾(关会话、停拉起的服务)最先登记:逆序执行,所以最后跑,先关运行时与端口
+    early = [] if memory is None else list(memory.closers)
     # 部署对手位进部署世界:只有轮次处理器登记部署 episode,只开 admit 时不给。与轮次处理器、门② 同一个管理面
     deployment_store = None
     if "start_agent_round" in keys and memory is not None and memory.deployment is not None:
         deployment_store = memory.deployment.store
-    runtime, switch = _shared_runtime(
-        store, options, keys,
-        turn_timeout_s=deploy_turn_timeout_s(
-            interact=options.interact, starling=memory is not None and memory.backend == "starling"),
-        training_worlds=None if memory is None else memory.training_worlds,
-        deployment_store=deployment_store,
-    )
+    try:
+        runtime, switch = _shared_runtime(
+            store, options, keys,
+            turn_timeout_s=deploy_turn_timeout_s(
+                interact=options.interact, starling=memory is not None and memory.backend == "starling"),
+            training_worlds=None if memory is None else memory.training_worlds,
+            deployment_store=deployment_store,
+        )
+    except BaseException:
+        try:
+            _close_all(early)
+        except Exception:
+            pass
+        raise
     ctx = BuildContext(
         store=store,
         accept_mock_evidence=options.allow_mock_evidence,
@@ -468,6 +507,7 @@ def assemble(
         repo_commit=resolve_repo_commit(options.repo_commit),
         runtime=runtime,
         deployment_memory=None if memory is None else memory.deployment,
+        closers=early,
     )
     if runtime is not None:
         ctx.register_closer(runtime.close)         # 登记一次;构造器只取用
@@ -480,13 +520,18 @@ def assemble(
         except Exception:
             pass          # 正在传播的才是根因:收尾失败不能把它盖掉
         raise
+    dispatcher = _dispatcher(options, runtime, data_producer=TemplateDataProducer(), **wiring)
+    session = None if memory is None else memory.session
+    if session is not None:
+        dispatcher = _guard(dispatcher, session)
+        handlers = {key: _guard(handler, session) for key, handler in handlers.items()}
     return Assembly(
-        dispatcher=_dispatcher(options, runtime, data_producer=TemplateDataProducer(), **wiring),
+        dispatcher=dispatcher,
         handlers=handlers,
         evaluator=evaluator,
         accept_mock_evidence=options.allow_mock_evidence,
         closers=tuple(ctx.closers),
-        sweep=None if memory is None else memory.sweep,
+        on_locked=None if memory is None else memory.on_locked,
     )
 
 
@@ -505,12 +550,12 @@ def run(
     try:
         if not a.closed_loop:
             run_daemon(store, interval_s, max_ticks=max_ticks, dispatcher=a.dispatcher, evaluator=a.evaluator,
-                       on_locked=a.sweep)
+                       on_locked=a.on_locked)
             return
         run_daemon(
             store, interval_s, max_ticks=max_ticks, dispatcher=a.dispatcher,
             handlers=a.handlers, evaluator=a.evaluator, accept_mock_evidence=a.accept_mock_evidence,
-            on_locked=a.sweep,          # 清扫 rollout 世界要等持锁(另一个守护进程可能正在用);run_daemon 在第一个 tick 前调
+            on_locked=a.on_locked,      # 部署世界核对要等持锁(另一个守护进程可能正在用);run_daemon 在第一个 tick 前调
         )
     finally:
         a.close()          # --interact 单独用时没有处理器,但运行时仍要收尾
@@ -530,8 +575,8 @@ def reconcile_one_tick(
     with acquire_repo_lock(repo_root):
         a = assemble(store, options, env=env, log_dir=log_dir, builders=builders)
         try:
-            if a.sweep is not None:
-                a.sweep()          # 持锁之后、第一个动作之前:上一个进程崩溃时留下的 rollout 世界在这里清掉
+            if a.on_locked is not None:
+                a.on_locked()      # 持锁之后、第一个动作之前:核对已有部署世界的设置与创建标记
             if not a.closed_loop:
                 # --evaluator someval 不开闭环,但评估器必须交给调和循环,否则 request_diagnostic 走占位桩
                 return reconcile_once(store, dispatcher=a.dispatcher, evaluator=a.evaluator)
