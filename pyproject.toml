@@ -13,8 +13,8 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "grpcio-tools>=1.84.0"]
 memory = [
-    "starling-client @ git+https://github.com/ruijieguo/starling@cff319d952360727823024ff43c71b15055bd8e3#subdirectory=clients/python",
-    "starling-memory[dashboard] @ git+https://github.com/ruijieguo/starling@cff319d952360727823024ff43c71b15055bd8e3",
+    "starling-client @ git+https://github.com/ruijieguo/starling@0e0620e9c214cdbff0cca6d95acb3cf2081f86b6#subdirectory=clients/python",
+    "starling-memory[dashboard] @ git+https://github.com/ruijieguo/starling@0e0620e9c214cdbff0cca6d95acb3cf2081f86b6",
 ]
 
 [build-system]
