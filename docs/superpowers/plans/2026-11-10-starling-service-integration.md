@@ -2192,7 +2192,7 @@ def build_seeds(repo_root: Path, env: Mapping[str, str], *, seed_id: str, scenar
 - 规则：`RISE_MEMORY_CONFIG` 没设（替身）→ 退出码 2 "the stand-in memory has no seeds"；`seed_id` 过 `PERSONA_ID_PATTERN`；每个 `--scenario` 在 `agent.yaml` 的 `scenario_ids` 里；`--snapshot` 只能配一个 `--scenario`；按 id 排序逐个处理。每个情境：取世界锁（`FileLockBusyError` → 退出码 2 "a deployment round or gate 2 is using world <id>"）→ 锁内 `uncommitted_snapshots(sid)` 非空 → 退出码 2 → 部署世界不在 → 退出码 2 → 同组种子（`list_worlds(labels={repo, root, kind=seed, seed_id, scenario_id})`，翻完所有页，只取 `seed` 为真）已有且没给 `--new-version` → 退出码 2，打印已有的世界名与版本 → `version` = 同组最大版本加一（首份 1）→ `fork(部署世界名, seed_world(prefix, seed_id, sid, version), snapshot_id=, seed=True, labels=labels(prefix, root, "seed", seed_id=, scenario_id=, version=str(version)), settings=)` → `ServiceTimeout` 时按这个世界名查，查到当作成功，查不到退出码 2 提示重跑。输出每个情境一行 `<世界名> <摘要>`。
 - 不取仓库锁、不写控制面的树；不造部署管理面与训练世界；用完 `ServiceHandle.close()`（拉起模式下停服务）。拉起模式下守护进程在跑时归属锁被占，退出码 2（Task 11 的文字）。
 
-- [ ] **Step 1: 写失败的测试**（`tests/test_factory_seed.py`，拉起模式的真服务，`root` 在 `tmp_path` 下）
+- [x] **Step 1: 写失败的测试**（`tests/test_factory_seed.py`，拉起模式的真服务，`root` 在 `tmp_path` 下）
 
 ```python
 pytest.importorskip("starling_client"); pytest.importorskip("starling.service")
@@ -2243,12 +2243,12 @@ def test_the_stand_in_has_no_seeds(store, capsys):
 
 `seeded_repo(scenarios, built=None, in_flight=None)` 夹具：建临时仓库与 `agent.yaml`，写拉起模式的记忆配置，经 `open_memory_service` 在 `built`（缺省同 `scenarios`）的部署世界里各写一条事件，返回 `(store, env, 第一个世界的摘要)`。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_factory_seed.py`
 Expected: FAIL（没有 `seed` 子命令）
 
-- [ ] **Step 3: 实现**：按 Interfaces。`main` 的分支：
+- [x] **Step 3: 实现**：按 Interfaces。`main` 的分支：
 
 ```python
 if args.command == "seed":
@@ -2265,12 +2265,12 @@ if args.command == "seed":
     return 0
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_factory_seed.py tests/test_factory_cli.py tests/test_factory_memory_wiring.py`
 Expected: PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/factory/seed.py src/factory/cli.py src/factory/memory_runtime.py tests/test_factory_seed.py

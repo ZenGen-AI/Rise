@@ -5,6 +5,7 @@
                        [--interval-s S] [--max-ticks N]
     factory reconcile <repo> --once [同上的装配开关]
     factory install-defaults <repo>
+    factory seed <repo> --seed-id <id> --scenario <id> [--scenario ...] [--snapshot <id>] [--new-version]
     factory trace <repo> <run>
     factory cost <repo> <run>
     factory logs <repo> <run> [--task <id>]
@@ -14,6 +15,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -76,6 +78,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_imp.add_argument("--someval-root", required=True, help="SoMEval 检出目录")
     p_imp.add_argument("--index", required=True, help="污染索引写到哪个树外路径")
 
+    p_seed = sub.add_parser("seed", help="从部署世界分叉种子世界(只在设了 RISE_MEMORY_CONFIG 时可用)")
+    p_seed.add_argument("repo_root")
+    p_seed.add_argument("--seed-id", required=True, help="种子 id;指令里的 memory.seed 填同一个值")
+    p_seed.add_argument("--scenario", action="append", required=True,
+                        help="agent.yaml 里的情境 id,可重复;按 id 排序逐个处理")
+    p_seed.add_argument("--snapshot", default=None,
+                        help="从看板快照列表里的这个快照分叉(只能配一个 --scenario);不给就是部署世界的当前状态")
+    p_seed.add_argument("--new-version", action="store_true",
+                        help="同组种子已有时建下一版;引用这个种子的在跑 run 续训会判 T3")
+
     for name, text in (("trace", "打印一轮的全链路产物"), ("cost", "打印一轮的成本明细与汇总")):
         p = sub.add_parser(name, help=text)
         p.add_argument("repo_root")
@@ -120,6 +132,20 @@ def main(
                 print(f"{a.kind} {a.target_id}")
             if not actions:
                 print("no actions")
+            return 0
+        if args.command == "seed":
+            from factory.seed import build_seeds          # 惰性:拖进 mindagent 与客户端
+
+            # 不取仓库锁、不写树:每个情境取世界锁,拉起模式下另有归属锁
+            try:
+                results = build_seeds(Path(args.repo_root), os.environ if env is None else env,
+                                      seed_id=args.seed_id, scenario_ids=args.scenario,
+                                      snapshot_id=args.snapshot, new_version=args.new_version)
+            except FactoryConfigError as exc:
+                print(f"factory: error: {exc}", file=sys.stderr)
+                return 2
+            for r in results:
+                print(f"{r.world} {r.digest}")
             return 0
         store = GitStore(args.repo_root)
         if args.command == "import-sombench":
