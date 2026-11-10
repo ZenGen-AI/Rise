@@ -581,6 +581,7 @@ SESSION_CLOSE_WAIT_S = 70.0   # mindagent.deployment;服务端 join 上限 60 �
 |---|---|
 | 某次调用收到 SessionExpired | 判瞬态;把这一代会话标为丢失,记下它在哪些世界上有可写句柄与过期时刻 |
 | 端口不是 rise 关的,却收到 `handle_closed` | 外部看板重启后端口与 token 不变(token 存在 `starling.json`,`S:python/starling/dashboard/config.py:152-154`),新进程认不出旧句柄,回 `handle_closed`(`S:src/governance/session_table.cpp:64-74`),心跳至多 10 秒后才发现过期。所以同样判瞬态,把这一代会话标为丢失 |
+| 某次调用收到 ServiceUnavailable(端口、开句柄、管理调用三处) | 判瞬态,同样把这一代会话标为丢失(`src/simple_actio/memory_starling.py:166-168`、`src/factory/starling_session.py:307`、`:389`)。不标的话,拉起的服务退出后没有人触发下面"下一次需要服务"那一行,每次调用只会再得到一次 ServiceUnavailable,服务永远不会被重新拉起 |
 | 下一次需要服务 | 新建客户端,代号加一,记 warning;旧客户端引用计数归零后再关 |
 | 每次换会话之后 | 重新核对 `info()` 的 `commit`、`protocol`、`extraction_config` 摘要与 token。任一项与装配期不符,或重连遇到 Unauthorized、ProtocolMismatch:停守护进程,按装配错误退出(退出码 2),日志写原因;不落到单条指令或轮次 |
 | 新会话开句柄收到 `world_held`,世界在丢失会话的可写列表里,距过期不到 60 秒 | 判瞬态,即排空窗口;服务端要等过期会话的在途调用结束。按完整世界名记录与比较 |
