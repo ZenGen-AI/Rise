@@ -1,25 +1,24 @@
-"""第 5 步的部署记忆语义在真 Starling 上再跑一遍(设计源第 11 节"真 Starling 或替身"的集成行)。
+"""第 5 步的部署记忆语义在真 Starling 记忆服务上再跑一遍(设计源第 11 节"真 Starling 或替身"的集成行)。
 
 用例照 `tests/test_ma_deployment.py`、`tests/test_ma_admit.py` 里同名语义的替身用例写,辅助代码从那两个模块导入,
-不复制。差别只有三处:库换成 `StarlingDeploymentStore`(held 快照与重放世界是过渡布局的库文件);抽取失败改用
-假端点的 `fail_keys`(取代 `FileTupleStore(extraction_failure=)`);摘要比较用 `store.digest(world)`,不比库文件内容。
+不复制。差别只有三处:库换成连真 starling-serve 的 `StarlingDeploymentStore`(held 快照与重放世界都在服务里);
+抽取失败改用假端点的 `fail_keys`(取代 `FileTupleStore(extraction_failure=)`);摘要比较用 `store.digest(world)`。
 部署用例的世界是情境 s1(`WORLD`),智能体位主体是 pa。
-假端点是本机回环子进程(`tests/starling_fakes.py`),不发任何外网请求。"""
-import tempfile
-from pathlib import Path
+服务模块级共用一个,每条用例一个世界前缀;假端点是本机回环子进程(`tests/starling_fakes.py`),不发任何外网请求。"""
 from types import SimpleNamespace
 
 import pytest
 
-starling = pytest.importorskip("starling")
+pytest.importorskip("starling_client"); pytest.importorskip("starling.service")
 from simple_actio.memory_port import MemoryEventConflict, PendingKey  # noqa: E402
-from simple_actio.memory_starling import StarlingDeploymentStore, copy_library  # noqa: E402
 from controlplane.deferred import DeferredError  # noqa: E402
 from controlplane.gitstore import GitStore  # noqa: E402
 from controlplane.paths import failure_record_file, library_state_file, proposal_file, run_dir, skill_file  # noqa: E402
 from mindagent.deployment import DeploymentFailedError  # noqa: E402
+from mindagent.errors import RestoreFailedError  # noqa: E402
 from mindagent.memory_layout import MemoryLayout  # noqa: E402
-from starling_fakes import FakeOpenAI, offline_api_key  # noqa: E402
+from starling_fakes import FakeOpenAI  # noqa: E402
+from starling_service import deployment_store, held_snapshots, open_session, start_service  # noqa: E402
 from test_ma_admit import KEY, PID, SKILL, _admit, _put  # noqa: E402
 from test_ma_deployment import EID, KEY0, ROUND, WORLD, _Factory, _FakeClient, _run, _WorldFactory  # noqa: E402
 from test_ma_deployment import store  # noqa: E402,F401  (部署用例的夹具:情境 s1、s2 与人格 pa、pb)
@@ -32,16 +31,25 @@ SECOND = {"scenario_id": "s1", "persona_id": "pa", "text": "pb：对方养了一
 SKILL_AND_MEMORY = [{"kind": "skill", "definition": SKILL}, {"kind": "memory", "definition": FIRST}]
 
 
+@pytest.fixture(scope="module")
+def service(tmp_path_factory):
+    proc = start_service(tmp_path_factory.mktemp("svc"))
+    yield proc
+    proc.kill()
+
+
 @pytest.fixture
-def mem(tmp_path):
+def mem(tmp_path, service):
     """与替身夹具同形:`_run`、`_admit` 只用 `.store` 与 `.layout`。`failing` 就是假端点的 `fail_keys`,
-    就地 add/clear 立即同步给假端点子进程。"""
-    with FakeOpenAI(dim=256) as fake, offline_api_key():
-        root = tmp_path / "mem"
-        yield SimpleNamespace(
-            store=StarlingDeploymentStore(root / "deploy", held_root=root / "held", replay_root=root / "replay",
-                                          endpoints=fake.endpoints()),
-            layout=MemoryLayout(root), failing=fake.fail_keys, fake=fake)
+    就地 add/clear 立即同步给假端点子进程。在途记录在记忆根下,创建标记在 `deploy/` 下,同组合根。"""
+    session = open_session(service)
+    try:
+        with FakeOpenAI(dim=256) as fake:
+            root = tmp_path / "mem"
+            yield SimpleNamespace(store=deployment_store(session, fake, root / "deploy"), layout=MemoryLayout(root),
+                                  failing=fake.fail_keys, fake=fake, session=session, service=service)
+    finally:
+        session.close()
 
 
 @pytest.fixture
@@ -53,23 +61,25 @@ def admit_store(tmp_path):
     return s
 
 
-def _pending_in_copy(path: Path) -> list[tuple[str, str]]:
-    """库文件(或起点快照)里还有哪些 pending 行,列全部主体的 (key, holder)(与 `pending_events` 同口径)。
-    快照是提交点,字节不能变:拷出来再开。"""
-    with tempfile.TemporaryDirectory() as tmp:
-        copy = Path(tmp) / "peek.db"
-        copy_library(path, copy)
-        memory = starling.Memory.open(str(copy), agent="peek")
-        try:
-            return [(p.key, p.holder) for p in memory.pending_events()]
-        finally:
-            memory.close(timeout=10)
+def _pending(mem, world):
+    """部署世界里全部主体的 pending 行 (key, holder)(与 `pending_events` 同口径,直接问服务)。"""
+    return [(p.key, p.holder) for p in mem.store.pending_events(world)]
 
 
-def _held_file(mem, eid):
-    """在途记录指的 held 快照库文件(过渡布局:held/<世界>/<快照 id>.db)。"""
+def _pending_in_snapshot(mem, eid):
+    """在途记录指的 held 快照里还有哪些 pending 行。快照是提交点,不能动它:分叉一个重放世界来读,读完关掉。"""
     rec = mem.layout.read_record(mem.layout.snapshot(ROUND, eid))
-    return mem.layout.root / "held" / rec.world_id / f"{rec.snapshot_id}.db"
+    name = mem.store.fork_replay(rec.world_id, rec.snapshot_id, round_id="peek")
+    try:
+        events = mem.session.admin("pending_events", {"world": name})["events"]
+        return [(e["key"], e["holder"]) for e in sorted(events, key=lambda e: e["seq"])]
+    finally:
+        mem.store.release_replay(name)
+
+
+def _held(mem, world=WORLD):
+    """部署世界在服务上的 held 快照 id。"""
+    return held_snapshots(mem.service, f"{mem.store.prefix}.deploy.{world}")
 
 
 class _StartProbe:
@@ -84,7 +94,7 @@ class _StartProbe:
         self.seen.append({
             "eid": eid, "digest": digest,
             "library_pending": self._mem.store.pending_events(WORLD),
-            "snapshot_pending": _pending_in_copy(_held_file(self._mem, eid)),
+            "snapshot_pending": _pending_in_snapshot(self._mem, eid),
         })
 
 
@@ -179,7 +189,7 @@ def test_the_second_round_reuses_the_episode_id_but_not_the_event_keys(store, me
     assert mem.fake.chat_calls == calls                                # 第二轮的行也是 committed 的
 
 
-def test_no_pending_rows_survive_an_episode_and_the_next_start_snapshot_is_clean(store, mem, monkeypatch, tmp_path):
+def test_no_pending_rows_survive_an_episode_and_the_next_start_snapshot_is_clean(store, mem, monkeypatch):
     """episodes_per_scenario=2:两条 episode 各有一个事件抽取失败、留 pending 行,episode 提交时驱动器放弃它们。
     第二条开始时部署世界与它的起点快照里都没有 pending 行;全部结束后仍没有,两份起点快照都已删。
     替身没有同名用例。"""
@@ -189,9 +199,7 @@ def test_no_pending_rows_survive_an_episode_and_the_next_start_snapshot_is_clean
     real = mem.store.abandon_event
 
     def spy(world, holder, key):
-        copy = tmp_path / f"before-abandon-{len(abandoned)}.db"
-        copy_library(mem.layout.root / "deploy" / f"{world}.db", copy)   # 端口都已关,库静止
-        abandoned.append((holder, key, mem.store.pending_events(world), _pending_in_copy(copy)))
+        abandoned.append((holder, key, mem.store.pending_events(world), _pending(mem, world)))   # 端口都已关
         real(world, holder, key)
 
     monkeypatch.setattr(mem.store, "abandon_event", spy)
@@ -209,7 +217,7 @@ def test_no_pending_rows_survive_an_episode_and_the_next_start_snapshot_is_clean
     assert mem.store.pending_events(WORLD) == []
     for eid in (EID, EID2):
         assert not mem.layout.snapshot(ROUND, eid).exists()
-    assert list((mem.layout.root / "held" / WORLD).iterdir()) == []     # 提交时 held 快照也删了
+    assert _held(mem) == []                                            # 提交时 held 快照也删了
     with pytest.raises(MemoryEventConflict):                           # 放弃是终态
         mem.store.remember_event(WORLD, "pa", KEY0, "pb：我很生气!!", interlocutor="pb")
 
@@ -230,6 +238,50 @@ def test_a_failed_attempt_rolls_back_both_slots_writes_in_one_starling_world(sto
     for holder, key, speaker, utterance in heard:
         again = mem.store.remember_event(WORLD, holder, key, f"{speaker}：{utterance}", interlocutor=speaker)
         assert not again.failed and again.stored                       # 已提交:同 key 同文本幂等
+
+
+def test_a_handle_another_session_holds_makes_the_restore_a_kept_restore_failure(store, mem, monkeypatch):
+    """Review Focus 最后一条,真服务那一次:本进程的端口都关了(`wait_closed` 为真),另一个会话(另一个 rise 进程)
+    还在部署世界上持可写句柄,服务回 `world_held`,判 `RestoreFailedError`;在途记录与 held 快照都留着,句柄放开后
+    重入从起点重跑。"""
+    other = open_session(mem.service)
+    held = []
+    real = mem.store.restore
+
+    def taken_meanwhile(world, snapshot_id):
+        if not held:
+            held.append(other.open_port(f"{mem.store.prefix}.deploy.{world}", "px", read_only=False,
+                                        settings=mem.store._settings, wrap=lambda remote, rel, gen: (remote, rel)))
+        return real(world, snapshot_id)
+
+    monkeypatch.setattr(mem.store, "restore", taken_meanwhile)
+    digests = {}
+    try:
+        with pytest.raises(RestoreFailedError, match=f"restore {EID} in world {WORLD}: MemoryFailureError") as info:
+            _run(store, _Factory({"end_reason": "timeout"}), mem, digests=digests)
+        assert info.value.point == "mindagent.deployment.restore"
+        rec = mem.layout.read_record(mem.layout.snapshot(ROUND, EID))
+        assert _held(mem) == [rec.snapshot_id]                            # 记录与快照都留着等人
+    finally:
+        for remote, release in held:
+            remote.close(); release()
+        other.close()
+    monkeypatch.undo()
+    (ep,) = _run(store, _Factory(), mem, digests=digests)               # 句柄放开后重入:先恢复再重跑
+    assert ep.id == EID and not mem.layout.snapshot(ROUND, EID).exists() and _held(mem) == []
+
+
+def test_a_held_snapshot_deleted_on_the_service_is_a_kept_restore_failure(store, mem):
+    digests = {}
+    with pytest.raises(OSError):
+        _run(store, lambda **kw: (_ for _ in ()).throw(OSError("x")), mem, digests=digests)
+    rec_path = mem.layout.snapshot(ROUND, EID)
+    rec = mem.layout.read_record(rec_path)
+    mem.session.admin("delete_snapshot", {"world": f"{mem.store.prefix}.deploy.{WORLD}",
+                                          "snapshot_id": rec.snapshot_id})          # 人在看板里误删了在途快照
+    with pytest.raises(RestoreFailedError, match=f"restore {EID} in world {WORLD}: MemoryFailureError") as info:
+        _run(store, _Factory(), mem, digests=digests)
+    assert info.value.point == "mindagent.deployment.restore" and rec_path.exists()
 
 
 # ---------------- 门② 记忆增量(替身用例:tests/test_ma_admit.py) ----------------

@@ -304,7 +304,7 @@ class ServiceSession:
             remote = gen.client.open(world, holder=holder, read_only=read_only, settings=settings)
         except BaseException as exc:
             self._release(gen, world, read_only)
-            if isinstance(exc, errors.SessionExpired):
+            if isinstance(exc, (errors.SessionExpired, errors.ServiceUnavailable)):
                 self.mark_lost(gen.number, writable_worlds=[])
             if not isinstance(exc, Exception):
                 raise
@@ -339,7 +339,8 @@ class ServiceSession:
         self._close_generations(closable)
 
     def mark_lost(self, generation: int, *, writable_worlds: Iterable[str]) -> None:
-        """代号 `generation` 的会话丢失了(调用收到 SessionExpired,或 rise 没关的端口收到 handle_closed)。
+        """代号 `generation` 的会话丢失了:调用收到 SessionExpired,rise 没关的端口收到 handle_closed,或者服务连不上
+        (ServiceUnavailable:服务进程不在了。拉起模式下只有标了丢失,下一次需要服务时才会重新拉起)。
         记下丢失时刻与那时有可写句柄的世界(报告里的加上这一代还开着的可写端口所在的世界)。只对当前代号生效:
         旧代号重复报告是空操作。"""
         reported = frozenset(writable_worlds)
@@ -377,12 +378,16 @@ class ServiceSession:
     def admin(self, op: str, body: dict) -> dict:
         """经不带会话的管理传输 POST `/api/v1/client/admin/<op>`,超时 300 秒。会话丢失时先换会话(管理传输随之重建),
         但过期本身不影响管理调用。客户端异常照 `translate_client_failure`(两个改判开关都为假)。"""
+        from starling_client import errors
+
         gen = self._live()
         with self._lock:
             gen.admin_calls += 1                           # 在途的管理调用也让这一代的传输留着
         try:
             return gen.transport.post(f"{_ADMIN_PATH}{op}", body, timeout_s=ADMIN_TIMEOUT_S)
         except Exception as exc:
+            if isinstance(exc, errors.ServiceUnavailable):
+                self.mark_lost(gen.number, writable_worlds=[])
             raise _translate(exc) from None
         finally:
             with self._lock:

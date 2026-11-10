@@ -1761,7 +1761,7 @@ class StarlingDeploymentStore:
 - `ensure_world(world_id)`：①有创建标记 `marker_dir/<world_id>.created` 而 `list_worlds` 里没有这个世界 → 永久失败 `"deploy world <名字> was deleted"`（装配期另报退出码 2，Task 16）；②`create_world(name, labels=labels(prefix, root, "deploy", scenario_id=world_id), settings=settings, seed=False)`，成功就写创建标记（临时文件加改名）；③收到 `world_exists`：`list_worlds(labels={"repo": prefix, "kind": "deploy", "scenario_id": world_id})` 翻完所有页找这个名字，找不到、`seed` 或 `read_only` 为真、`kind`、`repo` 不对 → 永久 `"world <名字> was not created by rise"`；`root` 标签不等于本记忆根 → 永久 `"world <名字> belongs to another memory root"`；对得上且标记不在就补写标记。同一进程内对每个世界只做一次（记一个集合）。
 - 空种子 `ensure_empty_seed()`（同一类里，装配期调）：同样三步，世界名 `<前缀>.seed-empty`，`seed=True`，标签 `kind=seed-empty`；返回它的摘要（`list_worlds(with_digest=True)` 里的 `digest`）。
 
-- [ ] **Step 1: 写失败的测试**（`tests/test_simple_actio_starling_store.py`，模块级真服务；每条用例用唯一前缀 `t<n>`，彼此不干扰）
+- [x] **Step 1: 写失败的测试**（`tests/test_simple_actio_starling_store.py`，模块级真服务；每条用例用唯一前缀 `t<n>`，彼此不干扰）
 
 ```python
 pytest.importorskip("starling_client"); pytest.importorskip("starling.service")
@@ -1838,19 +1838,19 @@ def test_after_an_external_restart_an_old_port_reads_handle_closed_as_a_lost_ses
 
 `store_factory(prefix=None, root_label=None, marker_dir=None)` 在模块级真服务上造 `ServiceSession` 与 `StarlingDeploymentStore`（前缀缺省取递增的 `t<n>`），返回 `(store, marker_dir, admin)`；`admin(op, body)` 直接调 `session.admin`，不经管理面；`restartable()` 另起一个本条用例独占的真服务（`start_service(..., port=<固定空闲端口>)`），`service.restart()` 在同一端口重起。`_delete_world_through_the_dashboard_route(name)` 用 httpx（`trust_env=False`、带 bearer token）发 `DELETE /api/worlds/<name>?confirm=<name>`（`S:python/starling/dashboard/routes/worlds.py:396-404`；路由前缀以 `S:python/starling/dashboard/app.py` 的挂载为准，实现时核对；客户端没有删世界的接口，只有测试这样做）。契约文件 `tests/test_simple_actio_deployment_store_contract.py` 的 `starling` 参数改为同一套夹具，Task 2、4 写下的契约用例对两个后端都跑。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_simple_actio_starling_store.py tests/test_simple_actio_deployment_store_contract.py`
 Expected: FAIL（`StarlingDeploymentStore` 还是进程内的签名）
 
-- [ ] **Step 3: 实现**：按 Interfaces。管理调用的异常都经 `translate_client_failure(..., port_closed_by_rise=False, in_drain_window=False)`；会话致命时 `session.admin` 已经抛瞬态失败，这里不另判。删掉的进程内函数若还有调用方（`src/factory/memory_runtime.py` 的 `StarlingTrainingWorlds`、`starling_memory_resolver`），它们在 Task 15、16 改，分支上暂时坏着。
+- [x] **Step 3: 实现**：按 Interfaces。管理调用的异常都经 `translate_client_failure(..., port_closed_by_rise=False, in_drain_window=False)`；会话致命时 `session.admin` 已经抛瞬态失败，这里不另判。删掉的进程内函数若还有调用方（`src/factory/memory_runtime.py` 的 `StarlingTrainingWorlds`、`starling_memory_resolver`），它们在 Task 15、16 改，分支上暂时坏着。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `uv run --offline pytest -q -p no:cacheprovider tests/test_simple_actio_starling_store.py tests/test_simple_actio_deployment_store_contract.py tests/test_simple_actio_memory_starling.py tests/test_ma_deployment_starling.py`
 Expected: PASS（`tests/test_ma_deployment_starling.py` 的恢复分码用例在真服务上钉住 Review Focus 最后一条）
 
-- [ ] **Step 5: 提交**（分支 `design4-step4`）
+- [x] **Step 5: 提交**（分支 `design4-step4`）
 
 ```bash
 git add src/simple_actio/memory_starling.py tests/test_simple_actio_starling_store.py tests/test_simple_actio_deployment_store_contract.py tests/test_ma_deployment_starling.py

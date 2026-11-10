@@ -160,3 +160,73 @@ def start_service(tmp_dir: Path, *, starling_json: dict | None = None, port: int
     if starling_json is not None:
         (proc.data_dir / "starling.json").write_text(json.dumps(starling_json), encoding="utf-8")
     return proc.start()
+
+
+# ---------------- 在真服务上造会话与部署管理面(第 4 步起各用例共用) ----------------
+
+import itertools  # noqa: E402
+
+_PREFIXES = itertools.count(1)
+
+
+def unique_prefix() -> str:
+    """每条用例一个世界名前缀(`t<n>`),共用一个服务的用例彼此看不见对方的世界。"""
+    return f"t{next(_PREFIXES)}"
+
+
+def fake_memory_config(fake, root: Path):
+    """指向假端点的记忆配置:rise 设置据此写出抽取与嵌入端点。"""
+    from factory.memory_config import MemoryConfig
+
+    return MemoryConfig(root=root, extraction_base_url=fake.base_url, extraction_model="fake-extract",
+                        embedding_base_url=fake.base_url, embedding_model="fake-embed", embedding_dim=fake.dim,
+                        timeout_ms=2000, max_retries=0)
+
+
+def open_session(proc: ServiceProc, **kw):
+    """连 `proc` 的服务会话,钉客户端包自己的提交。"""
+    import starling_client
+    from factory.starling_session import ServiceSession
+
+    return ServiceSession(url_of=lambda: proc.url, token_of=lambda: proc.token,
+                          pinned_commit=starling_client.COMMIT, **kw)
+
+
+def deployment_store(session, fake, marker_dir: Path, *, prefix: str | None = None, root_label: str | None = None,
+                     seed_digest: str | None = None, close_timeout_s: float = 60.0):
+    """在会话上造部署管理面:建好空种子(给了 `seed_digest` 就不建,直接用它),标签 `root` 缺省取 `marker_dir`
+    上一级的摘要。返回管理面(前缀在 `.prefix`)。"""
+    from factory import starling_names
+    from simple_actio.memory_starling import StarlingDeploymentStore, ensure_empty_seed
+
+    prefix = prefix or unique_prefix()
+    label = root_label or starling_names.root_label(marker_dir.parent)
+    settings = starling_names.rise_settings(fake_memory_config(fake, marker_dir.parent))
+    digest = seed_digest
+    if digest is None:
+        _, digest = ensure_empty_seed(session, names=starling_names, prefix=prefix, root_label=label,
+                                      settings=settings)
+    return StarlingDeploymentStore(session, names=starling_names, prefix=prefix, root_label=label, settings=settings,
+                                   marker_dir=marker_dir, empty_seed_digest=digest, close_timeout_s=close_timeout_s)
+
+
+def dashboard(proc: ServiceProc):
+    """看板路由的 httpx 客户端(不读代理环境变量,带 bearer token)。客户端没有删世界、列快照的接口,只有测试这样做。"""
+    import httpx
+
+    return httpx.Client(base_url=proc.url, headers={"Authorization": f"Bearer {proc.token}"}, trust_env=False,
+                        timeout=30.0)
+
+
+def held_snapshots(proc: ServiceProc, world: str) -> list[str]:
+    """世界 `world` 上 held 快照的 id(看板路由 `GET /api/worlds/<name>/snapshots`)。"""
+    with dashboard(proc) as http:
+        out = http.get(f"/api/worlds/{world}/snapshots")
+        out.raise_for_status()
+        return [s["id"] for s in out.json()["snapshots"] if s.get("kind") == "held"]
+
+
+def delete_world(proc: ServiceProc, world: str) -> None:
+    """经看板路由删世界(`DELETE /api/worlds/<name>?confirm=<name>`,S:python/starling/dashboard/routes/worlds.py:396-404)。"""
+    with dashboard(proc) as http:
+        http.delete(f"/api/worlds/{world}", params={"confirm": world}).raise_for_status()

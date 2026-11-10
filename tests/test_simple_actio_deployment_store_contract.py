@@ -5,7 +5,7 @@
 以及按快照 id 的管理面(40 篇 5.1 节、AC-34):删已删的快照是空操作,重放世界从快照分叉、只读、按完整世界名计端口,
 名字形如重放世界的情境 id 经 `open` 仍是部署世界。
 两边各自文件里的同义用例不删;这里防的是以后一边改了另一边没改。管理面按世界 id 管库,
-这里的 "s1" 是世界,"pa"、"pb" 是世界里的主体。"""
+这里的 "s1" 是世界,"pa"、"pb" 是世界里的主体。Starling 参数连真 starling-serve(模块级共用一个,每条用例一个世界前缀)。"""
 from __future__ import annotations
 
 import threading
@@ -17,7 +17,7 @@ import pytest
 
 from simple_actio.memory import FileTupleStore
 from simple_actio.memory_port import MemoryEvent, MemoryFailureError, PendingKey, SnapshotRef
-from starling_fakes import FakeOpenAI, offline_api_key
+from starling_fakes import FakeOpenAI
 
 KEY = "r1/deploy-m-s-0#1"
 TEXT = "pb：我担心预算超支"
@@ -26,25 +26,40 @@ TEXT = "pb：我担心预算超支"
 @dataclass
 class Case:
     store: object
-    root: Path
+    root: Path                           # 替身是库目录;Starling 是创建标记的目录。没有世界的读不该建它
     fail: Callable[[str], None]          # 让这个 key 的抽取失败,事件留在 pending
+
+
+@pytest.fixture(scope="module")
+def service(tmp_path_factory):
+    """Starling 参数共用的真 starling-serve;只有 Starling 参数取它,替身参数不起服务。"""
+    pytest.importorskip("starling_client"); pytest.importorskip("starling.service")
+    from starling_service import start_service
+
+    proc = start_service(tmp_path_factory.mktemp("svc"))
+    yield proc
+    proc.kill()
 
 
 @pytest.fixture(params=["file", "starling"])
 def case(request, tmp_path):
-    root = tmp_path / "deploy"
-    roots = {"held_root": tmp_path / "held", "replay_root": tmp_path / "replay"}
     if request.param == "file":
+        root = tmp_path / "deploy"
         failing: set[str] = set()
-        store = FileTupleStore(root, **roots,
+        store = FileTupleStore(root, held_root=tmp_path / "held", replay_root=tmp_path / "replay",
                                extraction_failure=lambda e: "extraction_failed" if e.key in failing else None)
         yield Case(store, root, failing.add)
         return
-    pytest.importorskip("starling")
-    from simple_actio.memory_starling import StarlingDeploymentStore
+    proc = request.getfixturevalue("service")
+    from starling_service import deployment_store, open_session
 
-    with FakeOpenAI(dim=256) as fake, offline_api_key():
-        yield Case(StarlingDeploymentStore(root, **roots, endpoints=fake.endpoints()), root, fake.fail_keys.add)
+    session = open_session(proc)
+    try:
+        with FakeOpenAI(dim=256) as fake:          # 每条用例一个世界前缀,彼此看不见
+            marker_dir = tmp_path / "mem" / "deploy"
+            yield Case(deployment_store(session, fake, marker_dir), marker_dir, fake.fail_keys.add)
+    finally:
+        session.close()
 
 
 def _assert_permanent(info):
