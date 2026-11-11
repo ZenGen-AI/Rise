@@ -36,6 +36,7 @@ from __future__ import annotations
 import copy
 import logging
 import re
+import subprocess
 from collections.abc import Callable
 from contextlib import ExitStack
 from datetime import datetime, timezone
@@ -340,7 +341,7 @@ def make_start_round_handler(
                 # 快照要回滚:T3、只报类名。
                 _fail_bad_world(store, model_id, existing, type(exc).__name__)
                 return
-            _handle(store, model_id, rel, existing, _rollback_with(locks))
+            _handle(store, model_id, rel, existing, _rollback_with(locks, store))
 
     def _fail_bad_world(store: GitStore, model_id: str, existing: Envelope | None, cls: str) -> None:
         try:
@@ -352,7 +353,7 @@ def make_start_round_handler(
         _close_round(store, env, f"scenario id refused by the memory layout: {cls}", category="T3",
                      point="mindagent.rounds.world", rollback=None, run_id=run_id, record=True)
 
-    def _rollback_with(locks: _WorldLocks) -> Rollback:
+    def _rollback_with(locks: _WorldLocks, store: GitStore) -> Rollback:
         def rollback(env: Envelope) -> None:
             """该轮次每份还在的起点快照在途记录按它记的世界恢复,再删记录、后删 held 快照(设计二第 9 节"轮次失败收尾",
             50 篇"接服务后的快照顺序"表"回滚"一行)。先拿该轮次产物 scenario_ids 里的世界锁(被占抛 DeferredError);
@@ -379,20 +380,32 @@ def make_start_round_handler(
             for path, rec in records.items():
                 world = rec.world_id
                 what = f"rollback {path.name} in world {world}"
+                try:
+                    eid = memory_layout.episode_of(path)
+                except ValueError:
+                    raise RestoreFailedError(f"{what}: record name does not carry an episode id",
+                                             point="mindagent.deployment.restore") from None
                 if not memory_store.wait_closed(world, close_wait_s):
                     raise RestoreFailedError(f"{what}: memory ports still open after {close_wait_s:g}s",
                                              point="mindagent.deployment.restore")
                 try:
                     memory_store.restore(world, rec.snapshot_id)
-                    # 删不掉的记录同样按恢复失败处理:库、记录与快照都留着等人,不从处理器逃出。先删记录、后删快照:
-                    # 恢复之后崩,重入再恢复一次同一份快照,结果相同
+                    # 恢复之后先把这条 episode 的起点摘要摘掉并写回轮次产物:轮次若停在 pending(崩在写终态之前),
+                    # 重入时"记录不在、episode 文件在、摘要记过"正是已提交 episode 的判法,而世界已经被恢复过、
+                    # 不是同一条记忆。顺序恢复 → 摘摘要写回 → 删记录:三步之间崩,重入再恢复一次同一份快照,
+                    # 结果相同;摘不掉(写回失败)按恢复失败处理,库、记录与快照都留着等人,不从处理器逃出。
+                    # 先删记录、后删快照:删记录失败同样按恢复失败处理
+                    digests = env.payload.get("episode_digests")
+                    if isinstance(digests, dict) and digests.pop(eid, None) is not None:
+                        store.write_product(agent_round_file(env.payload["model_id"]), env,
+                                            f"mindagent: {env.id} rollback {eid}")
                     path.unlink()
                 except MemoryFailureError as exc:
                     if exc.transient:
                         raise DeferredError(f"{what}: {type(exc).__name__}") from exc
                     raise RestoreFailedError(f"{what}: {type(exc).__name__}",
                                              point="mindagent.deployment.restore") from exc
-                except OSError as exc:
+                except (OSError, subprocess.CalledProcessError) as exc:
                     raise RestoreFailedError(f"{what}: {type(exc).__name__}",
                                              point="mindagent.deployment.restore") from exc
                 drop_snapshot(memory_store, world, rec.snapshot_id, what)

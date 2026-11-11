@@ -1,4 +1,5 @@
 import json
+import subprocess
 from types import SimpleNamespace
 
 import grpc
@@ -564,10 +565,12 @@ def test_a_round_that_cannot_lock_a_world_library_is_deferred(store, mem):
 
 def test_a_t3_round_rolls_back_the_in_flight_episode_and_drops_its_copy(store, mem):
     factory = _Factory(plans=[{}, {"create_error": SessionRejectedError("invalid_session", "bad")}])
+    start = mem.store.digest("s2")                                     # s2 还没人写过,就是这条 episode 的起点
     env = _start(store, _handler(factory=factory, mem=mem))
     assert env.status == "failed" and env.payload["failure"]["category"] == "T3"
-    second = "deploy-zengen-v1-s2-1"
-    assert mem.store.digest("s2") == env.payload["episode_digests"][second]
+    # 回滚把它退回起点,摘要也从轮次产物里摘掉:留着的话重入会把它当成已提交的 episode 复用
+    assert mem.store.digest("s2") == start
+    assert "deploy-zengen-v1-s2-1" not in env.payload["episode_digests"]
     assert mem.layout.round_snapshots(ROUND) == []
     assert not list((mem.layout.root / "held" / "s2").iterdir())       # 回滚后 held 快照也删了
 
@@ -589,9 +592,11 @@ def test_a_data_error_mid_episode_is_rolled_back_by_the_round(store, mem):
     h = make_start_round_handler(config=_cfg(), client_factory=_Factory(), backend_factory=lambda m, c: backend,
                                  personas_loader=_loader, memory_store=mem.store, memory_layout=mem.layout,
                                  memory_runtime=STAND_IN_MEMORY_RUNTIME)
+    start = mem.store.digest("s2")
     env = _start(store, h)
     _assert_failed(store, "mindagent.rounds", "SimpleActioDataError")
-    assert mem.store.digest("s2") == env.payload["episode_digests"]["deploy-zengen-v1-s2-1"]
+    assert mem.store.digest("s2") == start
+    assert "deploy-zengen-v1-s2-1" not in env.payload["episode_digests"]
     assert mem.store.pending_events("s2") == []
     assert mem.layout.round_snapshots(ROUND) == []
 
@@ -713,6 +718,9 @@ def test_a_superseded_round_with_a_kept_copy_is_rolled_back_first(store, mem):
     old = store.read_product(agent_round_file("zengen-v1"))
     assert old.status == "failed" and old.payload["failure"]["category"] == "superseded"
     assert not snap.exists()
+    # 回滚把这条 episode 的起点摘要也从轮次产物里摘掉:否则重入时"记录不在、episode 文件在、摘要记过"
+    # 会被当成已提交的 episode 复用,而世界其实已经退回起点
+    assert "deploy-zengen-v1-s1-1" not in old.payload["episode_digests"]
     # v1 的半截记忆在 v2 开跑之前就被覆盖回起点:v2 第一条 episode 的起点摘要就是 v1 那条的起点
     assert env2.payload["episode_digests"]["deploy-zengen-v2-s1-1"] == start
 
@@ -891,6 +899,29 @@ def test_a_record_that_cannot_be_deleted_after_rollback_fails_the_round_instead_
     assert env.status == "failed" and env.payload["failure"]["point"] == "mindagent.deployment.restore"
     assert "PermissionError" in env.payload["failure"]["reason"] and "denied" not in env.payload["failure"]["reason"]
     assert snap.exists()
+
+
+def test_a_digest_that_cannot_be_dropped_in_a_rollback_fails_the_round_and_keeps_record(store, mem, monkeypatch):
+    # 摘摘要要写回轮次产物:写回失败按恢复失败处理,库、记录与快照都留着,不从处理器逃出
+    _, rec = _kept_copy(store, mem)
+    real = store.write_product
+
+    def refuse(rel, env, message):
+        if "rollback" in message:
+            raise subprocess.CalledProcessError(1, ["git", "commit"], stderr="boom at /secret")
+        return real(rel, env, message)
+
+    from controlplane.deferred import DeferredError
+    monkeypatch.setattr(store, "write_product", refuse)
+    _model(store, 2, "run-002")
+    # 旧轮次被判 T3,但记录留着,新轮次的门② 见到它照旧延后
+    with pytest.raises(DeferredError, match="uncommitted start snapshot"):
+        _start(store, _handler(mem=mem), model="zengen-v2")
+    env = store.read_product(agent_round_file("zengen-v1"))
+    assert env.status == "failed" and env.payload["failure"]["point"] == "mindagent.deployment.restore"
+    assert "CalledProcessError" in env.payload["failure"]["reason"]
+    assert "/secret" not in env.payload["failure"]["reason"]
+    assert rec.exists()                                                # 记录留着:重入再恢复一次同一份快照
 
 
 # ---------------- 终审 I-2:记忆层的确定性错误判 T3,不从处理器逃出 ----------------

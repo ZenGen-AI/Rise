@@ -6,7 +6,8 @@
     <根>/snapshots/<round_id>/verify-<scenario_id>.rec.json     验证快照的在途记录:一个情境一份
 
 快照本身是部署管理面的 held 快照,rise 只在记录里记它的 id(客户端没有列快照的接口)。记录内容是
-`{"world_id", "snapshot_id", "digest"}`,自带世界 id,所以不再有 `.world` 旁注,也不解析文件名。
+`{"world_id", "snapshot_id", "digest"}`,自带世界 id,所以不再有 `.world` 旁注;文件名只在回滚里按
+`episode_of` 解析一次,取回记录里没记的 episode id。
 两个后端的记录格式相同;世界文件、held 快照与重放世界放在哪里由后端定(90 篇第 4 章布局表),
 `legacy_entries` 按后端判旧布局。文件名以 `deploy-` 起头、以 `.rec.json` 结尾才是起点快照的记录;
 替身旧快照 `deploy-*.json` 不带 `.rec`,分得开。旧布局(按人格建库、快照文件与旁注)不迁移,
@@ -140,6 +141,15 @@ class MemoryLayout:
     def world_of(self, path: Path) -> str:
         """在途记录所属的世界,读法与失败同 `read_record`。"""
         return self.read_record(path).world_id
+
+    def episode_of(self, path: Path) -> str:
+        """在途记录对应的 episode id:名字必须是 `deploy-<episode_id>.rec.json`,id 再按 `_check_segment` 的
+        规矩验一遍(写的时候也是这么验的,手改过的名字不认)。回滚用它把该 episode 从轮次产物的
+        `episode_digests` 里摘掉;记录内容本身不带 id。"""
+        name = path.name
+        if not (name.startswith(_DEPLOY_PREFIX) and name.endswith(_RECORD_SUFFIX)):
+            raise ValueError(f"episode_id: not a deploy record: {name!r}")
+        return _check_segment("episode_id", name[len(_DEPLOY_PREFIX):-len(_RECORD_SUFFIX)])
 
     @staticmethod
     def _is_record(p: Path) -> bool:

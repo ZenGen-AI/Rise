@@ -538,7 +538,7 @@ def load_library(store) -> LibraryState: ...
 | 每个智能体轮次 | 回复前召回,回复后把对方发言逐条写成事件,再只做嵌入;首个智能体轮次的轨迹 `memory.digest_before` 记起点摘要 | `remember` 返回 `failed` 只计数。`recall`、`embed_pending` 失败与 `remember` 抛异常是 MemoryFailureError,按下文失败分类走 |
 | episode 的某次尝试失败要重试 | 先关本次尝试的实例与端口,`wait_closed` 等服务端端口也关,再按起点快照 `restore` 整个世界,两个位的写入一起退掉,再开下一次尝试 | 恢复失败的处理同上 |
 | episode 成功 | 先 `wait_closed`,再落盘 episode;按世界列 `pending` 行,前缀是 `<round_id>/<eid>#` 的逐个按自己的主体 `abandon_event`,对手位留下的行一并放弃;再删在途记录,最后 `delete_snapshot`。删记录是这条 episode 的提交点。崩在放弃与删记录之间:重入先按快照恢复(已放弃的行也回到起点状态)再重跑,不会撞已放弃的 key | 等不到端口全关:`DeferredError`;记录删不掉(OSError):轮次 `failed`(T3),失败收尾时回滚;进程在删记录前崩溃:重入时这条 episode 按未提交处理,先恢复再重跑。`delete_snapshot` 失败只记 warning,只报码,留下孤儿 held 快照 |
-| 轮次判 `failed`(T3) | 先对在途 episode 按记录找到世界与快照 id,`restore` 回滚,再删记录与快照,再写失败记录。失败的轮次不把半截记忆留给下一轮 | 恢复失败:世界、记录与快照都保留,照写失败记录;记录读不出:按恢复失败处理 |
+| 轮次判 `failed`(T3) | 先对在途 episode 按记录找到世界与快照 id,`restore` 回滚,再把它从轮次产物的 `episode_digests` 里摘掉并写回产物,再删记录与快照,再写失败记录。失败的轮次不把半截记忆留给下一轮;摘要不摘掉的话,轮次停在 pending 时重入会把它当成已提交的 episode 复用 | 恢复失败或摘要写回失败:世界、记录与快照都保留,照写失败记录;记录读不出或文件名不带 episode id:按恢复失败处理 |
 | 第 6 步验证 | 本轮每个情境世界各 `snapshot` 一份,写 `verify-<scenario_id>.rec.json` 记录;重放某个情境的 episode 时,这个情境第一次用到时 `fork_replay` 一次可回收的重放世界,本轮全部提案的基线与候选实例都在它上面各以 `open_replay(重放世界名, 智能体位人格)` 开只读端口,`replay_read_only` 为真;finally 里关实例、`release_replay`、删快照与记录 | 快照做不出:轮次 `failed`,T3。重放里的记忆异常:瞬态延后,其余 T3 |
 
 **快照顺序** [已落地]。记录与 held 快照这一对由世界锁保护;部署轮次本来就持本轮全部情境的锁,开 episode 与提交都在锁内,所以不新增取锁代码。
@@ -547,7 +547,7 @@ def load_library(store) -> LibraryState: ...
 |---|---|---|
 | 开 episode | `snapshot` → 写记录 → `on_episode_start(eid, digest)` | 快照之后、记录之前:孤儿 held 快照;重入时重拍 |
 | 提交 | 删记录 → `delete_snapshot` | 删记录之后:孤儿 held 快照。反过来先删快照再崩,重入会拿一个不存在的 id 去恢复已提交的 episode。`delete_snapshot` 失败只记 warning,只报码,不影响提交 |
-| 回滚 | `restore` → 删记录 → `delete_snapshot` | 恢复之后崩:重入再恢复一次同一份快照,结果相同 |
+| 回滚 | `restore` → 摘掉 `episode_digests[eid]` 并写回轮次产物 → 删记录 → `delete_snapshot` | 恢复之后崩:重入再恢复一次同一份快照,结果相同;摘摘要之后、删记录之前崩同样如此(摘要已摘,重入按未提交处理) |
 | 门② 查在途 | 在它取到的世界锁内读记录 | 只读 |
 | 验证 | 每个情境 `snapshot`,写 `verify-` 记录(记录已在就先删旧快照);每个情境 `fork_replay` 一次,本轮全部提案的基线与候选实例都在这个重放世界上各以 `open_replay` 开一个只读句柄;finally 里关实例、`release_replay`、删快照与记录 | 重放世界只关不删,留给 Starling 第 6 期 |
 
@@ -718,7 +718,7 @@ join 等不到时,服务端把资源移进滞留表,由回收线程过后再关�
 | episode 已落盘、起点快照没删时崩溃 | 快照还在,episode 文件也在 | 同样先覆盖再重跑,因为删快照才是提交点 |
 | 覆盖部署世界失败 | 文件系统错误或摘要对不上 | 轮次 `failed`(T3),世界与快照都保留,等人处理 |
 | 收录门② 时世界锁被占,或任何轮次有未提交起点快照(只含技能的提案同样延后) | 抛 `DeferredError`,不写树,提案留 `approved` | 退避后重试;轮次放锁、快照删掉后收录成功 |
-| 轮次判 `failed`(T3)时有在途 episode | 先 `restore` 回滚,再删记录与快照,再写失败记录 | 下一轮从干净的部署世界开始 |
+| 轮次判 `failed`(T3)时有在途 episode | 先 `restore` 回滚,再摘掉它的 `episode_digests` 写回产物,再删记录与快照,再写失败记录 | 下一轮从干净的部署世界开始,也不会把回滚过的 episode 当已提交复用 |
 | 部署 episode 开始时世界里有别的轮次的未提交起点快照 | 抛 `DeferredError`,原因写出那个轮次 id | 人工恢复或删除那份快照;连续延后达上限守护进程带原因退出 |
 | 恢复前服务端端口在等待上限内没关 | `RestoreFailedError`,T3 | 库与快照都保留,等人处理 |
 | 开下一次尝试或提交前服务端端口在等待上限内没关 | `DeferredError`,轮次留 `pending` | 守护进程退避重入,快照在就先恢复 |
