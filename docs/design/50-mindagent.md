@@ -874,7 +874,7 @@ join 等不到时,服务端把资源移进滞留表,由回收线程过后再关�
 | 测试文件 | 用例数 | 覆盖 |
 |---|---|---|
 | `tests/test_ma_config_library.py` [已落地] | 34 | 配置校验、库版本 8 个反例、静态检查、`memory_library/` 非空的装配期把关 |
-| `tests/test_ma_deployment.py` [已落地] | 89 | 落盘 id、轨迹校验、复用、T1 重跑、实例异常、重试回滚、崩溃重入、恢复的分码、准入被拒退避、close 失败、部署世界与等端口全关 |
+| `tests/test_ma_deployment.py` [已落地] | 95 | 落盘 id、轨迹校验、复用、T1 重跑、实例异常、重试回滚、崩溃重入、恢复的分码、准入被拒退避、close 失败、部署世界与等端口全关 |
 | `tests/test_ma_analysis.py` [已落地] | 20 | 判定、阈值等号、`not` 包裹、库外技能 |
 | `tests/test_ma_proposals.py` [已落地] | 21 | 规则模板、严格解析、重试、成本条数 |
 | `tests/test_ma_verify.py` [已落地] | 10 | 精准命中、触发过宽、优先级压不过、跨情境按世界回放 |
