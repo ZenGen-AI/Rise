@@ -853,7 +853,7 @@ interact 的 `config_hash` 覆盖配置层的东西 [已落地]:情境 id、人�
 |---|---|---|
 | `tests/test_mt_config.py` | 321 | [已落地] |
 | `tests/test_mt_reward_pipeline.py` | 59 | [已落地] |
-| `tests/test_mt_dispatch.py` | 91 | [已落地] |
+| `tests/test_mt_dispatch.py` | 105 | [已落地] |
 | `tests/test_mt_orchestrator.py` | 67 | [已落地] |
 | `tests/test_mt_executor.py`、`tests/test_mt_grouping.py`、`tests/test_mt_trajectory_interact.py` | 26、26、58 | [已落地] |
 | `tests/test_mt_training_run.py` | 39 | [已落地] |
@@ -862,7 +862,7 @@ interact 的 `config_hash` 覆盖配置层的东西 [已落地]:情境 id、人�
 | `tests/test_mt_checkpoint.py` | 14 | [已落地] |
 | `tests/test_mt_datamodel.py` | 10 | [已落地] |
 | `tests/test_mt_wire.py`、`tests/test_mt_paths.py`、`tests/test_mt_integration.py`、`tests/test_mt_packaging.py` | 5、3、2、2 | [已落地] |
-| 合计 | 759 | [已落地] |
+| 合计 | 773 | [已落地] |
 | `tests/test_daemon_dispatcher.py`(ControlPlane 侧的派发缝) | 14 | [已落地] |
 | `tests/test_mt_data_spec.py`、`tests/test_mt_data_spec_stages.py` | 70、17 | [已落地] |
 | `tests/test_mt_data_producer.py`、`tests/test_mt_dispatch_synthesis.py` | 31、55 | [已落地] |
