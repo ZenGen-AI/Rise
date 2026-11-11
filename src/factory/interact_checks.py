@@ -16,7 +16,7 @@ from collections.abc import Mapping
 
 from controlplane.gitstore import GitStore
 from controlplane.paths import persona_file, scenario_file
-from factory.configio import describe, preflight
+from factory.configio import CONFIG_DATA_ERRORS, describe, preflight
 from factory.errors import FactoryConfigError
 
 TRAINING_PURPOSE = "training"
@@ -111,7 +111,7 @@ def _check_named_world(store: GitStore, section) -> None:
     for sid in section.scenario_ids:
         try:
             purpose = read_scenario(store, sid).purpose
-        except Exception as exc:
+        except CONFIG_DATA_ERRORS as exc:          # 只转数据错误;代码的毛病原样上抛,与 preflight 同口径
             raise FactoryConfigError(f"scenario {sid}: {describe(exc)}") from None
         if purpose != TRAINING_PURPOSE:
             wrong.append(f"{sid} ({purpose})")

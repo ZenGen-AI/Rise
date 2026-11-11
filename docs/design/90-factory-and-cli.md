@@ -822,7 +822,7 @@ TypeScript 命令行:`rise <review|approve|reject|confirm|status> [id] [reason]`
 | `--interact` 缺 `interact` 段、点名的情境与人格对不上,或与 `--executor roll` 同用 [已落地] | 启动即退出码 2,指出缺哪一项 | 补 `training_defaults.yaml`,或去掉 `--executor roll`,再启动 |
 | `--enable plan` 开着、`allow_interact` 为真,但没传 `--interact` [已落地] | 启动即退出码 2,错误信息点名缺 `--interact`。不拦的话规划器可能写出 interact 指令,派发时必然判 `failed`,闭环停住 | 加 `--interact`,或把 `scheduler.yaml` 的 `allow_interact` 关掉,再启动 |
 | 记忆配置缺键或多余键、权限不对、路径在仓库里,拉起模式下 `OPENAI_API_KEY` 为空,`memory_library/` 非空,`starling-client` 是 editable 安装或没有 git 提交,配置要求记忆服务却未装客户端,记忆根下有旧布局,或记忆根目录属于别的仓库 [已落地] | 启动即退出码 2,信息只含键名、变量名与路径 | 修好配置、设好变量、清理目录、改成非 editable 安装、执行 `pip install '.[memory]'`、移走旧布局条目,或给本仓库换一个记忆根目录,再启动 |
-| 记忆根目录是按人格的旧布局,或 `agent.yaml` 里同一人格占两个位 [已落地] | 启动即退出码 2,信息列出可疑条目或重复的人格 | 已从 `agent.yaml` 移除的情境的世界移回配置或移出记忆根,确认是旧的按人格库才删;或改绑定,再启动 |
+| 记忆根目录是按人格的旧布局,或 `agent.yaml` 里同一人格占两个位 [已落地] | 启动即退出码 2,信息列出可疑条目或重复的人格 | 已从 `agent.yaml` 移除的情境的世界,把情境加回 `agent.yaml` 或把文件移出记忆根,确认是旧的按人格库才删;或改绑定,再启动 |
 | 部署轮次要恢复世界,但服务端端口 `SESSION_CLOSE_WAIT_S` 内没关完 [已落地] | 按 `RestoreFailedError` 处理,库与快照都保留 | 人查明滞留的会话后恢复快照 |
 | 部署世界里有别的轮次留下的未提交起点快照 [已落地] | 轮次抛 `DeferredError`,原因写出那个轮次 id;连续 20 次后守护进程带原因退出 | 人工恢复或删除那份快照,再启动 |
 | 缺凭证或凭证写进了树 | 退出码 2,信息只含变量名或键路径 | 设好环境变量,从树里删掉凭证 [已落地] |
