@@ -866,7 +866,7 @@ V2 要做多租户、配方跨工厂流通、数据结构升级。这些无法�
 
 记忆按情境世界组织是设计二之后的新工作包,十一个任务都 [已落地]。替身与 Starling 两个后端过同一套世界契约测试。
 
-接 Starling 记忆服务是再下一个新工作包,六步都 [已落地]。依赖 Starling 记忆服务第 1 至 4 期(Starling `cff319d`);2026-11-11 钉住的提交升到 `0e0620e`(第 6 期,服务端加自动清理,客户端与协议未变)。每一步结束时全套测试绿,替身路径与 Starling 路径都能跑。
+接 Starling 记忆服务是再下一个新工作包,六步都 [已落地]。依赖 Starling 记忆服务第 1 至 4 期(Starling `cff319d`);2026-11-11 钉住的提交升到 `467f77d`(第 6 期加自动清理,第 5 期加看板按世界查看,客户端与协议未变)。每一步结束时全套测试绿,替身路径与 Starling 路径都能跑。
 
 | 步 | 内容 | Starling 路径 |
 |---|---|---|
@@ -929,7 +929,7 @@ V2 要做多租户、配方跨工厂流通、数据结构升级。这些无法�
 | 31 | [计划中] 看板服务的进程环境里有没有 `OPENAI_API_KEY`、它报的提交是什么 | 外部模式下 rise 查不到密钥,首次抽取、嵌入或召回才报 `endpoint_key_missing`;提交不同则拒绝启动 | 用 `token_file` 连上调 `info()`;建一个空世界写一条事件 |
 | 32 | [已落地] uv 锁得住同一仓库、同一提交的两个 git 依赖(一个带子目录);从 git URL 装时服务报完整提交,不是 `unknown`。2026-11-10 用 uv 0.10.7 在临时副本里钉 `cff319d` 核实:`uv lock` 锁出 `starling-client` 0.1.0(带子目录 `clients/python`)与 `starling-memory` 0.0.1 两项,新增 26 个包;`uv sync --extra memory` 从 PyPI 装上 `httpx2==2.16.0`;两份 `direct_url.json` 的 `vcs_info.commit_id`、`starling_client.COMMIT` 与服务 `info()` 的 `commit` 都是完整的 40 位提交,`protocol` 是 1 | extra 装得上;拉起模式比客户端与服务两个提交的设计不用改。只有源码树里未构建的客户端副本报 `unknown`,那不是支持的安装方式 | 升级 Starling 时用新提交重跑 `scripts/check_starling_deps.py`,七项全 OK 才改钉住的提交 |
 | 33 | [计划中] rise 的事件会不会得到写入结果 `no_store` 或 `rejected` | 得到时判永久失败:部署轮次 T3,训练 rollout T2 | 部署与训练各跑一轮真实对话,统计写入结果 |
-| 34 | [计划中] rollout 世界、重放世界、孤儿快照与 `pre-rollback` 归档的堆积速度 | Starling 第 6 期(`0e0620e`,2026-11-11 起钉住)加了后台清理:可回收世界按 `retention_group` 每组留最近 200 份、只留 14 天,`pre-rollback` 归档留 14 天;带 held 快照或开着的世界跳过。rise 的 rollout 世界(分组是 run id)与重放世界(分组是轮次 id)都已传 `reclaimable=True` 与分组键。孤儿 held 快照所在的世界不会被清 | 跑一个训练 run 与一个部署轮次,按标签数世界、量数据目录,看清理记录(`GET /api/worlds/cleanup_log`)是否按上面的规则删 |
+| 34 | [计划中] rollout 世界、重放世界、孤儿快照与 `pre-rollback` 归档的堆积速度 | Starling 第 6 期(2026-11-11 起钉住,现为 `467f77d`)加了后台清理:可回收世界按 `retention_group` 每组留最近 200 份、只留 14 天,`pre-rollback` 归档留 14 天;带 held 快照或开着的世界跳过。rise 的 rollout 世界(分组是 run id)与重放世界(分组是轮次 id)都已传 `reclaimable=True` 与分组键。孤儿 held 快照所在的世界不会被清 | 跑一个训练 run 与一个部署轮次,按标签数世界、量数据目录,看清理记录(`GET /api/worlds/cleanup_log`)是否按上面的规则删 |
 | 35 | [计划中] 关掉来源 lane 后,服务的召回与摘要是否逐项等于进程内时期的 Starling | 不等就改了记忆语义,违反只换后端的前提 | 用同一份世界设置在服务与进程内各跑一遍,比较 |
 | 36 | [计划中] 看板正在看某个 rollout 世界时,`close_world` 会不会阻塞到 30 秒;本机睡眠唤醒后服务会话是否过期 | 前者拖慢 rollout 收尾;后者让唤醒后的第一批调用判瞬态并重连 | 看板打开一个世界页面同时调 `close_world` 计时;开一个会话,合盖 5 分钟后调用一次 |
 | 37 | [已落地] 管理调用的 300 秒超时依赖 `starling_client` 的私有模块 `_transport`。2026-11-10 在 `cff319d` 上核实:`Transport` 也由 `starling_client.__all__` 导出;构造是 `(url, token, timeout_s=30.0, *, _httpx_transport=None)`,`post` 是 `(path, json=None, *, timeout_s=None) -> dict`,与管理传输的设计一致;用 `Transport(url, token, 300.0)` 发一次不带会话的 `list_worlds` 成功 | 管理传输的设计不用改。Starling 以后改了这两个签名,rise 的管理调用就坏了;句柄调用不受影响 | 第 3 步加一条测试按 `inspect.signature` 钉住两个签名;升级 Starling 时重跑 `scripts/check_starling_deps.py` |
