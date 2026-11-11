@@ -219,7 +219,7 @@
 | 实体 | 字段与含义 | 约束 |
 |---|---|---|
 | `DiagnosticTaxonomy` | `version`;`l1_dimensions`;`l2_dimensions` 从 L1 到 L2 列表;`l3_tasks` 从 L2 到 L3 列表;`g_probes` | 维度枚举是配置,不写死。SoMBench 导入的分类表直接用样本里的编号做键(3 个 L1、17 个 L2、71 个 L3,形如 `1`、`1.1`、`1.1.1`),`g_probes` 为空 |
-| `DiagnosticItem` | `id`、`l3_task`、`item_type`、`scoring_mode`(`rule`、`judge` 或 `someval`)、`track`、`reference_answer`、`rubric`、`family_id` | 动态题的 `rubric` 可带 `goal_keyword`。`someval` 模式的题只存 id、维度、题型和变体族,`reference_answer` 与 `rubric` 恒为空,题面、选项、答案一律不进树(DX-19);打分委托给 SoMEval,编排器不重打分 |
+| `DiagnosticItem` | `id`、`l3_task`、`item_type`、`scoring_mode`(`rule`、`judge` 或 `someval`)、`track`、`reference_answer`、`rubric`、`family_id` | `rule` 模式的题必须带字符串 `reference_answer`,缺了(或为 null)在构造时就以一行错误拒绝——打分器拿它做精确匹配,拖到评估期会因参考答案为空而在打分时抛 `AttributeError`。动态题的 `rubric` 可带 `goal_keyword`。`someval` 模式的题只存 id、维度、题型和变体族,`reference_answer` 与 `rubric` 恒为空,题面、选项、答案一律不进树(DX-19);打分委托给 SoMEval,编排器不重打分 |
 | `VariantFamily` | `family_id`、`base_item_id`、`variant_item_ids` | 诊断的最小单元。SoMBench 导入时,一道基题加上它的 `varA`、`varB` 变体成一族(529 族,其中 39 族有两个变体);`hardest` 不入族,见 DX-18 |
 | `SampleOutcome` | `score`(0 或 1)、`extracted`(SoMEval 抽出的答案字母,开放题为空)、`error_reason`(SoMEval 的原因码,正确时为空) | 真实运行器按题返回它;`ItemResult.raw_outputs` 存 `extracted`,从不存模型的完整输出 |
 | `ItemResult` | 每题 k 个原始输出、各次得分、通过率、总体方差、轨道 | 得分是 0 或 1,judge 分可为小数。k 为 1 时方差恒为 0,`unstable` 归类不会出现 |

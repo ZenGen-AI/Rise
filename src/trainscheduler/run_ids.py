@@ -13,7 +13,7 @@ from controlplane.gitstore import GitStore
 from controlplane.paths import CONTROL_PLANE_ROOT
 from trainscheduler.errors import RunIdOrderError
 
-_RUN_ID = re.compile(r"^run-([0-9]+)$")
+_RUN_ID = re.compile(r"^run-([0-9]+)\Z")
 
 
 def run_number(name: str) -> int | None:

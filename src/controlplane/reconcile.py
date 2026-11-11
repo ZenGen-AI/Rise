@@ -113,7 +113,7 @@ def has_round_in_flight(state: TreeState) -> bool:
 # R5 / 设计 §3.2:"最大 run"按 run-<数字> 的数值序比较,不按字符串序(run-9 与 run-011、
 # 超过 999 轮都会让字符串序选错)。不匹配的名字(scratch 之类)不参与比较。
 # 与计划 5 分配 run id 的规则同一口径;controlplane 不导入 trainscheduler,所以这里自己写。
-_RUN_ID = re.compile(r"^run-([0-9]+)$")   # [0-9] 而不是 \d:与计划 5 的 run_number 同一口径,避免 Unicode 数字被一边认、一边不认
+_RUN_ID = re.compile(r"^run-([0-9]+)\Z")   # [0-9] 而不是 \d:与计划 5 的 run_number 同一口径,避免 Unicode 数字被一边认、一边不认
 
 
 def _run_order_key(run_id: str) -> tuple:

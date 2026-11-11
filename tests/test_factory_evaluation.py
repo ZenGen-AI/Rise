@@ -152,10 +152,9 @@ def test_sampling_k_must_be_a_real_int(store, bad):
         build_mock_evaluator(store)
 
 
-@pytest.mark.parametrize("ref", [None, ""], ids=["null", "empty"])
-def test_a_base_item_without_a_reference_answer_is_answered_with_the_empty_string(store, monkeypatch, ref):
-    """补任务 103 的缺口:空参考答案回退。mock 的基题答案取 `reference_answer or ""`,所以参考答案为 null 或空串的基题,
-    交给 mock SoMEval 的固定答案都是 sampling_k 个空串,不是 None;变体题照旧答错。只钉装配时算出的答案表。"""
+def test_an_empty_reference_answer_of_a_base_item_is_answered_with_the_empty_string(store, monkeypatch):
+    """空串参考答案照旧兜底:mock 的基题答案取 `reference_answer or ""`,交给 mock SoMEval 的固定答案是
+    sampling_k 个空串;变体题照旧答错。只钉装配时算出的答案表。"""
     import factory.evaluation as evaluation
 
     seen = {}
@@ -164,9 +163,23 @@ def test_a_base_item_without_a_reference_answer_is_answered_with_the_empty_strin
     install_defaults(store)
     rel = item_pool_file(DEFAULT_EVALUATOR_CONFIG["item_pool_version"])
     env = store.read_product(rel)
-    env.payload["items"][0]["reference_answer"] = ref
-    store.write_product(rel, env, "human: no reference answer")
+    env.payload["items"][0]["reference_answer"] = ""
+    store.write_product(rel, env, "human: empty reference answer")
     build_mock_evaluator(store)
     k = DEFAULT_EVALUATOR_CONFIG["sampling_k"]
     assert seen["fixed"]["fi1"] == [""] * k
     assert seen["fixed"]["fi1v"] == [evaluation.MOCK_WRONG] * k
+
+
+def test_a_rule_item_without_a_reference_answer_is_refused_at_assembly(store):
+    """rule 模式的题缺参考答案(:null)原来会有空串兜底,但打分器对 None 调 strip() 会在评估期崩;
+    改为装配期就拒,一行错误、退出码 2,树里什么都不写。"""
+    install_defaults(store)
+    rel = item_pool_file(DEFAULT_EVALUATOR_CONFIG["item_pool_version"])
+    env = store.read_product(rel)
+    env.payload["items"][0]["reference_answer"] = None
+    store.write_product(rel, env, "human: null reference answer")
+    head = (store.repo_root / ".git" / "HEAD").read_text()
+    with pytest.raises(FactoryConfigError, match="cannot be read"):
+        build_mock_evaluator(store)
+    assert (store.repo_root / ".git" / "HEAD").read_text() == head

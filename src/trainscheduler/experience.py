@@ -294,7 +294,7 @@ def _eligible(record: dict, *, benchmark_version: str) -> bool:
 
 
 def _run_order(run_id: str) -> tuple[int, str]:
-    match = re.match(r"^run-([0-9]+)$", run_id)
+    match = re.match(r"^run-([0-9]+)\Z", run_id)
     return (int(match.group(1)), run_id) if match else (-1, run_id)
 
 

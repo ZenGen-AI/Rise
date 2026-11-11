@@ -56,6 +56,13 @@ class DiagnosticItem:
     rubric: dict | None
     family_id: str | None
 
+    def __post_init__(self) -> None:
+        """rule 模式的题必须有参考答案:打分器拿它做精确匹配,没有就会在评估期对 None 调 strip() 崩掉。
+        各包在构造时校验(读资产、从 dict 还原、测试夹具都经过这里),坏题在装配期就以一行错误退出,
+        不拖到跑完一批样本之后。judge 与 someval 的题本来就没有参考答案,不查。"""
+        if self.scoring_mode == "rule" and not isinstance(self.reference_answer, str):
+            raise ValueError(f"item {self.id!r}: a rule-mode item needs a string reference_answer")
+
     def to_dict(self) -> dict:
         return {
             "id": self.id,
