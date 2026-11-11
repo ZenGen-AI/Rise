@@ -4,7 +4,7 @@
 |---|---|
 | 一句话 | 把技能、推理经验与记忆渲染成指导语交给模型后端,每次响应附带激活轨迹 |
 | 与 Actio 的关系 | SimpleActio 是 Actio 的简化版。功能完备的正式版 Actio 在本仓库之外另行开发,完成后再接入 [计划中];接入方式与接口取舍留到那时设计 |
-| 状态 | [已落地]:技能、推理经验、记忆、激活轨迹与协议打通,十三个源文件,486 个用例;MindAgent 部署驱动器已装配实例,但默认入口用的仍是罐头后端,真实模型是否遵循指导语未核实,见「现状」。设计二 [已落地]:记忆改经记忆端口访问,生产实现是 Starling 适配器(可选 extra `memory`),替身是内存元组;每轮回复前 recall、回复后 remember 再只做嵌入;激活轨迹升到 simple_actio.trace.v2;部署记忆另有只给 MindAgent 的管理面,同样有替身与 Starling 两个实现;新增 `memory_port`、`memory_starling` 两个源文件。记忆按情境世界组织 [已落地]:端口绑定世界与主体,管理面按世界操作,事件 key 带主体。接 Starling 记忆服务 [已落地]:适配器包纯 Python 客户端 `starling_client` 的 RemoteMemory,管理面按快照 id 与主体操作,替身同步;端口五个方法不变 |
+| 状态 | [已落地]:技能、推理经验、记忆、激活轨迹与协议打通,十三个源文件,492 个用例;MindAgent 部署驱动器已装配实例,但默认入口用的仍是罐头后端,真实模型是否遵循指导语未核实,见「现状」。设计二 [已落地]:记忆改经记忆端口访问,生产实现是 Starling 适配器(可选 extra `memory`),替身是内存元组;每轮回复前 recall、回复后 remember 再只做嵌入;激活轨迹升到 simple_actio.trace.v2;部署记忆另有只给 MindAgent 的管理面,同样有替身与 Starling 两个实现;新增 `memory_port`、`memory_starling` 两个源文件。记忆按情境世界组织 [已落地]:端口绑定世界与主体,管理面按世界操作,事件 key 带主体。接 Starling 记忆服务 [已落地]:适配器包纯 Python 客户端 `starling_client` 的 RemoteMemory,管理面按快照 id 与主体操作,替身同步;端口五个方法不变 |
 | 所在层 | 共享基础设施 |
 | 代码位置 | `src/simple_actio` [已落地];协议改动在 `src/simulator/realtime` 与 `src/simulator/runner.py`;记忆端口 `src/simple_actio/memory_port.py` 与 Starling 适配器 `src/simple_actio/memory_starling.py` [已落地] |
 | 基线提交 | `b826440`(2026-10-21) |
@@ -861,17 +861,17 @@ SimpleActio 自己的失败是 T2 确定性:同样输入必然再失败,不重�
 | 信号与谓词 | `tokens`、三个内置信号、五个算子 | 无 | `tests/test_simple_actio_signals.py` | 38 | [已落地] |
 | 技能与路由 | `Skill` 校验、`route`、`check_library` | 无 | `tests/test_simple_actio_skills.py` | 39 | [已落地] |
 | 记忆与经验 | 快照、检索、三级回退;TupleMemory、内容 id、事件状态机 | 无 | `tests/test_simple_actio_memory_experience.py` | 67 | [已落地] |
-| 实例 | 轨迹模式(含 simple_actio.trace.v2)、`respond`、每轮读写、失败映射、重试与 `close` 不放弃、依赖边界与 `__future__` 静态检查 | 回显指导语的罐头后端、记录调用的假端口 | `tests/test_simple_actio_instance.py` | 81 | [已落地] |
+| 实例 | 轨迹模式(含 simple_actio.trace.v2)、`respond`、每轮读写、失败映射、重试与 `close` 不放弃、依赖边界与 `__future__` 静态检查 | 回显指导语的罐头后端、记录调用的假端口 | `tests/test_simple_actio_instance.py` | 82 | [已落地] |
 | 端到端 | SimpleActio 作客户端经真实 gRPC 跑会话并落盘 | `ScriptedBackend` 作对手 | `tests/test_simple_actio_realtime_e2e.py` | 2 | [已落地] |
 | 端口 | 值类型冻结、异常继承与 `transient`、两个协议按方法名检查 | 无 | `tests/test_simple_actio_memory_port.py` | 5 | [已落地] |
 | 契约 | 同一份规范样例经五个方法跑每种实现:命中顺序、摘要变化曲线、同 key 同文本幂等、同 key 异文本抛 MemoryEventConflict、`close` 后抛 MemoryClosedError | TupleMemory、FileTupleStore 的端口;装了 extra `memory` 时再加 StarlingMemory | `tests/test_simple_actio_memory_contract.py` | 15 | [已落地] |
-| 落盘替身 | FileTupleStore 与它复用的事件账本:提交点、崩溃后重调、按 id 的快照与恢复、重放世界、世界 id 与主体校验、账本带主体、用错主体放弃 | 无 | `tests/test_simple_actio_file_tuple_store.py` | 81 | [已落地] |
+| 落盘替身 | FileTupleStore 与它复用的事件账本:提交点、崩溃后重调、按 id 的快照与恢复、重放世界、世界 id 与主体校验、账本带主体、用错主体放弃 | 无 | `tests/test_simple_actio_file_tuple_store.py` | 84 | [已落地] |
 | Starling 适配器 | 包 RemoteMemory 的端口:命中渲染、召回显式传 `strict` 与 `include_volatile`、写入结果 `no_store`、`rejected` 判永久、`close` 的期限、会话过期与代号过期当作已关、rise 没关的端口收到 `handle_closed` 判瞬态 | 假 RemoteMemory 与连真 `starling-serve` 子进程的用例,本机假 OpenAI 端点;未装客户端或服务端时跳过 | `tests/test_simple_actio_memory_starling.py` | 45 | [已落地] |
-| Starling 管理面 | StarlingDeploymentStore:`ensure_world` 三步与创建标记、`root` 标签不符拒绝、恢复的分码、外部服务在同一端口重启后旧端口判瞬态 | 连真 `starling-serve` 子进程,本机假 OpenAI 端点;未装客户端或服务端时跳过 | `tests/test_simple_actio_starling_store.py` | 31 | [已落地] |
+| Starling 管理面 | StarlingDeploymentStore:`ensure_world` 三步与创建标记、`root` 标签不符拒绝、恢复的分码、外部服务在同一端口重启后旧端口判瞬态 | 连真 `starling-serve` 子进程,本机假 OpenAI 端点;未装客户端或服务端时跳过 | `tests/test_simple_actio_starling_store.py` | 33 | [已落地] |
 | 客户端错误码 | `translate_client_failure` 逐行:码表、三处改判、消息只写 `starling <code> (<类名>)` | 客户端异常类实例,不起服务 | `tests/test_simple_actio_client_errors.py` | 20 | [已落地] |
 | 世界契约 | 部署管理面的两个实现过同一套参数化用例:同世界两主体互不召回、世界摘要覆盖全部主体、任一主体端口开着时恢复被拒、别的世界开着端口不影响、`wait_closed` 等到别的线程关端口;同 key 两个主体各写一次两条都在;用错主体放弃判永久;`pending_events` 带主体;快照、写、恢复后摘要等于快照时;只读端口写入被拒;`fork_replay` 的摘要等于快照,返回完整世界名,`open_replay` 原样开它;名字形如重放世界的情境 id 经 `open` 仍开部署世界;删已删的快照是空操作 | FileTupleStore 与连真 `starling-serve` 子进程的 StarlingDeploymentStore;未装客户端或服务端时 Starling 一侧跳过 | `tests/test_simple_actio_deployment_store_contract.py` | 36 | [已落地] |
 
-合计 486 个用例,按上表的文件逐个实测照数(`uv run --offline pytest --collect-only -q <文件>`)。未装客户端或服务端时,连真服务的用例与两个契约文件里 Starling 的参数化用例运行时跳过。`tests/test_mt_packaging.py` 要求新包同时加进 `pyproject.toml` 的 wheel 包列表。
+合计 492 个用例,按上表的文件逐个实测照数(`uv run --offline pytest --collect-only -q <文件>`)。未装客户端或服务端时,连真服务的用例与两个契约文件里 Starling 的参数化用例运行时跳过。`tests/test_mt_packaging.py` 要求新包同时加进 `pyproject.toml` 的 wheel 包列表。
 
 设计二的测试 [已落地]。上表已含的文件不再重述;下面几项在别处或需要真 Starling:
 
@@ -894,7 +894,7 @@ SimpleActio 自己的失败是 T2 确定性:同样输入必然再失败,不重�
 
 ## 10. 现状、局限与未核实项
 
-`src/simple_actio` 十三个源文件全部在主干上,协议一侧的 `SubmitTurn.activation_trace`、客户端与驱动器的参数、运行器的三元组解包也已落地;第 9 章列出的 486 个用例按文件逐个实测照数。装配位置是 MindAgent 部署驱动器的轮次处理器,它经 `factory` 的 `agent.yaml` 取罐头后端 `CannedGuidedBackend`;真实模型后端还没有接上,真实模型是否遵循指导语仍未核实,见 10.3。设计二的记忆端口、部署记忆管理面、Starling 适配器与 simple_actio.trace.v2 都已落地:没设记忆配置时用替身,设了配置就用 Starling,没装 extra `memory` 则装配期拒绝;真端点的延迟与召回质量未核实,见 10.3。记忆按情境世界组织也已落地:端口绑定世界与主体,管理面按世界操作,事件 key 带主体。接 Starling 记忆服务已落地:适配器包客户端的 RemoteMemory,管理面按快照 id 与主体,重放世界只读。
+`src/simple_actio` 十三个源文件全部在主干上,协议一侧的 `SubmitTurn.activation_trace`、客户端与驱动器的参数、运行器的三元组解包也已落地;第 9 章列出的 492 个用例按文件逐个实测照数。装配位置是 MindAgent 部署驱动器的轮次处理器,它经 `factory` 的 `agent.yaml` 取罐头后端 `CannedGuidedBackend`;真实模型后端还没有接上,真实模型是否遵循指导语仍未核实,见 10.3。设计二的记忆端口、部署记忆管理面、Starling 适配器与 simple_actio.trace.v2 都已落地:没设记忆配置时用替身,设了配置就用 Starling,没装 extra `memory` 则装配期拒绝;真端点的延迟与召回质量未核实,见 10.3。记忆按情境世界组织也已落地:端口绑定世界与主体,管理面按世界操作,事件 key 带主体。接 Starling 记忆服务已落地:适配器包客户端的 RemoteMemory,管理面按快照 id 与主体,重放世界只读。
 
 ### 10.1 已落地与计划中
 

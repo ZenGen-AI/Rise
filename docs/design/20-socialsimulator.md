@@ -792,10 +792,10 @@ interact 会话前的准备 [已落地]。下表是派发器与组合根在起�
 
 | 测试文件 | 用例数 | 状态 |
 |---|---|---|
-| `tests/test_simple_actio_instance.py` | 81 | [已落地] |
-| `tests/test_ma_deployment.py` | 79 | [已落地] |
+| `tests/test_simple_actio_instance.py` | 82 | [已落地] |
+| `tests/test_ma_deployment.py` | 89 | [已落地] |
 | `tests/test_factory_handlers.py` | 93 | [已落地] |
-| `tests/test_factory_training_worlds.py` | 55 | [已落地] |
+| `tests/test_factory_training_worlds.py` | 51 | [已落地] |
 
 | 测试文件 | 用例数 | 状态 |
 |---|---|---|
@@ -821,7 +821,7 @@ interact 会话前的准备 [已落地]。下表是派发器与组合根在起�
 | `tests/test_realtime_client.py` | 2 | [已落地] |
 | `tests/test_realtime_client_order.py` | 5 | [已落地] |
 | `tests/test_realtime_client_abort.py` | 7 | [已落地] |
-| `tests/test_realtime_client_transport.py` | 22 | [已落地] |
+| `tests/test_realtime_client_transport.py` | 23 | [已落地] |
 | `tests/test_realtime_persistence.py` | 1 | [已落地] |
 | `tests/test_realtime_proto_submit_trace.py` | 5 | [已落地] |
 | `tests/test_runner_activation_trace.py` | 10 | [已落地] |

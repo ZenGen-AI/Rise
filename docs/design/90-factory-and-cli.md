@@ -1043,8 +1043,8 @@ factory 是第九个工作包,前八个全部落地后才施工。前置关系:1
 | 观测 | `trace`、`cost`、`sum_costs` | 临时仓库 | `tests/test_observe.py` | 5 [已落地] |
 | 命令行 | `review`、`approve`、`reject`、`status` | 临时 git 仓库 | `cli/test/commands.test.ts` | 19 [已落地] |
 | 命令行 | 命令名常量 | 无 | `cli/test/smoke.test.ts` | 1 [已落地] |
-| 开关与边界 | 映射表;无包导入 factory | 无 | `tests/test_factory_switches.py`、`tests/test_factory_boundaries.py` | 17、2 [已落地] |
-| 只读 | `trace`、`cost`、`logs` | 临时仓库 | `tests/test_factory_readonly.py` | 16 [已落地] |
+| 开关与边界 | 映射表;无包导入 factory | 无 | `tests/test_factory_switches.py`、`tests/test_factory_boundaries.py` | 18、2 [已落地] |
+| 只读 | `trace`、`cost`、`logs` | 临时仓库 | `tests/test_factory_readonly.py` | 17 [已落地] |
 | 桥接装配 | 角色、凭证不外露 | `sys.executable -c` 假可执行体 | `tests/test_factory_bridges.py` | 14 [已落地] |
 | 评估器装配 | 配置校验、默认资产 | `MockSoMEvalRunner`、`MockJudgeBackend` | `tests/test_factory_evaluation.py` | 16 [已落地] |
 | 组合根与命令行 | 逐字节相同、注入、装配错误、退出码、仓库锁被占用时的退出与只读照常 | 记录调用的假处理器 | `tests/test_factory_wire.py`、`tests/test_factory_cli.py` | 40、13 [已落地] |
@@ -1057,7 +1057,7 @@ factory 是第九个工作包,前八个全部落地后才施工。前置关系:1
 | 记忆配置读取与安装来源 | 文件不存在、权限过宽、路径在仓库里、缺键或多余键、地址带 userinfo;`url` 与 `token_file` 只给一个、地址不是回环、`world_prefix` 不合格式;`OPENAI_API_KEY` 为空、editable 安装、没有 git 提交、两行依赖不同提交、`.owner` 属于别的仓库,各自退出码 2、不回显取值;`.owner` 先写临时文件再以硬链接发布,并发首次使用只有一个成功,读到 0 字节的旧 `.owner` 拒绝 | 临时目录、临时仓库、假的安装元数据 | `tests/test_factory_memory_config.py` | 89 [已落地] |
 | 记忆后端选择与持锁核对 | 没设变量走替身并只记一次启动日志,不导入客户端;只开 `plan`、`nominate`、`track` 不读变量;`--interact`、`agent`、`admit` 任一在场就读且坏配置退出码 2;旧布局拒绝;装配顺序 ① 至 ⑦ 与失败时先关会话再停服务;持锁之后的部署世界核对(`run` 经 `on_locked`,`reconcile` 在锁内),创建标记在而世界不在、`root` 标签不符、设置不同各退出码 2;服务会话守卫停守护进程;拉起模式的部署路取推出的各层(缺省配置等提交 96 秒)、替身保持 5 秒、同开取训练位一层 | 真 `starling-serve` 子进程、假抽取与嵌入端点、FileTupleStore、临时仓库 | `tests/test_factory_memory_wiring.py` | 61 [已落地] |
 | 解析器与按标签找种子 | 没有种子时每个情境取空种子摘要;有种子时取最新版本、没有种子的情境取空种子;同版本按 `created_at` 再按名字排;翻完所有页;一个情境都没有种子判 T2;瞬态延后、永久交给派发器;嵌入向量变了摘要就变;`import factory.memory_runtime` 不需要客户端 | 假会话与真 `starling-serve` 子进程 | `tests/test_factory_memory_runtime.py` | 16 [已落地] |
-| 训练世界 | 同一 rollout 的训练位与对手位在同一世界、互不召回;同组两条 rollout 从同一起点出发、互不可见;服务端找不到世界时会话被拒;客户端在服务端端口关完之后才收尾世界,端口晚关时等着;同名世界仍被占时重试判瞬态;分叉超时按确切世界名复用,摘要不等就换后缀;`world_exists` 至多换 3 次后缀;只关带 rise 标签的世界。替身与 Starling 两个 `TrainingWorlds` 过同一套契约 | 替身世界;真 `starling-serve` 子进程加本机回环的假抽取与嵌入端点 | `tests/test_factory_training_worlds.py` | 48 [已落地] |
+| 训练世界 | 同一 rollout 的训练位与对手位在同一世界、互不召回;同组两条 rollout 从同一起点出发、互不可见;服务端找不到世界时会话被拒;客户端在服务端端口关完之后才收尾世界,端口晚关时等着;同名世界仍被占时重试判瞬态;分叉超时按确切世界名复用,摘要不等就换后缀;`world_exists` 至多换 3 次后缀;只关带 rise 标签的世界。替身与 Starling 两个 `TrainingWorlds` 过同一套契约 | 替身世界;真 `starling-serve` 子进程加本机回环的假抽取与嵌入端点 | `tests/test_factory_training_worlds.py` | 51 [已落地] |
 | 服务进程 | 拉起、等 ready、读回端口;残留服务六项核对逐项各一条,含命令行被截断、pid 复用、数据目录锁已释放;归属锁被占退出码 2;退出后退避重起,重启次数用完退出码 2;停止时 SIGTERM 后 SIGKILL | 注入 pid 与命令行读取函数,真 `starling-serve` 子进程 | `tests/test_factory_starling_service.py` | 26 [已落地] |
 | 服务会话 | 会话过期后换会话,旧会话等端口关完再关;排空窗口内外的 `world_held`;rise 没关的端口收到 `handle_closed` 判瞬态并换会话,换会话后提交、协议、抽取配置或 token 变了就致命;管理调用走不带会话的传输、超时 300 秒;私有传输的签名 | 假客户端与假传输 | `tests/test_factory_starling_session.py` | 36 [已落地] |
 | 世界名与 rise 设置 | 五类世界名、超长名字换摘要、标签、rise 设置写出全部叶子 | 无 | `tests/test_factory_starling_names.py` | 9 [已落地] |
