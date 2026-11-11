@@ -28,7 +28,7 @@ from simulator.store_adapter import read_episode, read_persona, read_scenario, w
 
 class _DeadlineStub:
     """给每条 Interact 流加 gRPC deadline:服务端失联时客户端的 next() 以 DEADLINE_EXCEEDED
-    结束,而不是挂住整个测试套件(套件没有单测超时)。"""
+    结束,而不是挂住整个测试套件(套件没有单测超时)。只实现 Interact:EnvironmentServiceClient 只调这一个 RPC。"""
 
     def __init__(self, stub, timeout_s=15.0):
         self._stub = stub
@@ -110,16 +110,10 @@ def _round(store, handler, model):
     return store.read_product(agent_round_file(model))
 
 
-def _agent_traces(store, run_id, episode_ids):
-    out = []
-    for eid in episode_ids:
-        ep = read_episode(store, run_id, eid)
-        assert all(t.activation_trace is None for t in ep.turns if t.speaker_slot == "b")
-        for t in ep.turns:
-            if t.speaker_slot == "a":
-                validate_trace(t.activation_trace)
-                out.append((t.utterance, t.activation_trace))
-    return out
+def _traces(store, run_id, episode_ids, slot):
+    """落盘 episode 里 slot 位各轮次的 (话语, 轨迹),按 episode、轮次顺序。只取数,不断言。"""
+    return [(t.utterance, t.activation_trace)
+            for eid in episode_ids for t in read_episode(store, run_id, eid).turns if t.speaker_slot == slot]
 
 
 def test_the_full_agent_rsi_loop_over_a_real_server(world):
@@ -129,7 +123,10 @@ def test_the_full_agent_rsi_loop_over_a_real_server(world):
     _promote(store, 1, "run-001")
     r1 = _round(store, handler, "zengen-v1")
     assert r1.status == "executed" and r1.payload["proposals"] == [] and r1.payload["findings"] == []
-    traces = _agent_traces(store, "run-001", r1.payload["episode_ids"])
+    assert all(t is None for _, t in _traces(store, "run-001", r1.payload["episode_ids"], "b"))  # 对手轮次不带轨迹
+    traces = _traces(store, "run-001", r1.payload["episode_ids"], "a")
+    for _, t in traces:
+        validate_trace(t)
     assert len(traces) == 6 and all(t["selected"] is None for _, t in traces)
     assert traces[0][1]["signals"] == ["emotion_high", "first_turn"]
 
@@ -152,7 +149,10 @@ def test_the_full_agent_rsi_loop_over_a_real_server(world):
     v = proposal.payload["verification"]
     assert (v["method"], v["fired_on_motivating"], v["fired_elsewhere"]) == ("replay_behavior", 1.0, 0.0)
     assert v["episodes"] == finding["episode_refs"] == r2.payload["episode_ids"]
-    r2_turns = _agent_traces(store, "run-002", r2.payload["episode_ids"])
+    assert all(t is None for _, t in _traces(store, "run-002", r2.payload["episode_ids"], "b"))
+    r2_turns = _traces(store, "run-002", r2.payload["episode_ids"], "a")
+    for _, t in r2_turns:
+        validate_trace(t)
     # Echo 把指导语用 "|" 拼起来:第一段是技能,其后是召回的记忆(部署库跨轮次持久,第一轮记下的对方原话)
     assert {u.split("|")[0] for u, t in r2_turns} == {"[skill:skill-goal] 推进目标"}
     assert any(t["memory_hits"] for _, t in r2_turns) and any("|[memory:" in u for u, _ in r2_turns)
@@ -173,7 +173,10 @@ def test_the_full_agent_rsi_loop_over_a_real_server(world):
     r3 = _round(store, handler, "zengen-v3")
     assert r3.status == "executed" and r3.payload["library_version"] == {"skill": "2", "memory": "0"}
     assert r3.payload["findings"] == [] and r3.payload["proposals"] == []
-    traces = _agent_traces(store, "run-003", r3.payload["episode_ids"])
+    assert all(t is None for _, t in _traces(store, "run-003", r3.payload["episode_ids"], "b"))
+    traces = _traces(store, "run-003", r3.payload["episode_ids"], "a")
+    for _, t in traces:
+        validate_trace(t)
     new_id = "skill-agent-round-zengen-v2-1-1"
     first_turns = traces[0::2]
     assert all(t["selected"] == new_id and t["library_version"] == {"skill": "2", "memory": "0"}
