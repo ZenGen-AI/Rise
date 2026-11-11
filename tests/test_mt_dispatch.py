@@ -1229,3 +1229,90 @@ def test_a_dispatcher_without_a_resolver_now_refuses_every_interact_directive(st
         client_factory=live().client_factory, policy=ScriptedBackend({})))
     env = store.read_product(f"{run_dir(RUN)}/directive.yaml")
     assert env.status == "failed" and "memory_resolver" in env.payload["failure"]["reason"]
+
+
+# ---------------- 逻辑 id 在派发入口校验:run id、情境 id、人格 id,以及拼出的逻辑 episode id ----------------
+
+def _refusing_dispatcher(trace):
+    """不该走到策略上下文与客户端:走到了 trace 就不是空的。"""
+    return interact_dispatcher(
+        client_factory=lambda **kw: pytest.fail("the dispatcher must refuse before it opens a session"),
+        policy_factory=lambda run_id, cfg: _Scope(trace, None))
+
+
+def _failure_reason(store):
+    env = store.read_product(f"{run_dir(RUN)}/directive.yaml")
+    assert env.status == "failed" and env.payload["failure"]["category"] == "T2"
+    return env.payload["failure"]["reason"]
+
+
+@pytest.mark.parametrize("overrides, field, hostile", [
+    ({"scenario_ids": ["../x", "s2"]}, "scenario_ids[0]", "../x"),
+    ({"scenario_ids": ["s1", "a/b"]}, "scenario_ids[1]", "a/b"),
+    ({"scenario_ids": ["..", "s2"]}, "scenario_ids[0]", ".."),
+    ({"bindings": [RoleBinding("a", "pa", "self_play").to_dict(),
+                   RoleBinding("b", "../pb", "frozen_reference", model_ref="zengen-v1").to_dict()]},
+     "bindings[1].persona_id", "../pb"),
+])
+def test_an_interact_directive_with_a_path_traversal_id_fails_before_anything_runs(
+        store, overrides, field, hostile):
+    _interact_directive(store, **overrides)
+    trace = []
+    reconcile_once(store, dispatcher=_refusing_dispatcher(trace))
+    reason = _failure_reason(store)
+    assert field in reason and "letters, digits" in reason
+    assert hostile not in reason.replace(field, "")           # 不回显敌意的值
+    assert trace == [] and not store.exists(f"{run_dir(RUN)}/training_run.yaml")
+
+
+def test_an_interact_directive_with_an_over_long_scenario_id_fails_without_echoing_it(store):
+    long_id = "L" * 129
+    _interact_directive(store, scenario_ids=[long_id, "s2"])
+    trace = []
+    reconcile_once(store, dispatcher=_refusing_dispatcher(trace))
+    reason = _failure_reason(store)
+    assert "scenario_ids[0]" in reason and "too long" in reason and "129" in reason
+    assert long_id not in reason and len(reason) < 200
+    assert trace == [] and not store.exists(f"{run_dir(RUN)}/training_run.yaml")
+
+
+def test_an_interact_directive_whose_longest_logical_episode_id_exceeds_128_fails(store):
+    # run-1-grpo1-<114 个字符>-r1 是 129 个字符:每个 id 单独合格,拼起来超长
+    _interact_directive(store, scenario_ids=["L" * 114, "s2"])
+    trace = []
+    reconcile_once(store, dispatcher=_refusing_dispatcher(trace))
+    reason = _failure_reason(store)
+    assert "logical episode id" in reason and "129" in reason and "L" * 114 not in reason
+    assert trace == [] and not store.exists(f"{run_dir(RUN)}/training_run.yaml")
+
+
+@pytest.mark.parametrize("run_id, problem", [
+    ("../x", "letters, digits"), ("a/b", "letters, digits"), (".", "letters, digits"),
+    ("r" * 129, "too long"), ("", "letters, digits"), (7, "must be a string"),
+])
+def test_a_directive_with_a_malformed_run_id_is_refused_at_the_dispatcher_entry(store, run_id, problem):
+    from controlplane.daemon import DirectiveFailedError
+    env = Envelope(
+        id=run_id, type="directive", version=1, created_at="2026-10-07T00:00:00Z",
+        created_by=OwnerRef(), status="pending", schema_version=1,
+        payload={"target_dimension": "tom", "recipe_ref": "", "training_config": _cfg_dict()})
+    before = _commit_count(store)
+    with pytest.raises(DirectiveFailedError) as excinfo:
+        make_mindtrainer_dispatcher()(store, env)
+    assert problem in excinfo.value.reason and excinfo.value.category == "T2"
+    if len(str(run_id)) >= 3:                                               # 更短的值会撞上提示语里的字符
+        assert str(run_id) not in excinfo.value.reason                      # 不回显
+    assert _commit_count(store) == before                                   # 什么都没写
+
+
+def test_an_interact_directive_whose_logical_episode_ids_are_exactly_128_characters_dispatches(store, live):
+    # run-1-grpo1-<113 个字符>-r1 恰好 128 个字符:边界上的合格 id 照常跑完
+    long_id = "L" * 113
+    write_scenario(store, _scenario(long_id))
+    _interact_directive(store, scenario_ids=[long_id], groups_per_step=1)
+    env = live()
+    reconcile_once(store, dispatcher=interact_dispatcher(
+        client_factory=env.client_factory, policy=ScriptedBackend({"a": ["agreed", "x", "no", "x"] * 8})))
+    assert store.read_product(f"{run_dir(RUN)}/directive.yaml").status == "executed"
+    assert _wait_until(lambda: len(env.closed) == 4)
+    assert max(len(e.id) for e in env.closed) == 128

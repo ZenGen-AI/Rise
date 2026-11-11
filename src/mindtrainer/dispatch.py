@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import re
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager, ExitStack, nullcontext
 
@@ -31,6 +32,7 @@ from mindtrainer.training_config import (
 )
 from mindtrainer.trajectory_source import (
     BatchTrajectorySource, InteractTrajectorySource, PolicyForRollout, TrajectorySource,
+    logical_episode_id,
 )
 from simulator.backends import ModelBackend
 from simulator.dataset import DatasetIntegrityError, DatasetManifest, read_manifest
@@ -44,9 +46,60 @@ _DETERMINISTIC = (
 )
 
 
+# 逻辑 id(run id、情境 id、人格 id)会拼进文件路径、世界名与逻辑 episode id,在派发入口一次判清,
+# 不等到 CreateSession 或记忆服务才拒(那时推理服务已经起来了)。白名单与
+# simple_actio.memory_port.PERSONA_ID_PATTERN 是同一个;mindtrainer 不得导入 simple_actio(分层规则),
+# 所以复制一份,tests/test_interact_parity.py 钉住两边相等:改一处要改另一处。
+_LOGICAL_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_LOGICAL_ID_MAX = 128
+
+
 # 真正会用到的阶段只在 data_spec.required_stages 一处实现:合成与读清单必须对"要哪几个阶段"
 # 意见一致,否则会合成用不到的阶段,或漏合成要用的阶段。
 _required_stages = required_stages
+
+
+def _id_problem(value: object) -> str | None:
+    """逻辑 id 不合格时返回问题的类别,合格返回 None。只说类别与长度,不回显值本身:值可能很长,也可能是敌意输入。"""
+    if not isinstance(value, str):
+        return f"must be a string, got {type(value).__name__}"
+    if len(value) > _LOGICAL_ID_MAX:
+        return f"is too long ({len(value)} characters, at most {_LOGICAL_ID_MAX})"
+    if not _LOGICAL_ID_PATTERN.fullmatch(value):
+        return "must start with a letter or digit and contain only letters, digits, '.', '_' and '-'"
+    return None
+
+
+def _check_run_id(run_id: object) -> None:
+    """run id 是 run 目录名与逻辑 episode id 的前缀。排在派发的第一步:此前不得拿它拼任何路径。
+    run id 自己不合格时,原因里不带它(其余原因都以 `directive <run_id>:` 开头)。"""
+    problem = _id_problem(run_id)
+    if problem is not None:
+        raise DirectiveFailedError(f"directive id {problem}")
+
+
+def _check_interact_ids(run_id: str, cfg: TrainingConfig) -> None:
+    """interact 指令里情境 id 与人格 id 的白名单,以及拼出的最长逻辑 episode id 不超 128。
+
+    排在 validate_training_config 之后:那时字段类型已查过,生成路也已回写,所以点名路与生成路的 id 都过这一道。
+    最长的逻辑 id 取最后一个 GRPO step、最后一条 rollout 的位数,再配上最长的情境 id。batch 指令不查:
+    它没有逻辑 episode id,情境来自清单。"""
+    if cfg.mode != "interact":
+        return
+    named = [(f"scenario_ids[{i}]", sid) for i, sid in enumerate(cfg.scenario_ids)]
+    named += [(f"bindings[{i}].persona_id", b.persona_id) for i, b in enumerate(cfg.bindings)]
+    for name, value in named:
+        problem = _id_problem(value)
+        if problem is not None:
+            raise DirectiveFailedError(f"directive {run_id}: {name} {problem}")
+    if cfg.grpo_steps > 0:
+        longest = max(cfg.scenario_ids, key=len)
+        episode_id = logical_episode_id(run_id, cfg.grpo_steps - 1, longest, cfg.group_size - 1)
+        if len(episode_id) > _LOGICAL_ID_MAX:
+            raise DirectiveFailedError(
+                f"directive {run_id}: the logical episode id built from the run id and the longest "
+                f"scenario_ids entry would be {len(episode_id)} characters, at most {_LOGICAL_ID_MAX}"
+            )
 
 
 def _data_run_id(run_id: str, ref: str, stage: str) -> str:
@@ -373,6 +426,7 @@ def make_mindtrainer_dispatcher(
 
     def dispatch(store: GitStore, directive: Envelope) -> None:
         run_id = directive.id
+        _check_run_id(run_id)
         try:
             cfg = load_config_from_directive(directive)
         except InvalidTrainingConfigError as exc:
@@ -386,6 +440,7 @@ def make_mindtrainer_dispatcher(
         reason = validate_training_config(cfg)
         if reason is not None:
             raise DirectiveFailedError(f"directive {run_id}: {reason}")
+        _check_interact_ids(run_id, cfg)
         try:
             # 本入口不提供 judge:judge 归因的指令做不成,重试无益,所以判失败而不是让 ValueError 逃出去
             attribution: AttributionBackend = build_attribution_backend(cfg.reward)

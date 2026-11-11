@@ -16,13 +16,14 @@ from factory.opponents import ModelRefError, driver_for, resolve_model_ref
 from factory.sombench_runner import EXPORT_FORMAT as RUNNER_EXPORT_FORMAT
 from mindagent.deployment import TRANSIENT_REASONS as DEPLOYMENT_TRANSIENT_REASONS
 from mindagent import deployment as _deployment
-from mindtrainer.dispatch import _DEFAULT_OPPONENT_DRIVER
+from mindtrainer.dispatch import _DEFAULT_OPPONENT_DRIVER, _LOGICAL_ID_MAX, _LOGICAL_ID_PATTERN
 from mindtrainer.dispatch import _is_adapter_export as dispatch_is_adapter_export
 from mindtrainer.roll_converter import EXPORT_FORMAT as CONVERTER_EXPORT_FORMAT
 from mindtrainer.training_config import OPPONENT_MODEL_BACKENDS
 from mindtrainer.trajectory_source import _TRANSIENT_REASONS as TRAJECTORY_TRANSIENT_REASONS
 from mindtrainer import trajectory_source as _trajectory_source
 from simulator.datamodel import OPPONENT_DRIVERS, RoleBinding
+from simple_actio.memory_port import PERSONA_ID_PATTERN
 from trainscheduler.config import _SLOT_DRIVERS
 
 
@@ -114,3 +115,12 @@ def test_the_admission_backoff_of_the_two_clients_is_the_same(name):
     """准入被拒的退避(终审 I-1):轨迹源与部署驱动器各写一份,原因名、总预算与退避步长都要相等。"""
     assert getattr(_trajectory_source, name) == getattr(_deployment, name)
     assert _trajectory_source.ADMISSION_REFUSED in TRAJECTORY_TRANSIENT_REASONS
+
+
+def test_the_dispatchers_logical_id_whitelist_is_the_persona_id_pattern():
+    """派发器在入口校验的逻辑 id 白名单(mindtrainer 不得导入 simple_actio,所以复制了一份)与 PERSONA_ID_PATTERN
+    逐字相同,上限就是模式里的 128 个字符;有一边改了,这里就红。"""
+    assert _LOGICAL_ID_PATTERN.pattern == PERSONA_ID_PATTERN.pattern
+    assert _LOGICAL_ID_PATTERN.flags == PERSONA_ID_PATTERN.flags
+    assert _LOGICAL_ID_MAX == 128
+    assert PERSONA_ID_PATTERN.fullmatch("a" * _LOGICAL_ID_MAX) and not PERSONA_ID_PATTERN.fullmatch("a" * (_LOGICAL_ID_MAX + 1))
