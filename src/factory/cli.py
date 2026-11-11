@@ -22,7 +22,6 @@ from pathlib import Path
 
 from controlplane.gitstore import GitStore
 from controlplane.lock import RepoLockedError, acquire_repo_lock
-from controlplane.paths import run_dir
 from factory import readonly
 from factory.errors import FactoryConfigError
 from factory.switches import SWITCHES, UnknownSwitchError, parse_enable
@@ -173,8 +172,9 @@ def main(
                 print(rel)
             return 0
         if args.command == "trace":
-            print(readonly.trace(store, args.run_id))
-            return 0 if store.list_products(run_dir(args.run_id)) else 1
+            text, found = readonly.trace_run(store, args.run_id)
+            print(text)
+            return 0 if found else 1
         if args.command == "cost":
             print(readonly.cost(store, args.run_id))
             return 0

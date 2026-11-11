@@ -34,7 +34,10 @@ def parse_enable(text: str | None) -> tuple[str, ...]:
 
 
 def handler_keys(switches: tuple[str, ...] | list[str]) -> frozenset[str]:
-    """开关 -> 要注入的处理器键。未知开关抛 UnknownSwitchError。"""
+    """开关 -> 要注入的处理器键。未知开关抛 UnknownSwitchError。
+    裸字符串抛 TypeError:它会被按字符拆开,报出一串单字母的"未知开关"。先用 parse_enable 解析。"""
+    if isinstance(switches, str):
+        raise TypeError("handler_keys takes a tuple or list of switch names, not a str; parse it with parse_enable first")
     unknown = sorted(set(switches) - set(ENABLE_MAP))
     if unknown:
         raise UnknownSwitchError(f"unknown switch(es) {unknown}")

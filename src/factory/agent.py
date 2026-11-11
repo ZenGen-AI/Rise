@@ -43,7 +43,6 @@ if TYPE_CHECKING:       # 只给类型注解用:运行时不导入 factory.memor
 logger = logging.getLogger(__name__)
 
 AGENT_CONFIG = f"{CONTROL_PLANE_ROOT}/config/agent.yaml"
-AGENT_BACKENDS = ("canned",)
 _REQUIRED = ("scenario_ids", "bindings", "opponent_lines")
 _OPTIONAL = tuple(f.name for f in fields(AgentConfig) if f.name not in ("scenario_ids", "bindings"))
 
@@ -226,17 +225,10 @@ class AgentRuntime:
 
     @property
     def interact_deadline_s(self) -> float:
-        """不取锁:读一个 float 是原子的,而 `_lock` 不可重入,持锁的代码一旦碰到这个 getter 就是自死锁
-        (client_factory 持锁读 `_deadline` 是直接读字段,正是这个原因)。setter 仍持锁,与别的状态变更串行。"""
+        """只读,构造时定下。不取锁:读一个 float 是原子的,而 `_lock` 不可重入,持锁的代码一旦碰到这个 getter
+        就是自死锁(client_factory 持锁读 `_deadline` 是直接读字段,正是这个原因)。
+        调用方要逐个给流 deadline 时用 client_factory(deadline_s=...)。"""
         return self._deadline
-
-    @interact_deadline_s.setter
-    def interact_deadline_s(self, value: float) -> None:
-        """改之后新造的、没给 deadline_s 的客户端(client_factory 构造 DeadlineStub 时读)用新值,已造好的不回头改。
-        调用方要逐个给流 deadline 时用 client_factory(deadline_s=...),不改这个缺省;src 里已经没有调用方改它,
-        只为测试与手工调试保留。"""
-        with self._lock:
-            self._deadline = value
 
     def register_session(self, scenario_id: str, run_id: str) -> None:
         """登记:此后新开的该情境 id 的会话属于 run_id,会话结束时钩子把 episode 写进这个 run。同 id 再登记则覆盖
@@ -374,7 +366,7 @@ class AgentRuntime:
                 except BaseException:
                     orphans.append(memory)
                     raise
-        except Exception:
+        except BaseException:      # KeyboardInterrupt 等也要先收尾,再原样抛出
             if worlds is None:
                 for closable in [*backends.values(), *orphans]:
                     try:

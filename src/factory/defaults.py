@@ -116,6 +116,6 @@ def install_defaults(store: GitStore) -> list[str]:
         write_scenario(store, scenario)
     for persona in DEFAULT_AGENT_PERSONAS:
         write_persona(store, persona)
-    _write_config_once(store, AGENT_CONFIG, "agent", DEFAULT_AGENT_CONFIG)
+    _write_config_once(store, AGENT_CONFIG, "agent", dict(DEFAULT_AGENT_CONFIG))
     paths.append(AGENT_CONFIG)
     return paths

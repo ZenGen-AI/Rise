@@ -906,6 +906,18 @@ def test_a_failure_while_building_the_backends_leaves_no_route_behind(store):
     assert runtime._session_runs == {}
 
 
+def test_a_keyboard_interrupt_while_building_the_backends_still_cleans_up_and_propagates(store):
+    """收尾接 BaseException:Ctrl+C 落在造后端的中途,路由照样撤掉,KeyboardInterrupt 原样抛出。"""
+    def interrupted(binding, scenario):
+        raise KeyboardInterrupt
+
+    runtime = AgentRuntime(store, ("hi",), opponent_backend_factory=interrupted)
+    runtime.register_session("s1", "run-1")
+    with pytest.raises(KeyboardInterrupt):
+        runtime._backends(_info("sess-interrupted"))
+    assert runtime._session_runs == {}
+
+
 def test_each_session_keeps_its_own_route_even_when_the_scenario_is_registered_to_a_new_run(store):
     """同一个情境 id 先后登记给两个 run:先开的会话仍按开会话时的 run 落盘。"""
     runtime = AgentRuntime(store, ("hi",))
@@ -1086,34 +1098,6 @@ def test_closing_a_session_and_routing_its_episode_never_wait_for_the_runtime_lo
     assert finished, "session wind-down blocked on the runtime lock"
     assert written == [("run-1", "ep-lock")]
     assert runtime._session_runs == {}
-
-
-def test_the_interact_deadline_is_settable_and_read_when_a_client_is_built(store):
-    """调和循环一次只派一条指令,所以一个可变值够用。设值之后新造的客户端用新值;已造好的 stub 不回头改。"""
-    from factory.agent import INTERACT_DEADLINE_S
-    calls = []
-
-    class FakeStub:
-        def __init__(self, channel):
-            pass
-
-        def Interact(self, request_iterator, **kw):
-            calls.append(kw)
-            return iter(())
-
-    runtime = AgentRuntime(store, ("hi",), stub_factory=FakeStub)
-    try:
-        assert runtime.interact_deadline_s == INTERACT_DEADLINE_S
-        runtime.interact_deadline_s = 7.0
-        assert runtime.interact_deadline_s == 7.0
-        built_before = runtime.client_factory()
-        assert calls[-1] == {"timeout": 7.0}
-        runtime.interact_deadline_s = 3.0
-        assert built_before._stub.timeout_s == 7.0     # 已造好的不变
-        runtime.client_factory()
-        assert calls[-1] == {"timeout": 3.0}
-    finally:
-        runtime.close()
 
 
 @pytest.mark.parametrize("switch", ["agent", "admit"])

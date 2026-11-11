@@ -24,10 +24,15 @@ def _reachable(uri: str) -> bool:
 
 def trace(store: GitStore, run_id: str) -> str:
     """打印该轮全链路：各产物状态 + links 溯源 + L2/L3 引用可达性。只读。"""
+    return trace_run(store, run_id)[0]
+
+
+def trace_run(store: GitStore, run_id: str) -> tuple[str, bool]:
+    """(trace 的文本, run 目录下有没有产物)。factory trace 要按有无产物定退出码,用它免得再列一次目录。"""
     lines: list[str] = [f"run {run_id}"]
     products = store.list_products(run_dir(run_id))
     if not products:
-        return f"run {run_id}: no products found"
+        return f"run {run_id}: no products found", False
     for rel in products:
         env = store.read_product(rel)
         links = ",".join(env.links) if env.links else "-"
@@ -40,7 +45,7 @@ def trace(store: GitStore, run_id: str) -> str:
             uri = ref["uri"]
             mark = "ok" if _reachable(uri) else "unreachable"
             lines.append(f"      metric_ref [{mark}] {uri}")
-    return "\n".join(lines)
+    return "\n".join(lines), True
 
 
 def cost(store: GitStore, run_id: str) -> str:

@@ -28,5 +28,6 @@ def test_every_factory_module_starts_with_future_annotations():
         body = ast.parse(path.read_text(encoding="utf-8")).body
         if body and isinstance(body[0], ast.Expr) and isinstance(getattr(body[0], "value", None), ast.Constant):
             body = body[1:]
+        assert body, f"{path.name} has no statements after its docstring"
         first = body[0]
         assert isinstance(first, ast.ImportFrom) and first.module == "__future__", path.name

@@ -7,7 +7,7 @@ import pytest
 from controlplane.envelope import BigRef, Envelope, OwnerRef
 from controlplane.gitstore import GitStore
 from controlplane.ledger import record_cost, record_failure
-from controlplane.observe import cost as observe_cost, trace as observe_trace
+from controlplane.observe import cost as observe_cost, trace as observe_trace, trace_run as observe_trace_run
 from controlplane.paths import run_dir
 from factory import readonly
 from factory.readonly import collect_log_refs, render_logs
@@ -46,7 +46,13 @@ def store(tmp_path):
 
 def test_trace_and_cost_are_the_observe_functions_themselves():
     assert readonly.trace is observe_trace
+    assert readonly.trace_run is observe_trace_run
     assert readonly.cost is observe_cost
+
+
+def test_trace_run_says_whether_the_run_has_products(store):
+    assert observe_trace_run(store, RUN) == (observe_trace(store, RUN), True)
+    assert observe_trace_run(store, "run-404") == ("run run-404: no products found", False)
 
 
 def test_cost_sums_omitted_tokens_as_zero(store):

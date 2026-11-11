@@ -56,3 +56,8 @@ def test_empty_items_and_unknown_names_are_rejected(text):
 def test_handler_keys_rejects_unknown_switches():
     with pytest.raises(UnknownSwitchError, match="nominatee"):
         handler_keys(["nominatee"])
+
+
+def test_handler_keys_refuses_a_bare_string_instead_of_splitting_it_into_letters():
+    with pytest.raises(TypeError, match="parse_enable"):
+        handler_keys("plan")

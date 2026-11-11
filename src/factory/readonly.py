@@ -1,4 +1,4 @@
-"""只读子命令:trace、cost 直接用 controlplane.observe,logs 按 run 目录里的 log_refs 打印日志。
+"""只读子命令:trace、cost 直接用 controlplane.observe(trace_run 一并返回有无产物),logs 按 run 目录里的 log_refs 打印日志。
 
 三者都只读树与本机文件,不写产物、不提交。
 """
@@ -10,10 +10,10 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 from controlplane.gitstore import UNREADABLE_PRODUCT_ERRORS, GitStore
-from controlplane.observe import cost, trace
+from controlplane.observe import cost, trace, trace_run
 from controlplane.paths import run_dir
 
-__all__ = ["collect_log_refs", "cost", "render_logs", "trace"]
+__all__ = ["collect_log_refs", "cost", "render_logs", "trace", "trace_run"]
 
 
 def _local_path(uri: str) -> Path | None:
