@@ -334,8 +334,9 @@ def test_an_in_flight_round_of_the_same_world_defers_admission_until_its_copy_is
 def test_a_locked_world_defers_admission(store, mem):
     _put(store, increments=[{"kind": "memory", "definition": MEMORY}])
     with mem.layout.hold_world("s1"):
-        with pytest.raises(DeferredError, match=r"world library locked: .*s1\.lock"):
+        with pytest.raises(DeferredError) as info:
             _admit(store, mem)
+    assert str(info.value) == "world library locked: s1"              # 报情境 id,不带锁文件的绝对路径
     assert store.read_product(proposal_file(PID)).status == "approved"
     assert mem.store.pending_events("s1") == []
     _admit(store, mem)

@@ -2,16 +2,15 @@
 
 顺序(make_admit_proposal_handler 返回的处理器):
 1. 读提案,不是 approved 就返回;增量与库版本先校验,不合法记一次 T2、提案留在 approved。
-   记忆增量的 (scenario_id, persona_id) 必须是部署配置里绑定的一对(bound_pairs 每次调用时现读,
-   只在提案有记忆增量时才调):不是、或读不了绑定,都在拿锁与写任何东西之前记一次 T2,提案留在 approved。
+   记忆增量的 (scenario_id, persona_id) 必须是部署配置里绑定的一对:不是、或读不了绑定,都在拿锁与写任何东西
+   之前记一次 T2,提案留在 approved。
 2. 记忆增量所涉情境世界(scenario_id,去重后排序)逐个拿世界锁,在锁内读在途记录,查该世界有没有未提交的
    部署起点快照:锁被占或有在途 episode 就抛 DeferredError(守护进程不写树、按退避重试),否则轮次重入恢复
    部署世界时会抹掉刚收录的记忆。任何世界有未提交的起点快照时,只含技能的提案也延后:在途轮次重入会重读库,
    技能版本一变,已提交的 episode 就换新 id 重跑、记下新记忆,随后在途那条按快照恢复回去,
-   把这些记忆悄悄抹掉。任一在途记录读不出(不是合法 JSON、键不对或世界 id 不合法)也抛 DeferredError,
-   原因只报类名与世界 id:它要人修,不能越过处理器打崩守护进程。
+   把这些记忆悄悄抹掉。任一在途记录读不出也抛 DeferredError:它要人修,不能越过处理器打崩守护进程。
 3. 记忆增量按位置逐个 remember_event 写进 scenario_id 那个世界、记在 persona_id 名下,事件 key 是
-   <proposal_id>#<k>(不带持有者:持有者在 remember_event 的参数里)。记忆先于技能写:
+   <proposal_id>#<k>。记忆先于技能写:
    抽取失败要整份提案转 rejected,技能条目已写成 effective 就收不回了。
    - remember_event 抛错(库打不开、③ 写失败):记一次失败记录,提案留在 approved,不放弃事件;下一 tick
      重入时同 key 同文本返回幂等的同一批语句 id,不二次抽取。
@@ -25,9 +24,9 @@
      admit_proposal,所以处理器一开始(拿锁之前)查这份记录,类别是 T3 就直接返回,不再每 tick 抽取一次。
      T1、T2 的记录不挡重入。run_id 过不了 fail_once 的守卫时 T3 写不下,之后每 tick 会再抽一次。
    - remember_event 撞上 MemoryEventConflict 且本提案还没有已提交的记忆:多半是上一次放弃了事件、
-     没来得及写 rejected 就崩了。再调一次 abandon_event(已放弃的是空操作、已提交的会抛),成功就照常
-     转 rejected;它抛就按上面的"抛错"记一次失败记录,提案不动。
-4. 技能条目写 skill_file(effective);条目已在就不重写。
+     没来得及写 rejected 就崩了。再调一次 abandon_event,成功就照常转 rejected;它抛就按上面的"抛错"
+     记一次失败记录,提案不动。
+4. 技能条目写 skill_file(effective)。
 5. library_state 版本 +1、记来源提案,entries 里记忆一项就是事件 key;已记过该提案就不再递增。
 6. 提案载荷加 admitted_statements(只作证据,真正的收据在部署库的事件表里),转 effective。
 崩在任何两步之间重跑都收敛。
@@ -163,7 +162,8 @@ def make_admit_proposal_handler(
                 try:
                     locks.enter_context(memory_layout.hold_world(sid))
                 except FileLockBusyError as exc:
-                    raise DeferredError(f"world library locked: {exc}") from exc
+                    # 报情境 id:FileLockBusyError 的文字是锁文件的绝对路径
+                    raise DeferredError(f"world library locked: {sid}") from exc
             for sid in world_ids:
                 try:
                     in_flight = memory_layout.uncommitted_snapshots(sid)
