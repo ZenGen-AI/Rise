@@ -561,7 +561,7 @@ def test_an_old_per_persona_memory_root_exits_2_listing_the_suspect_entries(tmp_
 def test_the_old_layout_refusal_is_exit_code_2_at_every_entry_that_needs_memory(tmp_path, store, monkeypatch, capsys):
     env = _starling_env(tmp_path, monkeypatch)
     _touch(tmp_path / "mem", "deploy/pa.db")
-    for args in (["--enable", "agent"], ["--enable", "admit"]):
+    for args in (["--enable", "agent"], ["--enable", "admit"], ["--interact"]):
         assert main(["reconcile", str(store.repo_root), "--once", *args], env=env) == 2
         err = capsys.readouterr().err
         assert err.startswith("factory: error: memory root has the old per-persona layout (deploy/pa.db")
