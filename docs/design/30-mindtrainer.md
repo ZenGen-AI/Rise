@@ -198,7 +198,7 @@ MindTrainer 分两层:入口与编排一层决定"从哪跑、跑不跑",模式�
 | `src/mindtrainer/checkpoint.py` | `CheckpointConverter` 协议、`MockConverter`、`register_candidate` | `controlplane` | [已落地] |
 | `src/mindtrainer/resume.py` | `decide_resume` 纯函数 | `datamodel`、`training_config` | [已落地] |
 | `src/mindtrainer/store_adapter.py` | 训练记录的读写与状态迁移检查 | `controlplane` | [已落地] |
-| `src/mindtrainer/orchestrator.py` | `resume_or_run`、`run_training`;确定性异常集合 `_DETERMINISTIC` 含 RoleMemoryFailureError,确定性终止原因集合含 `role_memory_failure`,命中即写 `failed` 后重抛 | 上述全部 | [已落地] |
+| `src/mindtrainer/orchestrator.py` | `resume_or_run`、`run_training`;确定性异常集合 `_DETERMINISTIC` 含 RoleMemoryFailureError 与 RoleBackendRejectedError,确定性终止原因集合含 `role_memory_failure`,命中即写 `failed` 后重抛 | 上述全部 | [已落地] |
 | `src/mindtrainer/dispatch.py` | `make_mindtrainer_dispatcher`:指令到训练,异常到失败类别;新增 `policy_factory` 参数,按 run 构造策略;进入策略上下文之前解析起点记忆、把摘要与运行时身份写进本次派发的配置 | `controlplane.daemon`、编排器 | [已落地] |
 | `src/mindtrainer/wire.py` | 把调和循环接到派发器的入口 | `controlplane.daemon` | [已落地] |
 | `src/mindtrainer/data_spec.py` | `data_spec` 严格解析、要合成哪些阶段、`DataProducer` 协议 | `training_config` | [已落地] |
@@ -802,6 +802,7 @@ interact 的生成路多一条「生成、写树、回写、复校」的链路 [
 | interact 的 `role_backend_rejected`(对手 API 回 4xx,408、425、429 除外) [已落地] | T2 | 不重试,记录写 `failed`(category T2)并重抛,当轮把指令判 `failed`;与 `invalid_session` 同属编排器的 `_DETERMINISTIC_ROLLOUT_REASONS` | 训练记录 `failure`;指令 `payload["failure"]` |
 | interact 的 `role_memory_unavailable`(对手位记忆失败,瞬态类别)与 `role_memory_failure`(其余类别) [已落地] | 前者 T1,后者 T2 | 前者在轨迹源的瞬态集合里,原地重跑,次数与耗尽后的去向同 `role_backend_timeout`;后者在 `_DETERMINISTIC_ROLLOUT_REASONS`(编排器与策略上下文共用)里:不重跑,记录写 `failed`,指令判 `failed`,不延后 | 前者 `curve_summary["failed_rollout_attempts"]`;后者训练记录 `failure` 与指令 `payload["failure"]` |
 | 训练位的 recall 或 embed_pending 失败、remember 抛出的异常,瞬态类别(转换后端改抛 RoleMemoryUnavailableError;`remember` 的 `failure_category` 只计数、不按它分类) [已落地] | T1 | 轨迹源在 `_attempt` 里接住,译成瞬态的失败尝试,会话 abort,原地重跑。remember 返回 failed(含 timeout)只计数、不抛,不进这一行与下一行 | `curve_summary["failed_rollout_attempts"]` |
+| 训练位策略自己的对端回 4xx(408、425、429 除外),`post_chat` 抛 `OpponentRejectedError` [已落地] | T2 | 服务已过就绪探测,这时的 4xx 是本 run 的 vLLM 明确拒绝(适配器名、密钥、请求体不对),重试无益。它是 `RoleBackendRejectedError` 的子类;轨迹源不包装策略异常,会话 abort 后原样上抛;编排器的 `_DETERMINISTIC` 含 `RoleBackendRejectedError`,把记录写 `failed`(category T2)后重抛;策略上下文原样放行,派发器见记录已 `failed` 判 `DirectiveFailedError`,不延后。408、425、429、5xx、超时与回复形状不对仍走下方「真推理的 rollout 失败」一行的延后 | 训练记录 `failure`、指令 `payload["failure"]` |
 | 训练位的记忆失败,其余类别(改抛 RoleMemoryFailureError) [已落地] | T2 | 会话 abort。编排器把训练记录写 `failed` 后重抛,策略上下文原样放行,派发器见记录已 `failed` 就判 `DirectiveFailedError`,不延后。端口 close 超过 60 秒同样判这一类,不重试;世界留在服务里 | 训练记录 `failure`、指令 `payload["failure"]` |
 | 解析起点时记忆服务连不上或超时 [已落地] | 延后 | 解析器抛 `DeferredError`,派发器原样上抛,指令留 `pending`,守护进程退避重试 | 无;不写树 |
 | 这个 `seed_id` 一份种子都没有;没有一版种子的摘要等于本 run 解出的起点摘要;种子落后于当前 schema;分叉出的摘要不等于钉住的摘要 [已落地] | T2 | 第一条在解析时判,原因写种子 id;第二条在进策略上下文 `bind` 时判,原因写种子 id 与情境 id;后两条在建 rollout 世界时判,训练位记忆失败,原因写需要在看板里升级种子或摘要不符 | 指令 `payload["failure"]` |
@@ -811,7 +812,7 @@ interact 的生成路多一条「生成、写树、回写、复校」的链路 [
 | `bindings` 里人格重复 [已落地] | T2 | `validate_training_config` 给出原因,指令判 `failed`,不写训练记录 | 指令 `payload["failure"]` |
 | 创建会话被拒,终止原因在瞬态集合里(准入满额,或逻辑 episode id 撞上活动会话,都是 `role_backend_unavailable`) [已落地] | T1 | 准入满额先在同一次尝试里退避重建(总等待 `ADMISSION_WAIT_S` 65 秒,不计入重试次数),仍被拒再按终止原因查瞬态集合、按条重跑;`invalid_session` 仍不重跑 | `curve_summary["failed_rollout_attempts"]` |
 | interact 的 `role_backend_failure` 等其余原因(含对手 API 的回复形状不对) | T1 或 T2,协议上不区分(与 20 篇一致) | 不按条重跑(它不在轨迹源的瞬态集合里),上抛,记录保持 `pending`,由续训上限兜底(经 `--interact` 入口时的去向见下一行) | 同上 |
-| 经 `--interact` 入口时,真推理的 rollout 失败:上几行里上抛的 `RolloutFailedError`(`invalid_session` 与 `role_backend_rejected` 除外),以及训练位策略自己撞上的 `OpponentApiError` [已落地] | 延后 | 策略上下文把它们译成 `RolloutDeferredError`(`DeferredError` 的子类):指令保持 `pending`,守护进程按退避重试而不退出;原因只写异常类名与 reason 码,不带异常文字(文字里可能有远端地址)。每次重派耗一次 `resume_attempts`,到 `max_resume_attempts` 由 `decide_resume` 升级为 T3。这条结论靠一条配置校验兜住:interact 下 `max_resume_attempts`(默认 3)必须小于守护进程的连续延后上限 `MAX_CONSECUTIVE_DEFERRALS`(20,`DeferralBook` 的缺省值,`src/controlplane/daemon.py`),不小于就在构造期与派发期被拒,信息形如 `max_resume_attempts must be < 20 in interact mode (the daemon's consecutive-deferral limit), got 20`。同一条指令最多连续延后 `max_resume_attempts + 1` 次就升 T3,所以一直失败的 run 最终是 T3,不会无限退避,也不会先撞上连续延后上限让守护进程因 `DeferredExhaustedError` 退出。batch 不走延后通道,不受这条限制。`invalid_session` 与 `role_backend_rejected` 不在此列,仍是上面的 T2。训练位策略自己抛的 `OpponentRejectedError` 也在此列而不是 T2:训练位是本 run 自己起的 vLLM,4xx 多半是服务配置坏了,但这和起服务时的瞬态失败区分不开,先按延后处理 | 守护进程结构化日志;终局时指令 `failure.category = T3` |
+| 经 `--interact` 入口时,真推理的 rollout 失败:上几行里上抛的 `RolloutFailedError`(`invalid_session` 与 `role_backend_rejected` 除外),以及训练位策略自己撞上的 `OpponentApiError`(`OpponentRejectedError` 除外) [已落地] | 延后 | 策略上下文把它们译成 `RolloutDeferredError`(`DeferredError` 的子类):指令保持 `pending`,守护进程按退避重试而不退出;原因只写异常类名与 reason 码,不带异常文字(文字里可能有远端地址)。每次重派耗一次 `resume_attempts`,到 `max_resume_attempts` 由 `decide_resume` 升级为 T3。这条结论靠一条配置校验兜住:interact 下 `max_resume_attempts`(默认 3)必须小于守护进程的连续延后上限 `MAX_CONSECUTIVE_DEFERRALS`(20,`DeferralBook` 的缺省值,`src/controlplane/daemon.py`),不小于就在构造期与派发期被拒,信息形如 `max_resume_attempts must be < 20 in interact mode (the daemon's consecutive-deferral limit), got 20`。同一条指令最多连续延后 `max_resume_attempts + 1` 次就升 T3,所以一直失败的 run 最终是 T3,不会无限退避,也不会先撞上连续延后上限让守护进程因 `DeferredExhaustedError` 退出。batch 不走延后通道,不受这条限制。`invalid_session`、`role_backend_rejected` 与训练位策略自己抛的 `OpponentRejectedError` 不在此列,仍是上面的 T2 | 守护进程结构化日志;终局时指令 `failure.category = T3` |
 
 T1 的上抛异常会让 `run_daemon` 退出,需要外部监督者重启。重启后同一条指令再次派发,`resume_attempts` 上限保证它最终升级为 T3,不会无限空转。`DeferredError` 的子类不在此列:守护进程接住它们,进程不退出;同一动作连续延后超过上限才带原因退出(CP-14)。经 `--interact` 入口的真推理 rollout 失败属于这一类例外:策略上下文已把它译成延后类,见上表。
 
@@ -853,7 +854,7 @@ interact 的 `config_hash` 覆盖配置层的东西 [已落地]:情境 id、人�
 | `tests/test_mt_config.py` | 312 | [已落地] |
 | `tests/test_mt_reward_pipeline.py` | 59 | [已落地] |
 | `tests/test_mt_dispatch.py` | 89 | [已落地] |
-| `tests/test_mt_orchestrator.py` | 66 | [已落地] |
+| `tests/test_mt_orchestrator.py` | 67 | [已落地] |
 | `tests/test_mt_executor.py`、`tests/test_mt_grouping.py`、`tests/test_mt_trajectory_interact.py` | 26、26、53 | [已落地] |
 | `tests/test_mt_training_run.py` | 39 | [已落地] |
 | `tests/test_mt_resume.py` | 19 | [已落地] |
@@ -861,7 +862,7 @@ interact 的 `config_hash` 覆盖配置层的东西 [已落地]:情境 id、人�
 | `tests/test_mt_checkpoint.py` | 14 | [已落地] |
 | `tests/test_mt_datamodel.py` | 10 | [已落地] |
 | `tests/test_mt_wire.py`、`tests/test_mt_paths.py`、`tests/test_mt_integration.py`、`tests/test_mt_packaging.py` | 5、3、2、2 | [已落地] |
-| 合计 | 742 | [已落地] |
+| 合计 | 743 | [已落地] |
 | `tests/test_daemon_dispatcher.py`(ControlPlane 侧的派发缝) | 14 | [已落地] |
 | `tests/test_mt_data_spec.py`、`tests/test_mt_data_spec_stages.py` | 70、17 | [已落地] |
 | `tests/test_mt_data_producer.py`、`tests/test_mt_dispatch_synthesis.py` | 31、55 | [已落地] |

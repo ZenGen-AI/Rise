@@ -1016,7 +1016,7 @@ factory 是第九个工作包,前八个全部落地后才施工。前置关系:1
 | 轮次中途瞬态异常或被杀 | T1 | 轮次留在 `pending`,守护进程退出;重启后的 tick 复用已落盘的 episode 续上(R19) | 已落盘的 episode [已落地] |
 | 派发器或处理器抛 `DeferredError` | 资源暂不可用 | 不写树,按退避重试;连续延后超过上限抛 `DeferredExhaustedError` 退出 | 一行结构化日志 [已落地] |
 | interact 指令起 vLLM 服务:租约被占 `ComputeBusyError`,或起服务失败 `ServeStartupError` | 资源暂不可用 | 同上 | 同上 [已落地] |
-| interact 指令里真推理的 rollout 失败:对手 API 或 vLLM 服务连不上、角色位后端出错、重试用尽的超时、落盘失败(`invalid_session` 除外,它仍判 T2) | 资源暂不可用 | 策略上下文译成延后类:不写树,按退避重试,进程不退出;每次重派耗一次 `resume_attempts`,到上限升级为 T3。interact 的配置校验要求 `max_resume_attempts`(默认 3)小于守护进程的连续延后上限 `MAX_CONSECUTIVE_DEFERRALS`(20,`DeferralBook` 的缺省值),所以一直失败的 run 先到续训上限、判 T3,不会先撞上 `DeferredExhaustedError` 让守护进程退出 | 一行结构化日志;终局时指令 `failure.category = T3` [已落地] |
+| interact 指令里真推理的 rollout 失败:对手 API 或 vLLM 服务连不上、角色位后端出错、重试用尽的超时、落盘失败(`invalid_session`、`role_backend_rejected` 与训练位策略回 4xx 除外,它们判 T2;408、425、429 不算 4xx 拒绝) | 资源暂不可用 | 策略上下文译成延后类:不写树,按退避重试,进程不退出;每次重派耗一次 `resume_attempts`,到上限升级为 T3。interact 的配置校验要求 `max_resume_attempts`(默认 3)小于守护进程的连续延后上限 `MAX_CONSECUTIVE_DEFERRALS`(20,`DeferralBook` 的缺省值),所以一直失败的 run 先到续训上限、判 T3,不会先撞上 `DeferredExhaustedError` 让守护进程退出 | 一行结构化日志;终局时指令 `failure.category = T3` [已落地] |
 | 派发器或处理器抛其他瞬态异常 | T1 | 进程退出,外部监督者重启 | 树里已提交的部分 |
 | 门控写证据不在场或迁移非法 | 用法错误 | 命令抛错,不写文件、不提交 | 无 [已落地] |
 
@@ -1052,7 +1052,7 @@ factory 是第九个工作包,前八个全部落地后才施工。前置关系:1
 | 处理器构造 | 六个构造器、证据开关单一来源、Interact 流超时 | 罐头后端 | `tests/test_factory_handlers.py` | 93 [已落地] |
 | 端到端 | 完整闭环、R5、规划等配方入库门、R18、R19、MindAgent 链 | `HeuristicBackend`、罐头后端 | `tests/test_factory_e2e_loop.py` | 10 [已落地] |
 | 跨工作包 | 共享用例表、分层规则、run 编号数值序 | 无 | `tests/test_factory_cross_plan.py`、`tests/test_factory_run_order.py` | 32、3 [已落地] |
-| `--interact` 装配 | 十一条拒绝项:第 3、9 条合用一组测试,第 10 条没有装配测试(钉住的是派发器的 `ValueError`),其余八条各有测试;打开后派发器带上实时客户端与策略工厂;真推理的 rollout 失败走延后通道、一直失败升 T3;不打开时 interact 指令的失败原因点名开关;收尾时服务停不下来判 T2;外部 API 对手超时或回 503 一次后整条重跑、一直回 503 时指令保持 `pending`、回 404 判 `failed`(T2);scripted 对手位没有台词时派发期判 T2;`opponent` 段在装配之后改了,下一条指令用新值,读不到或写坏了判 T2 且不带地址 | 假 serve、本机 HTTP 桩 | `tests/test_factory_interact_wire.py` | 111 [已落地] |
+| `--interact` 装配 | 十一条拒绝项:第 3、9 条合用一组测试,第 10 条没有装配测试(钉住的是派发器的 `ValueError`),其余八条各有测试;打开后派发器带上实时客户端与策略工厂;真推理的 rollout 失败走延后通道、一直失败升 T3;不打开时 interact 指令的失败原因点名开关;收尾时服务停不下来判 T2;外部 API 对手超时或回 503 一次后整条重跑、一直回 503 时指令保持 `pending`、回 404 判 `failed`(T2);训练位策略的 vLLM 回 404 判 `failed`(T2)、回 408、425、429、503 仍延后;scripted 对手位没有台词时派发期判 T2;`opponent` 段在装配之后改了,下一条指令用新值,读不到或写坏了判 T2 且不带地址 | 假 serve、本机 HTTP 桩 | `tests/test_factory_interact_wire.py` | 118 [已落地] |
 | `--interact` 端到端 | `factory reconcile --once --interact` 走到候选 `pending_review`,episode 都在产物树里 | 假 vLLM(本地 HTTP 回固定文本)、mock 执行器 | `tests/test_factory_interact_e2e.py` | 2 [已落地] |
 | 记忆配置读取与安装来源 | 文件不存在、权限过宽、路径在仓库里、缺键或多余键、地址带 userinfo;`url` 与 `token_file` 只给一个、地址不是回环、`world_prefix` 不合格式;`OPENAI_API_KEY` 为空、editable 安装、没有 git 提交、两行依赖不同提交、`.owner` 属于别的仓库,各自退出码 2、不回显取值;`.owner` 先写临时文件再以硬链接发布,并发首次使用只有一个成功,读到 0 字节的旧 `.owner` 拒绝 | 临时目录、临时仓库、假的安装元数据 | `tests/test_factory_memory_config.py` | 89 [已落地] |
 | 记忆后端选择与持锁核对 | 没设变量走替身并只记一次启动日志,不导入客户端;只开 `plan`、`nominate`、`track` 不读变量;`--interact`、`agent`、`admit` 任一在场就读且坏配置退出码 2;旧布局拒绝;装配顺序 ① 至 ⑦ 与失败时先关会话再停服务;持锁之后的部署世界核对(`run` 经 `on_locked`,`reconcile` 在锁内),创建标记在而世界不在、`root` 标签不符、设置不同各退出码 2;服务会话守卫停守护进程;拉起模式的部署路取推出的各层(缺省配置等提交 96 秒)、替身保持 5 秒、同开取训练位一层 | 真 `starling-serve` 子进程、假抽取与嵌入端点、FileTupleStore、临时仓库 | `tests/test_factory_memory_wiring.py` | 61 [已落地] |

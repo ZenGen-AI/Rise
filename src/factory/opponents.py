@@ -63,8 +63,9 @@ class OpponentRejectedError(OpponentApiError, RoleBackendRejectedError):
     同样的请求再发还是同样的回答,重试无益。
 
     同时是两样东西,各有用处:是 RoleBackendRejectedError,所以服务端驱动把对手位的拒绝归 role_backend_rejected
-    (T2,轨迹源不重跑、编排器把训练记录写 failed),而不是被通用异常分支吞成 role_backend_failure;
-    仍是 OpponentApiError,所以训练位策略撞上时,策略上下文照旧把它译成延后(理由见 interact_policy)。
+    (T2,轨迹源不重跑、编排器把训练记录写 failed),而不是被通用异常分支吞成 role_backend_failure。
+    训练位策略撞上时它穿过轨迹源(策略异常不包装),编排器同样按 RoleBackendRejectedError 写 failed,
+    策略上下文原样放行,派发器判 T2;不像别的 OpponentApiError 那样译成延后。
     408、425、429、5xx、回复形状不对不是它。信息里绝不含密钥值。"""
 
 

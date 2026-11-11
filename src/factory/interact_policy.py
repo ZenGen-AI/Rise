@@ -29,8 +29,9 @@
 它冒出来时登记注销、对手开关解绑都已在各自的 finally 里做完,不会被跳过。
 
 训练体里抛出的真推理失败也分两路(Ruling 27):`RolloutFailedError`(确定性拒绝除外)与 `OpponentApiError`
-译成 `RolloutDeferredError`(`DeferredError` 的子类),走延后通道,指令保持 pending,守护进程不会被它带走。
-确定性拒绝(`invalid_session`、`role_backend_rejected`、`role_memory_failure`,见 `mindtrainer.orchestrator` 的 `_DETERMINISTIC_ROLLOUT_REASONS`)
+(训练位策略的 `OpponentRejectedError` 除外)译成 `RolloutDeferredError`(`DeferredError` 的子类),走延后通道,
+指令保持 pending,守护进程不会被它带走。确定性拒绝(`invalid_session`、`role_backend_rejected`、`role_memory_failure`,
+见 `mindtrainer.orchestrator` 的 `_DETERMINISTIC_ROLLOUT_REASONS`)与训练位策略的 `OpponentRejectedError`
 原样放行:编排器已把 training_run 写成 failed,派发器据此把指令判为 T2。
 """
 from __future__ import annotations
@@ -64,6 +65,7 @@ from factory.opponents import (
     ModelRefError,
     OpponentApiError,
     OpponentCredentialError,
+    OpponentRejectedError,
     driver_for,
     resolve_model_ref,
 )
@@ -413,10 +415,13 @@ def make_policy_factory(
                             raise
                         # from None:异常文字(含服务端转述的细节)不跟着回溯走
                         raise _rollout_deferral(exc) from None
+                    except OpponentRejectedError:
+                        # 训练位策略的 4xx(408、425、429 除外):服务已过就绪探测,这时的 4xx 是本 run 的 vLLM 明确拒绝
+                        # (适配器名、密钥、请求体不对),重试无益。编排器已写 failed(RoleBackendRejectedError 在它的
+                        # 确定性集合里),派发器据此判 T2
+                        raise
                     except OpponentApiError as exc:
-                        # 含训练位策略自己抛的 OpponentRejectedError。训练位是本 run 自己起的 vLLM,4xx 多半意味着
-                        # 服务配置坏了(适配器名不对之类),重试无益;但这一点和起服务时的瞬态失败区分不开,
-                        # 所以先按现状译成延后(重试有界,最终升 T3)。这一点记在设计 30 的失败分类表里(「训练位策略自己抛的 OpponentRejectedError」)。
+                        # 训练位策略的超时、暂时不可用、回复形状不对:重试有界,最终升 T3
                         raise _rollout_deferral(exc) from None
                 finally:
                     for sid in registered:

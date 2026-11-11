@@ -765,6 +765,33 @@ def test_a_deterministic_memory_failure_of_the_trained_slot_fails_the_run_instea
     assert source.collects == 1
 
 
+class _PolicyRejectedSource:
+    """替身 Interact 源:collect 时训练位策略的对端明确拒绝(轨迹源不包装策略异常,原样穿出)。"""
+
+    def __init__(self):
+        self.collects = 0
+
+    def collect(self):
+        from simulator.realtime.backend_timeout import RoleBackendRejectedError
+        self.collects += 1
+        raise RoleBackendRejectedError("HTTP 404 from the vLLM service serve-job-a1")
+
+
+def test_a_rejection_of_the_trained_slot_policy_fails_the_run_instead_of_leaving_it_pending(store):
+    from simulator.realtime.backend_timeout import RoleBackendRejectedError
+    source = _PolicyRejectedSource()
+    with pytest.raises(RoleBackendRejectedError):
+        _go(store, _interact_cfg(), MockExecutor(), make_sources=_stub_sources(store, source))
+    failed = read_training_run(store, RUN)
+    assert (failed.status, failed.failure["category"], failed.failure["point"]) == (
+        "failed", "T2", "step 1 (grpo_opd)",
+    )
+    assert failed.failure["detail"].startswith("RoleBackendRejectedError: ")
+    with pytest.raises(NeedsHumanError, match="failed"):
+        _go(store, _interact_cfg(), MockExecutor(), make_sources=_stub_sources(store, source))
+    assert source.collects == 1
+
+
 @pytest.mark.parametrize("reason", ["timeout", "role_backend_failure"])
 def test_other_rollout_failures_stay_pending_for_the_attempt_limit_to_bound(store, reason):
     source = _RejectedSource(reason)

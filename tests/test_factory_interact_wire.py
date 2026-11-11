@@ -1352,6 +1352,44 @@ def test_a_policy_that_cannot_reach_its_service_defers_the_directive(world, tmp_
     assert book.streak(DISPATCH_KEY) == 1
 
 
+def test_a_trained_slot_policy_answering_404_fails_the_directive_as_t2_instead_of_deferring(
+        world, tmp_path, monkeypatch, external_api):
+    """训练位自己的 vLLM 回 4xx(408、425、429 除外):服务已过就绪探测,这是明确拒绝,重试无益。
+    OpponentRejectedError 穿过轨迹源 -> 编排器写 failed -> 策略上下文原样放行 -> 派发器判 T2,不进延后通道。"""
+    import factory.interact_policy as ip
+
+    server = external_api([(404, 0.0)] * 50)
+    serve = FakeServe(server.base_url)
+    monkeypatch.setattr(ip, "real_serve", serve)
+    _write_directive(world)
+    book = _ticks(world, tmp_path)
+    directive = _read(world, "directive")
+    assert directive.status == "failed" and directive.payload["failure"]["category"] == "T2"
+    reason = directive.payload["failure"]["reason"]
+    assert "OpponentRejectedError" in reason and "HTTP 404" in reason
+    assert SERVE_KEY not in reason
+    run = _read(world, "training_run")
+    assert run.status == "failed" and run.payload["failure"]["category"] == "T2"
+    assert book.streak(DISPATCH_KEY) == 0                      # 没进延后通道
+    assert serve.trace == ["enter", "exit"]                    # 服务照常停了、租约照常放了
+    assert server.count == 1                                   # 不重跑:训练位只发了一次
+
+
+@pytest.mark.parametrize("status", [408, 425, 429, 503])
+def test_a_trained_slot_policy_answering_a_transient_status_still_defers_the_directive(
+        world, tmp_path, monkeypatch, external_api, status):
+    """408、425、429 与 5xx 仍是暂时不可用:译成延后,指令与训练记录都留 pending。"""
+    import factory.interact_policy as ip
+
+    server = external_api([(status, 0.0)] * 50)
+    monkeypatch.setattr(ip, "real_serve", FakeServe(server.base_url))
+    _write_directive(world)
+    book = _ticks(world, tmp_path)
+    assert _read(world, "directive").status == "pending"
+    assert _read(world, "training_run").status == "pending"
+    assert book.streak(DISPATCH_KEY) == 1
+
+
 def test_an_invalid_session_still_fails_the_directive_this_tick(world, tmp_path, stub, fake_serve):
     """invalid_session 是请求本身有问题:订单写 failed,派发器译成 T2,不进延后通道。"""
     write_scenario(world, Scenario("t1", "bg", [RoleSlot("a", "a")], "c", ["n"], "training"))   # 缺 b 位
@@ -1556,6 +1594,19 @@ def test_a_deterministic_rollout_failure_passes_through_the_policy_scope_unchang
         with factory(RUN, _cfg()):
             raise original
     assert caught.value is original
+
+
+def test_a_rejection_of_the_trained_slot_policy_passes_through_the_policy_scope_unchanged(world, tmp_path, stub):
+    """训练位策略的 OpponentRejectedError 不译成延后:编排器已写 failed,派发器据此判 T2。"""
+    from factory.opponents import OpponentRejectedError
+
+    _, _, factory, serve = _unit(world, tmp_path, stub)
+    original = OpponentRejectedError("HTTP 404 from the vLLM service serve-job-a1")
+    with pytest.raises(OpponentRejectedError) as caught:
+        with factory(RUN, _cfg()):
+            raise original
+    assert caught.value is original
+    assert serve.trace == ["enter", "exit"]
 
 
 # ---------------- Part 4:装配期拒绝项(设计 90 §6.1 的十一条) ----------------

@@ -26,7 +26,7 @@ from mindtrainer.training_config import (
 from mindtrainer.trajectory_source import RolloutFailedError, TrajectorySource, batch_for_step
 from simulator.datamodel import Episode
 from simulator.dataset import DatasetIntegrityError
-from simulator.realtime.backend_timeout import RoleMemoryFailureError
+from simulator.realtime.backend_timeout import RoleBackendRejectedError, RoleMemoryFailureError
 
 
 class NotEnoughGroupsError(ValueError):
@@ -36,11 +36,13 @@ class NotEnoughGroupsError(ValueError):
 
 # 这几类是确定性失败(补充 E.2 的 T2):同样的输入还会再失败,写 failed 并保留,不进续训。
 # RoleMemoryFailureError 是训练位的记忆端口确定性失败:经组合根的转换后端变成它的子类,同样的输入还会再失败。
+# RoleBackendRejectedError 是训练位策略的对端明确拒绝(4xx,408、425、429 除外):组合根的 HTTP 客户端抛它的子类,
+# 轨迹源不包装策略异常,原样穿到这里。
 # 其余异常一律不吞,run 保持 pending,交给 decide_resume 判定。
 _DETERMINISTIC = (
     DatasetIntegrityError, DegenerateGroupError, AttributionError,
     NotEnoughGroupsError, InvalidTrainingConfigError, TrainingDataRejectedError,
-    RoleMemoryFailureError,
+    RoleMemoryFailureError, RoleBackendRejectedError,
 )
 
 # 这三个 rollout 终止原因是确定性的拒绝(T2),重试无益:invalid_session 是请求本身有问题,
@@ -185,7 +187,8 @@ def run_training(
     - 收尾:存最终 checkpoint(先回写 pending,再转换),注册候选,置 executed。候选若在崩溃
       窗口里已被人审核、且确属本 run 本配置同一份权重,视为注册已完成,照常置 executed。
     - 确定性失败写 failed(category T2)并原样重抛,其中包括 Interact 的 invalid_session、
-      role_backend_rejected 与 role_memory_failure 拒绝;其余异常(含 timeout 用尽、role_backend_failure)不吞,run 保持 pending。
+      role_backend_rejected 与 role_memory_failure 拒绝,以及训练位策略自己抛的 RoleBackendRejectedError;
+      其余异常(含 timeout 用尽、role_backend_failure)不吞,run 保持 pending。
     - metric_stream_refs 与 on_step:逐步指标不进 git(补充 D.2),on_step 是调用方观察
       每一步的唯一出口;指标流文件本身由调用方写,只把引用交给这里记录。
     - policy_backend:说明这条记录的数据来自哪种后端(interact 才有)。只在构造新记录时写入;
