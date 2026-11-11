@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 import pytest
@@ -339,7 +338,7 @@ def test_a_failing_subprocess_never_puts_raw_stderr_in_the_reason(tmp_path):
 
     def run_with_secret(argv, **kw):
         import subprocess
-        result = original(run, argv, **kw)
+        original(run, argv, **kw)
         return subprocess.CompletedProcess(argv, 3, b"", f"HTTP 401 key={SECRET} retry later".encode())
 
     runner = _runner(tmp_path, rows=[], store=store, run=run_with_secret)

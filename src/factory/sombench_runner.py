@@ -29,7 +29,6 @@ from controlplane.deferred import DeferredError
 from controlplane.envelope import BigRef, InvalidBigRefError
 from controlplane.gitstore import GitStore
 from controlplane.paths import candidate_checkpoint_file
-from diagnostic.contamination import normalize_text
 from diagnostic.datamodel import DiagnosticItem, SampleOutcome
 from factory.errors import FactoryConfigError
 from factory.eval_config import EvalConfig

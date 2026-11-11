@@ -1,6 +1,6 @@
 from diagnostic.datamodel import DiagnosticItem, ItemResult
 from diagnostic.someval_adapter import (
-    SoMEvalRunner, MockSoMEvalRunner, run_static_items,
+    MockSoMEvalRunner, run_static_items,
 )
 
 

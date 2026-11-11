@@ -163,7 +163,6 @@ def test_repro_is_the_validator_output_verbatim(store):
 
 
 def test_an_unknown_commit_and_a_missing_manifest_are_repro_errors(store):
-    from controlplane.paths import run_dir
     import os
 
     os.remove(store.repo_root / dataset_manifest_file("run-002", "sft"))

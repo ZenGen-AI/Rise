@@ -6,7 +6,6 @@ Starling 参数连模块级共用的真 starling-serve,每条用例一个世界�
 from __future__ import annotations
 
 import logging
-import os
 import threading
 import time
 from dataclasses import dataclass

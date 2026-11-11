@@ -8,7 +8,7 @@ import math
 from dataclasses import dataclass, field
 
 from controlplane.daemon import MAX_CONSECUTIVE_DEFERRALS
-from controlplane.envelope import SHA256_HEX, BigRef, Envelope, InvalidBigRefError
+from controlplane.envelope import BigRef, Envelope, InvalidBigRefError
 from simulator.datamodel import OPPONENT_DRIVERS, RoleBinding
 
 MODES = ("batch", "interact")

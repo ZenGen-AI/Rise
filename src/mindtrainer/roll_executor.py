@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 
 from compute.client import ComputeClient, JobSpec
 from compute.endpoint import ComputeEndpoint
-from compute.errors import ComputeError, HelperError, TransportError
+from compute.errors import ComputeError, HelperError
 from compute.roll_env import version_hint as _version_hint
 from controlplane.envelope import BigRef
 from mindtrainer.datamodel import StepResult

@@ -1,7 +1,6 @@
 import pytest
 
 from controlplane.config import (
-    BackendConfig,
     load_backend_config,
     resolve_credential,
     redact,

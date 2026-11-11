@@ -4,7 +4,6 @@ redact_message 之前把"只有数字、逗号、点、正负号、e、E 和空�
 于是 backend: [123456789] 这样的取值会被 CliBridge 的信息带到标准错误。现在只有紧跟在单词 in 之后、
 恰好是两个数字的括号组才保留(校验信息自己写的区间,如 in [0, 1]),其余括号组一律换成 <value>。
 """
-import sys
 
 import pytest
 

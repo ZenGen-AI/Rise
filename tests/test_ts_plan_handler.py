@@ -22,7 +22,6 @@ from ts_fixtures import (
     make_store,
     write_decision,
     write_directive,
-    write_model,
     write_recipe,
     write_report,
     write_round,

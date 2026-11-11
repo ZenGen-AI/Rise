@@ -1,7 +1,5 @@
 """StarlingMemory 的专属用例:包客户端 `RemoteMemory` 的端口(40 篇第 8 节码表、4.4 节渲染、close 的期限与
 "当作已关")。契约用例在共享契约里;真服务上的用例在管理面与训练世界的测试里。"""
-import re
-import threading
 from types import SimpleNamespace
 
 import pytest

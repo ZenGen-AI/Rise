@@ -5,7 +5,6 @@ import grpc
 import pytest
 
 from simple_actio.memory import FileTupleStore
-from simple_actio.skills import Skill
 from controlplane.envelope import BigRef, Envelope, OwnerRef
 from controlplane.gitstore import GitStore
 from controlplane.lock import hold_file_lock
@@ -264,7 +263,6 @@ def test_a_pending_round_resumes_without_regenerating_persisted_episodes(store, 
 def test_a_crash_after_packaging_reruns_into_the_same_proposal_id(store, mem, monkeypatch):
     _skill(store, GOAL)
     real = store.write_product
-    calls = {"n": 0}
 
     def crash_on_executed(rel, env, message):
         if rel == agent_round_file("zengen-v1") and env.status == "executed":

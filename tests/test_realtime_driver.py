@@ -8,7 +8,7 @@ from simulator.realtime.backend_timeout import (
     RoleBackendRejectedError, RoleBackendUnavailableError,
     RoleMemoryFailureError, RoleMemoryUnavailableError,
 )
-from simulator.realtime.driver import SessionDriver, DriverEvent
+from simulator.realtime.driver import SessionDriver
 from simulator.realtime.session import SessionState
 
 

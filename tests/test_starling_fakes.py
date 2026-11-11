@@ -175,7 +175,7 @@ def test_leaving_the_with_block_ends_the_server_process():
         assert proc is not None and proc.poll() is None
     assert proc.poll() is not None
     with pytest.raises(AssertionError):
-        fake.base_url
+        _ = fake.base_url
     fake.stop()                                                      # 幂等
 
 

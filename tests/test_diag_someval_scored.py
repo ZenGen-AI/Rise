@@ -4,15 +4,14 @@ from __future__ import annotations
 import pytest
 
 from controlplane.gitstore import GitStore
-from diagnostic.datamodel import DiagnosticItem, DiagnosticTaxonomy, SampleOutcome, VariantFamily
+from diagnostic.datamodel import DiagnosticItem, DiagnosticTaxonomy, SampleOutcome
 from diagnostic.orchestrator import DiagnosticConfig, run_diagnostic
 from diagnostic.scorer import MockJudgeBackend
 from diagnostic.someval_adapter import (
     MockSoMEvalRunner,
-    run_static_items,
     run_static_items_scored,
 )
-from diagnostic.store_adapter import read_report, write_report
+from diagnostic.store_adapter import read_report
 from diagnostic.taxonomy_loader import ItemPool
 
 

@@ -13,7 +13,7 @@ from controlplane.gitstore import UNREADABLE_PRODUCT_ERRORS, GitStore
 from controlplane.observe import cost, trace
 from controlplane.paths import run_dir
 
-__all__ = ["cost", "trace", "collect_log_refs", "render_logs"]
+__all__ = ["collect_log_refs", "cost", "render_logs", "trace"]
 
 
 def _local_path(uri: str) -> Path | None:

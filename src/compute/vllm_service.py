@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from compute.client import JobSpec
 from compute.endpoint import is_clean_abs_path
 from compute.errors import ComputeError
-from compute.sizing import DEFAULT_OVERHEAD_GIB, MemorySizing, check_memory_fits
+from compute.sizing import DEFAULT_OVERHEAD_GIB
 
 SECRET_ENV = "VLLM_API_KEY"
 BASE_MODEL_NAME = "base"

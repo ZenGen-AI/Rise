@@ -78,7 +78,6 @@ def test_full_session_happy_path(server_address):
                 if turns[-1].speaker_slot == "a":
                     break  # 候选轮已确认，进入下一次候选提交
             elif kind == "end_session":
-                turns_final = msg
                 break
 
     # 排空剩余事件直到 end_session

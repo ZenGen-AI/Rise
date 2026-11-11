@@ -1,4 +1,4 @@
-from simulator.datamodel import Persona, Scenario, RoleSlot, TurnRecord
+from simulator.datamodel import Persona, Scenario, RoleSlot
 from simulator.backends import ScriptedBackend, TemplateGenerationBackend
 
 

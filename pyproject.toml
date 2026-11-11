@@ -11,7 +11,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "grpcio-tools>=1.84.0"]
+dev = ["pytest>=8.0", "grpcio-tools>=1.84.0", "ruff>=0.17"]
 memory = [
     "starling-client @ git+https://github.com/ruijieguo/starling@467f77d89320a1652d174370f2e6d796eb2a4daf#subdirectory=clients/python",
     "starling-memory[dashboard] @ git+https://github.com/ruijieguo/starling@467f77d89320a1652d174370f2e6d796eb2a4daf",
@@ -26,6 +26,53 @@ allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/controlplane", "src/simulator", "src/diagnostic", "src/mindtrainer", "src/inference_bridge", "src/recipestore", "src/trainplanner", "src/trainscheduler", "src/simple_actio", "src/mindagent", "src/factory", "src/compute"]
+
+[tool.ruff]
+line-length = 120
+extend-exclude = ["src/simulator/realtime/proto/*_pb2*.py"]   # grpcio-tools 生成的代码
+
+[tool.ruff.lint]
+# 规则集用 ruff 的默认值;下面这些是现有代码里的纯风格问题(首跑 707 条),不做全量改写,先关掉
+ignore = [
+    "I001",     # 导入顺序:现有分组按依赖层次排,不按字母
+    "C408",     # dict(...) 调用:测试里用关键字构造配置更好读
+    "BLE001",   # 捕获 Exception:都是有意兜底,旁边写了理由
+    "UP037",    # 带引号的注解:与 from __future__ import annotations 并存,无害
+    "SIM117",   # 嵌套 with:分开写是为了注释各层的退出顺序
+    "UP045",    # Optional[X] 写法:与 X | None 并存,无害
+    "UP007",    # Union[X, Y] 写法:同上
+    "UP035",    # typing.Callable:与 collections.abc 并存,无害
+    "UP017",    # timezone.utc:与 datetime.UTC 等价
+    "UP031",    # % 格式化:src/compute/job_tool.py 按 Python 3.8 写且 sha256 写死,其余几处是同一写法
+    "UP012",    # encode("utf-8"):显式写编码,无害
+    "RUF100",   # 多余的 noqa:注释点名了默认集之外的规则(E402、N802、BLE001 等),并带着理由文字
+    "RUF059",   # 解包后不用的变量:测试里按位置命名,读起来更清楚
+    "RUF023",   # __slots__ 不按字母排:按字段含义排
+    "RUF015",   # [...][0]:测试里取唯一一项,写法无害
+    "RUF012",   # 类属性可变默认值:测试替身里有意共享
+    "RUF007",   # zip 取相邻对:与 itertools.pairwise 等价
+    "PLR0402",  # import a.b as b:测试里为 monkeypatch 取模块,写法无害
+    "PLR1711",  # 结尾多余的 return:无害
+    "PLW1510",  # subprocess.run 不带 check:调用处自己看 returncode
+    "TRY004",   # 类型不对抛 ValueError:调用方按 ValueError 统一接
+    "S110",     # try-except-pass:都是收尾时不盖住原异常,旁边写了理由
+    "B017",     # pytest.raises(Exception):冻结 dataclass 的赋值,异常类型不是要测的东西
+    "B008",     # 默认参数里调 FactoryOptions():它是冻结 dataclass,共享一个实例无害
+    "SIM102",   # 可合并的嵌套 if:分开写是为了注释各自的条件
+    "SIM115",   # open 不用 with:锁文件句柄要跨上下文持有
+    "SIM401",   # if 换 dict.get:原写法带着注释说明非 list 的处理
+    "PYI034",   # __enter__ 的返回注解:现有写法无害
+    "ISC004",   # 列表里的隐式字符串拼接:一句提示分两行写,是有意的
+    "RET501",   # 显式 return None:无害
+]
+
+[tool.ruff.lint.per-file-ignores]
+# pytest 夹具从别的测试模块导入、再作同名参数,是夹具复用的正常写法
+"tests/**" = ["F811"]
+# 闭包在同一次循环里当场调用,不会晚绑定
+"src/mindagent/deployment.py" = ["B023"]
+"tests/test_memory_live.py" = ["B023"]
+"tests/test_realtime_session_resources.py" = ["B023"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

@@ -395,8 +395,6 @@ def _sombench_sha(eval_config) -> str:
 
 def _build_someval_evaluator(store, client, endpoint, eval_config, dataset_sha: str):
     """真实评估器:资产与版本在装配期校验一次,运行期每次仍从树里读。"""
-    from diagnostic.evaluator import make_diagnostic_evaluator
-    from diagnostic.scorer import MockJudgeBackend
     from factory.evaluation import _someval_evaluator
     from factory.sombench import check_sombench_version
     from factory.sombench_runner import SomevalRunner

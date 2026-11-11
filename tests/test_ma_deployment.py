@@ -81,7 +81,7 @@ def store(tmp_path):
     s.init()
     for sid in ("s1", "s2"):
         write_scenario(s, Scenario(sid, "bg", [RoleSlot("a", "a"), RoleSlot("b", "b")], "c", ["n"], PURPOSE))
-    for pid, p in _personas().items():
+    for p in _personas().values():
         write_persona(s, p)
     return s
 

@@ -54,9 +54,6 @@ def test_file_sha256_reads_in_chunks_correctly(tmp_path):
 
 # ---------------- 导入:分类表、题库、变体族、索引 ----------------
 
-import json
-from pathlib import Path
-
 from controlplane.gitstore import GitStore
 from diagnostic.assets import read_item_pool, read_taxonomy
 from factory.sombench import build_assets, import_assets, index_texts, sombench_parquet
@@ -164,7 +161,7 @@ def test_the_tree_contains_no_story_text(tmp_path):
 
 def test_the_import_is_idempotent(tmp_path):
     store = _store(tmp_path)
-    first = import_assets(store, ROWS, dataset_sha256=DIGEST, index_path=tmp_path / "i.idx")
+    import_assets(store, ROWS, dataset_sha256=DIGEST, index_path=tmp_path / "i.idx")
     before = len(store.list_products("control-plane/diagnostics"))
     import_assets(store, ROWS, dataset_sha256=DIGEST, index_path=tmp_path / "i.idx")
     assert len(store.list_products("control-plane/diagnostics")) == before

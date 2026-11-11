@@ -52,4 +52,4 @@ def test_the_cli_table_deliberately_lacks_the_admit_only_edge():
     import re
     from pathlib import Path
     ts = (Path(__file__).resolve().parents[1] / "cli/src/commands.ts").read_text(encoding="utf-8")
-    assert re.search(r'^\s*approved: \["effective"\],$', ts, re.M)
+    assert re.search(r'^\s*approved: \["effective"\],$', ts, re.MULTILINE)

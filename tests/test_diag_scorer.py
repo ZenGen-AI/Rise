@@ -1,7 +1,7 @@
 import pytest
 from diagnostic.datamodel import DiagnosticItem, ItemResult
 from diagnostic.scorer import (
-    RuleScorer, JudgeBackend, MockJudgeBackend, LLMJudgeScorer,
+    RuleScorer, MockJudgeBackend, LLMJudgeScorer,
     SelfEvalBiasError,
 )
 

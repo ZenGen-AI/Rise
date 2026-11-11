@@ -328,7 +328,7 @@ def test_client_run_job_timeout_stops_the_job_and_releases_lease(tmp_path: Path)
     ep = _endpoint(tmp_path, job_timeout_seconds=2.0, poll_seconds=0.3)
     cl = ComputeClient(ep, SshTransport("local", runner=local_runner))
     t = time.monotonic()
-    with pytest.raises(RemoteJobTimeoutError, match="exceeded 2") as exc:
+    with pytest.raises(RemoteJobTimeoutError, match="exceeded 2"):
         cl.run_job("job3", JobSpec(argv=("sleep", "600")))
     assert 2.0 < time.monotonic() - t < 4.0
     assert cl.lease_holder()[0] is None

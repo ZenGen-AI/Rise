@@ -52,9 +52,7 @@ def _canonical_value(value: object) -> dict[str, Any]:
         number = float(value)
         if not math.isfinite(number):
             raise ValueError(f"perturbation value {value!r} is not a finite number")
-        text = repr(number)
-        if text.endswith(".0"):
-            text = text[:-2]   # 整数值显示成 4,不是 4.0
+        text = repr(number).removesuffix(".0")   # 整数值显示成 4,不是 4.0
         return {"num": text}
     if isinstance(value, str):
         return {"str": value}

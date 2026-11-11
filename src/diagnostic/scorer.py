@@ -93,8 +93,6 @@ class MockJudgeBackend:
 class SelfEvalBiasError(Exception):
     """Raised when judge model is too close to candidate model (self-eval bias risk)."""
 
-    pass
-
 
 def _is_near_relative(judge_model_id: str, candidate_model_id: str) -> bool:
     """

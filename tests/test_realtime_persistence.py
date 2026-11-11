@@ -1,5 +1,4 @@
 import grpc
-import pytest
 
 from controlplane.gitstore import GitStore
 from controlplane.paths import episode_file

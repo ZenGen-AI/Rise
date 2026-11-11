@@ -1,5 +1,5 @@
 import pytest
-from diagnostic.datamodel import DimensionScore, RegressionFlags
+from diagnostic.datamodel import DimensionScore
 from diagnostic.benchmark_version import BenchmarkVersion
 from diagnostic.regression import (
     detect_regressions, detect_g_probe_failure, detect_reward_hacking,

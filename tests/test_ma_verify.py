@@ -4,7 +4,7 @@ from simple_actio.instance import instantiate
 from simple_actio.skills import Skill
 from simple_actio.trace import build_trace
 from inference_bridge import ScriptedBridge
-from mindagent.analysis import BehaviorFinding, analyze
+from mindagent.analysis import analyze
 from mindagent.errors import MindAgentDataError
 from mindagent.proposals import ProposalDraft, propose
 from mindagent.verify import METHOD, OVERFIT_NOTE, Verification, replay, verify

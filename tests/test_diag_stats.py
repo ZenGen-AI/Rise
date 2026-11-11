@@ -1,4 +1,3 @@
-import math
 from diagnostic.stats import (
     wilson_interval, pass_rate, variance, aggregate_pass_rates,
     difference_is_significant,
