@@ -49,7 +49,7 @@ _DETERMINISTIC = (
 # role_backend_rejected 是对手 API 明确拒绝了请求(4xx,408、425、429 除外),
 # role_memory_failure 是对手位记忆的确定性失败(同样的输入再来还是同样的结果)。编排器据此把训练记录写 failed;
 # factory 的策略上下文也据此原样放行(其余 RolloutFailedError 都译成延后),所以两边共用这一个集合。
-_DETERMINISTIC_ROLLOUT_REASONS = frozenset({"invalid_session", "role_backend_rejected", "role_memory_failure"})
+DETERMINISTIC_ROLLOUT_REASONS = frozenset({"invalid_session", "role_backend_rejected", "role_memory_failure"})
 
 # start_grpo_step -> {"sft": 源, "grpo_opd": 源}。用工厂而不是现成的源,因为续训时
 # Interact 源要从正确的 scenario 轮转位置起步(start_step),而这取决于续训点。
@@ -345,7 +345,7 @@ def run_training(
         # invalid_session(请求本身有问题)、role_backend_rejected(对手 API 明确拒绝)与 role_memory_failure
         # (对手位记忆确定性失败)都是重试无益的确定性拒绝:写 failed 保留。
         # 其余 reason(timeout 与 role_backend_timeout 用尽、role_backend_failure 分不出 T1/T2)不吞,run 保持 pending。
-        if exc.reason in _DETERMINISTIC_ROLLOUT_REASONS:
+        if exc.reason in DETERMINISTIC_ROLLOUT_REASONS:
             write_training_run(store, _failed(run, point, exc))
         raise
 
