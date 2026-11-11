@@ -118,10 +118,14 @@ def test_a_judge_without_a_run_id_is_rejected_before_any_call():
     assert judge.calls == []
 
 
-def test_missing_motivating_episodes_and_unknown_findings_are_data_errors():
+def test_missing_motivating_episodes_are_a_data_error():
     eps, findings, (draft,) = _setup()
     with pytest.raises(MindAgentDataError, match="motivating episodes not given"):
         verify(draft, findings, eps[:1], base_instance_factory=_factory(), personas=PERSONAS, scenarios=SCENARIOS)
+
+
+def test_a_draft_of_an_unknown_finding_is_a_data_error():
+    eps, findings, (draft,) = _setup()
     orphan = ProposalDraft("finding-ghost", draft.increments, draft.generator)
     with pytest.raises(MindAgentDataError, match="unknown finding"):
         verify(orphan, findings, eps, base_instance_factory=_factory(), personas=PERSONAS, scenarios=SCENARIOS)

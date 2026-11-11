@@ -122,6 +122,11 @@ def propose(
         raise ValueError(f"max_parse_retries must be an int >= 0, got {max_parse_retries!r}")
     if bridge is not None and not run_id:
         raise MindAgentDataError("propose with a bridge needs a non-empty run_id")
+    # 草案技能 id 由信号名推出(skill-candidate-<signal>):同一信号两条发现会撞 id。analyze 已按信号去重,
+    # 这里在调用桥接之前再查一次
+    signals = [f.signal for f in findings]
+    if len(set(signals)) != len(signals):
+        raise MindAgentDataError(f"findings must have distinct signals (draft skill ids derive from them), got {signals}")
     drafts: list[ProposalDraft] = []
     for i, finding in enumerate(findings, start=1):
         if bridge is None:

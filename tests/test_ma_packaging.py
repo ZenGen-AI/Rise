@@ -3,7 +3,7 @@ import pytest
 from controlplane.gitstore import GitStore
 from controlplane.paths import CONTROL_PLANE_ROOT, proposal_file
 from mindagent.analysis import BehaviorFinding
-from mindagent.packaging import PROPOSAL_TYPE, Thresholds, package, proposal_id_for, screen
+from mindagent.packaging import PROPOSAL_TYPE, Thresholds, package, proposal_id_for, screen, stale_proposals
 from mindagent.proposals import propose
 from mindagent.verify import Verification
 
@@ -104,3 +104,21 @@ def test_mismatched_lengths_are_rejected(store):
 def test_nothing_to_package_writes_nothing(store):
     assert package(store, ROUND, [], [], [], thresholds=TH, run_id="run-003", bound_model_id="zengen-v3") == []
     assert list((store.repo_root / f"{CONTROL_PLANE_ROOT}/skill_memory_proposals").iterdir()) == []
+
+
+def test_stale_proposals_reports_pending_ones_numbered_past_kept_and_skips_reviewed_ones(store):
+    assert stale_proposals(store, ROUND, 0) == []                      # 还没有提案目录
+    fs = [_finding("a_sig"), _finding("b_sig"), _finding("c_sig")]
+    envs = _pack(store, fs, [_v(1.0, 0.0)] * 3)
+    assert [e.id for e in envs] == [proposal_id_for(ROUND, n) for n in (1, 2, 3)]
+    reviewed = store.read_product(proposal_file(proposal_id_for(ROUND, 3)))
+    reviewed.status = "approved"
+    store.write_product(proposal_file(reviewed.id), reviewed, "review")
+    other = [_finding("other")]
+    package(store, f"{ROUND}0", other, propose(other), [_v(1.0, 0.0)], thresholds=TH,
+            run_id="run-003", bound_model_id="zengen-v3")              # 另一轮(id 以本轮 id 起头)的提案不算
+    assert store.exists(proposal_file(f"proposal-{ROUND}0-1"))
+    assert stale_proposals(store, ROUND, 3) == []
+    stale = stale_proposals(store, ROUND, 1)
+    assert [d["proposal_id"] for d in stale] == [proposal_id_for(ROUND, 2)]   # 3 号已审过,不报
+    assert "stale" in stale[0]["reason"]

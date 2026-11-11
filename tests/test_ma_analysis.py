@@ -103,6 +103,12 @@ def test_signals_can_be_restricted_and_unknown_names_are_ignored():
     assert [f.signal for f in found] == ["no_new_information"]
 
 
+def test_a_repeated_signal_name_gives_one_finding():
+    eps = [_episode(f"e{i}", [ANGRY]) for i in range(3)]
+    found = analyze(eps, min_support=1, min_ratio=0.0, skills=[GOAL], signals=("emotion_high", "emotion_high"))
+    assert [f.signal for f in found] == ["emotion_high"]
+
+
 def test_an_off_schema_trace_is_a_data_error():
     ep = _episode("e0", [ANGRY])
     ep.turns[1].activation_trace = {"selected": "skill-goal"}

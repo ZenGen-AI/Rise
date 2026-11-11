@@ -45,6 +45,15 @@ def test_each_finding_gets_its_own_draft_in_order_and_unknown_signals_get_a_gene
         "信号 custom_signal 为真时,先处理它指向的状况",)
 
 
+def test_two_findings_of_one_signal_are_refused_before_any_bridge_call():
+    bridge = ScriptedBridge([GOOD, GOOD])
+    with pytest.raises(MindAgentDataError, match="distinct signals"):
+        propose([_finding("emotion_high", "f1"), _finding("emotion_high", "f2")], bridge=bridge, run_id="run-003")
+    assert bridge.calls == []
+    with pytest.raises(MindAgentDataError, match="distinct signals"):
+        propose([_finding("emotion_high", "f1"), _finding("emotion_high", "f2")])
+
+
 def test_with_a_bridge_the_model_writes_the_policy_text(tmp_path):
     store = GitStore(str(tmp_path))
     store.init()

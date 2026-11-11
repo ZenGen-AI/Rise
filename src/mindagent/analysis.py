@@ -65,7 +65,10 @@ def agent_slot_of_episode(episode: Episode) -> str:
 
 def signal_turns(episode: Episode, signal: str, registry: SignalRegistry) -> list[int]:
     """该 episode 里 signal 在 agent 发言前为真的那些 agent 轮次的 turn_index。"""
-    slot = agent_slot_of_episode(episode)
+    return _signal_turns(episode, agent_slot_of_episode(episode), signal, registry)
+
+
+def _signal_turns(episode: Episode, slot: str, signal: str, registry: SignalRegistry) -> list[int]:
     fn = registry.get(signal)
     return [
         t.turn_index
@@ -95,16 +98,23 @@ def analyze(
     if isinstance(min_ratio, bool) or not isinstance(min_ratio, (int, float)) or not 0.0 <= min_ratio <= 1.0:
         raise ValueError(f"min_ratio must be a number in [0, 1], got {min_ratio!r}")
     reg = registry if registry is not None else default_registry()
-    names = [s for s in (signals if signals is not None else OPPONENT_SIGNALS) if s in reg]
+    # 去重:同名信号重复给出会产出 id 相同的两条发现
+    names = list(dict.fromkeys(s for s in (signals if signals is not None else OPPONENT_SIGNALS) if s in reg))
     targets = {s.id: referenced_signals(s.trigger) for s in skills}
 
-    counted = [e for e in episodes if any(t.speaker_slot == agent_slot_of_episode(e) for t in e.turns)]
+    counted: list[tuple[Episode, str]] = []
+    for e in episodes:
+        slot = agent_slot_of_episode(e)
+        if any(t.speaker_slot == slot for t in e.turns):
+            counted.append((e, slot))
+    if not counted:
+        return []
     findings: list[BehaviorFinding] = []
     for signal in sorted(names):
         affected: list[str] = []
-        for episode in counted:
+        for episode, slot in counted:
             turns_by_index = {t.turn_index: t for t in episode.turns}
-            for idx in signal_turns(episode, signal, reg):
+            for idx in _signal_turns(episode, slot, signal, reg):
                 trace = turns_by_index[idx].activation_trace
                 if trace is not None:
                     try:
@@ -121,8 +131,6 @@ def analyze(
                 if signal not in targets[selected]:
                     affected.append(episode.id)
                     break
-        if not counted:
-            continue
         support = len(affected)
         ratio = support / len(counted)
         if support < min_support or ratio < min_ratio:
