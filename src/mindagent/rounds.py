@@ -237,7 +237,7 @@ def _check_inputs(store: GitStore, config: AgentConfig) -> None:
 
 class _WorldLocks:
     """一次处理器调用里拿到的世界锁(设计三 4.2 节)。同一个世界只拿一次:flock 按打开的文件算,同一进程再开
-    一次去拿也会被拒。按 scenario_id 排序依次拿,被占就抛 DeferredError(原因只有锁文件路径)。
+    一次去拿也会被拒。按 scenario_id 排序依次拿,被占就抛 DeferredError(原因只报情境 id,不带锁文件的绝对路径)。
     情境 id 过不了世界 id 白名单时 hold_world 抛 ValueError,由调用方处理。"""
 
     def __init__(self, layout: MemoryLayout) -> None:
@@ -256,7 +256,7 @@ class _WorldLocks:
             try:
                 self._stack.enter_context(self._layout.hold_world(sid))
             except FileLockBusyError as exc:
-                raise DeferredError(f"world library locked: {exc}") from exc
+                raise DeferredError(f"world library locked: {sid}") from exc
             self._held.add(sid)
 
 
@@ -396,6 +396,7 @@ def make_start_round_handler(
                     raise RestoreFailedError(f"{what}: {type(exc).__name__}",
                                              point="mindagent.deployment.restore") from exc
                 drop_snapshot(memory_store, world, rec.snapshot_id, what)
+            _rmdir_if_empty(memory_layout.root / "snapshots" / env.id)
 
         return rollback
 
@@ -422,7 +423,6 @@ def make_start_round_handler(
             _close_round(store, _existing_or_new(store, model_id, run_id), reason, category="T3", point=point,
                          rollback=rollback if roll_back else None, run_id=run_id, retries=retries, record=True)
 
-        lib: LibraryState | None = None
         try:
             lib = load_library(store)
             payload = _binding_payload(model_id, version, run_id, ckpt, lib, config, generator, runtime)
@@ -501,11 +501,19 @@ def make_start_round_handler(
                     lambda: memory_store.fork_replay(scenario_id, snap_id, round_id=env.id))
             replay = replays[scenario_id]
             port = _verify_op(lambda: memory_store.open_replay(replay, agent_pid))   # 名字原样传(40 篇 AC-34)
-            inst = instantiate(
-                backend_factory(model_id, ckpt), skills=lib.skills + tuple(extra),
-                memory=port, episode_id=f"{env.id}/verify", interlocutors=interlocutors,
-                replay_read_only=True, library_version=lib.version, profile=profile,
-            )
+            try:
+                inst = instantiate(
+                    backend_factory(model_id, ckpt), skills=lib.skills + tuple(extra),
+                    memory=port, episode_id=f"{env.id}/verify", interlocutors=interlocutors,
+                    replay_read_only=True, library_version=lib.version, profile=profile,
+                )
+            except BaseException:
+                # 端口还没交给实例、不在 built 里:这里关上再原样上抛,关不上只记 warning,不盖掉原异常
+                try:
+                    port.close()
+                except Exception as exc:
+                    _log.warning("verify replay: closing a replay port failed: %s", type(exc).__name__)
+                raise
             built.append(inst)
             return inst
 

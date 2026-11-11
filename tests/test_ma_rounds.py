@@ -554,8 +554,9 @@ def test_a_round_that_cannot_lock_a_world_library_is_deferred(store, mem):
     # 修补第 1 轮:锁被占不判 T3,抛 DeferredError 让守护进程退避;拿锁在写任何东西之前
     from controlplane.deferred import DeferredError
     with hold_file_lock(mem.layout.world_lock("s1")):                 # 本轮每个情境世界都要锁(设计三 4.2 节)
-        with pytest.raises(DeferredError, match="world library locked: .*s1.lock"):
+        with pytest.raises(DeferredError) as info:
             _start(store, _handler(mem=mem))
+    assert str(info.value) == "world library locked: s1"              # 报情境 id,不带锁文件的绝对路径
     assert not store.exists(agent_round_file("zengen-v1"))
     assert not store.exists(failure_record_file("run-001", "agent-zengen-v1"))
     assert _start(store, _handler(mem=mem)).status == "executed"     # 锁放了,下一 tick 照常跑
@@ -721,7 +722,7 @@ def test_a_superseded_round_whose_world_library_is_locked_is_deferred(store, mem
     start, snap = _kept_copy(store, mem)
     _model(store, 2, "run-002")
     with hold_file_lock(mem.layout.world_lock("s1")):
-        with pytest.raises(DeferredError, match="s1.lock"):
+        with pytest.raises(DeferredError, match="^world library locked: s1$"):
             _start(store, _handler(mem=mem), model="zengen-v2")
     assert store.read_product(agent_round_file("zengen-v1")).status == "pending"
     assert snap.exists() and mem.store.digest("s1") != start
@@ -734,7 +735,7 @@ def test_a_rollback_locks_the_worlds_of_the_stale_round_not_only_the_current_con
     _model(store, 2, "run-002")
     (store.repo_root / run_dir("run-002")).mkdir(parents=True)
     with hold_file_lock(mem.layout.world_lock("s1")):
-        with pytest.raises(DeferredError, match="s1.lock"):
+        with pytest.raises(DeferredError, match="^world library locked: s1$"):
             _start(store, _handler(mem=mem, scenario_ids=("s2",)), model="zengen-v2")
     assert store.read_product(agent_round_file("zengen-v1")).status == "pending"
     env2 = _start(store, _handler(mem=mem, scenario_ids=("s2",)), model="zengen-v2")
@@ -1112,3 +1113,71 @@ def test_a_failure_while_tidying_up_verification_is_only_a_warning(store, mem, m
         env = _start(store, _handler(mem=mem))
     assert env.status == "executed" and env.payload["proposals"]
     assert "OSError" in caplog.text and "/secret" not in caplog.text
+
+
+# ---------------- 清理批次 B ----------------
+
+def test_an_unreadable_round_whose_model_is_also_unreadable_fails_without_a_failure_record(store, mem):
+    # 轮次与模型都读不出:run id 为空,fail_once 什么都不写,原因只留在轮次产物上
+    _corrupt_round(store)
+    (store.repo_root / model_file(1)).write_text(CONFLICTED, encoding="utf-8")
+    _start(store, _handler(mem=mem))
+    env = store.read_product(agent_round_file("zengen-v1"))
+    assert env.status == "failed" and env.payload["run_id"] == ""
+    assert env.payload["failure"] == {"category": "T3", "reason": "unreadable round product",
+                                      "point": "mindagent.rounds.read"}
+    runs = store.repo_root / CONTROL_PLANE_ROOT / "runs"
+    assert not any(p.name.startswith("failure-") for p in runs.rglob("*"))
+
+
+def test_a_rollback_whose_server_port_never_closes_fails_the_round_and_keeps_record_and_snapshot(store, mem):
+    start, snap = _kept_copy(store, mem)
+    leftover = mem.store.open("s1", "pb")                              # 服务端的对手端口一直没关
+    _model(store, 2, "run-002")
+    h = make_start_round_handler(
+        config=_cfg(), client_factory=_Factory(), backend_factory=lambda m, c: Echo(), personas_loader=_loader,
+        memory_store=mem.store, memory_layout=mem.layout, memory_runtime=STAND_IN_MEMORY_RUNTIME, close_wait_s=0)
+    _start(store, h)
+    env = store.read_product(agent_round_file("zengen-v1"))
+    assert env.status == "failed" and env.payload["failure"]["point"] == "mindagent.deployment.restore"
+    assert "memory ports still open after 0s" in env.payload["failure"]["reason"]
+    assert snap.exists() and mem.store.digest("s1") != start           # 库、记录与快照都留给人
+    leftover.close()
+
+
+def test_a_rollback_removes_the_empty_snapshot_directory_of_the_round(store, mem):
+    _, snap = _kept_copy(store, mem)
+    _model(store, 2, "run-002")
+    _start(store, _handler(mem=mem))
+    assert store.read_product(agent_round_file("zengen-v1")).status == "failed"
+    assert not snap.exists() and not (mem.layout.root / "snapshots" / ROUND).exists()
+
+
+def test_a_replay_port_is_closed_when_instantiate_raises(store, mem, monkeypatch):
+    from mindagent import rounds
+    real_open, real_instantiate = mem.store.open_replay, rounds.instantiate
+    closed = []
+
+    def open_replay(name, holder):
+        port = real_open(name, holder)
+        real_close = port.close
+
+        def close():
+            closed.append(name)
+            real_close()
+
+        port.close = close
+        return port
+
+    def instantiate(*a, replay_read_only=None, **kw):
+        if replay_read_only:
+            raise Crash()
+        return real_instantiate(*a, replay_read_only=replay_read_only, **kw)
+
+    monkeypatch.setattr(mem.store, "open_replay", open_replay)
+    monkeypatch.setattr(rounds, "instantiate", instantiate)
+    _skill(store, GOAL)
+    with pytest.raises(Crash):
+        _start(store, _handler(mem=mem))
+    assert closed                                                      # 端口没交给实例,也关上了
+    assert not (mem.layout.root / "snapshots" / ROUND).exists()        # 收尾照常放重放世界、删快照
