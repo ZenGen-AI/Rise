@@ -183,24 +183,24 @@
 </details>
 <!-- figure:end 21-diagnostic-architecture -->
 
-| 模块 | 职责 | 依赖 | 行数 | 状态 |
-|---|---|---|---|---|
-| `orchestrator` | `run_diagnostic(...)`:八步流水线,写报告 | 下列全部流水线模块 | 240 | [已落地] |
-| `taxonomy_loader` | `ItemPool`、按档选题、选出完整的变体族 | `datamodel` | 72 | [已落地] |
-| `someval_adapter` | `SoMEvalRunner` 协议与 mock,原始输出转 `ItemResult` | `stats` | 103 | [已落地] |
-| `dynamic_track` | 跑一道动态题的 episode,带关键词早停 | `simulator.runner` | 75 | [已落地] |
-| `scorer` | 规则打分器、judge 协议与 mock、自评偏差守卫 | `stats` | 165 | [已落地] |
-| `error_classifier` | 变体族错误归类、动态一致性、按 L2 汇总分布 | `datamodel` | 108 | [已落地] |
-| `aggregator` | L3、L2、L1 聚合与两轨融合 | `stats` | 89 | [已落地] |
-| `regression` | 退化判定;G 组探针与 reward hacking 检测 | `stats`、`benchmark_version` | 105 | [已落地] |
-| `report`、`store_adapter` | 组装报告;信封读写 | `controlplane` | 38、30 | [已落地] |
-| `stats` | Wilson 区间、通过率、总体方差、区间相交 | 标准库 `math` | 98 | [已落地] |
-| `benchmark_version` | 五段式版本记录与可比判定 | 无 | 52 | [已落地] |
-| `isolation` | 训练情境与题库的污染判定与过滤(词元相似度,对中文无效,无调用方) | 无 | 137 | [已落地] |
-| `contamination` | 污染索引:SoMBench 文本的 20 字滑窗哈希集合的构建、读取、命中计数;训练数据的准入检查 | 标准库 | 120 | [已落地] |
-| `evaluator`、`assets` | 接入调和循环;分类表与题库的信封读写 | 编排器、`controlplane.evidence` | 111、74 | [已落地] |
-| 真实运行器与导入命令 | 起服务、跑 SoMEval 子进程、解析结果;把 SoMBench 导入成分类表、题库与污染索引 | `compute`、`diagnostic`,在 `factory` 里装配 | 393、209、135 | [已落地] |
-| `compute.sizing` | 起服务前的显存核算(权重体积、非权重开销、编译峰值) | `compute.errors` | 88 | [已落地] |
+| 模块 | 职责 | 依赖 | 状态 |
+|---|---|---|---|
+| `orchestrator` | `run_diagnostic(...)`:八步流水线,写报告 | 下列全部流水线模块 | [已落地] |
+| `taxonomy_loader` | `ItemPool`、按档选题、选出完整的变体族 | `datamodel` | [已落地] |
+| `someval_adapter` | `SoMEvalRunner` 协议与 mock,原始输出转 `ItemResult` | `stats` | [已落地] |
+| `dynamic_track` | 跑一道动态题的 episode,带关键词早停 | `simulator.runner` | [已落地] |
+| `scorer` | 规则打分器、judge 协议与 mock、自评偏差守卫 | `stats` | [已落地] |
+| `error_classifier` | 变体族错误归类、动态一致性、按 L2 汇总分布 | `datamodel` | [已落地] |
+| `aggregator` | L3、L2、L1 聚合与两轨融合 | `stats` | [已落地] |
+| `regression` | 退化判定;G 组探针与 reward hacking 检测 | `stats`、`benchmark_version` | [已落地] |
+| `report`、`store_adapter` | 组装报告;信封读写 | `controlplane` | [已落地] |
+| `stats` | Wilson 区间、通过率、总体方差、区间相交 | 标准库 `math` | [已落地] |
+| `benchmark_version` | 五段式版本记录与可比判定 | 无 | [已落地] |
+| `isolation` | 训练情境与题库的污染判定与过滤(词元相似度,对中文无效,无调用方) | 无 | [已落地] |
+| `contamination` | 污染索引:SoMBench 文本的 20 字滑窗哈希集合的构建、读取、命中计数;训练数据的准入检查 | 标准库 | [已落地] |
+| `evaluator`、`assets` | 接入调和循环;分类表与题库的信封读写 | 编排器、`controlplane.evidence` | [已落地] |
+| 真实运行器与导入命令 | 起服务、跑 SoMEval 子进程、解析结果;把 SoMBench 导入成分类表、题库与污染索引 | `compute`、`diagnostic`,在 `factory` 里装配 | [已落地] |
+| `compute.sizing` | 起服务前的显存核算(权重体积、非权重开销、编译峰值) | `compute.errors` | [已落地] |
 
 依赖方向规则:
 

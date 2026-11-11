@@ -199,26 +199,26 @@ SocialSimulator 的仿真部分是工厂的"社会情境发生器":它把情境�
 
 读图说明。中间一层是共享核心:数据模型、后端协议与运行器。批量模块生成情境与人格,对每条 rollout 调一次运行器,经存储适配落盘。实时模块的会话驱动器在后台线程调用同一个 `run_episode`,客户端位用 `ClientDrivenBackend`,对手位用套了期限的服务端后端。客户端运行在调用方进程,经 gRPC 双向流与服务端通信,即受限直连的接口①与接口②。
 
-| 模块 | 职责 | 依赖 | 行数 | 状态 |
-|---|---|---|---|---|
-| `src/simulator/datamodel.py` | `Persona`、`Scenario`、`RoleSlot`、`RoleBinding`、`RoleAssignment`、`TurnRecord`、`Episode` | 无 | 208 | [已落地] |
-| `src/simulator/backends.py` | `ModelBackend`、`GenerationBackend` 协议;`ScriptedBackend`、`TemplateGenerationBackend` | datamodel | 102 | [已落地] |
-| `src/simulator/runner.py` | `run_episode`,`RoleSlotMismatchError` | datamodel、backends | 99 | [已落地] |
-| `src/simulator/generators.py` | `generate_*` 自动生成路,`load_*` 外部配置路 | backends | 29 | [已落地] |
-| `src/simulator/store_adapter.py` | 情境、人格、Episode 的信封读写 | controlplane | 77 | [已落地] |
-| `src/simulator/dataset.py` | 清单、摘要、分组键、`produce_grouped_dataset` | runner、store_adapter、controlplane | 197 | [已落地] |
-| `src/simulator/stubs.py` | ControlPlane 骨架桩:情境池、候选、诊断占位 | generators、controlplane | 86 | [已落地] |
-| `src/simulator/realtime/session.py` | 会话状态与迁移表 | 无 | 39 | [已落地] |
-| `src/simulator/realtime/backend.py` | `ClientDrivenBackend`,`TurnTimeoutError` | datamodel | 62 | [已落地] |
-| `src/simulator/realtime/backend_timeout.py` | `TimeoutBackend`,`RoleBackendTimeoutError`;`TimeoutBackend` 构造时收会话资源,每次调用在调用方线程里先登记进它、后端线程结束时移出;记忆失败的两个异常基类 RoleMemoryUnavailableError(T1)与 RoleMemoryFailureError(T2) | backends、resources | 58 | [已落地] |
-| `src/simulator/realtime/resources.py` | 会话信息 SessionInfo、会话资源 SessionResources 与异常 SessionClosingError:资源持有未套期限的 `backends`、在途线程计数与收尾动作,提供 `quiesce`、`join`、`close` | backends | — | [已落地] |
-| `src/simulator/realtime/driver.py` | `SessionDriver`:后台线程、outbox 队列、收尾分类,含两个记忆失败分支 | runner、session、两种实时后端、backend_timeout | 162 | [已落地] |
-| `src/simulator/realtime/validation.py` | `validate_create_session` 纯函数校验;`validate_episode_id` 校验 `episode_id` 白名单 | datamodel | 52 | [已落地] |
-| `src/simulator/realtime/codec.py` | 数据模型与 protobuf 互转 | proto | 84 | [已落地] |
-| `src/simulator/realtime/servicer.py` | `EnvironmentServicer.Interact` 主循环;准入检查、给资源的后端套 `TimeoutBackend`、终态收尾、滞留表 | driver、validation、codec、resources | 339 | [已落地] |
-| `src/simulator/realtime/server.py` | `create_server` 组装,不启动;`BackendsFactory` 收会话信息、返回会话资源 | servicer | 60 | [已落地] |
-| `src/simulator/realtime/client.py` | `EnvironmentServiceClient` 同步客户端;构造参数 `message_timeout_s` 给 `_next_msg` 加相邻两条消息之间的等待上限,`create_session` 加可选 `episode_id` | codec、proto | 242 | [已落地] |
-| `src/simulator/realtime/proto/realtime_env.proto` | 协议定义,生成物由 `scripts/gen_realtime_proto.sh` 产出并入库;`CreateSession` 带可选 `episode_id` | protobuf | 102 | [已落地] |
+| 模块 | 职责 | 依赖 | 状态 |
+|---|---|---|---|
+| `src/simulator/datamodel.py` | `Persona`、`Scenario`、`RoleSlot`、`RoleBinding`、`RoleAssignment`、`TurnRecord`、`Episode` | 无 | [已落地] |
+| `src/simulator/backends.py` | `ModelBackend`、`GenerationBackend` 协议;`ScriptedBackend`、`TemplateGenerationBackend` | datamodel | [已落地] |
+| `src/simulator/runner.py` | `run_episode`,`RoleSlotMismatchError` | datamodel、backends | [已落地] |
+| `src/simulator/generators.py` | `generate_*` 自动生成路,`load_*` 外部配置路 | backends | [已落地] |
+| `src/simulator/store_adapter.py` | 情境、人格、Episode 的信封读写 | controlplane | [已落地] |
+| `src/simulator/dataset.py` | 清单、摘要、分组键、`produce_grouped_dataset` | runner、store_adapter、controlplane | [已落地] |
+| `src/simulator/stubs.py` | ControlPlane 骨架桩:情境池、候选、诊断占位 | generators、controlplane | [已落地] |
+| `src/simulator/realtime/session.py` | 会话状态与迁移表 | 无 | [已落地] |
+| `src/simulator/realtime/backend.py` | `ClientDrivenBackend`,`TurnTimeoutError` | datamodel | [已落地] |
+| `src/simulator/realtime/backend_timeout.py` | `TimeoutBackend`,`RoleBackendTimeoutError`;`TimeoutBackend` 构造时收会话资源,每次调用在调用方线程里先登记进它、后端线程结束时移出;记忆失败的两个异常基类 RoleMemoryUnavailableError(T1)与 RoleMemoryFailureError(T2) | backends、resources | [已落地] |
+| `src/simulator/realtime/resources.py` | 会话信息 SessionInfo、会话资源 SessionResources 与异常 SessionClosingError:资源持有未套期限的 `backends`、在途线程计数与收尾动作,提供 `quiesce`、`join`、`close` | backends | [已落地] |
+| `src/simulator/realtime/driver.py` | `SessionDriver`:后台线程、outbox 队列、收尾分类,含两个记忆失败分支 | runner、session、两种实时后端、backend_timeout | [已落地] |
+| `src/simulator/realtime/validation.py` | `validate_create_session` 纯函数校验;`validate_episode_id` 校验 `episode_id` 白名单 | datamodel | [已落地] |
+| `src/simulator/realtime/codec.py` | 数据模型与 protobuf 互转 | proto | [已落地] |
+| `src/simulator/realtime/servicer.py` | `EnvironmentServicer.Interact` 主循环;准入检查、给资源的后端套 `TimeoutBackend`、终态收尾、滞留表 | driver、validation、codec、resources | [已落地] |
+| `src/simulator/realtime/server.py` | `create_server` 组装,不启动;`BackendsFactory` 收会话信息、返回会话资源 | servicer | [已落地] |
+| `src/simulator/realtime/client.py` | `EnvironmentServiceClient` 同步客户端;构造参数 `message_timeout_s` 给 `_next_msg` 加相邻两条消息之间的等待上限,`create_session` 加可选 `episode_id` | codec、proto | [已落地] |
+| `src/simulator/realtime/proto/realtime_env.proto` | 协议定义,生成物由 `scripts/gen_realtime_proto.sh` 产出并入库;`CreateSession` 带可选 `episode_id` | protobuf | [已落地] |
 
 依赖方向规则。
 
