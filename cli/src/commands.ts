@@ -137,7 +137,9 @@ function summarizeDiagnostic(report: Envelope | null, rel: string): string[] {
   ];
   if (mock) {
     lines.push("  [MOCK BACKENDS] scores come from mock SoMEval/judge backends — they show the pipeline ran, not model quality");
-  } else if ("backends" in p && p.backends !== "real") {
+  } else if (!("backends" in p)) {
+    lines.push("  backends: MISSING — the loop grades this report as stub");
+  } else if (p.backends !== "real") {
     lines.push(`  backends: UNREADABLE (expected "mock" or "real", got ${JSON.stringify(p.backends)})`);
   }
   // 载荷键 ↔ Python diagnostic/datamodel.py 的 DiagnosticReport.to_dict
@@ -309,15 +311,16 @@ export function reject(repoRoot: string, id: string, reason: string): void {
 export function confirm(repoRoot: string, id: string): void {
   // 闭环集成设计 §3.4：调度器写的指令先是 awaiting_confirmation，人确认后才变 pending、被派发
   // 与 findGateProduct 同一规则：收集全部命中，多处命中报歧义，不取第一个
-  const hits = lsFiles(repoRoot, DIRECTIVE_PATTERN).filter((r) => readProduct(repoRoot, r).id === id);
+  const hits = lsFiles(repoRoot, DIRECTIVE_PATTERN)
+    .map((rel) => ({ rel, env: readProduct(repoRoot, rel) }))
+    .filter((hit) => hit.env.id === id);
   if (hits.length === 0) {
     throw new Error(`directive ${id} not found`);
   }
   if (hits.length > 1) {
-    throw new Error(`directive ${id} is ambiguous: ${hits.join(", ")}`);
+    throw new Error(`directive ${id} is ambiguous: ${hits.map((hit) => hit.rel).join(", ")}`);
   }
-  const rel = hits[0];
-  const env = readProduct(repoRoot, rel);
+  const { rel, env } = hits[0];
   if (!(NONREVIEW_TRANSITIONS[env.status] ?? []).includes("pending")) {
     throw new Error(`confirm: ${id} is ${env.status}; only an awaiting_confirmation directive can be confirmed`);
   }
@@ -326,15 +329,12 @@ export function confirm(repoRoot: string, id: string): void {
 }
 
 export function status(repoRoot: string): string {
-  const review: string[] = [];
-  for (const { kind, pattern } of GATE_PATTERNS) {
-    for (const rel of lsFiles(repoRoot, pattern)) {
-      const env = readProduct(repoRoot, rel);
-      if (env.status === "pending_review") {
-        review.push(`  ${env.id} [${env.status}] ${kind}`);
-      }
-    }
-  }
+  const review = GATE_PATTERNS.flatMap(({ kind, pattern }) =>
+    lsFiles(repoRoot, pattern)
+      .map((rel) => readProduct(repoRoot, rel))
+      .filter((env) => env.status === "pending_review")
+      .map((env) => `  ${env.id} [${env.status}] ${kind}`),
+  );
   const confirmation = lsFiles(repoRoot, DIRECTIVE_PATTERN)
     .map((rel) => readProduct(repoRoot, rel))
     .filter((env) => env.status === "awaiting_confirmation")

@@ -193,6 +193,24 @@ describe("review prints evidence per kind", () => {
     expect(out).toContain("verification: UNREADABLE");
   });
 
+  it("proposal: finding.episode_refs that is not an array says episodes=UNREADABLE", () => {
+    seedProposal(root, "pending_review", {
+      ...PROPOSAL_PAYLOAD, finding: { ...PROPOSAL_PAYLOAD.finding, episode_refs: "e1,e2" },
+    });
+    expect(review(root, PROPOSAL_ID)).toContain(
+      "finding: f-1 pattern=emotion_high ignored support=6 ratio=0.83 episodes=UNREADABLE",
+    );
+  });
+
+  it("proposal: verification.episodes that is not an array says episodes=UNREADABLE", () => {
+    seedProposal(root, "pending_review", {
+      ...PROPOSAL_PAYLOAD, verification: { ...PROPOSAL_PAYLOAD.verification, episodes: 2 },
+    });
+    expect(review(root, PROPOSAL_ID)).toContain(
+      "verification: method=replay_behavior fired_on_motivating=0.90 fired_elsewhere=0.00 episodes=UNREADABLE",
+    );
+  });
+
   it("proposal: an empty increments list says none", () => {
     seedProposal(root, "pending_review", { ...PROPOSAL_PAYLOAD, increments: [] });
     expect(review(root, PROPOSAL_ID)).toContain("increments: none");
@@ -219,6 +237,16 @@ describe("review prints evidence per kind", () => {
     const out = review(root, "cand-run-001");
     expect(out).not.toContain("MOCK");
     expect(out).not.toContain("backends: UNREADABLE");
+  });
+
+  it("candidate: a report without the backends key says it grades as stub", () => {
+    seedCandidate(root, "run-001", "pending_review");
+    seed(root, "control-plane/runs/run-001/diagnostic_report.yaml", envelope("diag-run-001", "diagnostic_report", "executed", {
+      dimension_scores: [], regression_flags: { flags: [] },
+    }));
+    const out = review(root, "cand-run-001");
+    expect(out).toContain("backends: MISSING — the loop grades this report as stub");
+    expect(out).not.toContain("MOCK");
   });
 
   it("candidate: an unknown backends value says UNREADABLE", () => {
