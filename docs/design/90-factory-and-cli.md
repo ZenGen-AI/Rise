@@ -1052,7 +1052,7 @@ factory 是第九个工作包,前八个全部落地后才施工。前置关系:1
 | 处理器构造 | 六个构造器、证据开关单一来源、Interact 流超时 | 罐头后端 | `tests/test_factory_handlers.py` | 93 [已落地] |
 | 端到端 | 完整闭环、R5、规划等配方入库门、R18、R19、MindAgent 链 | `HeuristicBackend`、罐头后端 | `tests/test_factory_e2e_loop.py` | 10 [已落地] |
 | 跨工作包 | 共享用例表、分层规则、run 编号数值序 | 无 | `tests/test_factory_cross_plan.py`、`tests/test_factory_run_order.py` | 32、3 [已落地] |
-| `--interact` 装配 | 十一条拒绝项:第 3、9 条合用一组测试,第 10 条没有装配测试(钉住的是派发器的 `ValueError`),其余八条各有测试;打开后派发器带上实时客户端与策略工厂;真推理的 rollout 失败走延后通道、一直失败升 T3;不打开时 interact 指令的失败原因点名开关;收尾时服务停不下来判 T2;外部 API 对手超时或回 503 一次后整条重跑、一直回 503 时指令保持 `pending`、回 404 判 `failed`(T2);训练位策略的 vLLM 回 404 判 `failed`(T2)、回 408、425、429、503 仍延后;scripted 对手位没有台词时派发期判 T2;`opponent` 段在装配之后改了,下一条指令用新值,读不到或写坏了判 T2 且不带地址 | 假 serve、本机 HTTP 桩 | `tests/test_factory_interact_wire.py` | 118 [已落地] |
+| `--interact` 装配 | 十一条拒绝项:第 3、9 条合用一组测试,第 10 条没有装配测试(钉住的是派发器的 `ValueError`),其余八条各有测试;打开后派发器带上实时客户端与策略工厂;真推理的 rollout 失败走延后通道、一直失败升 T3;不打开时 interact 指令的失败原因点名开关;收尾时服务停不下来判 T2;外部 API 对手超时或回 503 一次后整条重跑、一直回 503 时指令保持 `pending`、回 404 判 `failed`(T2);训练位策略的 vLLM 回 404 判 `failed`(T2)、回 408、425、429、503 仍延后;scripted 对手位没有台词时派发期判 T2;`opponent` 段在装配之后改了,下一条指令用新值,读不到或写坏了判 T2 且不带地址,别的段落写坏了不影响 | 假 serve、本机 HTTP 桩 | `tests/test_factory_interact_wire.py` | 119 [已落地] |
 | `--interact` 端到端 | `factory reconcile --once --interact` 走到候选 `pending_review`,episode 都在产物树里 | 假 vLLM(本地 HTTP 回固定文本)、mock 执行器 | `tests/test_factory_interact_e2e.py` | 2 [已落地] |
 | 记忆配置读取与安装来源 | 文件不存在、权限过宽、路径在仓库里、缺键或多余键、地址带 userinfo;`url` 与 `token_file` 只给一个、地址不是回环、`world_prefix` 不合格式;`OPENAI_API_KEY` 为空、editable 安装、没有 git 提交、两行依赖不同提交、`.owner` 属于别的仓库,各自退出码 2、不回显取值;`.owner` 先写临时文件再以硬链接发布,并发首次使用只有一个成功,读到 0 字节的旧 `.owner` 拒绝 | 临时目录、临时仓库、假的安装元数据 | `tests/test_factory_memory_config.py` | 89 [已落地] |
 | 记忆后端选择与持锁核对 | 没设变量走替身并只记一次启动日志,不导入客户端;只开 `plan`、`nominate`、`track` 不读变量;`--interact`、`agent`、`admit` 任一在场就读且坏配置退出码 2;旧布局拒绝;装配顺序 ① 至 ⑦ 与失败时先关会话再停服务;持锁之后的部署世界核对(`run` 经 `on_locked`,`reconcile` 在锁内),创建标记在而世界不在、`root` 标签不符、设置不同各退出码 2;服务会话守卫停守护进程;拉起模式的部署路取推出的各层(缺省配置等提交 96 秒)、替身保持 5 秒、同开取训练位一层 | 真 `starling-serve` 子进程、假抽取与嵌入端点、FileTupleStore、临时仓库 | `tests/test_factory_memory_wiring.py` | 61 [已落地] |
@@ -1096,7 +1096,7 @@ factory 是第九个工作包,前八个全部落地后才施工。前置关系:1
 |---|---|---|
 | 闭环模式的诊断恒为 mock 证据 | 默认入口下闭环永远不会自己转 | 开发入口打开 `--allow-mock-evidence` |
 | mock 诊断对每个候选打同样的分 | 首轮之后增益恒为 0,不再提名新配方,退化标记不会出现 | 首次闭环人工登记更低分的基线 |
-| 装配是一次性的 | 改 `evaluator.yaml`、`backends.yaml`、`agent.yaml` 要重启 | `scheduler.yaml` 与模板每次调用重读;`training_defaults.yaml` 的 `opponent` 段在每条 interact 指令进入策略上下文时重读(装配期的检查仍是启动门槛) |
+| 装配是一次性的 | 改 `evaluator.yaml`、`backends.yaml`、`agent.yaml` 要重启 | `scheduler.yaml` 与模板每次调用重读;`training_defaults.yaml` 的 `opponent` 段在每条 interact 指令进入策略上下文时重读,只解析这一段,别的段落写坏了不让有 external_api 对手位的 run 判 T2(装配期的整份检查仍是启动门槛) |
 | 外部推理与部署会话同步执行 | 调用期间调和循环不转,审核被饿住 | 记录调用时长,必要时改异步 |
 | 瞬态异常让进程退出 | 需要外部监督者,但没有任何工作包交付监督脚本、重启退避或崩溃计数;规划与轮次处理器在非桥接瞬态异常下没有重入次数上限,只有 MindTrainer 的续训次数有上限 | 调和循环无状态,重启从树续接 |
 | `logs` 看不到成功调用的桥接日志 | 只能看到失败记录登记的引用 | 直接看 `.rise/logs/<run>/` |

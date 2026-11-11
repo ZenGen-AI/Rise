@@ -1549,6 +1549,24 @@ def test_an_opponent_section_that_breaks_after_assembly_fails_the_directive_with
     assert fake_serve.calls == []                                        # 在占租约之前就判了
 
 
+def test_a_broken_unrelated_section_does_not_fail_a_run_with_an_external_opponent(world, tmp_path, stub, fake_serve):
+    """派发期只解析 opponent 段:training_defaults.yaml 里别的段落写坏了,external_api 的 run 照常跑完。"""
+    write_config(world, training_defaults_file(), "training-defaults",
+                 _interact_defaults(base_url=stub.base_url, model="ext-model", api_key_env=OPP_KEY_ENV),
+                 "test: first opponent")
+    _write_directive(world, bindings=_external_opponent_binding())
+
+    def break_it():
+        payload = _interact_defaults(base_url=stub.base_url, model="ext-model", api_key_env=OPP_KEY_ENV)
+        payload["training_config"]["sft_steps"] = "many"
+        payload["interact"]["max_turns_per_episode"] = 0
+        write_config(world, training_defaults_file(), "training-defaults", payload, "test: broken unrelated sections")
+
+    _reconcile_after(world, tmp_path, break_it)
+    assert _read(world, "directive").status == "executed"
+    assert stub.models() == {BASE_MODEL_NAME, "ext-model"}
+
+
 def test_a_broken_opponent_section_does_not_fail_a_run_that_has_no_external_opponent(
         world, tmp_path, stub, fake_serve):
     """opponent 段只在本 run 有 external_api 对手位时才读:不相干的 run 不会被它拖垮。"""

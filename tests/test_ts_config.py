@@ -15,6 +15,7 @@ from trainscheduler.config import (
     check_perturbable_key,
     default_training_defaults_payload,
     install_default_configs,
+    load_opponent_section,
     load_scheduler_config,
     load_training_defaults,
     parse_scheduler_config,
@@ -469,6 +470,45 @@ def test_opponent_section_must_be_a_mapping(bad):
     raw["opponent"] = bad
     with pytest.raises(SchedulerConfigError, match="opponent must be a mapping"):
         parse_training_defaults(raw)
+
+
+def _write_defaults(store, payload) -> None:
+    write_config(store, training_defaults_file(), "training-defaults", payload, "test: defaults")
+
+
+def test_load_opponent_section_reads_only_that_section(tmp_path):
+    """其余段落写坏了不影响 opponent 段:整份校验(load_training_defaults)照样拦它们。"""
+    store = make_store(tmp_path)
+    raw = default_training_defaults_payload()
+    raw["opponent"] = _opponent()
+    raw["training_config"]["sft_steps"] = "many"
+    raw["interact"] = {"broken": True}
+    raw["unrelated"] = 1
+    _write_defaults(store, raw)
+    assert load_opponent_section(store) == _opponent()
+    with pytest.raises(SchedulerConfigError):
+        load_training_defaults(store)
+
+
+def test_load_opponent_section_is_none_without_the_section(tmp_path):
+    store = make_store(tmp_path)
+    _write_defaults(store, default_training_defaults_payload())
+    assert load_opponent_section(store) is None
+
+
+def test_load_opponent_section_parses_the_section_strictly(tmp_path):
+    store = make_store(tmp_path)
+    raw = default_training_defaults_payload()
+    raw["opponent"] = {**_opponent(), "extra": 1}
+    _write_defaults(store, raw)
+    with pytest.raises(SchedulerConfigError, match="unknown key"):
+        load_opponent_section(store)
+
+
+def test_load_opponent_section_needs_the_file(tmp_path):
+    store = make_store(tmp_path)
+    with pytest.raises(SchedulerConfigError, match="not found"):
+        load_opponent_section(store)
 
 
 def test_a_rejected_api_key_env_never_echoes_its_value():

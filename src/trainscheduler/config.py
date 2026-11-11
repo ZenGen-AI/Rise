@@ -502,6 +502,20 @@ def load_training_defaults(store: GitStore) -> TrainingDefaults:
     return parse_training_defaults(read_config(store, rel))
 
 
+def load_opponent_section(store: GitStore) -> dict | None:
+    """只读 training_defaults.yaml 的 opponent 段并严格解析它;没有这一段返回 None。
+
+    给派发期每次重读用:其余段落写坏了不影响这里(它们由 load_training_defaults 在装配期与调度时校验)。
+    文件不在、不是 config 信封、载荷不是映射,照样抛错:这些情形下 opponent 段也读不出。"""
+    rel = training_defaults_file()
+    if not store.exists(rel):
+        raise SchedulerConfigError(f"{rel} not found")
+    raw = read_config(store, rel)
+    if not isinstance(raw, dict):
+        raise SchedulerConfigError(f"training defaults must be a mapping, got {type(raw).__name__}")
+    return _parse_opponent(raw["opponent"]) if "opponent" in raw else None
+
+
 def default_training_defaults_payload() -> dict:
     return {"training_config": copy.deepcopy(DEFAULT_TRAINING_CONFIG), "data_spec": copy.deepcopy(DEFAULT_DATA_SPEC)}
 

@@ -78,7 +78,7 @@ from mindtrainer.trajectory_source import PolicyForRollout, RolloutFailedError
 from simulator.backends import ModelBackend, ScriptedBackend
 from simulator.datamodel import RoleBinding, Scenario
 from simulator.store_adapter import read_scenario
-from trainscheduler.config import load_training_defaults
+from trainscheduler.config import load_opponent_section
 
 if TYPE_CHECKING:       # 只给类型注解用:运行时不导入 factory.memory_runtime,没装 Starling 时本模块照常可用
     from factory.memory_runtime import TrainingWorlds
@@ -193,9 +193,10 @@ def _opponent_section(store: GitStore, run_id: str) -> Mapping[str, str]:
 
     装配期的检查(interact_checks)是启动门槛,保留不变;这里是派发期的第二道:文件被删、写坏、
     opponent 段被删、地址被改成带 user:password@ 的,都在占租约之前判 T2。原因只报段名与异常类型,不带异常文字:
-    解析错误的文字、地址都可能带着远端地址。读失败一律译成 T2,磁盘瞬态错误也在内:重试这条指令前先要有人看一眼配置。"""
+    解析错误的文字、地址都可能带着远端地址。读失败一律译成 T2,磁盘瞬态错误也在内:重试这条指令前先要有人看一眼配置。
+    只解析 opponent 段:其余段落写坏了不拖垮这里,它们由装配期与调度时的整份校验把关。"""
     try:
-        section = load_training_defaults(store).opponent
+        section = load_opponent_section(store)
     except Exception as exc:
         raise DirectiveFailedError(
             f"directive {run_id}: the opponent section of training_defaults.yaml cannot be read ({type(exc).__name__})"
