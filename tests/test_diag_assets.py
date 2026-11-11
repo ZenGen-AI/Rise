@@ -2,6 +2,7 @@
 import shutil
 
 import pytest
+import yaml
 
 from controlplane.envelope import Envelope, OwnerRef
 from controlplane.evidence import diagnostic_grade
@@ -28,7 +29,7 @@ from diagnostic.orchestrator import DiagnosticConfig, run_diagnostic
 from diagnostic.paths import item_pool_file, taxonomy_file
 from diagnostic.scorer import MockJudgeBackend
 from diagnostic.someval_adapter import MockSoMEvalRunner
-from diagnostic.store_adapter import BACKENDS_KEY, BACKENDS_VALUES, read_report, write_report
+from diagnostic.store_adapter import read_report, write_report
 from diagnostic.taxonomy_loader import ItemPool
 from simulator.stubs import diagnostic_evaluator_stub
 
@@ -124,8 +125,12 @@ def test_the_backends_marker_lands_in_the_same_commit_as_the_report(store):
     assert len(store._git("log", "--format=%s").splitlines()) == 1
 
 
-def test_the_marker_key_and_values_are_fixed():
-    assert (BACKENDS_KEY, BACKENDS_VALUES) == ("backends", ("mock", "real"))
+@pytest.mark.parametrize("backends", ["mock", "real"])
+def test_the_written_report_carries_the_marker_under_the_key_the_readers_use(store, backends):
+    """controlplane.evidence 与 cli/src/commands.ts 各自写死键名 backends:钉落盘的报告,而不是常量。"""
+    write_report(store, "run-1", _report_obj(), backends=backends)
+    on_disk = yaml.safe_load((store.repo_root / diagnostic_report_file("run-1")).read_text())
+    assert on_disk["payload"]["backends"] == backends
 
 
 @pytest.mark.parametrize("backends", ["mock", "real"])
@@ -137,6 +142,15 @@ def test_run_diagnostic_passes_the_marker_through(store, backends):
     payload = store.read_product(diagnostic_report_file("run-1")).payload
     assert payload["backends"] == backends
     assert diagnostic_grade(payload) == backends
+
+
+def test_run_diagnostic_rejects_an_unknown_marker_and_writes_nothing(store):
+    someval = MockSoMEvalRunner(fixed={"i1": ["B"] * 4, "i1v": ["C"] * 4})
+    cfg = DiagnosticConfig("run-1", "cand-1", "cand-model", "none", "full", 4, "bench-v1")
+    with pytest.raises(ValueError, match="backends"):
+        run_diagnostic(cfg, TAX, POOL, someval, MockJudgeBackend("external-judge", {}), store,
+                       baseline_scores=[], dynamic_specs=[], backends="fake")
+    assert not store.exists(diagnostic_report_file("run-1"))
 
 
 def test_run_diagnostic_requires_the_backends_marker(store):

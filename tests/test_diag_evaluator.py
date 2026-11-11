@@ -174,6 +174,16 @@ def test_the_highest_effective_version_wins_numerically(seeded):
     assert resolve_baseline(seeded, "run-011", "bench-v1", backends="mock")[0] == "zengen-v10"
 
 
+def test_a_deprecated_top_version_falls_back_to_the_highest_effective_one(seeded):
+    _evaluator()(seeded, "run-001", "cand-run-001")
+    _evaluator()(seeded, "run-002", "cand-run-002")
+    _promote(seeded, 1, "run-001")
+    _promote(seeded, 2, "run-002", status="deprecated")
+    ref, scores = resolve_baseline(seeded, "run-003", "bench-v1", backends="mock")
+    assert ref == "zengen-v1"
+    assert scores, "the fallback baseline must carry run-001's scores"
+
+
 def test_injected_into_the_loop_it_replaces_the_stub_diagnostic(seeded):
     env = Envelope(id="run-001", type="directive", version=1, created_at="t", created_by=OwnerRef(),
                    status="pending", schema_version=1, payload={"target_dimension": "tom", "recipe_ref": ""})
@@ -189,7 +199,7 @@ def test_injected_into_the_loop_it_replaces_the_stub_diagnostic(seeded):
 
 def test_diagnostic_never_imports_mindtrainer():
     root = Path(__file__).resolve().parents[1] / "src" / "diagnostic"
-    for path in sorted(root.glob("*.py")):
+    for path in sorted(root.rglob("*.py")):
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             names = []
             if isinstance(node, ast.Import):

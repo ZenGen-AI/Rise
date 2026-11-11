@@ -6,6 +6,9 @@ controlplane.paths 只给了 taxonomy_file / item_pool_file 两个路径函数,�
 """
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Protocol, TypeVar
+
 from controlplane.envelope import CURRENT_SCHEMA_VERSION, Envelope, OwnerRef
 from controlplane.gitstore import GitStore
 from diagnostic.datamodel import DiagnosticTaxonomy
@@ -15,7 +18,17 @@ from diagnostic.taxonomy_loader import ItemPool
 TAXONOMY_TYPE = "diagnostic_taxonomy"
 ITEM_POOL_TYPE = "diagnostic_item_pool"
 
-_NOW = "2026-10-09T00:00:00Z"
+
+class _Versioned(Protocol):
+    @property
+    def version(self) -> str: ...
+
+
+_A = TypeVar("_A", bound=_Versioned)
+
+# 资产信封的 created_at。值不能改:install-defaults 按"已提交内容相同"判断能否重装,值一变,
+# 已装过默认资产的仓库就会被拒绝。
+_ASSET_CREATED_AT = "2026-10-09T00:00:00Z"
 
 
 class DiagnosticAssetError(Exception):
@@ -24,7 +37,7 @@ class DiagnosticAssetError(Exception):
 
 def _envelope(id_: str, type_: str, payload: dict) -> Envelope:
     return Envelope(
-        id=id_, type=type_, version=1, created_at=_NOW, created_by=OwnerRef(),
+        id=id_, type=type_, version=1, created_at=_ASSET_CREATED_AT, created_by=OwnerRef(),
         status="effective", schema_version=CURRENT_SCHEMA_VERSION, links=[], payload=payload,
     )
 
@@ -38,37 +51,37 @@ def _read(store: GitStore, rel: str, expected_type: str) -> Envelope:
     return env
 
 
-def write_taxonomy(store: GitStore, taxonomy: DiagnosticTaxonomy) -> str:
-    rel = taxonomy_file(taxonomy.version)
-    store.write_product(
-        rel, _envelope(f"taxonomy-{taxonomy.version}", TAXONOMY_TYPE, taxonomy.to_dict()),
-        f"diagnostic: taxonomy {taxonomy.version}",
-    )
+def _write_asset(store: GitStore, rel: str, id_: str, type_: str, label: str, version: str, payload: dict) -> str:
+    """写一份资产产物,提交信息是 diagnostic: <label> <version>。返回树内路径。"""
+    store.write_product(rel, _envelope(id_, type_, payload), f"diagnostic: {label} {version}")
     return rel
+
+
+def _read_asset(
+    store: GitStore, rel: str, type_: str, label: str, version: str, from_dict: Callable[[dict], _A],
+) -> _A:
+    """读一份资产产物并核对载荷里的版本号与路径上的一致。"""
+    asset = from_dict(_read(store, rel, type_).payload)
+    if asset.version != version:
+        raise DiagnosticAssetError(f"{rel} carries {label} version {asset.version!r}, not {version!r}")
+    return asset
+
+
+def write_taxonomy(store: GitStore, taxonomy: DiagnosticTaxonomy) -> str:
+    v = taxonomy.version
+    return _write_asset(store, taxonomy_file(v), f"taxonomy-{v}", TAXONOMY_TYPE, "taxonomy", v, taxonomy.to_dict())
 
 
 def read_taxonomy(store: GitStore, version: str) -> DiagnosticTaxonomy:
-    taxonomy = DiagnosticTaxonomy.from_dict(_read(store, taxonomy_file(version), TAXONOMY_TYPE).payload)
-    if taxonomy.version != version:
-        raise DiagnosticAssetError(
-            f"{taxonomy_file(version)} carries taxonomy version {taxonomy.version!r}, not {version!r}"
-        )
-    return taxonomy
+    return _read_asset(
+        store, taxonomy_file(version), TAXONOMY_TYPE, "taxonomy", version, DiagnosticTaxonomy.from_dict,
+    )
 
 
 def write_item_pool(store: GitStore, pool: ItemPool) -> str:
-    rel = item_pool_file(pool.version)
-    store.write_product(
-        rel, _envelope(f"item-pool-{pool.version}", ITEM_POOL_TYPE, pool.to_dict()),
-        f"diagnostic: item pool {pool.version}",
-    )
-    return rel
+    v = pool.version
+    return _write_asset(store, item_pool_file(v), f"item-pool-{v}", ITEM_POOL_TYPE, "item pool", v, pool.to_dict())
 
 
 def read_item_pool(store: GitStore, version: str) -> ItemPool:
-    pool = ItemPool.from_dict(_read(store, item_pool_file(version), ITEM_POOL_TYPE).payload)
-    if pool.version != version:
-        raise DiagnosticAssetError(
-            f"{item_pool_file(version)} carries item pool version {pool.version!r}, not {version!r}"
-        )
-    return pool
+    return _read_asset(store, item_pool_file(version), ITEM_POOL_TYPE, "item pool", version, ItemPool.from_dict)

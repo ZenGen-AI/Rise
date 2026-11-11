@@ -5,7 +5,8 @@ from controlplane.gitstore import GitStore
 from controlplane.paths import diagnostic_report_file
 from diagnostic.datamodel import DiagnosticReport
 
-_NOW = "2026-09-27T00:00:00Z"
+# 报告信封的 created_at,固定值:同一份报告重写时内容逐字节相同,write_product 什么都不做。
+_REPORT_CREATED_AT = "2026-09-27T00:00:00Z"
 
 # 诊断报告载荷里的后端标记(闭环集成设计 R17)。controlplane.evidence.diagnostic_grade 读它定等级;
 # cli/src/commands.ts 的 summarizeDiagnostic 读它打印 [MOCK BACKENDS]。两侧各写一次。
@@ -29,7 +30,7 @@ def write_report(
         id=report.id,
         type="diagnostic_report",
         version=1,
-        created_at=_NOW,
+        created_at=_REPORT_CREATED_AT,
         created_by=OwnerRef(),
         status="executed",
         schema_version=CURRENT_SCHEMA_VERSION,
@@ -57,7 +58,7 @@ def write_failure_report(
         id=run_id,
         type="diagnostic_report",
         version=1,
-        created_at=_NOW,
+        created_at=_REPORT_CREATED_AT,
         created_by=OwnerRef(),
         status="executed",
         schema_version=CURRENT_SCHEMA_VERSION,
