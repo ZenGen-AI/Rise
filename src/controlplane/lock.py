@@ -29,7 +29,7 @@ if sys.platform == "win32":  # pragma: no cover - Windows 未验证
 else:
     import fcntl
 
-    _BUSY = BlockingIOError  # flock(LOCK_NB) 被占用时抛它;别的 OSError(如 ENOLCK)不是"被锁"
+    _BUSY: type[OSError] = BlockingIOError  # flock(LOCK_NB) 被占用时抛它;别的 OSError(如 ENOLCK)不是"被锁"
 
     def _try_lock(fh) -> None:
         fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)

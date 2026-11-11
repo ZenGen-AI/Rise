@@ -101,6 +101,7 @@ _IN_FLIGHT_DIRECTIVE = frozenset({"pending", "awaiting_confirmation"})
 _IN_FLIGHT_CANDIDATE = frozenset({"pending_review", "approved"})
 _TERMINAL_CANDIDATE = frozenset({"effective", "rejected"})
 
+
 def has_round_in_flight(state: TreeState) -> bool:
     """任何 run 的指令是 pending/awaiting_confirmation,或候选是 pending_review/approved。"""
     return any(

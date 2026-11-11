@@ -32,7 +32,14 @@ def _whole_tree(store):
 
 
 def _git_log(store):
-    return store._git("log", "--format=%s").splitlines()
+    return store._git("log", "--format=%H %s").splitlines()
+
+
+@pytest.fixture
+def pinned_git_dates(monkeypatch):
+    """两棵树比提交哈希时把作者与提交时间钉死:哈希相同才说明树、父提交与提交信息都一样。"""
+    for var in ("GIT_AUTHOR_DATE", "GIT_COMMITTER_DATE"):
+        monkeypatch.setenv(var, "2026-10-09T00:00:00Z")
 
 
 def _mock_report(run_id, candidate_id):
@@ -68,7 +75,7 @@ def _drive_to_promotion(store, **kw):
     return kinds
 
 
-def test_explicit_empty_injection_leaves_tree_log_and_actions_identical(tmp_path):
+def test_explicit_empty_injection_leaves_tree_log_and_actions_identical(tmp_path, pinned_git_dates):
     a, b = GitStore(str(tmp_path / "a")), GitStore(str(tmp_path / "b"))
     for s in (a, b):
         s.init()
@@ -81,7 +88,7 @@ def test_explicit_empty_injection_leaves_tree_log_and_actions_identical(tmp_path
     assert _git_log(a) == _git_log(b)
 
 
-def test_handlers_for_actions_that_never_trigger_change_nothing(tmp_path):
+def test_handlers_for_actions_that_never_trigger_change_nothing(tmp_path, pinned_git_dates):
     """有处理器但触发条件不满足(桩诊断是 stub 证据):树与提交日志都与不注入时一致。"""
     a, b = GitStore(str(tmp_path / "a")), GitStore(str(tmp_path / "b"))
     for s in (a, b):

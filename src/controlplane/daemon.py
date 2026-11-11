@@ -127,7 +127,7 @@ class DirectiveFailedError(Exception):
 
 
 def stub_dispatcher(store: GitStore, directive: Envelope) -> None:
-    """默认派发器:骨架里的桩,行为与引入派发缝之前逐字节相同。"""
+    """默认派发器:骨架里的桩。按 tom 维度调 simulator.stubs.execute_dispatch,写桩场景池与桩候选,不经计算层。"""
     execute_dispatch(store, directive.id, "tom")
 
 
@@ -160,9 +160,9 @@ def read_tree_state(
 ) -> TreeState:
     """扫 git 树，投影成 reconcile() 需要的纯视图。
 
-    enabled 为空时只填既有的几项(指令、候选、模型数与最大版本号)和 unreadable;为了填 unreadable,
-    也逐个读模型文件(晋级的暂停规则要用,控制面 CP-17)。树里没有坏文件时,结果与引入闭环视图之前
-    相同。accept_mock_evidence 此时不起作用:没有闭环动作,它无处可用。非空时才去填 runs / models / gates。
+    enabled 为空时只填指令、候选、模型数与最大版本号和 unreadable;为了填 unreadable,也逐个读模型文件
+    (晋级的暂停规则要用,控制面 CP-17)。runs / models / gates 留空,accept_mock_evidence 记成 False:
+    没有闭环动作,它无处可用。enabled 非空时才去填 runs / models / gates。
 
     读不出的产物(gitstore.UNREADABLE_PRODUCT_ERRORS)不抛:状态记 UNREADABLE_STATUS,路径进 unreadable;
     OSError 原样上抛。"""
@@ -348,6 +348,18 @@ def apply_action(
     evaluator: Evaluator | None = None,
 ) -> None:
     _check_handlers(handlers)
+    _apply_action(store, action, dispatcher=dispatcher, handlers=handlers, evaluator=evaluator)
+
+
+def _apply_action(
+    store: GitStore,
+    action: Action,
+    *,
+    dispatcher: Dispatcher | None,
+    handlers: Mapping[str, Handler] | None,
+    evaluator: Evaluator | None,
+) -> None:
+    """apply_action 的本体,不再查 handlers:reconcile_once 每个 tick 已查过一次。"""
     if handlers and action.kind in handlers:
         # 闭环动作:处理器异常原样上抛,不吞
         handlers[action.kind](store, action)
@@ -465,7 +477,7 @@ def reconcile_once(
         if deferrals is not None and not deferrals.due(key):
             continue
         try:
-            apply_action(store, action, dispatcher=dispatcher, handlers=handlers, evaluator=evaluator)
+            _apply_action(store, action, dispatcher=dispatcher, handlers=handlers, evaluator=evaluator)
         except DeferredError as exc:
             retry_at = deferrals.record(key, exc) if deferrals is not None else None
             _log.warning(
