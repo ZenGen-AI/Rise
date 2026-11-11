@@ -5,11 +5,14 @@ import pytest
 
 from controlplane.daemon import reconcile_once
 from controlplane.gitstore import GitStore
+from controlplane.lock import RepoLockedError
 from controlplane.paths import candidate_checkpoint_file, diagnostic_report_file, run_dir
 from controlplane.reconcile import CLOSED_LOOP_ACTIONS
 from factory.cli import build_parser, dev_main, main
 from factory.evaluation import EVALUATOR_CONFIG
+from factory.errors import FactoryConfigError
 from factory.wire import Assembly, BuildContext, FactoryOptions, assemble, resolve_repo_commit
+from factory.wire import run as wire_run
 from factory_fixtures import (
     DATA_SPEC, Recorder, closed_loop_repo, git_head, git_log_messages, held_lock, produce_datasets,
     recording_builders, tree_files, write_directive,
@@ -265,7 +268,7 @@ def test_dev_entry_turns_mock_evidence_on(tmp_path):
     assert seen[0].accept_mock_evidence is False
 
 
-# ---- 仓库锁(设计 CP-12):run 的锁由 run_daemon 取,reconcile 的锁由 reconcile_one_tick 在装配之前取 ----
+# ---- 仓库锁(设计 CP-12):run 与 reconcile 的锁都在装配之前取(wire.run、reconcile_one_tick) ----
 
 def _locked_message(capsys):
     err = capsys.readouterr().err
@@ -300,6 +303,29 @@ def test_closed_loop_reconcile_takes_the_lock_before_any_builder_runs(tmp_path, 
     _locked_message(capsys)
     assert seen == []  # 锁在装配之前取:被占用时一个处理器构造器都没跑
     assert (git_head(store), tree_files(store)) == (head, files)
+
+
+def test_closed_loop_run_takes_the_lock_before_any_builder_runs(tmp_path, capsys):
+    """run 与 reconcile 一样先取锁再装配:另一个守护进程占着树时,处理器构造器一个都不跑,树里不写东西。"""
+    store = closed_loop_repo(str(tmp_path / "cp"))
+    head, files, seen = git_head(store), tree_files(store), []
+    builders = recording_builders(Recorder(), seen_contexts=seen)
+    with held_lock(store.repo_root):
+        with pytest.raises(RepoLockedError, match="rise.lock"):
+            wire_run(str(store.repo_root), FactoryOptions(switches=("plan",)), max_ticks=1, env={}, builders=builders)
+        assert main(["run", str(store.repo_root), "--max-ticks", "1", "--enable", "plan"], env={},
+                    builders=builders) == 2
+    _locked_message(capsys)
+    assert seen == []  # 锁在装配之前取:被占用时一个处理器构造器都没跑
+    assert (git_head(store), tree_files(store)) == (head, files)
+
+
+def test_run_releases_the_lock_when_assembly_fails(twin):
+    a, _ = twin
+    with pytest.raises(FactoryConfigError, match="planner backend"):
+        wire_run(str(a.repo_root), FactoryOptions(planner_backend="nope"), max_ticks=1, env={})
+    with held_lock(a.repo_root):  # 取得到,说明装配失败后锁已放掉
+        pass
 
 
 def test_the_lock_is_released_when_run_and_reconcile_finish(twin):

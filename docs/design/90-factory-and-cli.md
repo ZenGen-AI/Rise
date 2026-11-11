@@ -192,7 +192,7 @@ factory 是组合根:系统里唯一知道所有包的地方。它把各子系�
 | `scripts/run_controlplane.py` | `mindtrainer.wire.main` 的薄壳 | `mindtrainer.wire` | [已落地] |
 | `src/controlplane/observe.py` | `trace`、`cost`、`sum_costs`,只读 | `controlplane.gitstore`、`controlplane.paths` | [已落地] |
 | `factory.switches` | `ENABLE_MAP`、`parse_enable`、`handler_keys` | 无 | [已落地] |
-| `factory.wire` | `FactoryOptions`、`BuildContext`、`assemble`、`run`、`reconcile_one_tick`;`--interact` 的互斥检查与装配 [已落地];`memory_wiring` 是薄转发(惰性导入,`import factory.cli` 不载入 mindagent),`deploy_turn_timeout_s` 按开关与后端取部署会话的等提交上限;`--interact` 与记忆处理器的分支调 `memory_wiring` 装配记忆;`run` 把部署世界核对作为 `on_locked` 传给 `run_daemon`,`reconcile_one_tick` 在锁内自己调;Starling 时每个处理器与派发器外包一层服务会话守卫,运行期服务身份变了就停守护进程 [已落地] | 全部包 | [已落地] |
+| `factory.wire` | `FactoryOptions`、`BuildContext`、`assemble`、`run`、`reconcile_one_tick`;`--interact` 的互斥检查与装配 [已落地];`memory_wiring` 是薄转发(惰性导入,`import factory.cli` 不载入 mindagent),`deploy_turn_timeout_s` 按开关与后端取部署会话的等提交上限;`--interact` 与记忆处理器的分支调 `memory_wiring` 装配记忆;`run` 与 `reconcile_one_tick` 都先取锁再装配,部署世界核对在锁内、装配之后自己调(FC-52);Starling 时每个处理器与派发器外包一层服务会话守卫,运行期服务身份变了就停守护进程 [已落地] | 全部包 | [已落地] |
 | `factory.cli` | argparse 子命令、开关、退出码、`main`、`dev_main`;`--interact` 开关;子命令 `seed` 惰性导入 `factory.seed` [已落地] | `factory.wire`、`factory.readonly` | [已落地] |
 | `factory.readonly` | `trace`、`cost`(即观测函数)、`collect_log_refs`、`render_logs` | `controlplane.observe` | [已落地] |
 | `factory.bridges` | `BRIDGE_ROLES`、`build_bridge` | `inference_bridge`、`controlplane.config` | [已落地] |
@@ -385,7 +385,7 @@ sampling_k: 4       # 整数,至少 1
 | `source_lane` | `enabled` 为 `False`;`render_time` `False`、`tau_source` 0.56、`model` `text-embedding-v4`、`dim` 1024、`k_source` 30、`chunk_byte_budget` 32000(C++ 默认值,`S:include/starling/governance/world_settings.hpp:40-49`) | 进程内 `Memory` 没有来源 lane,不关就改了召回语义。看板把七个子键都写进默认世界(`S:python/starling/dashboard/config.py:270-278`),只写 `enabled` 时其余继承看板的值,比较时 rise 一侧按 C++ 默认补齐,用户一改就不一致 |
 | `background` | `tick_interval_s` 0,`ingest` `False`,`auto_snapshot` 的 `on_session` `False`、`interval_hours` 0 | 默认世界的后台开着,不关的话部署世界会自己写,摘要漂移 |
 
-嵌入照旧由 rise 调 `embed_pending` 驱动,时刻取事件时钟。已有部署世界的设置核对放在持仓库锁之后(`deploy_world_check`):`run` 在 `on_locked` 里做(`src/controlplane/daemon.py:524-526`),`reconcile` 本来就先取锁。核对是带 rise 设置开一次只读句柄再关上,不同就退出码 2,文字写世界名。放在锁外的话,第二个 `run` 撞上仓库锁之前已开过只读句柄,服务端恢复见到它回 `world_held`,在跑守护进程的部署轮次判 T3(`S:python/starling/dashboard/world_manager.py:1607-1610`)。
+嵌入照旧由 rise 调 `embed_pending` 驱动,时刻取事件时钟。已有部署世界的设置核对放在持仓库锁之后(`deploy_world_check`):`run` 与 `reconcile` 都先取锁再装配,核对在锁内、装配之后、第一个 tick 之前(FC-52)。核对是带 rise 设置开一次只读句柄再关上,不同就退出码 2,文字写世界名。放在锁外的话,第二个 `run` 撞上仓库锁之前已开过只读句柄,服务端恢复见到它回 `world_held`,在跑守护进程的部署轮次判 T3(`S:python/starling/dashboard/world_manager.py:1607-1610`)。
 
 看板上的人工操作 [已落地]。看板的删世界、改世界设置、删快照、回滚路由不经过 rise 的世界锁(`S:python/starling/dashboard/routes/worlds.py:396`、`:421`、`:476`、`:483`),所以只在守护进程停着时做:
 
@@ -694,7 +694,7 @@ TypeScript 命令行:`rise <review|approve|reject|confirm|status> [id] [reason]`
 
 | 步 | 动作 | 失败时 |
 |---|---|---|
-| 0 | 取仓库排他文件锁(`run`、`reconcile`、`install-defaults`、`import-sombench` 取,只读子命令不取;`reconcile` 在装配前取,`run` 在装配后、第一个 tick 前取) | 锁已被占用,退出码 2 [已落地] |
+| 0 | 取仓库排他文件锁(`run`、`reconcile`、`install-defaults`、`import-sombench` 取,只读子命令不取;`run` 与 `reconcile` 都在装配前取,FC-52) | 锁已被占用,退出码 2 [已落地] |
 | 1 | 解析 `--enable`,经 `ENABLE_MAP` 得到处理器键 | 未知开关或空项,退出码 2 |
 | 2 | 处理器键为空:只构造 `make_mindtrainer_dispatcher()`,调 `run_daemon` 时只传派发器 | 无 |
 | 3 | 读 `evaluator.yaml`,要求恰好五个键 | `FactoryConfigError`,退出码 2 |
@@ -945,7 +945,7 @@ factory 是第九个工作包,前八个全部落地后才施工。前置关系:1
 | FC-24 | 记忆运行时身份是一个字典:后端种类、Starling 版本加安装来源、抽取与嵌入的完整端点、模型、超时、重试次数,以及激活轨迹模式;editable 安装的 Starling 装配期拒绝 [已落地] | 只记 Starling 版本号 | 换 Starling 或换抽取模型,同一起点记忆下的行为也变;editable 安装的源码目录随时在变,身份钉不住。地址只在规范化后比较,不含 userinfo | 身份字段多,任一变了续训就升 T3 |
 | FC-25 | 对手位的三种驱动都由对手工厂包进 SimpleActio 实例,`ExternalApiBackend` 改为每个会话新造一个;部署会话的对手位同样包,记忆是每会话一份空的替身记忆 | 对手位保持裸后端;只给 `vllm` 驱动包 | 对手要靠记忆扮演某种人格的个体;共享的外部后端实例现在无害,因为它无状态。会话资源要有归属,所以每个会话各持一个 | 每轮多一次 recall 与 remember,会话变慢;`scripted` 的后端只有 `respond`,指导语被忽略,台词与现在逐字相同。部署对手位的空记忆已由 FC-34 取代 |
 | FC-26 | interact 配置的 `memory` 必填,没有"不用记忆"和"不写记忆"的开关;记忆支持落地前写下的 pending interact run 在派发器的配置校验处判 T2,由人重开 [已落地] | `memory` 可选;留一个关写开关 | 记忆变了行为就变,可选就等于留了绕过记忆的口子;旧 run 的 rollout 没有记忆,续上去的有,不是同一个实验 | 落地前的 pending interact run 要人工重开 |
-| FC-27 | 每条 rollout 在起点库的私有副本上跑,用完即弃;清扫记忆根目录下 `runs/` 的每个子项,只删这一处,不碰 `deploy/`、`seeds/`、`snapshots/`,不跟进符号链接。`reconcile` 在锁内、装配之后、第一个动作之前清扫,`run` 把清扫作为 `on_locked` 传给 `run_daemon`,在它取到仓库排他锁之后、第一个 tick 之前调用。运行中只删已释放会话的目录 | 同一 run 内共用一个库、记忆累积;运行中周期性扫目录;`reconcile` 与 `run` 都在装配里清扫 | 同组 rollout 的起点相同,组内优势才只反映策略。`run` 的装配在取锁之前,装配里清扫会和另一个持锁进程抢删在途副本;`assemble` 因此只交出清扫函数、不调它。钩子在锁内,本进程还没有会话,别的进程被仓库锁挡在外面,扫目录才安全。运行中扫会误删在用的库 | 记忆不在一条 run 内累积;`run_daemon` 多一个启动钩子参数 `on_locked`;崩溃留下的副本到下一次 `run` 或 `reconcile` 取到锁时才清。每位一份副本已由 FC-35 取代;清扫已由 FC-43 与 SYS-40 取代:rollout 世界从种子分叉、只关不删,记忆根下没有 rollout 世界,清扫去掉,`on_locked` 改做部署世界的设置核对(FC-48) |
+| FC-27 | 每条 rollout 在起点库的私有副本上跑,用完即弃;清扫记忆根目录下 `runs/` 的每个子项,只删这一处,不碰 `deploy/`、`seeds/`、`snapshots/`,不跟进符号链接。`reconcile` 在锁内、装配之后、第一个动作之前清扫,`run` 把清扫作为 `on_locked` 传给 `run_daemon`,在它取到仓库排他锁之后、第一个 tick 之前调用。运行中只删已释放会话的目录 | 同一 run 内共用一个库、记忆累积;运行中周期性扫目录;`reconcile` 与 `run` 都在装配里清扫 | 同组 rollout 的起点相同,组内优势才只反映策略。`run` 的装配在取锁之前,装配里清扫会和另一个持锁进程抢删在途副本;`assemble` 因此只交出清扫函数、不调它。钩子在锁内,本进程还没有会话,别的进程被仓库锁挡在外面,扫目录才安全。运行中扫会误删在用的库 | 记忆不在一条 run 内累积;`run_daemon` 多一个启动钩子参数 `on_locked`;崩溃留下的副本到下一次 `run` 或 `reconcile` 取到锁时才清。每位一份副本已由 FC-35 取代;清扫已由 FC-43 与 SYS-40 取代:rollout 世界从种子分叉、只关不删,记忆根下没有 rollout 世界,清扫去掉,`on_locked` 改做部署世界的设置核对(FC-48);`run` 先取锁再装配后,它在锁内、装配之后调(FC-52) |
 | FC-28 | 一个记忆根目录只属于一个控制面仓库:根目录下 `.owner` 文件记该仓库的绝对路径,首次使用时先写临时文件再以硬链接发布;装配期读到的路径与当前仓库不同,就退出码 2,信息写两个路径 [已落地] | 不记归属,靠使用者自觉;每个仓库在根目录下建自己的子目录;直接以 `O_EXCL` 建 `.owner`(被打断会留下 0 字节文件) | 两个仓库共用一个根目录时,部署记忆会混写,启动清扫又会删掉对方在途会话的副本;仓库锁只挡同一个仓库的进程,挡不住另一个仓库的进程 | 换仓库路径(移动或重新克隆)后要人工改 `.owner` |
 | FC-29 | 组合根按记忆配置在场与否选部署记忆管理面:在场用 StarlingDeploymentStore,不在场用 FileTupleStore。FileTupleStore 把数据存成 JSON 文件,根目录是 `<git 目录>/rise-memory`,不是临时目录(重启要保留)。部署驱动器改收实例工厂 make_instance(episode_id, memory, holder),由轮次处理器用组合根给的模型后端工厂造出它,每次尝试新造一个实例 [已落地] | MindAgent 自己读配置、自己选实现;替身不落盘;驱动器仍收一个现成的实例 | 只有组合根读记忆配置;管理面在 `simple_actio`,MindAgent 不导入 `starling`,依赖边界仍可扫描。替身也落盘,备份起点、成功后删快照的提交点协议在两种实现上一样成立。实例按 episode 新造,事件 key 才带各自的逻辑 episode id | 覆盖部署世界必须先关实例与端口,驱动器要管实例的完整生命周期;替身路径在 git 目录里多一个目录 |
 | FC-30 | 组合根给每个 SimpleActio 实例外套转换后端(模块 factory.memory_translate),接住 simple_actio 的 MemoryFailureError,按 `transient` 改抛两个 factory 异常子类。FactoryMemoryUnavailableError 继承 simulator 的 RoleMemoryUnavailableError(瞬态),FactoryMemoryFailureError 继承 RoleMemoryFailureError(确定性)。两个基类在 `src/simulator/realtime/backend_timeout.py` [已落地] | simulator 导入 simple_actio 的异常;把记忆失败并进 `role_backend_failure` | simulator 与 mindtrainer 不导入 simple_actio,只有组合根知道两边。并进 `role_backend_failure` 会被译成延后,确定性的故障反复重试,抽取端点的网络抖动又不该升人工 | 组合根多一层包装;分类依赖 simple_actio 对 `transient` 的穷举映射 |
@@ -966,10 +966,11 @@ factory 是第九个工作包,前八个全部落地后才施工。前置关系:1
 | FC-45 | extra `memory` 装客户端与服务端两行,钉同一个提交;安装来源必须有 git 提交,不再接受 `record:` [已落地] | 只装客户端;两行各钉各的 | 外部模式只用客户端,拉起模式与测试两行都要;没有提交就无法与服务报的提交比对 | 不用拉起模式的机器也要编译 C++ |
 | FC-46 | 一个进程仍只用一个服务会话。句柄调用超时取时间预算的"句柄"一层(拉起模式缺省配置 58 秒,FC-51);管理调用走一个不带会话的传输对象,超时 300 秒 [已落地] | 全部 300 秒;管理操作另开一个会话;请 Starling 给管理方法加单次超时 | 句柄调用在这一层内判瞬态,短于收尾 join 与等端口全关(拉起缺省配置 156 秒与 166 秒),服务卡住时对手位端口仍在等待期内关上;恢复的排空已用满 30 秒,整库的分叉与快照更长。管理请求不带会话,所以不是第二个会话 | 依赖客户端包的私有模块 `_transport`,升级 Starling 时要核对;Starling 给管理方法加单次超时后换掉 |
 | FC-47 | 运行期服务身份变了就停守护进程:端口不是 rise 关的却收到 `handle_closed` 判瞬态并换会话;每次换会话重新核对 `info()` 的提交、协议、抽取配置摘要与 token,不符或遇到 Unauthorized、ProtocolMismatch,以及拉起的服务重启 3 次用完,都按装配错误退出(退出码 2)[已落地] | 只在装配期核对;`handle_closed` 一律判永久;重启次数用完后逐条判失败 | 外部看板重启后旧句柄回 `handle_closed`,判永久会把一次重启变成一批 T2 与 T3;用户升级源码树再重启看板,不核对就会把两套记忆行为拼进同一个实验,而训练记录里的运行时身份还是旧值 | 看板一升级,在跑的守护进程就退出,要人重启 |
-| FC-48 | 已有部署世界的设置核对放在持仓库锁之后:`run` 在 `on_locked` 里做,`reconcile` 本来先取锁 [已落地] | 装配期在锁外核对;把恢复时只读句柄引起的 `world_held` 判瞬态 | 锁外核对时,第二个 `run` 撞上仓库锁之前已开过只读句柄,在跑守护进程的恢复会回 `world_held`,判 T3;改判瞬态会放过真冲突 | 出错时守护进程不开跑 |
+| FC-48 | 已有部署世界的设置核对放在持仓库锁之后:`run` 与 `reconcile` 都先取锁再装配,核对在锁内调(FC-52) [已落地] | 装配期在锁外核对;把恢复时只读句柄引起的 `world_held` 判瞬态 | 锁外核对时,第二个 `run` 撞上仓库锁之前已开过只读句柄,在跑守护进程的恢复会回 `world_held`,判 T3;改判瞬态会放过真冲突 | 出错时守护进程不开跑 |
 | FC-49 | rise 第一次建某个部署世界时写创建标记 `deploy/<scenario_id>.created`;标记在而世界不在判永久失败,不静默重建 [已落地] | `ensure_world` 见不在就建;加命令列出或修复 | 看板删世界的路由不经过 rise,静默重建会让部署记忆悄悄从空开始 | 有意从空开始时,人要在看板删世界后再删标记 |
 | FC-50 | 外部模式下抽取与嵌入的端点、模型、密钥、超时、重试一律取 Starling 默认世界的角色端点,rise 配置里不许出现;拉起模式照旧由 rise 配置给出 [已落地] | rise 配置显式给端点,密钥取看板进程的 `OPENAI_API_KEY` | 用户在看板里配好模型与密钥,rise 再配一份就有两处要同步,且看板进程的环境变量 rise 查不到;provider 端点的地址与密钥由服务补,rise 不经手 | 看板里换模型或调超时,已有部署世界报 `world_settings_mismatch`,要按"改了抽取或嵌入配置"处理 |
 | FC-51 | 拉起与外部模式的各层时限都由端点按 Starling 真实的最坏耗时推出,每层严格包住内层,且不低于接服务之前的常量;外部模式不给端点封顶 [已落地] | 外部模式照拉起模式拒绝一次调用(含重试与退避)最坏超过 4 秒的端点;拉起模式沿用固定各层 | 端点在用户的看板里,拒绝它等于外部模式用不了;固定各层时内层会比外层先失败的那一层被外层截断,失败分类丢失,拉起模式的固定值就有两处不包住 | 端点慢时各层随之变长,8787 现在的端点推出的部署等提交约 2.2 小时,卡住的会话要等这么久才判超时;拉起模式缺省配置下部署等提交从 40 秒变 96 秒、收尾 join 从 60 秒变 156 秒 |
+| FC-52 | `run` 先取仓库排他锁再装配,与 `reconcile` 一致;锁一路持到守护进程退出,装配或核对失败时同样释放。`controlplane.daemon` 另给一个假定调用方已持锁的入口 `run_daemon_locked`(同一进程里文件锁不可重入) [已落地] | 照旧装配后由 `run_daemon` 取锁,把锁内要做的事作为 `on_locked` 传进去 | 装配有副作用(开记忆服务会话、建世界、写树里的状态),另一个守护进程占着树时第二个 `run` 必须在装配之前失败;推翻了「`run` 的装配在取锁之前」这条旧前提 | 装配期的配置错误也要先拿到锁才报出来;`run_daemon(on_locked=)` 只剩不装配的 `mindtrainer.wire.run` 与测试在用 |
 
 ## 8. 失败处理与可观测
 

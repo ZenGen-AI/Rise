@@ -710,7 +710,7 @@ class MemoryWiring:
     `deployment` 只在调用方要部署记忆(启用 start_agent_round 或 admit_proposal)时非空;`training_worlds` 两个后端都有
     (替身是 `StandInTrainingWorlds`),策略工厂与运行时共用这一个。替身的后三项都是空的:
     - `on_locked`:持仓库锁之后才跑的检查(90 篇"世界设置"一段、FC-48、第 23 条),只交出函数、不在装配时调
-      (`run_daemon(on_locked=)`、`reconcile_one_tick` 的锁内)。第二个进程撞锁之前不能开过任何句柄。
+      (`run` 与 `reconcile_one_tick` 都先取锁再装配,在锁内调它)。第二个进程撞锁之前不能开过任何句柄。
     - `closers`:按登记顺序是关会话、拉起模式下停服务;组合根最先登记,逆序执行时最后跑。
     - `session`:服务会话,组合根据它查致命状态。
     - `budget`:各层时限(`factory.memory_budget`)。替身是固定的 `BASE_LAYERS`,拉起与外部模式按服务的端点推出。"""

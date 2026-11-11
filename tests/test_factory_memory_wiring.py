@@ -394,17 +394,70 @@ def test_a_context_without_a_shared_runtime_gets_the_starling_budget_too(store, 
         wire._close_all(ctx.closers)
 
 
-def test_run_passes_on_locked_to_the_daemon_and_the_stand_in_passes_none(store, monkeypatch):
-    seen = []
-    marker = lambda: None
+def test_run_takes_the_lock_then_assembles_then_runs_on_locked_then_the_daemon(store, monkeypatch):
+    """run 与 reconcile 同序:取仓库锁、装配、锁内核对(on_locked)、守护进程;替身没有核对,锁仍先于装配。"""
+    order = []
+    real_lock = wire.acquire_repo_lock
+
+    def lock(root):
+        order.append("lock")
+        return real_lock(root)
+
+    def wiring(repo_root, env, *, deployment):
+        order.append("assemble")
+        return _fake_wiring(repo_root, lambda: order.append("check"))
+
+    def stand_in(repo_root, env, *, deployment):
+        order.append("assemble")
+        return _fake_wiring(repo_root, None)
+
+    monkeypatch.setattr(wire, "acquire_repo_lock", lock)
+    monkeypatch.setattr(wire, "run_daemon_locked", lambda store_, interval_s, **kw: order.append("daemon"))
     with monkeypatch.context() as m:
-        m.setattr(wire, "run_daemon", lambda store_, interval_s, **kw: seen.append(kw.get("on_locked")))
-        m.setattr(wire, "memory_wiring", lambda repo_root, env, *, deployment: _fake_wiring(repo_root, marker))
+        m.setattr(wire, "memory_wiring", wiring)
         wire.run(str(store.repo_root), FactoryOptions(switches=("agent",)), max_ticks=1, env={})
+    assert order == ["lock", "assemble", "check", "daemon"]
+    order.clear()
     with monkeypatch.context() as m:
-        m.setattr(wire, "run_daemon", lambda store_, interval_s, **kw: seen.append(kw.get("on_locked")))
+        m.setattr(wire, "memory_wiring", stand_in)
         wire.run(str(store.repo_root), FactoryOptions(switches=("agent",)), max_ticks=1, env={})
-    assert seen == [marker, None]
+    assert order == ["lock", "assemble", "daemon"]
+
+
+def test_run_does_not_wire_memory_when_the_repository_is_locked(store, monkeypatch):
+    """另一个守护进程占着树时,第二个 run 在装配之前就失败:记忆装配(开服务会话、建世界)一次都没调。"""
+    from controlplane.lock import RepoLockedError
+    from factory_fixtures import git_head, held_lock, tree_files
+
+    wired, daemon = [], []
+    head, files = git_head(store), tree_files(store)
+    monkeypatch.setattr(wire, "memory_wiring",
+                        lambda repo_root, env, *, deployment: wired.append(1) or _fake_wiring(repo_root, None))
+    monkeypatch.setattr(wire, "run_daemon_locked", lambda *a, **kw: daemon.append(1))
+    with held_lock(store.repo_root):
+        with pytest.raises(RepoLockedError, match="rise.lock"):
+            wire.run(str(store.repo_root), FactoryOptions(switches=("agent",)), max_ticks=1, env={})
+    assert wired == [] and daemon == []
+    assert (git_head(store), tree_files(store)) == (head, files)
+
+
+def test_a_failing_on_locked_in_run_closes_the_assembly_skips_the_daemon_and_releases_the_lock(store, monkeypatch):
+    from factory_fixtures import held_lock
+
+    closed, daemon = [], []
+
+    def boom():
+        raise FactoryConfigError("memory service: world rise.deploy.s1: world_settings_mismatch")
+
+    monkeypatch.setattr(wire, "memory_wiring", lambda repo_root, env, *, deployment: _fake_wiring(repo_root, boom))
+    monkeypatch.setattr(wire, "run_daemon_locked", lambda *a, **kw: daemon.append(1))
+    real_close = wire.Assembly.close
+    monkeypatch.setattr(wire.Assembly, "close", lambda self: (closed.append(1), real_close(self)))
+    with pytest.raises(FactoryConfigError, match="world_settings_mismatch"):
+        wire.run(str(store.repo_root), FactoryOptions(switches=("agent",)), max_ticks=1, env={})
+    assert daemon == [] and closed == [1]
+    with held_lock(store.repo_root):    # 取得到,说明核对失败后锁已放掉
+        pass
 
 
 def test_on_locked_is_not_run_by_assemble(store, monkeypatch):

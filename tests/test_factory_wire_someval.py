@@ -276,6 +276,6 @@ def test_the_daemon_entry_point_also_hands_over_the_evaluator(tmp_path, monkeypa
     _pending_candidate(store, "run-1")
     seen = {}
     monkeypatch.setattr(wire, "_build_someval_evaluator", lambda *a: (lambda *b: None))
-    monkeypatch.setattr(wire, "run_daemon", lambda store_, interval_s, **kw: seen.update(kw))
+    monkeypatch.setattr(wire, "run_daemon_locked", lambda store_, interval_s, **kw: seen.update(kw))
     wire.run(str(store.repo_root), FactoryOptions(executor="roll", evaluator="someval"), max_ticks=1, env=env)
     assert callable(seen.get("evaluator"))

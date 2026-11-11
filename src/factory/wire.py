@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from controlplane.daemon import Dispatcher, Evaluator, Handler, reconcile_once, run_daemon
+from controlplane.daemon import Dispatcher, Evaluator, Handler, reconcile_once, run_daemon_locked
 from controlplane.gitstore import GitStore
 from controlplane.lock import acquire_repo_lock
 from controlplane.reconcile import Action
@@ -158,8 +158,7 @@ class Assembly:
     executor_factory: Callable[[str], object] | None = None
     converter: object | None = None
     # Starling 且启用部署记忆时,持仓库锁之后才跑的部署世界核对(90 篇第 23 条);替身与不需要的路径是 None。
-    # assemble 只交出它、不调它:第二个进程撞锁之前不能开过任何句柄,由 run(经 run_daemon 的 on_locked)与
-    # reconcile_one_tick 在锁内调用。
+    # assemble 只交出它、不调它:由 run 与 reconcile_one_tick 在锁内、装配之后、第一个 tick 之前调用。
     on_locked: Callable[[], None] | None = None
 
     def close(self) -> None:
@@ -582,19 +581,24 @@ def run(
     builders: Mapping[str, HandlerBuilder] | None = None,
 ) -> None:
     store = GitStore(repo_root)
-    a = assemble(store, options, env=env, log_dir=log_dir, builders=builders)
-    try:
-        if not a.closed_loop:
-            run_daemon(store, interval_s, max_ticks=max_ticks, dispatcher=a.dispatcher, evaluator=a.evaluator,
-                       on_locked=a.on_locked)
-            return
-        run_daemon(
-            store, interval_s, max_ticks=max_ticks, dispatcher=a.dispatcher,
-            handlers=a.handlers, evaluator=a.evaluator, accept_mock_evidence=a.accept_mock_evidence,
-            on_locked=a.on_locked,      # 部署世界核对要等持锁(另一个守护进程可能正在用);run_daemon 在第一个 tick 前调
-        )
-    finally:
-        a.close()          # --interact 单独用时没有处理器,但运行时仍要收尾
+    # 设计 CP-12:锁在装配之前取,与 reconcile_one_tick 一致。装配有副作用(开记忆服务会话、建世界、写树里的状态),
+    # 另一个守护进程占着树时第二个 run 必须在装配之前就失败(RepoLockedError 原样上抛,一个产物都不写)。
+    # 锁一路持到守护进程退出;装配或核对失败时 with 同样释放锁。
+    with acquire_repo_lock(store.repo_root):
+        a = assemble(store, options, env=env, log_dir=log_dir, builders=builders)
+        try:
+            if a.on_locked is not None:
+                a.on_locked()      # 持锁之后、第一个 tick 之前:核对已有部署世界的设置与创建标记
+            if not a.closed_loop:
+                run_daemon_locked(store, interval_s, max_ticks=max_ticks, dispatcher=a.dispatcher,
+                                  evaluator=a.evaluator)
+                return
+            run_daemon_locked(
+                store, interval_s, max_ticks=max_ticks, dispatcher=a.dispatcher,
+                handlers=a.handlers, evaluator=a.evaluator, accept_mock_evidence=a.accept_mock_evidence,
+            )
+        finally:
+            a.close()          # --interact 单独用时没有处理器,但运行时仍要收尾
 
 
 def reconcile_one_tick(
