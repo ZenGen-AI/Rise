@@ -1135,6 +1135,21 @@ def test_a_resolver_exception_fails_the_directive_with_its_class_name_only(store
     assert trace == []
 
 
+def test_a_resolver_exception_does_not_ride_along_as_the_cause(store, live):
+    """原异常的文字可能带端点地址:不能留在 __cause__ 里,被回溯或日志带出去。"""
+    def broken(seed, scenario_ids):
+        raise RuntimeError("cannot open https://memory.example/secret")
+
+    _interact_directive(store, memory=unresolved_memory())
+    dispatcher = make_mindtrainer_dispatcher(
+        client_factory=live().client_factory, policy_factory=lambda run_id, cfg: _Scope([], None),
+        memory_resolver=broken)
+    with pytest.raises(DirectiveFailedError) as info:
+        dispatcher(store, store.read_product(f"{run_dir(RUN)}/directive.yaml"))
+    assert info.value.__cause__ is None and info.value.__suppress_context__
+    assert "memory.example" not in str(info.value)
+
+
 def test_a_resolver_that_defers_leaves_the_directive_pending(store, live):
     """记忆服务连不上、超时是瞬态(30 篇 MT-32):解析器抛 DeferredError,派发器原样上抛,不判 T2。"""
     def busy(seed, scenario_ids):

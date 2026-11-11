@@ -621,7 +621,7 @@ def evidence_acceptable(grade: str, accept_mock: bool) -> bool: ...
 | 工具函数 | 基座解析、观测、配置、记账、配置信封 | 构造的产物 | `test_models_resolve.py` 7、`test_observe.py` 5、`test_config.py` 8、`test_ledger.py` 33、`test_config_envelope.py` 24 |
 | 端到端 | 指令到晋级;拒绝不晋级 | 骨架桩 | `tests/test_e2e_loop.py`,2 |
 | 骨架 | 桩与冒烟 | 无 | `test_stubs.py` 3、`test_smoke.py` 2 |
-| 命令行 | 五个命令、三类审核 | 临时 git 仓库 | `cli/test/commands.test.ts` 19、`cli/test/gates.test.ts` 46、`cli/test/gittree.test.ts` 4、`cli/test/smoke.test.ts` 1 |
+| 命令行 | 五个命令、三类审核 | 临时 git 仓库 | `cli/test/commands.test.ts` 19、`cli/test/gates.test.ts` 49、`cli/test/gittree.test.ts` 4、`cli/test/smoke.test.ts` 1 |
 
 上表 Python 文件合计 415 个用例,用 `uv run pytest --collect-only -q` 对逐个文件实测;命令行 70 个用例,用 `npx vitest run --reporter=json` 实测(`vitest list` 在本版本列不出测试文件,`it(` 的文本计数还会漏掉循环生成的参数化用例)。闭环扩展的测试 [已落地],覆盖确认态、记账、配置信封、证据等级、六个新动作、闭环视图、注入缝、晋级幂等、提交范围与仓库文件锁。
 

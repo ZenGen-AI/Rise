@@ -292,7 +292,8 @@ def _resolve_memory(run_id: str, cfg: TrainingConfig, memory_resolver: MemoryRes
     except DirectiveFailedError as exc:
         raise DirectiveFailedError(f"directive {run_id}: {exc.reason}") from exc
     except Exception as exc:
-        raise DirectiveFailedError(f"directive {run_id}: memory resolver failed: {type(exc).__name__}") from exc
+        # from None:异常文字可能带端点地址,不能经 __cause__ 跟着回溯走
+        raise DirectiveFailedError(f"directive {run_id}: memory resolver failed: {type(exc).__name__}") from None
     resolved = dataclasses.replace(cfg, memory=memory)
     reason = validate_training_config(resolved)
     if reason is not None:
