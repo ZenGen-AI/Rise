@@ -641,3 +641,114 @@ def test_the_default_executor_does_not_read_the_endpoint_config(twin):
     mt_wire.run(str(a.repo_root), interval_s=0, max_ticks=3)
     assert main(["run", str(b.repo_root), "--interval-s", "0", "--max-ticks", "3"]) == 0
     _same(a, b)
+
+
+# ---- 任务 104 的测试缺口:收尾函数的逆序与中途失败、装配失败比对 HEAD、开发入口 ----
+
+def _closer_builders(order):
+    """两个构造器各登记两个收尾函数,把调用记进 order。处理器键按字典序构造:nominate_recipe 在先,record_track 在后。"""
+    def make(name):
+        def build(ctx):
+            ctx.register_closer(lambda: order.append(f"{name}-first"))
+            ctx.register_closer(lambda: order.append(f"{name}-second"))
+            return lambda store, action: None
+        return build
+    return {"nominate_recipe": make("nominate"), "record_track": make("track")}
+
+
+def test_run_closes_what_the_builders_registered_in_reverse_order_when_it_finishes(tmp_path):
+    """补任务 104 的缺口:收尾函数逆序。经 run 走一遍真路径(Assembly.close 在 finally 里),后登记的先关。"""
+    store = _closed(tmp_path, run_id=None)
+    order = []
+    wire_run(str(store.repo_root), FactoryOptions(switches=("nominate", "track")), interval_s=0, max_ticks=1,
+             env={}, builders=_closer_builders(order))
+    assert order == ["track-second", "track-first", "nominate-second", "nominate-first"]
+
+
+def test_a_builder_failing_mid_assembly_closes_the_earlier_builders_resources_and_keeps_its_own_error(tmp_path):
+    """补任务 104 的缺口:装配中途失败。先构造的处理器登记的收尾函数要被逆序调用,即使其中一个抛异常也不盖住
+    构造器自己的 FactoryConfigError,也不跳过排在它前面的那个。"""
+    store = _closed(tmp_path, run_id=None)
+    order = []
+
+    def nominate(ctx):
+        ctx.register_closer(lambda: order.append("first"))
+
+        def boom():
+            order.append("second-raises")
+            raise RuntimeError("closer exploded")
+
+        ctx.register_closer(boom)
+        return lambda store, action: None
+
+    def plan(ctx):
+        raise FactoryConfigError("plan builder failed")
+
+    with pytest.raises(FactoryConfigError, match="plan builder failed"):
+        assemble(store, FactoryOptions(switches=("nominate", "plan"), planner_backend="heuristic"), env={},
+                 builders={"nominate_recipe": nominate, "plan_next_round": plan})
+    assert order == ["second-raises", "first"]
+
+
+@pytest.mark.parametrize("argv,builders,fragment", [
+    (["--enable", "plan,agent"], lambda: recording_builders(Recorder(), keys=["plan_next_round"]),
+     "no handler builder for ['start_agent_round']"),
+    (["--enable", "plan"], lambda: {"plan_next_round": lambda ctx: (_ for _ in ()).throw(FactoryConfigError("plan builder failed"))},
+     "plan builder failed"),
+], ids=["missing-builder", "builder-raises"])
+def test_an_assembly_failure_exits_2_and_leaves_head_and_tree_untouched(tmp_path, capsys, argv, builders, fragment):
+    """补任务 104 的缺口:两处装配失败(缺构造器、构造器抛配置错误)原先只断言退出码,不比对 HEAD。
+    退出码 2、一行错误,树里的文件和提交都原样。"""
+    store = _closed(tmp_path)
+    head, files = git_head(store), tree_files(store)
+    assert main(["reconcile", str(store.repo_root), "--once", *argv], env={}, builders=builders()) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("factory: error: ") and fragment in err and len(err.splitlines()) == 1
+    assert (git_head(store), tree_files(store)) == (head, files)
+
+
+def test_the_dev_entry_turns_mock_evidence_on_for_run_too_but_leaves_other_commands_alone(tmp_path, capsys):
+    """补任务 104 的缺口:`dev_main` 之前只测了 reconcile 分支。run 同样加上 --allow-mock-evidence;其他子命令
+    不加(install-defaults 的解析器不认这个开关,加了会以 SystemExit 结束)。"""
+    store = _closed(tmp_path, run_id=None)
+    seen = []
+    assert dev_main(["run", str(store.repo_root), "--max-ticks", "1", "--interval-s", "0", "--enable", "plan"],
+                    env={}, builders=recording_builders(Recorder(), seen_contexts=seen)) == 0
+    assert [c.accept_mock_evidence for c in seen] == [True]
+    seen.clear()
+    assert main(["run", str(store.repo_root), "--max-ticks", "1", "--interval-s", "0", "--enable", "plan"],
+                env={}, builders=recording_builders(Recorder(), seen_contexts=seen)) == 0
+    assert [c.accept_mock_evidence for c in seen] == [False]
+    fresh = GitStore(str(tmp_path / "fresh"))
+    fresh.init()
+    assert dev_main(["install-defaults", str(fresh.repo_root)], env={}) == 0
+    capsys.readouterr()
+
+
+def test_the_dev_entry_script_lets_the_loop_turn_on_mock_evidence_and_the_plain_script_does_not(tmp_path):
+    """补任务 104 的缺口:开发入口没有子进程测试。同一棵"mock 证据、已晋级"的树,真处理器(启发式规划):
+    run_factory.py 不接受 mock 证据所以什么都不做,run_factory_dev.py 自动加开关所以触发规划。"""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    from factory_fixtures import approve
+
+    store = _closed(tmp_path)
+    rec = Recorder()
+    for _ in range(3):
+        assert main(["reconcile", str(store.repo_root), "--once", "--enable", "plan"], env={},
+                     builders=recording_builders(rec)) == 0
+    approve(store, RUN)
+    assert main(["reconcile", str(store.repo_root), "--once", "--enable", "plan"], env={},
+                builders=recording_builders(rec)) == 0
+    scripts = Path(__file__).resolve().parents[1] / "scripts"
+    argv = ["reconcile", str(store.repo_root), "--once", "--enable", "plan", "--planner-backend", "heuristic"]
+
+    def run_script(name):
+        out = subprocess.run([sys.executable, str(scripts / name), *argv], capture_output=True, text=True)
+        assert out.returncode == 0, out.stderr
+        return out.stdout
+
+    assert run_script("run_factory.py") == "no actions\n"
+    assert run_script("run_factory_dev.py") == f"plan_next_round {RUN}\n"

@@ -673,3 +673,69 @@ def test_closing_the_session_ports_never_waits_for_the_runtime_lock(worlds, stor
     worker.join(timeout=5.0)
     assert finished, "closing the session ports blocked on the runtime lock"
     assert worlds.close_rollout(EP, [a], wait_s=0.5) is True
+
+
+def test_a_hung_opponent_on_the_real_servicer_lingers_and_the_world_is_held_until_the_reaper_closes_its_port(
+        store_with_scenario, monkeypatch):
+    """补设计三清单"经真 servicer 的滞留路径"的测试缺口:现有的真 servicer 加挂住对手用例都不经训练世界的保留表。
+    对手位后端第一次调用挂住 -> 服务端后端超时、会话以 role_backend_timeout 结束 -> 收尾 join 等不到在途线程,
+    资源进滞留表,对手位的世界端口还开着 -> 客户端 close_rollout 等不到计数归零,世界进保留表,同名重试判瞬态。
+    挂住的线程退出后回收线程关掉滞留资源(经 release_all 关端口),保留表里的世界才能先删后建。只用替身世界。"""
+    import factory.agent as agent_module
+    from simulator.datamodel import Persona
+    from simulator.store_adapter import write_scenario
+
+    real_create_server = agent_module.create_server
+    monkeypatch.setattr(agent_module, "create_server", lambda *a, **kw: real_create_server(*a, linger_retry_s=0.05, **kw))
+
+    class HangOnce:
+        def __init__(self):
+            self.release, self.calls = threading.Event(), 0
+
+        def respond(self, persona, scenario, history, speaker_slot):
+            self.calls += 1
+            if self.calls == 1:
+                self.release.wait(10)
+            return "hello", None
+
+    store, scenario, _ = store_with_scenario
+    hang = HangOnce()
+    write_scenario(store, Scenario(scenario.id, "bg", [RoleSlot("a", "a"), RoleSlot("b", "b")], "c", ["n"], "training"))
+    worlds = StandInTrainingWorlds(held_wait_s=0.1)
+    worlds.bind("run-1", None, {"s1": TupleMemory().digest()})
+    runtime = AgentRuntime(store, ("hi",), training_worlds=worlds, backend_timeout_s=0.5, resource_join_timeout_s=0.3,
+                           opponent_backend_factory=lambda binding, scn: hang)
+    runtime.register_session("s1", "run-1")
+    assignment = RoleAssignment("s1", [RoleBinding("b", "pb", "frozen_reference", model_ref="zengen-v1"),
+                                       RoleBinding("a", "pa", "self_play")], 4)
+    personas = {pid: Persona(pid, ["t"], "m", "s", ["v"]) for pid in ("pa", "pb")}
+
+    def eventually(predicate, timeout_s=5.0):
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            time.sleep(0.02)
+        return predicate()
+
+    try:
+        mine = worlds.open_rollout("run-1", "s1", EP, "pa")
+        client = runtime.client_factory()
+        client.create_session(scenario_id="s1", role_assignment=assignment, personas=personas,
+                              purpose="training", client_driven_slot="a", episode_id=EP)
+        assert client.closed and client.drain_until_end().terminated_reason == "role_backend_timeout"
+        servicer = runtime._server.servicer
+        assert eventually(lambda: servicer.lingering_count() == 1)       # join 等不到挂住的线程:资源滞留,端口没关
+        assert worlds.close_rollout(EP, [mine], wait_s=0.2) is False     # 服务端端口还计着数:世界进保留表
+        assert EP in worlds._held and EP not in worlds._worlds
+        with pytest.raises(MemoryFailureError) as retry:                 # 同名重试等满 held_wait_s 仍被占着
+            worlds.open_rollout("run-1", "s1", EP, "pa")
+        assert retry.value.transient is True
+        hang.release.set()                                               # 挂住的线程退出:回收线程关滞留资源
+        assert eventually(lambda: servicer.lingering_count() == 0)
+        again = worlds.open_rollout("run-1", "s1", EP, "pa")             # 端口关上了:保留的世界先删后建,从起点重来
+        assert again.digest() == TupleMemory().digest()
+        assert worlds.close_rollout(EP, [again], wait_s=1.0) is True
+    finally:
+        hang.release.set()
+        runtime.close()

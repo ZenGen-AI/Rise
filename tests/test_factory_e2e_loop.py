@@ -401,3 +401,93 @@ def test_an_unreadable_round_product_is_failed_by_the_handler_and_the_loop_moves
     assert len(_agent_failures(store, "run-001")) - len(before) == 1
 
     assert tick(store, "agent") == []  # failed 挡住
+
+
+# ---- 任务 108 的测试缺口:repo_commit 两种状态分开钉、第二轮逐 tick 动作行、增益阈值来自配置、fail_after=5 依赖的罐头形状 ----
+
+def _promote_and_nominate(store, *extra):
+    enable = "nominate,track,admit"
+    train_and_promote(store, "run-001", enable, *LOOP)
+    return tick(store, enable, *LOOP, *extra)
+
+
+def test_a_valid_repo_commit_reaches_the_recipe_candidate_and_is_not_a_repro_error(store):
+    """补任务 108 的缺口:大循环用例里 repo_commit 的断言是析取式(有值,或 repro 里报了它),两种状态都能过。
+    这里分开钉:传一个合法的短哈希,候选的 code_version 带着它,repro 错误里不出现 repo_commit。"""
+    assert _promote_and_nominate(store, "--repo-commit", "c0ffee1") == ["nominate_recipe run-001"]
+    cand = store.read_product(recipe_candidate_file("run-001"))
+    assert cand.payload["code_version"] == {"repo_commit": "c0ffee1"}
+    assert not any("repo_commit" in err for err in cand.payload["repro"]["errors"])
+
+
+def test_an_invalid_repo_commit_is_kept_on_the_candidate_and_reported_as_a_repro_error(store):
+    """补任务 108 的缺口(析取式断言的另一半):不是 7 到 40 位小写十六进制的值照样写进候选,但 repro 报错点名 repo_commit。"""
+    assert _promote_and_nominate(store, "--repo-commit", "c0ffee") == ["nominate_recipe run-001"]
+    cand = store.read_product(recipe_candidate_file("run-001"))
+    assert cand.payload["code_version"] == {"repo_commit": "c0ffee"}
+    assert any("code_version.repo_commit" in err for err in cand.payload["repro"]["errors"])
+
+
+def test_the_second_round_runs_the_same_four_actions_one_per_tick(store):
+    """补任务 108 的缺口:第二轮的逐 tick 动作行没有钉住(大循环用例丢掉了 train_and_promote 的返回值)。
+    规划后第二条指令不用确认,训练、诊断、待审、晋级各占一个 tick,动作行与第一轮同形,目标换成 run-002。"""
+    enable = "plan,track,admit"
+    extra = (*LOOP, "--no-confirm-directives")
+    train_and_promote(store, "run-001", enable, *extra)
+    assert tick(store, enable, *extra) == ["plan_next_round run-001"]
+    assert train_and_promote(store, "run-002", enable, *extra) == [
+        ["dispatch_directive run-002"], ["request_diagnostic cand-run-002"],
+        ["await_review cand-run-002"], ["promote_candidate cand-run-002"],
+    ]
+
+
+def test_the_nomination_threshold_is_the_scheduler_configs_min_gain_not_a_constant(store):
+    """补任务 108 的缺口:`gain > 0.01` 把默认阈值写死在断言里。这里让阈值来自配置:把 min_gain 抬到比增益还高,
+    同一个 run 的提名就变成 skipped、不产生配方候选,理由里点名这个阈值;增益本身不变。"""
+    from controlplane.paths import scheduler_config_file
+    from trainscheduler.config import load_scheduler_config
+
+    enable = "nominate,track,admit"
+    train_and_promote(store, "run-001", enable, *LOOP)
+    config = load_scheduler_config(store)
+    gain = compute_gain(store, "run-001", DIM).gain
+    assert gain > config.min_gain                                      # 默认阈值下会提名(大循环用例钉的那条)
+    write_config(store, scheduler_config_file(), "scheduler",
+                 dict(config.to_dict(), min_gain=gain + 1.0), "human: raise min_gain above the gain")
+    assert tick(store, enable, *LOOP) == ["nominate_recipe run-001"]
+    nomination = store.read_product(nomination_file("run-001")).payload
+    assert nomination["result"] == "skipped" and nomination["recipe_candidate_id"] is None
+    assert f"below min_gain {gain + 1.0}" in nomination["reason"]
+    assert not store.exists(recipe_candidate_file("run-001"))
+    assert compute_gain(store, "run-001", DIM).gain == gain
+
+
+def test_the_canned_agent_round_has_the_shape_the_flaky_failure_point_assumes(store, monkeypatch):
+    """补任务 108 的缺口:`_Flaky(fail_after=5)` 依赖罐头情境的形状(三个情境、四个回合、智能体后说,
+    所以每条部署 episode 里智能体说 2 句:2 + 2 + 第三条的第一句 = 第 5 次)。形状变了,那条用例会静默地换成
+    另一个失败点。这里直接数:部署的头三个后端各被调用 2 次,而且失败点的算式与配置对得上。"""
+    from factory import handlers as fh
+    from factory.agent import CannedGuidedBackend
+    from factory.defaults import DEFAULT_AGENT_CONFIG
+
+    scenarios, max_turns = len(DEFAULT_AGENT_CONFIG["scenario_ids"]), DEFAULT_AGENT_CONFIG["max_turns"]
+    per_episode = max_turns // 2
+    assert (scenarios, max_turns) == (3, 4) and per_episode * (scenarios - 1) + 1 == 5
+
+    _agent_ready(store)
+    built = []
+
+    def counting_factory(model_id, ckpt):
+        inner, calls = CannedGuidedBackend(), []
+        built.append(calls)
+
+        class Backend:
+            def respond_guided(self, *a):
+                calls.append(1)
+                return inner.respond_guided(*a)
+
+        return Backend()
+
+    monkeypatch.setattr(fh, "canned_backend_factory", counting_factory)
+    assert tick(store, "agent") == ["start_agent_round zengen-v2"]
+    assert [len(calls) for calls in built[:scenarios]] == [per_episode] * scenarios

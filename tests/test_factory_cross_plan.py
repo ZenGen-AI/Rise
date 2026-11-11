@@ -142,7 +142,9 @@ def test_controlplane_imports_none_of_the_new_packages():
 
 
 RUN_NAMES = ["run-1", "run-001", "run-999", "run-1000", "run-٥٠", "run-1b", "run-", "RUN-001", "run-+1",
-             "scratch"]
+             "scratch",
+             # 任务 109 的缺口:带换行的名字。正则里的 `$` 会放过结尾的一个换行,两边要么同时认、要么同时不认
+             "run-1\n", "run-1\r\n", "run-1\nx", "run-\n1", "\nrun-1"]
 
 
 @pytest.mark.parametrize("name", RUN_NAMES)
@@ -254,4 +256,90 @@ def test_handlers_does_not_import_wire_at_module_level():
     handlers = Path(__file__).resolve().parents[1] / "src" / "factory" / "handlers.py"
     offenders = [f"handlers.py:{n} imports {mod}" for n, mod in _module_level_imports(handlers)
                  if mod == "factory.wire" or mod.startswith("factory.wire.")]
+    assert offenders == []
+
+
+@pytest.mark.parametrize("name", ["run-٥٠", "run-１２", "run-²"], ids=["arabic-indic", "fullwidth", "superscript"])
+def test_both_run_number_parsers_reject_non_ascii_digits(name):
+    """补任务 109 的缺口:`test_run_number_parsers_agree` 只比两边是否一致,两边同时退化成 \\d 也能过。
+    这里钉死各自的口径:run 编号只认 ASCII 的 [0-9]。"""
+    from controlplane.reconcile import _RUN_ID
+    from trainscheduler.run_ids import run_number
+
+    assert run_number(name) is None
+    assert _RUN_ID.match(name) is None
+
+
+def _ts_refusal_cases():
+    """cli/test/gates.test.ts 里"拒绝批准"循环的数组字面量,译成与 REPRO_CASES 同一套写法(undefined 即缺字段)。"""
+    import json
+    import re
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "cli" / "test" / "gates.test.ts"
+    if not path.exists():
+        pytest.skip("cli/test/gates.test.ts is not in this checkout")
+    match = re.search(r"for \(const repro of \[(.*?)\]\) \{\s*\n\s*it\(`refuses a recipe candidate", path.read_text(encoding="utf-8"), re.DOTALL)
+    assert match, "the refusal loop in gates.test.ts was not found; update this test with the TypeScript table"
+    literal = re.sub(r"\bundefined\b", '"<missing>"', match.group(1))
+    literal = re.sub(r"([{,]\s*)([A-Za-z_]\w*)\s*:", r'\1"\2":', literal)
+    return json.loads(f"[{literal}]")
+
+
+def test_the_typescript_refusal_table_is_the_python_rejected_cases():
+    """补任务 109 的缺口:Python 的 REPRO_CASES 与 TypeScript 的拒绝循环各写了一份,注释里说"一侧改了另一侧照改",
+    但没有机械核对。这里把 TypeScript 数组字面量读出来,与 Python 表里判拒绝的那些逐项比对(忽略顺序)。
+    只关联拒绝一侧:接受一侧在 TypeScript 里是三个独立的 it,没有成表。"""
+    import json
+
+    ts = sorted(json.dumps(c, sort_keys=True) for c in _ts_refusal_cases())
+    py = sorted(json.dumps(r, sort_keys=True) for r, accepted in REPRO_CASES if not accepted)
+    assert ts == py, "gates.test.ts and test_factory_cross_plan.REPRO_CASES list different rejected repro shapes"
+
+
+@pytest.mark.parametrize("run_id,n", [("run-9", 3), ("run-010", 2), ("run-xyz", 7)])
+def test_plan_8_evaluator_baseline_round_trips_for_other_run_ids(tmp_path, run_id, n):
+    """补任务 109 的缺口:评估器基线往返只测了 run-001。换成短编号、补零编号与非数字 id,在真实晋级产物上
+    resolve_baseline 仍点名 zengen-v<n>、给出分数,baseline_run_of 追回同一个 run。"""
+    store = closed_loop_repo(str(tmp_path / "cp"), run_id=None)
+    build_mock_evaluator(store)(store, run_id, f"cand-{run_id}")
+    store.write_product(candidate_checkpoint_file(run_id), Envelope(
+        id=f"cand-{run_id}", type="candidate_checkpoint", version=1, created_at="t", created_by=OwnerRef(),
+        status="approved", schema_version=1, payload={}), "seed approved candidate")
+    apply_action(store, Action("promote_candidate", f"cand-{run_id}", {"run_id": run_id, "model_version": n}))
+    ref, scores = resolve_baseline(store, "run-next", "factory-bench-v1", backends="mock")
+    assert ref == f"zengen-v{n}" and scores
+    assert baseline_run_of(store, ref) == (run_id, "ok")
+
+
+def _dynamic_imports(source: str) -> list[tuple[int, str]]:
+    """一段源码里的动态导入调用:`importlib.import_module(...)`、`import_module(...)`、`__import__(...)`。"""
+    import ast
+
+    found = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Call):
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+            if name in ("import_module", "__import__"):
+                found.append((node.lineno, name))
+    return found
+
+
+def test_the_dynamic_import_scan_finds_what_the_static_layer_scan_cannot_see():
+    source = "import importlib\nm = importlib.import_module('diagnostic.x')\nn = __import__('mindtrainer')\n"
+    assert _dynamic_imports(source) == [(2, "import_module"), (3, "__import__")]
+    assert _dynamic_imports("import os\nfrom a import b\n") == []
+
+
+def test_no_layered_package_uses_a_dynamic_import():
+    """补任务 109 的缺口:`test_layer_rules_hold` 用 ast 看 Import 与 ImportFrom,看不到 importlib.import_module 或
+    __import__,动态导入能绕过分层规则。目前四个受分层规则管的包里一处都没有;出现时要么改成静态导入,
+    要么在这里逐个说明并让分层测试也认它。"""
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[1] / "src"
+    offenders = [f"{p.relative_to(src)}:{lineno} {name}" for package in LAYER_RULES
+                 for p in sorted((src / package).rglob("*.py"))
+                 for lineno, name in _dynamic_imports(p.read_text(encoding="utf-8"))]
     assert offenders == []

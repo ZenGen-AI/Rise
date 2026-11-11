@@ -113,3 +113,60 @@ def test_missing_assets_fail_at_assembly_not_at_the_first_candidate(store):
     (store.repo_root / taxonomy_file(DEFAULT_EVALUATOR_CONFIG["taxonomy_version"])).unlink()
     with pytest.raises(FactoryConfigError, match="diagnostic assets"):
         build_mock_evaluator(store)
+
+
+# ---- 任务 103 的测试缺口:quick 档、题库缺失、版本字段类型错、空参考答案回退 ----
+
+def test_the_quick_tier_is_carried_into_a_mock_graded_report(store):
+    """补任务 103 的缺口:evaluator.yaml 的 tier 写 quick 时装配通过,报告记 run_tier 为 quick,证据等级仍是 mock。"""
+    write_config(store, EVALUATOR_CONFIG, "evaluator", dict(DEFAULT_EVALUATOR_CONFIG, tier="quick"), "human: quick tier")
+    install_defaults(store)                                   # 已有的配置不覆盖
+    build_mock_evaluator(store)(store, "run-001", "cand-run-001")
+    payload = store.read_product(diagnostic_report_file("run-001")).payload
+    assert payload["run_tier"] == "quick" and payload["backends"] == "mock"
+    assert diagnostic_grade(payload) == "mock"
+
+
+def test_a_missing_item_pool_fails_at_assembly_like_a_missing_taxonomy(store):
+    """补任务 103 的缺口:题库缺失(现有用例只删了分类表)同样在装配期判 FactoryConfigError。"""
+    install_defaults(store)
+    (store.repo_root / item_pool_file(DEFAULT_EVALUATOR_CONFIG["item_pool_version"])).unlink()
+    with pytest.raises(FactoryConfigError, match="diagnostic assets"):
+        build_mock_evaluator(store)
+
+
+@pytest.mark.parametrize("key", ["taxonomy_version", "item_pool_version", "benchmark_version"])
+@pytest.mark.parametrize("bad", [3, None, ["a"]], ids=["int", "null", "list"])
+def test_a_version_field_of_the_wrong_type_is_named_by_its_key(store, key, bad):
+    """补任务 103 的缺口:三个版本字段不是字符串时点名字段(现有用例只试了 benchmark_version 为空串)。"""
+    write_config(store, EVALUATOR_CONFIG, "evaluator", dict(DEFAULT_EVALUATOR_CONFIG, **{key: bad}), "bad")
+    with pytest.raises(FactoryConfigError, match=rf"{key} must be a non-empty string"):
+        build_mock_evaluator(store)
+
+
+@pytest.mark.parametrize("bad", [2.0, "4"], ids=["float", "string"])
+def test_sampling_k_must_be_a_real_int(store, bad):
+    """补任务 103 的缺口:sampling_k 是浮点或字符串也拒绝(现有用例只有 0 与 True)。"""
+    write_config(store, EVALUATOR_CONFIG, "evaluator", dict(DEFAULT_EVALUATOR_CONFIG, sampling_k=bad), "bad")
+    with pytest.raises(FactoryConfigError, match="sampling_k must be an int >= 1"):
+        build_mock_evaluator(store)
+
+
+@pytest.mark.parametrize("ref", [None, ""], ids=["null", "empty"])
+def test_a_base_item_without_a_reference_answer_is_answered_with_the_empty_string(store, monkeypatch, ref):
+    """补任务 103 的缺口:空参考答案回退。mock 的基题答案取 `reference_answer or ""`,所以参考答案为 null 或空串的基题,
+    交给 mock SoMEval 的固定答案都是 sampling_k 个空串,不是 None;变体题照旧答错。只钉装配时算出的答案表。"""
+    import factory.evaluation as evaluation
+
+    seen = {}
+    real = evaluation.MockSoMEvalRunner
+    monkeypatch.setattr(evaluation, "MockSoMEvalRunner", lambda fixed: seen.update(fixed=fixed) or real(fixed=fixed))
+    install_defaults(store)
+    rel = item_pool_file(DEFAULT_EVALUATOR_CONFIG["item_pool_version"])
+    env = store.read_product(rel)
+    env.payload["items"][0]["reference_answer"] = ref
+    store.write_product(rel, env, "human: no reference answer")
+    build_mock_evaluator(store)
+    k = DEFAULT_EVALUATOR_CONFIG["sampling_k"]
+    assert seen["fixed"]["fi1"] == [""] * k
+    assert seen["fixed"]["fi1v"] == [evaluation.MOCK_WRONG] * k

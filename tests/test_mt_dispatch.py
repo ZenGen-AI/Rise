@@ -1108,6 +1108,33 @@ def test_the_resolved_memory_is_part_of_the_config_hash(store, live):
     assert "config changed" in env.payload["failure"]["reason"]
 
 
+def test_a_pending_run_recorded_with_per_persona_digest_keys_is_failed_t3_on_resume(store):
+    """补设计三清单"旧按人格键续训判 T3"的端到端缺口:设计三之前的 pending 记录,其 config_hash 是按旧形状
+    (digests 的键是人格 id)算的。升级后续训,解析器按情境给出新形状的摘要,哈希对不上:指令判 T3
+    "config changed",不开任何客户端、不动训练记录,留给人处理。"""
+    import dataclasses
+
+    from mindtrainer.datamodel import TrainingRun
+    from mindtrainer.store_adapter import read_training_run, write_training_run
+    from mindtrainer.training_config import config_hash, load_config_from_directive
+
+    _interact_directive(store, memory=unresolved_memory())
+    cfg = load_config_from_directive(store.read_product(f"{run_dir(RUN)}/directive.yaml"))
+    legacy_memory = {"seed": None, "digests": {"pa": "digest-pa", "pb": "digest-pb"}, "runtime": dict(STAND_IN_RUNTIME)}
+    write_training_run(store, TrainingRun(RUN, config_hash(dataclasses.replace(cfg, memory=legacy_memory))))
+    before = read_training_run(store, RUN)
+
+    def no_client(**kw):
+        raise AssertionError("a run that needs a human must not open a session")
+
+    reconcile_once(store, dispatcher=make_mindtrainer_dispatcher(
+        client_factory=no_client, policy=ScriptedBackend({}), memory_resolver=fake_memory_resolver))
+    env = store.read_product(f"{run_dir(RUN)}/directive.yaml")
+    assert env.status == "failed" and env.payload["failure"]["category"] == "T3"
+    assert "config changed since run run-1 started" in env.payload["failure"]["reason"]
+    assert read_training_run(store, RUN) == before and before.status == "pending"        # 训练记录原样不动
+
+
 def test_an_interact_directive_without_a_memory_resolver_fails_naming_the_interact_switch(store, live):
     _interact_directive(store, memory=unresolved_memory())
     trace = []

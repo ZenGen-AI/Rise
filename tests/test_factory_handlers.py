@@ -1254,3 +1254,115 @@ def test_the_stand_in_memory_logs_its_backend(store, caplog):
     with caplog.at_level(logging.INFO, logger="factory.memory_runtime"):
         memory_wiring(store.repo_root, {}, deployment=True)           # 启动日志在选后端处记一次,不在造替身处
     assert "memory backend: stand-in" in caplog.text
+
+
+# ---- 任务 107 的测试缺口:_has_bridge_role 的分支、畸形 backends.yaml、agent.yaml 缺文件与类型、收尾经 Assembly、共享的加载器与规划后端 ----
+
+def _bridge_entry(**kw):
+    raw = {"backend": "fake", "invocation_form": "cli", "model_name": "m", "prompt_template_version": "v1",
+           "token_env": None, "command": [sys.executable, "-c", "print('ok')"]}
+    raw.update(kw)
+    return raw
+
+
+def test_has_bridge_role_is_false_without_the_file_false_without_the_role_and_true_with_it(store):
+    """补任务 107 的缺口:`_has_bridge_role` 此前没有直接用例。三个分支:没有 backends.yaml、有文件但没有这个角色、有这个角色。"""
+    assert fh._has_bridge_role(store, "agent") is False
+    write_config(store, backends_config_file(), "backends", {"planner": _bridge_entry()}, "test: planner only")
+    assert fh._has_bridge_role(store, "agent") is False and fh._has_bridge_role(store, "planner") is True
+    write_config(store, backends_config_file(), "backends",
+                 {"planner": _bridge_entry(), "agent": _bridge_entry()}, "test: both roles")
+    assert fh._has_bridge_role(store, "agent") is True
+
+
+def test_a_garbled_backends_yaml_is_a_config_error_for_the_agent_switch_too(store, capsys):
+    """补任务 107 的缺口:畸形 backends.yaml。_has_bridge_role 不吞读文件的错误,agent 开关的装配期一行错误、退出码 2。"""
+    from factory.cli import main
+
+    (store.repo_root / backends_config_file()).parent.mkdir(parents=True, exist_ok=True)
+    (store.repo_root / backends_config_file()).write_text("a: [unterminated\n", encoding="utf-8")
+    with pytest.raises(FactoryConfigError, match=r"backends.yaml cannot be read as a configuration product \(ParserError\)"):
+        fh._has_bridge_role(store, "agent")
+    assert main(["reconcile", str(store.repo_root), "--once", "--enable", "agent"], env={}) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("factory: error: ") and "ParserError" in err and len(err.splitlines()) == 1
+
+
+def test_the_round_handler_gets_a_bridge_only_when_backends_yaml_has_an_agent_entry(store, monkeypatch):
+    """补任务 107 的缺口:`_has_bridge_role` 的结果落到轮次处理器的 bridge 参数上。没有 agent 条目是 None(罐头后端的轮次不需要),
+    有就是造好的 CliBridge;只有 planner 条目也是 None。"""
+    from inference_bridge import CliBridge
+
+    seen = []
+    monkeypatch.setattr(fh, "make_start_round_handler", lambda **kw: seen.append(kw["bridge"]) or (lambda s, a: None))
+    assemble(store, FactoryOptions(switches=("agent",)), env={}).close()
+    write_config(store, backends_config_file(), "backends", {"planner": _bridge_entry()}, "test: planner only")
+    assemble(store, FactoryOptions(switches=("agent",)), env={}).close()
+    write_config(store, backends_config_file(), "backends",
+                 {"planner": _bridge_entry(), "agent": _bridge_entry()}, "test: both roles")
+    assemble(store, FactoryOptions(switches=("agent",)), env={}).close()
+    assert seen[:2] == [None, None] and isinstance(seen[2], CliBridge)
+
+
+def test_a_missing_agent_yaml_exits_2_at_assembly_naming_install_defaults(store, capsys):
+    """补任务 107 的缺口:agent.yaml 的缺文件分支没测。装配期一行错误、退出码 2,提示去跑 install-defaults。"""
+    from factory.cli import main
+
+    (store.repo_root / AGENT_CONFIG).unlink()
+    store._git("add", "-A")
+    store._git("commit", "-q", "-m", "human: drop agent.yaml")
+    with pytest.raises(FactoryConfigError, match="agent.yaml is missing; the agent switch needs it"):
+        read_agent_settings(store)
+    assert main(["reconcile", str(store.repo_root), "--once", "--enable", "agent"], env={}) == 2
+    err = capsys.readouterr().err
+    assert "agent.yaml is missing" in err and "install-defaults" in err and len(err.splitlines()) == 1
+
+
+@pytest.mark.parametrize("key,bad,fragment", [
+    ("scenario_ids", "s1", "scenario_ids must be a non-empty list"),
+    ("scenario_ids", ["s1", 7], "scenario_ids must be a non-empty list"),
+    ("opponent_lines", "hello", "opponent_lines must be a non-empty list"),
+    ("opponent_lines", ["ok", ""], "opponent_lines must be a non-empty list"),
+    ("bindings", "x", "bindings must be a list of mappings"),
+    ("bindings", [1], "bindings must be a list of mappings"),
+    ("max_turns", "4", "max_turns must be an int >= 1"),
+    ("max_turns", 0, "max_turns must be an int >= 1"),
+    ("min_support", 1.5, "min_support must be an int >= 1"),
+    ("min_ratio", "x", "min_ratio must be a number"),
+])
+def test_agent_yaml_field_types_are_named_by_their_field(store, key, bad, fragment):
+    """补任务 107 的缺口:agent.yaml 类型用例薄。每个必填与可选字段写错类型都点名字段,且不回显取值。"""
+    write_config(store, AGENT_CONFIG, "agent", dict(DEFAULT_AGENT_CONFIG, **{key: bad}), "human: bad type")
+    with pytest.raises(FactoryConfigError, match=fragment) as caught:
+        read_agent_settings(store)
+    assert "hello" not in str(caught.value)
+
+
+def test_the_agent_switch_registers_the_runtime_closer_once_through_the_assembly(store):
+    """补任务 107 的缺口:收尾注册没有经 Assembly 测。agent 开关装配出的 Assembly 里恰好登记了共用运行时的 close,
+    Assembly.close() 调到它(runtime 回到未启动),再调一次也不抛。"""
+    asm = assemble(store, FactoryOptions(switches=("agent",)), env={})
+    runtimes = [c.__self__ for c in asm.closers if isinstance(getattr(c, "__self__", None), AgentRuntime)]
+    assert len(runtimes) == 1 and len(asm.closers) == 1
+    runtimes[0].client_factory()
+    assert runtimes[0].started
+    asm.close()
+    assert not runtimes[0].started
+    asm.close()
+
+
+def test_the_plan_switch_hands_the_shared_config_loader_and_the_chosen_backend_to_the_plan_handler(store, monkeypatch):
+    """补任务 107 的缺口:共享的 config loader 与规划后端没被断言。confirm_directives 覆盖只在 loader 的返回值里;
+    heuristic 选启发式后端,bridge 选以 planner 桥接为底座、名为 bridge 的后端。"""
+    from trainplanner.backends import BridgeDecisionBackend, HeuristicBackend
+
+    seen = []
+    monkeypatch.setattr(fh, "make_plan_handler", lambda **kw: seen.append(kw) or (lambda s, a: None))
+    assemble(store, FactoryOptions(switches=("plan",), planner_backend="heuristic", confirm_directives=False), env={}).close()
+    _planner_backend(store)
+    assemble(store, FactoryOptions(switches=("plan",), planner_backend="bridge"), env={}).close()
+    heuristic, bridge = seen
+    assert isinstance(heuristic["backend"], HeuristicBackend)
+    assert heuristic["config_loader"](store).confirm_directives is False
+    assert isinstance(bridge["backend"], BridgeDecisionBackend) and bridge["backend"].name == "bridge"
+    assert bridge["config_loader"](store).confirm_directives == load_scheduler_config(store).confirm_directives
