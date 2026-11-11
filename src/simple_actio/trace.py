@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 
 from simple_actio.errors import SimpleActioDataError
+from simple_actio.experience import TIERS
 
 TRACE_SCHEMA_V1 = "simple_actio.trace.v1"
 TRACE_SCHEMA_V2 = "simple_actio.trace.v2"
@@ -104,7 +105,7 @@ def validate_trace(trace: object) -> None:
         if (
             not isinstance(exp, dict) or set(exp) != {"id", "tier"}
             or not isinstance(exp["id"], str) or not exp["id"]
-            or exp["tier"] not in ("primary", "secondary", "fallback")
+            or exp["tier"] not in TIERS
         ):
             raise SimpleActioDataError(f"trace.experience: expected None or {{id, tier}}, got {exp!r}")
     lv = trace["library_version"]

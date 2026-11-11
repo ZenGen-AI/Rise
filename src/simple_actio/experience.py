@@ -14,6 +14,8 @@ from simple_actio.triggers import InvalidTriggerError, evaluate_trigger, validat
 from simulator.datamodel import TurnRecord
 
 TIERS = ("primary", "secondary", "fallback")
+CONDITIONAL_TIERS = TIERS[:-1]  # 带条件的两级,select_tier 按这个顺序试
+FALLBACK_TIER = TIERS[-1]  # 无条件的保底一级
 
 
 @dataclass(frozen=True)
@@ -52,9 +54,9 @@ class ReasoningExperience:
             tier = getattr(self, name)
             if not isinstance(tier, Tier):
                 raise SimpleActioDataError(f"experience {eid}.tiers.{name}: expected Tier, got {type(tier).__name__}")
-            if name == "fallback" and tier.when is not None:
+            if name == FALLBACK_TIER and tier.when is not None:
                 raise SimpleActioDataError(f"experience {eid}.tiers.fallback.when must be null (fallback is unconditional)")
-            if name != "fallback" and tier.when is None:
+            if name != FALLBACK_TIER and tier.when is None:
                 raise SimpleActioDataError(f"experience {eid}.tiers.{name}.when must be a trigger")
 
     def to_dict(self) -> dict:
@@ -101,7 +103,7 @@ def _trigger(node: object, what: str) -> None:
 @dataclass(frozen=True)
 class ExperienceActivation:
     experience_id: str
-    tier: str  # "primary" | "secondary" | "fallback"
+    tier: str  # TIERS 之一
     instructions: tuple[str, ...]
 
 
@@ -109,11 +111,11 @@ def select_tier(
     exp: ReasoningExperience, history: list[TurnRecord], speaker_slot: str, registry: SignalRegistry,
 ) -> ExperienceActivation:
     """三级回退:主策略条件成立用主策略,否则次策略条件成立用次策略,否则用保底策略。"""
-    for name in ("primary", "secondary"):
+    for name in CONDITIONAL_TIERS:
         tier: Tier = getattr(exp, name)
         if evaluate_trigger(tier.when, history, speaker_slot, registry):
             return ExperienceActivation(exp.id, name, tier.instructions)
-    return ExperienceActivation(exp.id, "fallback", exp.fallback.instructions)
+    return ExperienceActivation(exp.id, FALLBACK_TIER, exp.fallback.instructions)
 
 
 def activate(

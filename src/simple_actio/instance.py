@@ -17,7 +17,9 @@ from simple_actio import _check
 from simple_actio.errors import SimpleActioDataError
 from simple_actio.experience import ExperienceActivation, ReasoningExperience, activate
 from simple_actio.memory import MemoryEntry, TupleMemory
-from simple_actio.memory_port import MemoryBackend, MemoryEvent, MemoryFailureError, MemoryHit
+from simple_actio.memory_port import (
+    PERSONA_ID_PATTERN, MemoryBackend, MemoryEvent, MemoryFailureError, MemoryHit,
+)
 from simple_actio.signals import SignalRegistry, default_registry
 from simple_actio.skills import RouteResult, Skill, check_library, route
 from simple_actio.trace import build_trace, normalize_library_version
@@ -234,8 +236,25 @@ class SimpleActioInstance:
         _guard(self.memory.embed_pending)
 
     def close(self) -> None:
-        """关掉记忆端口。不放弃任何事件:放弃由 MindAgent 在 episode 最终结束时经部署管理面做。"""
-        self.memory.close()
+        """关掉记忆端口。不放弃任何事件:放弃由 MindAgent 在 episode 最终结束时经部署管理面做。
+        与读写路径同经 _guard:端口抛的非 MemoryFailureError 改抛永久 MemoryFailureError,只报类名。"""
+        _guard(self.memory.close)
+
+
+def _check_experiences(experiences: tuple[ReasoningExperience, ...], reg: SignalRegistry) -> None:
+    """类型、id 不重复,触发条件里的信号都在 reg 里。"""
+    seen: set[str] = set()
+    for e in experiences:
+        if not isinstance(e, ReasoningExperience):
+            raise SimpleActioDataError(f"expected ReasoningExperience, got {type(e).__name__}")
+        if e.id in seen:
+            raise SimpleActioDataError(f"duplicate experience id {e.id!r}")
+        seen.add(e.id)
+        for what, trig in (("applies_when", e.applies_when), ("primary", e.primary.when), ("secondary", e.secondary.when)):
+            try:
+                validate_trigger(trig, reg)
+            except InvalidTriggerError as exc:
+                raise SimpleActioDataError(f"experience {e.id}.{what}: {exc}") from None
 
 
 def instantiate(
@@ -283,7 +302,9 @@ def instantiate(
     elif not replay_read_only:
         raise SimpleActioDataError("episode_id: required when the instance writes memory")
     if holder is not None:
-        _check.text(holder, "holder")
+        if not isinstance(holder, str) or not PERSONA_ID_PATTERN.fullmatch(holder):
+            raise SimpleActioDataError(f"holder: expected 1 to 128 characters of [A-Za-z0-9._-] "
+                                       f"starting with a letter or digit, got {holder!r}")
     elif not replay_read_only:
         raise SimpleActioDataError("holder: required when the instance writes memory")
     if interlocutors is None:
@@ -296,18 +317,7 @@ def instantiate(
             _check.text(persona_id, f"interlocutors[{slot!r}]")
         interlocutors = dict(interlocutors)
     experiences = tuple(experiences)
-    seen: set[str] = set()
-    for e in experiences:
-        if not isinstance(e, ReasoningExperience):
-            raise SimpleActioDataError(f"expected ReasoningExperience, got {type(e).__name__}")
-        if e.id in seen:
-            raise SimpleActioDataError(f"duplicate experience id {e.id!r}")
-        seen.add(e.id)
-        for what, trig in (("applies_when", e.applies_when), ("primary", e.primary.when), ("secondary", e.secondary.when)):
-            try:
-                validate_trigger(trig, reg)
-            except InvalidTriggerError as exc:
-                raise SimpleActioDataError(f"experience {e.id}.{what}: {exc}") from None
+    _check_experiences(experiences, reg)
     if isinstance(memory_limit, bool) or not isinstance(memory_limit, int) or memory_limit < 0:
         raise SimpleActioDataError(f"memory_limit: expected a non-negative int, got {memory_limit!r}")
     if profile is not None and not isinstance(profile, dict):

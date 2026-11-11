@@ -388,7 +388,8 @@ def test_instantiate_memory_arguments():
     with pytest.raises(SimpleActioDataError, match="memory"):
         instantiate(EchoGuidance(), **base, memory=object(), episode_id="ep")
     for bad in ({"episode_id": ""}, {"episode_id": 3}, {"interlocutors": {"b": ""}},
-                {"interlocutors": [("b", "pb")]}, {"replay_read_only": "yes"}, {"holder": ""}, {"holder": 3}):
+                {"interlocutors": [("b", "pb")]}, {"replay_read_only": "yes"}, {"holder": ""}, {"holder": 3},
+                {"holder": "a/b"}, {"holder": ".pa"}, {"holder": "pa\n"}, {"holder": "p" * 129}):
         with pytest.raises(SimpleActioDataError):
             instantiate(EchoGuidance(), **base, memory=TupleMemory(), **{"episode_id": "ep", "holder": "pa", **bad})
     short = instantiate(EchoGuidance(), **base, memories=[])
@@ -406,6 +407,24 @@ def test_close_forwards_to_the_port():
     inst = _ported(port)
     inst.close()
     assert port.closed == 1
+
+
+def test_close_failures_go_through_the_same_guard_as_reads_and_writes():
+    class FailingClose(RecordingPort):
+        def __init__(self, exc):
+            super().__init__()
+            self.exc = exc
+
+        def close(self):
+            raise self.exc
+
+    with pytest.raises(MemoryFailureError) as info:
+        _ported(FailingClose(OSError("/secret/path"))).close()
+    assert info.value.transient is False and str(info.value) == "OSError"  # 只报类名
+    original = MemoryFailureError("close_timeout", transient=True)
+    with pytest.raises(MemoryFailureError) as info:
+        _ported(FailingClose(original)).close()
+    assert info.value is original
 
 
 def test_an_instance_over_a_file_port_reads_the_same_store_the_management_plane_writes(tmp_path):
