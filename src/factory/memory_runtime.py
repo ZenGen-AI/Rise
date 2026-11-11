@@ -263,6 +263,8 @@ class _World:
         self.open = 1                        # 训练位的端口:建世界之前先占上,同名的并发重建就看得见它
         self.ready = False
         self.closed = threading.Condition(lock)
+        # 进保留表的原因是客户端自己的端口关不上:没有任何东西会再关它,同名重试等也白等
+        self.client_stuck = False
 
 
 def _close_all(ports: Sequence[object]) -> Exception | None:
@@ -380,13 +382,15 @@ class _RolloutWorlds:
         """建世界、登记、开 holder 的端口。重试在同一线程里顺序发生,上一次尝试的上下文已经退出,所以同名世界
         先删后建,从起点出发。它在保留表里还有端口开着(等服务端收尾)时,持表锁有界等待 `held_wait_s`(等待时放锁),
         醒来后复核两张表。仍有端口开着就不删,抛瞬态 `MemoryFailureError`:轨迹源把它记成一次
-        role_memory_unavailable 再重跑。世界表里的同名项还有端口开着(上一次尝试的 `close_rollout` 还没跑完)时
+        role_memory_unavailable 再重跑。保留的原因是客户端自己的端口关不上(`client_stuck`)时不等、直接抛:
+        没有任何东西会再关那个端口。世界表里的同名项还有端口开着(上一次尝试的 `close_rollout` 还没跑完)时
         不等、直接抛:等它就是和 `close_rollout` 等同一项的 Condition,本方先醒的话,新建的世界会被随后醒来的
         `close_rollout` 摘掉并删掉。建不成时摘掉表项、删掉半建的世界。run 没绑定抛 `KeyError`。"""
         seed = self.seed_of(run_id)
         with self._lock:
             held, live = self._held.get(episode_id), self._worlds.get(episode_id)
-            if held is not None and held.open > 0 and (live is None or live.open == 0):
+            if (held is not None and held.open > 0 and not held.client_stuck
+                    and (live is None or live.open == 0)):
                 held.closed.wait_for(lambda: held.open == 0, self.held_wait_s)
             if self._busy(episode_id) is not None:          # 醒来后重新从两张表取表项复核
                 raise MemoryFailureError(
@@ -441,8 +445,11 @@ class _RolloutWorlds:
             else:
                 done = rec.closed.wait_for(lambda: rec.open == 0, wait_s)
             if rec is not None:
-                del self._worlds[episode_id]
+                # 按 `is rec` 摘:等待期间放了锁,同名的 open_rollout 可能已经换上了新的表项
+                if self._worlds.get(episode_id) is rec:
+                    del self._worlds[episode_id]
                 if not done:
+                    rec.client_stuck = first is not None
                     self._held[episode_id] = rec
         if first is not None:
             if rec is not None:

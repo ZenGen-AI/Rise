@@ -243,6 +243,57 @@ def test_a_client_port_that_does_not_close_keeps_the_world_and_reraises(worlds):
         a.digest()                                                 # 后面的端口照样关了
 
 
+def test_a_retry_after_a_client_port_did_not_close_is_transient_at_once(worlds):
+    """客户端自己的端口关不上就没有任何东西会再关它:同名重试不等 held_wait_s,直接判瞬态。"""
+    worlds.held_wait_s = 3.0
+    a = worlds.open_rollout("run-1", "s1", EP, "pa")
+
+    class Stuck:
+        def close(self):
+            raise MemoryFailureError("starling memory failed: TimeoutError", transient=False)
+
+    stuck = Stuck()
+    real_close, a.close = a.close, stuck.close                     # 训练位端口本身关不上
+    with pytest.raises(MemoryFailureError):
+        worlds.close_rollout(EP, [a], wait_s=3.0)
+    started = time.monotonic()
+    with pytest.raises(MemoryFailureError) as held:
+        worlds.open_rollout("run-1", "s1", EP, "pa")
+    assert held.value.transient is True and time.monotonic() - started < 1.0
+    real_close()                                                   # 端口终于关上:计数归零,重试照常
+    again = worlds.open_rollout("run-1", "s1", EP, "pa")
+    assert worlds.close_rollout(EP, [again], wait_s=1.0) is True
+
+
+def test_close_rollout_does_not_drop_a_newer_world_opened_while_it_waited():
+    """close_rollout 等端口计数时放了锁:同名的 open_rollout 在这期间可以换上新表项,收尾只摘自己那一项。"""
+    worlds = StandInTrainingWorlds(held_wait_s=0.1)
+    worlds.bind("run-1", None, {})
+    a = worlds.open_rollout("run-1", "s1", EP, "pa")
+    rec = worlds._worlds[EP]
+    reopened = []
+
+    class Racing:
+        """替 rec.closed:等待时放锁,让同名的 open_rollout 先换上新表项,再拿回锁返回已归零。"""
+
+        def wait_for(self, predicate, timeout):
+            worlds._lock.release()
+            try:
+                reopened.append(worlds.open_rollout("run-1", "s1", EP, "pa"))
+            finally:
+                worlds._lock.acquire()
+            return True
+
+        def notify_all(self):
+            pass
+
+    rec.closed = Racing()
+    assert worlds.close_rollout(EP, [a], wait_s=1.0) is True
+    b = worlds.join_rollout(EP, "pb")                              # 新世界还在表里,服务端加入得进来
+    worlds.release_session(EP, [b])
+    assert worlds.close_rollout(EP, reopened, wait_s=1.0) is True
+
+
 def test_an_unbound_run_has_no_seed_and_cannot_open_a_rollout(worlds):
     with pytest.raises(KeyError):
         worlds.seed_of("run-2")
