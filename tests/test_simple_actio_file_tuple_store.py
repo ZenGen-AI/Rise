@@ -7,7 +7,9 @@ from pathlib import Path
 import pytest
 
 from simple_actio.errors import SimpleActioDataError
-from simple_actio.memory import FileTupleStore, MemoryEntry, TupleMemory, _Ledger, content_id
+from simple_actio.memory import (
+    _GENERAL_FACT_SUBJECT, FileTupleStore, MemoryEntry, TupleMemory, _Ledger, content_id,
+)
 from simple_actio.memory_port import (
     DeploymentMemoryStore, MemoryBackend, MemoryClosedError, MemoryEvent, MemoryEventConflict,
     MemoryFailureError, PendingKey, RememberOutcome,
@@ -47,12 +49,27 @@ def _doc(*rows):
     return {"entries": [], "events": list(rows), "next_seq": max((r["seq"] for r in rows), default=-1) + 1}
 
 
-@pytest.mark.parametrize("args", [("", "pb：一", "pb"), ("k", "", "pb"), ("k", "pb：一", "")])
-def test_ledger_begin_rejects_an_empty_key_text_or_interlocutor(args):
+@pytest.mark.parametrize("args", [("", "pb：一", "pb"), ("k", "", "pb"), ("k", "pb：一", 3), ("k", "pb：一", None)])
+def test_ledger_begin_rejects_an_empty_key_or_text_and_a_non_string_interlocutor(args):
     led = _Ledger()
     with pytest.raises(SimpleActioDataError):
         led.begin(MemoryEvent(*args), holder="pb")
     assert led.events == {} and led.next_seq == 0
+
+
+def test_ledger_begin_accepts_an_empty_interlocutor_as_a_general_fact_and_keeps_the_empty_string_in_the_row():
+    # 与 Starling 一致:interlocutor 为空串是一般事实,登记照常;事件行原样存空串,不换哨兵
+    led = _Ledger()
+    assert led.begin(MemoryEvent("k", "天气很好", ""), holder="pa") is None
+    row = led.events[("pa", "k")]
+    assert (row["state"], row["interlocutor"], row["seq"]) == ("pending", "", 0) and led.next_seq == 1
+    ids = led.commit("k", holder="pa")
+    assert ids == (content_id(_GENERAL_FACT_SUBJECT, "天气很好"),)
+    assert led.events[("pa", "k")]["interlocutor"] == ""                       # 提交后事件行里仍是空串
+    assert [(e.subject, e.content) for e in led.entries] == [(_GENERAL_FACT_SUBJECT, "天气很好")]
+    assert led.begin(MemoryEvent("k", "天气很好", ""), holder="pa") == ids     # 同 key 同文本幂等
+    clone = _Ledger.from_json(json.loads(json.dumps(led.to_json())))            # 落盘再读回:空串通过行校验
+    assert clone.events[("pa", "k")]["interlocutor"] == "" and clone.digest() == led.digest()
 
 
 def test_ledger_begin_on_a_pending_row_with_a_different_text_conflicts():
@@ -404,6 +421,50 @@ def test_a_failed_extraction_leaves_a_pending_row_with_its_text_and_a_retry_comm
     port.close()
 
 
+def test_a_general_fact_with_an_empty_interlocutor_is_stored_pending_then_committed_and_recalled(tmp_path):
+    flaky = Flaky("w#0")
+    store = _store(tmp_path, extraction_failure=flaky)
+    # 抽取失败:行留 pending、空串原样落盘,待处理事件里可见
+    assert store.remember_event("s1", "pa", "w#0", "天气很好", interlocutor="") == RememberOutcome((), True, "timeout")
+    row = _rows(tmp_path / "deploy")["w#0"]
+    assert (row["state"], row["interlocutor"], row["failure_category"]) == ("pending", "", "timeout")
+    assert store.pending_events("s1") == [PendingKey("w#0", "pa")]
+    flaky.failing.clear()
+    port = store.open("s1", "pa")
+    out = port.remember(MemoryEvent("w#0", "天气很好", ""))                      # 同 key 同文本推进 pending 行
+    assert out == RememberOutcome((content_id(_GENERAL_FACT_SUBJECT, "天气很好"),), False, None)
+    assert _rows(tmp_path / "deploy")["w#0"]["state"] == "committed" and store.pending_events("s1") == []
+    assert [h.text for h in port.recall("天气", limit=3)] == [f"{_GENERAL_FACT_SUBJECT}: 天气很好"]
+    assert store.remember_event("s1", "pa", "w#0", "天气很好", interlocutor="") == out   # 幂等
+    port.close()
+
+
+def test_a_general_fact_is_not_recalled_by_a_query_that_shares_no_word_with_its_text(tmp_path):
+    # 哨兵主体不产生词面:一般事实只能被它自己的文本命中
+    port = _store(tmp_path).open("s1", "pa")
+    port.remember(MemoryEvent("w#0", "天气很好", ""))
+    assert port.recall("预算", limit=3) == [] and port.recall("*", limit=3) == []
+    assert len(port.recall("天气", limit=3)) == 1
+    port.close()
+
+
+def test_a_non_string_interlocutor_is_still_a_data_error_and_writes_nothing(tmp_path):
+    store = _store(tmp_path)
+    for bad in (3, None, ["pb"]):
+        with pytest.raises(SimpleActioDataError):
+            store.remember_event("s1", "pa", "w#0", "天气很好", interlocutor=bad)
+    assert store.pending_events("s1") == [] and store.digest("s1") == TupleMemory().digest()
+
+
+def test_tuple_memory_and_file_store_agree_on_a_general_fact(tmp_path):
+    port, mem = _store(tmp_path).open("s1", "pa"), TupleMemory().world("pa")
+    ev = MemoryEvent("w#0", "天气很好", "")
+    assert port.remember(ev) == mem.remember(ev)
+    assert port.recall("天气", limit=3) == mem.recall("天气", limit=3)
+    assert port.digest() == mem.digest()
+    port.close()
+
+
 def test_seq_is_allocated_when_the_row_is_written(tmp_path):
     store = _store(tmp_path, extraction_failure=Flaky("ep-1#0"))
     store.remember_event("s1", "pa", "ep-1#0", "pb：一", interlocutor="pb")
@@ -734,9 +795,10 @@ def test_the_pending_row_is_on_disk_before_extraction_runs_and_a_committed_event
     assert seen == ["pending"]
 
 
-def test_an_empty_field_is_rejected_before_anything_is_written(tmp_path):
+def test_an_empty_key_or_text_is_rejected_before_anything_is_written(tmp_path):
+    # interlocutor 不在其内:空串是一般事实,和 Starling 一样收
     store = _store(tmp_path)
-    for key, text, who in (("", "pb：一", "pb"), ("k", "", "pb"), ("k", "pb：一", "")):
+    for key, text, who in (("", "pb：一", "pb"), ("k", "", "pb")):
         with pytest.raises(SimpleActioDataError):
             store.remember_event("s1", "pa", key, text, interlocutor=who)
     assert not (tmp_path / "deploy" / "s1.json").exists()

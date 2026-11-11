@@ -83,6 +83,20 @@ def test_the_sample_gives_the_same_hit_order_and_digest_curve(make_port):
             assert [h.id for h in hits] == [stored[k][0] for k in q["hits"]], q
 
 
+def test_a_general_fact_with_an_empty_interlocutor_is_accepted_stored_and_recalled(make_port):
+    # interlocutor 为空串是一般事实(关于世界,不是关于某个人):三个实现都收,同 key 同文本幂等
+    port = make_port()
+    before = port.digest()
+    event = MemoryEvent("ep-general#0", "天气：今天天气很好", "")
+    out = port.remember(event)
+    assert (out.failed, out.category) == (False, None) and out.stored
+    assert port.embed_pending() >= 0
+    assert port.digest() != before
+    hits = port.recall("今天天气怎么样", limit=3)
+    assert len(hits) == 1 and re.fullmatch(r"mem-.+", hits[0].id)
+    assert port.remember(event) == out
+
+
 def test_empty_ports_share_a_fixed_digest_and_recall_nothing(make_port):
     a, b = make_port(), make_port()
     assert re.fullmatch(r"[0-9a-f]{64}", a.digest())

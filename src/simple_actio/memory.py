@@ -156,6 +156,10 @@ _EVENT_ROW_KEYS = {"key", "text", "interlocutor", "seq", "state", "statement_ids
 _EVENT_ROW_OPTIONAL_KEYS = {"holder"}  # 读旧账本时行里没有 holder,按 "" 补
 _EVENT_STATES = ("pending", "committed", "abandoned")
 _CLOCK_ORIGIN = datetime(2026, 1, 1, tzinfo=timezone.utc)
+# 一般事实(事件的 interlocutor 为空串)落成条目时用的所述对象。条目的 subject 必须非空(MemoryEntry 校验,
+# 落盘账本读回时也过它),所以空串只留在事件行里,条目取这个哨兵。选 "*":既不是合法人格 id(人格 id 以字母
+# 或数字开头),也不产生任何词面,所以不会因为查询里碰巧有某个词就让一般事实多得一个命中。
+_GENERAL_FACT_SUBJECT = "*"
 
 
 def content_id(subject: str, content: str) -> str:
@@ -183,7 +187,7 @@ def _check_event_row(row: object) -> dict:
     what = f"memory event {row['key']!r}"
     _check.text(row["key"], f"{what}.key")
     _check.text(row["text"], f"{what}.text")
-    _check.text(row["interlocutor"], f"{what}.interlocutor")
+    _check.text(row["interlocutor"], f"{what}.interlocutor", allow_empty=True)  # 空串是一般事实
     _check.text(row.get("holder", ""), f"{what}.holder", allow_empty=True)
     if _check.integer(row["seq"], f"{what}.seq") < 0:
         raise SimpleActioDataError(f"{what}.seq: expected an int >= 0, got {row['seq']!r}")
@@ -264,7 +268,7 @@ class _Ledger:
         不同抛 MemoryEventConflict。新行写成 pending。"""
         _check.text(event.key, "memory event key")
         _check.text(event.text, "memory event text")
-        _check.text(event.interlocutor, "memory event interlocutor")
+        _check.text(event.interlocutor, "memory event interlocutor", allow_empty=True)  # 空串是一般事实,与 Starling 一致
         _check.text(holder, "memory event holder", allow_empty=True)
         row = self.events.get((holder, event.key))
         if row is not None:
@@ -293,14 +297,15 @@ class _Ledger:
         if row["state"] == "abandoned":
             raise MemoryEventConflict(f"memory event {key!r} was abandoned")
         if row["state"] == "pending":
+            subject = row["interlocutor"] or _GENERAL_FACT_SUBJECT  # 一般事实:事件行留空串,条目取哨兵
             entry = MemoryEntry(
-                id=_entry_id(key), version=1, subject=row["interlocutor"], content=row["text"],
+                id=_entry_id(key), version=1, subject=subject, content=row["text"],
                 timestamp=_entry_time(row["seq"]), confidence=1.0, source_episode=key,
             )
             self.entries.append(entry)
             self.holders[entry.id] = row["holder"]
             row["state"] = "committed"
-            row["statement_ids"] = [content_id(row["interlocutor"], row["text"])]
+            row["statement_ids"] = [content_id(subject, row["text"])]
             row["failure_category"] = None
         return tuple(row["statement_ids"])
 

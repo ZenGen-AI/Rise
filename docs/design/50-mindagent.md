@@ -309,7 +309,7 @@ payload:
 
 读轮次产物的人不必翻库文件,就知道每条 episode 的记忆从哪来。库不在产物树里,这两个键是记忆身份在树里的唯一留痕。
 
-记忆增量的 `definition` 恰好是 `scenario_id`、`persona_id`、`text`、`interlocutor` 四个键(`MEMORY_DEFINITION_KEYS`),不再是 `MemoryEntry`。`scenario_id` 指世界,`persona_id` 指主体,两者都过世界 id 白名单;`text` 原样作事件文本,`interlocutor` 是这条记忆关于谁,空串表示一般事实(替身库收不了一般事实:空串在登记前就被拒,判 T2,提案留 `approved`)。收录前严格校验,多键少键都是 T2。收录处理器把写成功的语句 id 记进提案载荷的 `admitted_statements`,只作证据,不作幂等依据。
+记忆增量的 `definition` 恰好是 `scenario_id`、`persona_id`、`text`、`interlocutor` 四个键(`MEMORY_DEFINITION_KEYS`),不再是 `MemoryEntry`。`scenario_id` 指世界,`persona_id` 指主体,两者都过世界 id 白名单;`text` 原样作事件文本,`interlocutor` 是这条记忆关于谁,空串表示一般事实(两个后端都收一般事实:`interlocutor` 为空串,事件行原样存空串;替身落成条目时所述对象取哨兵 `*`)。收录前严格校验,多键少键都是 T2。收录处理器把写成功的语句 id 记进提案载荷的 `admitted_statements`,只作证据,不作幂等依据。
 
 `(scenario_id, persona_id)` 必须是部署配置里该情境绑定的一对,否则 T2,提案留 `approved` [已落地]。V1 没有代码生成记忆增量,只有手写提案与测试带它,所以这里只有校验与写入。
 
@@ -854,7 +854,7 @@ join 等不到时,服务端把资源移进滞留表,由回收线程过后再关�
 | 组件 | 部署驱动器与两个处理器 | 真实 loopback 服务端、替身客户端、`ScriptedBridge` [已落地]、故障注入 |
 | 端到端 | 三轮 AgentRSI 环路加一次收录 | 真实 loopback 服务端,对手为脚本化后端 |
 | 静态 | 依赖方向、`__future__` 首行;本包不导入 `starling`(全仓库只有 `simple_actio/memory_starling.py` 导入它) | 无 |
-| 组件 | 门② 改路:记忆增量走 `remember_event`;重入补收据不二次抽取,崩在 ③ 之前按 `engram_ref` 补;确定性抽取失败后事件 `abandoned`、提案 `rejected`,且之后任何路径都不会把它写进记忆;瞬态抽取失败(单条或部分已提交)事件留 `pending`、写 T1、延后重试,抽取恢复后收录完;部分已提交后确定性失败记 T3、留 `approved`,重入不再抽取;一般事实(空 `interlocutor`)在替身上判 T2;抛异常后提案留 `approved` | FileTupleStore、故障注入 |
+| 组件 | 门② 改路:记忆增量走 `remember_event`;重入补收据不二次抽取,崩在 ③ 之前按 `engram_ref` 补;确定性抽取失败后事件 `abandoned`、提案 `rejected`,且之后任何路径都不会把它写进记忆;瞬态抽取失败(单条或部分已提交)事件留 `pending`、写 T1、延后重试,抽取恢复后收录完;部分已提交后确定性失败记 T3、留 `approved`,重入不再抽取;一般事实(空 `interlocutor`)两个后端都收,提案照常收录;抛异常后提案留 `approved` | FileTupleStore、故障注入 |
 | 组件 | episode 重试回滚:第二次尝试前关实例与端口、`restore` 后部署世界回到起点,摘要相同;`restore` 在端口未关时被拒;第二条 episode 的事件 key 前缀是它自己的逻辑 id;第二轮用同一 `deploy-<model>-<scenario>-<k>` 时事件 key 带轮次前缀,不撞上一轮已 `committed` 的 key | 真 Starling 或 FileTupleStore、故障注入 |
 | 组件 | 部署崩溃重入:episode 中途崩溃(起点快照在)重入时先覆盖再重跑;episode 已落盘但起点快照没删时同样重跑;已提交的 episode 被复用、不重跑,记忆收录后也不重跑,技能版本变了才以新逻辑 id 重跑;覆盖失败判轮次 `failed`,世界与快照都保留;轮次判 `failed` 时在途 episode 被回滚 | 真 Starling 或 FileTupleStore、故障注入 |
 | 组件 | 世界锁:第二个轮次拿不到锁时延后(`DeferredError`),树里什么都不写,放锁后照常跑;起点快照做不出判 `failed` | 临时目录 |

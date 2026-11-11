@@ -864,8 +864,8 @@ SimpleActio 自己的失败是 T2 确定性:同样输入必然再失败,不重�
 | 实例 | 轨迹模式(含 simple_actio.trace.v2)、`respond`、每轮读写、失败映射、重试与 `close` 不放弃、依赖边界与 `__future__` 静态检查 | 回显指导语的罐头后端、记录调用的假端口 | `tests/test_simple_actio_instance.py` | 82 | [已落地] |
 | 端到端 | SimpleActio 作客户端经真实 gRPC 跑会话并落盘 | `ScriptedBackend` 作对手 | `tests/test_simple_actio_realtime_e2e.py` | 2 | [已落地] |
 | 端口 | 值类型冻结、异常继承与 `transient`、两个协议按方法名检查 | 无 | `tests/test_simple_actio_memory_port.py` | 5 | [已落地] |
-| 契约 | 同一份规范样例经五个方法跑每种实现:命中顺序、摘要变化曲线、同 key 同文本幂等、同 key 异文本抛 MemoryEventConflict、`close` 后抛 MemoryClosedError | TupleMemory、FileTupleStore 的端口;装了 extra `memory` 时再加 StarlingMemory | `tests/test_simple_actio_memory_contract.py` | 15 | [已落地] |
-| 落盘替身 | FileTupleStore 与它复用的事件账本:提交点、崩溃后重调、按 id 的快照与恢复、重放世界、世界 id 与主体校验、账本带主体、用错主体放弃 | 无 | `tests/test_simple_actio_file_tuple_store.py` | 84 | [已落地] |
+| 契约 | 同一份规范样例经五个方法跑每种实现:命中顺序、摘要变化曲线、同 key 同文本幂等、同 key 异文本抛 MemoryEventConflict、`close` 后抛 MemoryClosedError、空 `interlocutor` 的一般事实三个实现都收 | TupleMemory、FileTupleStore 的端口;装了 extra `memory` 时再加 StarlingMemory | `tests/test_simple_actio_memory_contract.py` | 18 | [已落地] |
+| 落盘替身 | FileTupleStore 与它复用的事件账本:提交点、崩溃后重调、按 id 的快照与恢复、重放世界、世界 id 与主体校验、账本带主体、用错主体放弃 | 无 | `tests/test_simple_actio_file_tuple_store.py` | 90 | [已落地] |
 | Starling 适配器 | 包 RemoteMemory 的端口:命中渲染、召回显式传 `strict` 与 `include_volatile`、写入结果 `no_store`、`rejected` 判永久、`close` 的期限、会话过期与代号过期当作已关、rise 没关的端口收到 `handle_closed` 判瞬态 | 假 RemoteMemory 与连真 `starling-serve` 子进程的用例,本机假 OpenAI 端点;未装客户端或服务端时跳过 | `tests/test_simple_actio_memory_starling.py` | 45 | [已落地] |
 | Starling 管理面 | StarlingDeploymentStore:`ensure_world` 三步与创建标记、`root` 标签不符拒绝、恢复的分码、外部服务在同一端口重启后旧端口判瞬态 | 连真 `starling-serve` 子进程,本机假 OpenAI 端点;未装客户端或服务端时跳过 | `tests/test_simple_actio_starling_store.py` | 33 | [已落地] |
 | 客户端错误码 | `translate_client_failure` 逐行:码表、三处改判、消息只写 `starling <code> (<类名>)` | 客户端异常类实例,不起服务 | `tests/test_simple_actio_client_errors.py` | 20 | [已落地] |
