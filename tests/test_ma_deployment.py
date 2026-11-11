@@ -1161,6 +1161,19 @@ def test_a_server_port_that_never_closes_fails_the_restore_and_keeps_the_snapsho
     assert len(f.clients) == 1
 
 
+def test_a_reentry_restore_with_a_port_left_open_and_no_wait_fails_and_keeps_the_record(store, mem):
+    digests = {}
+    with pytest.raises(OSError):
+        _run(store, lambda **kw: (_ for _ in ()).throw(OSError("x")), mem, digests=digests)
+    leftover = mem.store.open(WORLD, "pb")                             # 服务端的对手端口一直没关
+    f = _Factory()
+    with pytest.raises(RestoreFailedError, match="memory ports still open after 0s") as info:
+        _run(store, f, mem, digests=digests, close_wait_s=0)
+    assert info.value.point == "mindagent.deployment.restore"
+    assert mem.layout.snapshot(ROUND, EID).exists() and f.clients == []
+    leftover.close()
+
+
 def test_a_server_port_that_never_closes_after_a_success_defers_the_commit(store, mem):
     f = _WorldFactory(mem, release=lambda port: None)
     with pytest.raises(DeferredError, match=f"world {WORLD}"):
