@@ -93,8 +93,3 @@ def _stem(proposal_id: str) -> str:
 def skill_id_for(proposal_id: str, k: int) -> str:
     """提案里第 k 个(从 1 起)增量收录后的技能 id:proposal-X → skill-X-k。"""
     return f"skill-{_stem(proposal_id)}-{k}"
-
-
-def memory_id_for(proposal_id: str, k: int) -> str:
-    """提案里第 k 个(从 1 起)增量收录后的记忆 id:proposal-X → mem-X-k。"""
-    return f"mem-{_stem(proposal_id)}-{k}"

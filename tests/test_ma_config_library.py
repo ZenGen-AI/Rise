@@ -13,7 +13,6 @@ from mindagent.library import (
     LibraryState,
     check_memory_library_empty,
     load_library,
-    memory_id_for,
     read_library_versions,
     skill_id_for,
 )
@@ -61,6 +60,9 @@ def test_config_defaults_and_agent_slot():
 @pytest.mark.parametrize("kw,match", [
     ({"scenario_ids": ()}, "scenario_ids"),
     ({"scenario_ids": ("s1", "s1")}, "must not repeat"),
+    ({"scenario_ids": (1,)}, "scenario_ids"),
+    ({"scenario_ids": ("s1", "")}, "scenario_ids"),
+    ({"scenario_ids": ("s1", "S1")}, "must not repeat ignoring case"),
     ({"bindings": (OPP,)}, "exactly one self_play"),
     ({"bindings": (AGENT, RoleBinding("c", "pc", "self_play"))}, "exactly one self_play"),
     ({"max_turns": 0}, "max_turns"),
@@ -124,7 +126,6 @@ def test_a_non_decimal_library_version_is_a_data_error(store, bad):
 
 def test_entry_ids_are_derived_from_the_proposal_id():
     assert skill_id_for("proposal-agent-round-zengen-v3-1", 1) == "skill-agent-round-zengen-v3-1-1"
-    assert memory_id_for("proposal-agent-round-zengen-v3-1", 2) == "mem-agent-round-zengen-v3-1-2"
     with pytest.raises(ValueError):
         skill_id_for("agent-round-zengen-v3-1", 1)
     with pytest.raises(ValueError):

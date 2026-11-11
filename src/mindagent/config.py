@@ -42,6 +42,9 @@ class AgentConfig:
             raise ValueError(f"scenario_ids must be a non-empty tuple of ids, got {self.scenario_ids!r}")
         if len(set(self.scenario_ids)) != len(self.scenario_ids):
             raise ValueError(f"scenario_ids must not repeat, got {self.scenario_ids!r}")
+        # 情境 id 拼进替身的文件名(deploy/<scenario>.json 等):大小写不敏感的文件系统上只差大小写的两个 id 撞文件
+        if len({s.casefold() for s in self.scenario_ids}) != len(self.scenario_ids):
+            raise ValueError(f"scenario_ids must not repeat ignoring case, got {self.scenario_ids!r}")
         agent_slot_of(self.bindings)
         _check_int("max_turns", self.max_turns, 1)
         _check_int("episodes_per_scenario", self.episodes_per_scenario, 1)
