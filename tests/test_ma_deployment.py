@@ -559,6 +559,42 @@ def test_a_new_skill_version_reruns_under_a_suffixed_id(store, mem):
     assert again.id == f"{EID}-s1"                                     # 重入复用带后缀的那条
 
 
+def _tamper_turn(store, index, mutate):
+    """改坏已落盘的 EID 的第 index 轮(直接改树里的 YAML 载荷,再提交)。"""
+    env = store.read_product(episode_file(RUN, EID))
+    mutate(env.payload["turns"][index])
+    store.write_product(episode_file(RUN, EID), env, "test: tamper")
+
+
+@pytest.mark.parametrize("index,mutate,needle", [
+    pytest.param(3, lambda t: t.update(activation_trace={"selected": "skill-calm"}), "turn 3: trace",
+                 id="later-agent-turn-off-schema-trace"),
+    pytest.param(3, lambda t: t.update(activation_trace=None), "turn 3: trace", id="later-agent-turn-without-trace"),
+    pytest.param(2, lambda t: t.update(speaker_slot="zz"), "turn 2: speaker_slot", id="later-turn-unbound-speaker"),
+    pytest.param(3, lambda t: t.update(utterance=7), "turn 3: utterance", id="later-turn-utterance-not-a-str"),
+])
+def test_a_malformed_later_turn_of_a_committed_episode_is_a_data_error_not_a_rerun(store, mem, index, mutate, needle):
+    """复用前逐轮核对:首个智能体轮次(第 1 轮)完好、坏的是后面的轮次时,同样抛 MindAgentDataError(轮次判 T3),
+    不当成"技能版本对不上"静默重跑一条已提交的 episode。"""
+    digests = {}
+    _run(store, _Factory(), mem, digests=digests)
+    first = read_episode(store, RUN, EID).turns[1]
+    validate_trace(first.activation_trace)                              # 首个智能体轮次本身是好的
+    _tamper_turn(store, index, mutate)
+    f = _Factory()
+    with pytest.raises(MindAgentDataError, match=needle) as info:
+        _run(store, f, mem, digests=digests)
+    assert EID in str(info.value) and f.clients == []                   # 没有开新会话,也没有重跑
+
+
+def test_a_well_formed_committed_episode_passes_the_all_turns_check_and_is_reused(store, mem):
+    digests = {}
+    _run(store, _Factory(), mem, digests=digests)
+    f = _Factory()
+    (ep,) = _run(store, f, mem, digests=digests)
+    assert f.clients == [] and ep.id == EID and len(ep.turns) == 4
+
+
 def test_exhausted_transient_retries_leave_the_library_at_the_start(store, mem):
     digests = {}
     with pytest.raises(DeploymentFailedError) as info:
@@ -1217,3 +1253,47 @@ def test_the_default_close_wait_outlasts_the_servers_join_timeout():
     join = inspect.signature(create_server).parameters["resource_join_timeout_s"].default
     assert deployment.SESSION_CLOSE_WAIT_S == 70.0 >= join + 10
     assert inspect.signature(run_deployment_episodes).parameters["close_wait_s"].default == 70.0
+
+
+class _RecallingWorldClient(_WorldClient):
+    """_WorldClient 加一条:开完对手端口、第一次开口之前,用对手人格的端口召回 query,结果记进 recalled。"""
+
+    def __init__(self, *a, query="plain", **kw):
+        super().__init__(*a, **kw)
+        self._query = query
+        self.recalled = None
+
+    def create_session(self, **kw):
+        # 与父类同序:端口先开好;召回发生在 _advance 写入任何东西之前,所以看到的只有以前的 episode 留下的
+        scenario_id, role_assignment = kw["scenario_id"], kw["role_assignment"]
+        pid = {b.slot_id: b.persona_id for b in role_assignment.bindings}["b"]
+        probe = self._mem.store.open(scenario_id, pid)
+        try:
+            self.recalled = probe.recall(self._query, limit=5)
+        finally:
+            probe.close()
+        return super().create_session(**kw)
+
+
+def test_the_opponent_slot_recalls_what_it_remembered_in_an_earlier_episode_of_the_same_world(store, mem):
+    """补设计三清单"部署对手位跨两条 episode 记得"的测试缺口:同一情境的两条 episode 共用一个部署世界,
+    第一条里对手位记下的智能体发言("plain"),第二条开口前就能用对手人格的端口召回;第一条开口前什么都没有。
+    智能体位不一样:召回只看本主体名下的条目,对手位记下的东西不进智能体的召回。"""
+    registry, clients = {}, []
+
+    def factory(**kw):
+        c = _RecallingWorldClient(mem, registry)
+        clients.append(c)
+        return c
+
+    eps = _run(store, factory, mem, episodes_per_scenario=2,
+               register_episode=registry.__setitem__, unregister_episode=registry.pop)
+    assert [e.id for e in eps] == [EID, "deploy-zengen-v1-s1-2"]
+    first, second = clients
+    assert first.recalled == []                                         # 第一条开口前世界里没有对手位的记忆
+    assert [h.text for h in second.recalled] == ["pa: pa：plain"]       # 第二条:第一条里对手位记下的智能体发言
+    agent_port = mem.store.open(WORLD, "pa")
+    try:
+        assert agent_port.recall("plain", limit=5) == []                # 对手位记下的是 pa 说的话,不在 pa 自己名下
+    finally:
+        agent_port.close()

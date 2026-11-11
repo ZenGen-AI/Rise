@@ -9,6 +9,8 @@ from controlplane.envelope import Envelope, OwnerRef
 from controlplane.paths import planner_prompt_file, scheduler_config_file, training_defaults_file
 from controlplane.reconcile import Action
 from factory.cli import main
+from factory.configio import preflight
+from factory.errors import FactoryConfigError
 from factory.wire import FactoryOptions, assemble
 from factory_fixtures import closed_loop_repo, git_head, tree_files
 from trainscheduler.config import default_training_defaults_payload, load_scheduler_config
@@ -168,3 +170,54 @@ def test_the_handler_still_rereads_scheduler_yaml_on_every_call(tmp_path):
             asm.handlers["plan_next_round"](store, action)
     finally:
         asm.close()
+
+
+# ---------------- 预检只转数据错误(计划 9 清理清单:preflight 把编程错误当成配置错误) ----------------
+
+def _raises(exc):
+    def load():
+        raise exc
+    return load
+
+
+@pytest.mark.parametrize("exc", [
+    RuntimeError("loader broke"), NameError("name 'x' is not defined"), ImportError("no module"),
+    AssertionError("invariant"), ZeroDivisionError("division by zero"), NotImplementedError("todo"),
+], ids=lambda e: type(e).__name__)
+def test_preflight_lets_a_bug_in_the_loader_propagate_instead_of_exiting_2(exc):
+    with pytest.raises(type(exc)) as info:
+        preflight("scheduler.yaml", _raises(exc))
+    assert info.value is exc and not isinstance(info.value, FactoryConfigError)
+
+
+@pytest.mark.parametrize("exc", [
+    ValueError("must be a bool"), SchedulerConfigError("scheduler.min_gain must be finite"), KeyError("template_version"),
+    TypeError("BigRef.sha256 must be 64 lowercase hex chars"), AttributeError("'NoneType' object has no attribute 'x'"),
+    OverflowError("int too large"), FileNotFoundError("scheduler.yaml"), RecursionError("maximum recursion depth exceeded"),
+], ids=lambda e: type(e).__name__)
+def test_preflight_still_converts_data_errors_to_a_one_line_config_error(exc):
+    with pytest.raises(FactoryConfigError, match=r"^scheduler\.yaml: ") as info:
+        preflight("scheduler.yaml", _raises(exc))
+    assert type(exc).__name__ in str(info.value) and "\n" not in str(info.value)
+    assert info.value.__suppress_context__ is True
+
+
+def test_a_frozen_config_dataclass_type_error_is_still_a_config_error():
+    """冻结配置(BackendConfig、BigRef 一类)构造时字段形状不对抛的 TypeError 是数据错误,照旧退出码 2 那一路。"""
+    from controlplane.envelope import BigRef
+
+    with pytest.raises(FactoryConfigError, match="InvalidBigRefError"):       # TypeError 的子类
+        preflight("training_defaults.yaml", lambda: BigRef(uri="x", sha256="nope", size_bytes=0))
+
+
+def test_an_unexpected_runtime_error_in_the_loader_is_not_exit_code_2(tmp_path, monkeypatch):
+    """端到端:加载函数里的编程错误不再变成"factory: error: ...: RuntimeError"加退出码 2,而是带回溯上抛。"""
+    store = _repo(tmp_path, run_id=None)
+    import factory.handlers as handlers
+
+    def broken(_store):
+        raise RuntimeError("loader bug")
+
+    monkeypatch.setattr(handlers, "load_training_defaults", broken)
+    with pytest.raises(RuntimeError, match="loader bug"):
+        main(["reconcile", str(store.repo_root), "--once", "--enable", "plan", "--planner-backend", "heuristic"], env={})

@@ -321,6 +321,28 @@ def test_a_failed_close_does_not_mark_the_port_closed_so_a_second_close_can_fini
         port.digest()
 
 
+def test_force_close_releases_the_port_even_when_the_handle_will_not_close():
+    """最终收尾的强关:句柄上有在途调用没返回(close 超时)时,抛出失败,但端口当作已关、release 一定调,
+    两侧的端口计数才归零;之后再关是空操作。"""
+    remote = FakeRemote(raise_on={"close": TimeoutError("1 call(s) still in flight")})
+    port, released = _port(remote, close_timeout_s=60.0)
+    with pytest.raises(MemoryFailureError):
+        port.force_close(0.25)
+    assert remote.close_calls == [0.25] and released == [1]                  # 用强关的期限,不用端口自己的 60 秒
+    with pytest.raises(MemoryClosedError):
+        port.digest()
+    port.force_close(0.25)
+    port.close()
+    assert released == [1] and remote.close_calls == [0.25]
+
+
+def test_force_close_on_a_healthy_port_is_an_ordinary_close():
+    remote = FakeRemote()
+    port, released = _port(remote)
+    port.force_close(2.0)
+    assert remote.close_calls == [2.0] and released == [1]
+
+
 def test_handle_closed_after_rise_started_closing_is_a_closed_port():
     """rise 关端口时的 handle_closed 是自己关的:之后的调用照常是 MemoryClosedError,不报会话丢失。"""
     session = Session()

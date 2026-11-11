@@ -14,8 +14,8 @@ from factory.errors import FactoryConfigError
 from factory.memory_config import MemoryConfig
 from factory.starling_names import settings_digest
 from factory.starling_service import ServiceRestartsExhausted
-from factory.starling_session import (ADMIN_TIMEOUT_S, DRAIN_WINDOW_S, HANDLE_TIMEOUT_S, ServiceIdentity,
-                                      ServiceSession, service_runtime)
+from factory.starling_session import (ADMIN_TIMEOUT_S, DRAIN_WINDOW_S, FORCE_CLOSE_WAIT_S, HANDLE_TIMEOUT_S,
+                                      ServiceIdentity, ServiceSession, service_runtime)
 from simple_actio.memory_port import MemoryFailureError
 from simple_actio.trace import TRACE_SCHEMA_V2
 from starling_service import start_service
@@ -424,6 +424,123 @@ def test_close_closes_every_client_still_open_and_later_calls_fail():
     with pytest.raises(MemoryFailureError) as info:
         _open(s)
     assert info.value.transient is False
+
+
+class _StuckPort:
+    """忽略排空窗口的端口:正常的 `close` 一直失败(在途调用没返回),`force_close` 才让计数归零。
+    `release` 是会话给的那个;`counted` 模拟世界一侧的计数(训练世界的 `_release_once`)。"""
+
+    def __init__(self, release, counted):
+        self._release, self.counted = release, counted
+        self.closes, self.forced = 0, []
+        self.closed = False
+
+    def close(self):
+        self.closes += 1
+        raise MemoryFailureError("starling memory failed: TimeoutError", transient=False)
+
+    def force_close(self, timeout_s):
+        self.forced.append(timeout_s)
+        self.counted[0] -= 1
+        self.closed = True
+        self._release()
+
+
+def test_close_force_closes_a_handle_that_ignored_the_drain_window(caplog):
+    """排空窗口过后还开着的端口(卡住的收尾线程、没返回的在途调用):最终收尾不再只记 warning,而是强关它,
+    会话这一层与世界一侧的计数都归零,客户端在强关之后才关。"""
+    s, made = _session([FakeClient(INFO)])
+    counted, ports = [1], []
+
+    def wrap(remote, release, gen):
+        ports.append(_StuckPort(release, counted))
+        return ports[0]
+
+    _open(s, wrap=wrap)
+    gen = s._current
+    assert gen.ports == 1 and gen.writers == {"rise.deploy.s1": 1} and len(gen.handles) == 1
+    with caplog.at_level("WARNING", logger="factory.starling_session"):
+        s.close()
+    (port,) = ports
+    assert port.closed and port.forced == [FORCE_CLOSE_WAIT_S] and counted == [0]
+    assert gen.ports == 0 and gen.writers == {} and gen.handles == {}      # 没有计数着还开着的端口
+    assert made[0].closed is True
+    assert "force-closing" not in caplog.text                               # 强关成功不吵
+    s.close()                                                               # 幂等
+    assert port.forced == [FORCE_CLOSE_WAIT_S]
+
+
+def test_a_force_close_that_fails_logs_only_the_class_name_and_still_releases_and_closes_the_rest(caplog):
+    s, made = _session([FakeClient(INFO)])
+    ports = []
+
+    class Broken:
+        def force_close(self, timeout_s):
+            raise RuntimeError("cannot reach http://127.0.0.1:9 token=SECRET")
+
+    def wrap(remote, release, gen):
+        port = Broken() if not ports else _StuckPort(release, [1])
+        ports.append(port)
+        return port
+
+    _open(s, world="rise.deploy.s1", wrap=wrap)
+    _open(s, world="rise.deploy.s2", wrap=wrap)
+    gen = s._current
+    with caplog.at_level("WARNING", logger="factory.starling_session"):
+        s.close()
+    assert "force-closing a memory handle failed: RuntimeError" in caplog.text
+    assert "SECRET" not in caplog.text and "127.0.0.1" not in caplog.text
+    assert ports[1].closed                                                  # 前一个失败不挡后一个
+    assert gen.ports == 0 and gen.writers == {} and made[0].closed is True  # 失败的那个也调了会话的 release
+
+
+def test_a_handle_without_a_force_close_is_closed_directly_with_the_force_timeout():
+    s, made = _session([FakeClient(INFO)])
+    remotes = []
+
+    class Remote:
+        def close(self, timeout=None):
+            remotes.append(timeout)
+
+    made[0].open = lambda world, *, holder, read_only, settings: Remote()
+    _open(s, wrap=lambda remote, release, gen: object())                     # 没有 force_close 的端口
+    gen = s._current
+    s.close()
+    assert remotes == [FORCE_CLOSE_WAIT_S] and gen.ports == 0 and gen.handles == {}
+
+
+def test_a_port_closed_normally_is_not_force_closed_and_close_behaves_as_before():
+    s, made = _session([FakeClient(INFO)])
+    ports = []
+
+    def wrap(remote, release, gen):
+        port = _StuckPort(release, [1])
+        ports.append(port)
+        return port
+
+    _open(s, wrap=wrap)
+    (port,) = ports
+    port.force_close(1.0)                                                   # 当作正常关闭:release 摘掉登记
+    assert s._current.handles == {} and s._current.ports == 0
+    port.forced.clear()
+    s.close()
+    assert port.forced == [] and made[0].closed is True
+
+
+def test_a_port_that_finishes_opening_after_close_began_is_force_closed_and_refused():
+    s, made = _session([FakeClient(INFO)])
+    ports = []
+
+    def wrap(remote, release, gen):
+        port = _StuckPort(release, [1])
+        ports.append(port)
+        s.close()                                                           # 开的这段时间里会话被最终收尾
+        return port
+
+    with pytest.raises(MemoryFailureError) as info:
+        _open(s, wrap=wrap)
+    assert info.value.transient is False
+    assert ports[0].closed and s._current.ports == 0                        # 收尾没看见它,开端口的一方强关
 
 
 def test_a_service_on_another_commit_is_refused_at_construction_naming_both_commits():

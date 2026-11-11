@@ -96,6 +96,35 @@ def test_a_pending_proposal_with_a_changed_payload_is_rewritten_in_place(store):
     assert store.read_product(proposal_file(again.id)).payload["verification"]["fired_on_motivating"] == 0.9
 
 
+def test_a_rewritten_pending_proposal_carries_the_bumped_version_and_old_versions_still_read(store):
+    """改写仍为 pending_review 的提案时信封版本在旧版本上加一(此前每次重置为 1);同载荷重入不动版本;
+    读取方对任何历史版本号的产物照常读得出。"""
+    f = _finding("emotion_high")
+    (first,) = _pack(store, [f], [_v(1.0, 0.0)])
+    rel = proposal_file(first.id)
+    assert first.version == 1 and store.read_product(rel).version == 1       # 第一次写:版本 1
+    (same,) = _pack(store, [f], [_v(1.0, 0.0)])
+    assert same.version == 1                                                 # 载荷没变:不重写,版本不动
+    (second,) = _pack(store, [f], [_v(0.9, 0.0)])
+    assert second.version == 2 and store.read_product(rel).version == 2
+    assert store.read_product(rel).payload["verification"]["fired_on_motivating"] == 0.9
+    (third,) = _pack(store, [f], [_v(0.85, 0.0)])
+    assert third.version == 3 and store.read_product(rel).version == 3       # 每次改写都升
+    on_disk = store.read_product(rel)
+    assert on_disk.schema_version == first.schema_version == 1               # 迁移器链的版本不动
+    assert [e.version for e in _pack(store, [f], [_v(0.85, 0.0)])] == [3]    # 读到版本 3 的产物:载荷相同仍是空操作
+
+
+def test_a_proposal_written_at_the_old_version_one_is_read_and_rewritten_upward(store):
+    """旧产物的版本号是 1(改动之前每次改写都重置成 1):照常读得出,下一次改写在它上面加一。"""
+    f = _finding("emotion_high")
+    (env,) = _pack(store, [f], [_v(1.0, 0.0)])
+    old = store.read_product(proposal_file(env.id))
+    assert old.version == 1 and old.schema_version == 1
+    (again,) = _pack(store, [f], [_v(0.9, 0.0)])
+    assert again.version == old.version + 1
+
+
 def test_mismatched_lengths_are_rejected(store):
     with pytest.raises(ValueError, match="1 drafts but 0 verifications"):
         screen(propose([_finding("a_sig")]), [], TH)

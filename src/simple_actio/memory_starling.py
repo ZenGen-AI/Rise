@@ -273,12 +273,28 @@ class StarlingMemory:
         (旧会话丢失后服务认不得它的句柄);关的时候收到 SessionExpired;收到 handle_closed。后两种同时报会话丢失。
         `TimeoutError`(在途调用在期限内没返回)抛非瞬态 MemoryFailureError,端口保持打开,返回后可以再关一次:
         训练路 rollout 世界的收尾靠这一点决定世界进不进保留表。"""
+        self._close(self._close_timeout_s)
+
+    def force_close(self, timeout_s: float) -> None:
+        """进程最终收尾时强关:关句柄至多等 `timeout_s` 秒(端口自己的期限不用),**不论成败**端口都当作已关、
+        `release` 一定调,所以世界一侧与会话一侧的端口计数都归零,不留"计数着还开着"的端口。关句柄失败照 `close` 的
+        口径抛,调用方只记类名。句柄上还有在途调用没返回时,服务端的句柄留到客户端关闭、会话结束时一并释放。已关是空操作。"""
+        if self._closed:
+            return
+        try:
+            self._close(timeout_s)
+        finally:
+            if not self._closed:
+                self._closed = True
+                self._release()
+
+    def _close(self, timeout_s: float) -> None:
         if self._closed:
             return
         if self._session.owns_generation(self._generation):
             self._closing = True
             try:
-                self._remote.close(timeout=self._close_timeout_s)
+                self._remote.close(timeout=timeout_s)
             except (_client_errors.SessionExpired, _client_errors.MemoryClosed):
                 self._lost()
             except Exception as exc:

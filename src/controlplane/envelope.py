@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 CURRENT_SCHEMA_VERSION = 1
 
@@ -128,3 +128,15 @@ class Envelope:
             links=list(d.get("links", [])),
             payload=d.get("payload", {}),
         )
+
+
+def bump(new: Envelope, previous: Envelope | None) -> Envelope:
+    """改写一个已有产物、载荷形状变了时用:返回 `new` 的副本,`version` 取上一份的 `version + 1`
+    (`new` 自带的版本号更大就保留,版本号只升不降)。`previous` 为 None 是第一次写,原样返回 `new`。
+
+    只动信封的 `version`(同一个产物的第几版),不动 `schema_version`:后者是迁移器链的版本,升了读取方会
+    抛 UnknownSchemaVersionError。读取方只要求 `version` 是不小于 1 的整数,所以历史版本号的产物照常读得出。
+    不改入参;载荷与链接是 `new` 的同一批对象,调用方此后不应再改它们。"""
+    if previous is None:
+        return new
+    return replace(new, version=max(new.version, previous.version + 1))

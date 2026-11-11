@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import itertools
 import logging
 import threading
 import time
@@ -37,6 +38,9 @@ HANDLE_TIMEOUT_S = 30.0
 ADMIN_TIMEOUT_S = 300.0
 # 排空窗口:一个会话丢失后这么久之内,在它丢失时有可写句柄的世界上开句柄收到 world_held 判瞬态
 DRAIN_WINDOW_S = 60.0
+# 最终收尾强关一个还开着的句柄至多等多久(秒)。正常关闭走端口自己的期限;到了强关,句柄上多半有在途调用没返回,
+# 不再陪它等满:关不上也当作已关,客户端随后关闭、会话结束,服务端一并释放
+FORCE_CLOSE_WAIT_S = 5.0
 
 
 def _service_leaves(endpoint: dict) -> dict:
@@ -91,7 +95,9 @@ class ServiceFatal(Exception):
 @dataclass
 class _Generation:
     """一代会话:它的客户端与管理传输,开着的端口数与在途的管理调用数,开着的可写端口按世界计数,是否已丢失。
-    丢失之后,两个计数都归零才关它的客户端与管理传输。"""
+    丢失之后,两个计数都归零才关它的客户端与管理传输。
+    `handles` 登记还开着的句柄 `(句柄, 端口, release)`,键是会话内递增的编号;端口关上(release 被调)时摘掉。
+    它只给最终收尾 `close()` 强关用。"""
 
     number: int
     client: object
@@ -101,6 +107,7 @@ class _Generation:
     writers: dict[str, int] = field(default_factory=dict)
     lost: bool = False
     closed: bool = False
+    handles: dict[int, tuple[object, object, Callable[[], None]]] = field(default_factory=dict)
 
     def idle(self) -> bool:
         return self.ports == 0 and self.admin_calls == 0
@@ -156,6 +163,7 @@ class ServiceSession:
         self._switching = threading.Lock()                 # 同一时刻只有一条线程换会话
         self._fatal: str | None = None
         self._closed = False
+        self._handle_ids = itertools.count(1)              # 句柄编号:登记与摘除的键
         self._old: list[_Generation] = []                  # 已丢失、端口或管理调用还没走完的旧代号
         # 排空窗口的记录:(丢失时刻, 那时有可写句柄的完整世界名)。与代号分开记,旧代号的客户端关了窗口照样算满 60 秒
         self._drain: list[tuple[float, frozenset[str]]] = []
@@ -366,24 +374,35 @@ class ServiceSession:
             raise _translate(exc, in_drain_window=self.in_drain_window(world)) from None
         released = threading.Event()
         guard = threading.Lock()
+        key = next(self._handle_ids)
 
         def release() -> None:
             with guard:
                 if released.is_set():
                     return
                 released.set()
-            self._release(gen, world, read_only)
+            self._release(gen, world, read_only, key)
 
         try:
-            return wrap(remote, release, gen.number)
+            port = wrap(remote, release, gen.number)
         except BaseException:
             self._close_quietly(remote)                    # 没造成端口:句柄关掉,计数退回
             release()
             raise
+        with self._lock:
+            late = self._closed
+            if not late and not released.is_set():         # wrap 返回之前就关掉的端口不登记
+                gen.handles[key] = (remote, port, release)
+        if late:                                           # 开的这段时间里会话被最终收尾了:收尾没看见它,这里强关
+            self._force_close([(remote, port, release)])
+            raise MemoryFailureError("starling session is closed", transient=False)
+        return port
 
-    def _release(self, gen: _Generation, world: str, read_only: bool) -> None:
+    def _release(self, gen: _Generation, world: str, read_only: bool, key: int | None = None) -> None:
         with self._lock:
             gen.ports -= 1
+            if key is not None:
+                gen.handles.pop(key, None)
             if not read_only:
                 left = gen.writers.get(world, 0) - 1
                 if left > 0:
@@ -453,14 +472,39 @@ class ServiceSession:
     # ---- 关闭 ----
 
     def close(self) -> None:
-        """关当前与尚未关掉的旧代号的客户端与管理传输(过期的客户端 close() 不发 disconnect,客户端自己处理)。
-        拉起服务的停止不在这里,由组合根另登记(Task 16)。幂等。"""
+        """最终收尾。先强关还开着的句柄(客户端此时还连着),再关当前与尚未关掉的旧代号的客户端与管理传输
+        (过期的客户端 close() 不发 disconnect,客户端自己处理)。拉起服务的停止不在这里,由组合根另登记(Task 16)。幂等。
+
+        正常情况下端口都已关上,没有句柄可强关,行为与只关客户端时相同。有句柄在排空窗口、等端口全关的期限过后
+        仍没关(服务端的收尾线程卡住,或客户端的在途调用没返回),`close_rollout` 与恢复只记 warning、世界留在保留表里;
+        到了这里不能再留:逐个调端口自己的 `close`(关句柄,再调端口登记的整串 release,世界一侧的计数随之减),
+        不管成败都再调会话这一层的 release,所以本进程里不留计数着还开着的端口。强关失败只记类名,不挡其余句柄与客户端的关闭。"""
         with self._lock:
             if self._closed:
                 return
             self._closed = True
             gens = [g for g in [*self._old, self._current] if not g.closed]
+            lingering: list[tuple[object, object, Callable[[], None]]] = []
             for g in gens:
                 g.closed = True
+                lingering.extend(g.handles.values())
+                g.handles.clear()
             self._old = []
+        self._force_close(lingering)
         self._close_generations(gens)
+
+    def _force_close(self, handles: Iterable[tuple[object, object, Callable[[], None]]]) -> None:
+        """锁外调用:逐个强关句柄,一个失败不挡其余的。端口有 `force_close` 就调它(它关句柄,并让世界一侧与会话一侧的
+        计数都归零);没有就直接关句柄。不论成败最后都调会话这一层的 release(幂等),所以 `gen.ports` 与可写计数归零。
+        失败只记类名(异常文字可能带地址)。"""
+        for remote, port, release in handles:
+            try:
+                force = getattr(port, "force_close", None)
+                if callable(force):
+                    force(FORCE_CLOSE_WAIT_S)
+                else:
+                    remote.close(timeout=FORCE_CLOSE_WAIT_S)
+            except Exception as exc:
+                _log.warning("force-closing a memory handle failed: %s", type(exc).__name__)
+            finally:
+                release()

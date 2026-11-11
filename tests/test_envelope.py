@@ -3,7 +3,7 @@ import dataclasses
 import pytest
 
 from controlplane.envelope import (
-    CURRENT_SCHEMA_VERSION, SHA256_HEX, BigRef, Envelope, InvalidBigRefError, OwnerRef,
+    CURRENT_SCHEMA_VERSION, SHA256_HEX, BigRef, Envelope, InvalidBigRefError, OwnerRef, bump,
 )
 
 HEX = "a" * 64
@@ -106,3 +106,31 @@ def test_the_error_does_not_echo_an_oversized_value():
 
 def test_the_hex_rule_is_the_one_shared_constant():
     assert SHA256_HEX.match(HEX) and not SHA256_HEX.match(HEX.upper())
+
+
+# ---- 改写时升信封版本 ----
+
+def _env(version=1, payload=None, **kw):
+    base = dict(id="p-1", type="skill_memory_proposal", version=version, created_at="2026-10-09T00:00:00Z",
+                created_by=OwnerRef(), status="pending_review", schema_version=CURRENT_SCHEMA_VERSION,
+                links=["r"], payload=payload if payload is not None else {"a": 1})
+    base.update(kw)
+    return Envelope(**base)
+
+
+def test_bump_raises_the_version_by_one_over_the_previous_and_leaves_the_rest_alone():
+    previous, new = _env(version=3), _env(version=1, payload={"a": 2})
+    out = bump(new, previous)
+    assert out.version == 4 and out is not new and new.version == 1 and previous.version == 3   # 不改入参
+    assert out.to_dict() == {**new.to_dict(), "version": 4}
+    assert out.schema_version == CURRENT_SCHEMA_VERSION      # 动的是产物版本,不是迁移器链的版本
+
+
+def test_bump_of_a_first_write_is_the_envelope_itself():
+    new = _env()
+    assert bump(new, None) is new
+
+
+def test_bump_never_lowers_a_version_the_caller_already_set_higher():
+    assert bump(_env(version=9), _env(version=3)).version == 9
+    assert bump(_env(version=4), _env(version=3)).version == 4

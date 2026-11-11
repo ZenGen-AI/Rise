@@ -6,10 +6,20 @@ from collections.abc import Callable, Iterable
 from typing import TypeVar
 
 from controlplane.config import ConfigTypeError, CredentialInGitTreeError, read_config
-from controlplane.gitstore import GitStore
+from controlplane.gitstore import UNREADABLE_PRODUCT_ERRORS, GitStore
 from factory.errors import FactoryConfigError
 
 T = TypeVar("T")
+
+# 装配期读配置时,"这份数据不对"的异常类型:各包的校验错误(都是 ValueError 子类:SchedulerConfigError、TemplateError、
+# MindAgentDataError、InvalidTrainingConfigError 等)、读不出的产物(`UNREADABLE_PRODUCT_ERRORS`:缺键、冻结 dataclass 与
+# BigRef 构造的 TypeError、YAML 语法、信封校验、schema_version 无法迁移)、OverflowError、OSError(文件缺失或读不了),
+# 以及嵌套过深的 YAML 抛的 RecursionError(它是 RuntimeError 的子类,但由数据触发)。
+# 其余类型(NameError、ImportError、AssertionError、普通 RuntimeError 等)是代码的毛病:不转成配置错误,
+# 原样上抛,让守护进程带回溯退出。
+CONFIG_DATA_ERRORS: tuple[type[BaseException], ...] = (
+    ValueError, OverflowError, OSError, RecursionError, *UNREADABLE_PRODUCT_ERRORS,
+)
 
 PLACEHOLDER = "<value>"
 _QUOTES = "'\""
@@ -132,7 +142,8 @@ def describe(exc: BaseException) -> str:
 
 
 def preflight(label: str, load: Callable[[], T]) -> T:
-    """装配期预检:调一次只读的加载函数,失败一律转成 FactoryConfigError(命令行退出码 2,树里什么都不写)。
+    """装配期预检:调一次只读的加载函数,数据错误转成 FactoryConfigError(命令行退出码 2,树里什么都不写)。
+    只转 `CONFIG_DATA_ERRORS` 那一组;别的异常(代码的毛病)原样上抛,不伪装成配置错误。
     返回加载的结果,但不缓存:处理器仍在每次调用时自己重读(计划 5,计划 9 Ruling 21),所以人改了配置下一次动作就生效。"""
     try:
         return load()
@@ -142,5 +153,5 @@ def preflight(label: str, load: Callable[[], T]) -> T:
         raise FactoryConfigError(f"{label}: not a configuration product (its type field is wrong)") from None
     except CredentialInGitTreeError as exc:
         raise FactoryConfigError(f"{label}: {exc}") from None
-    except Exception as exc:
+    except CONFIG_DATA_ERRORS as exc:
         raise FactoryConfigError(f"{label}: {describe(exc)}") from None

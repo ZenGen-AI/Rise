@@ -25,8 +25,9 @@ from typing import TypeVar
 
 import grpc
 
+from simple_actio.errors import SimpleActioDataError
 from simple_actio.memory_port import DeploymentMemoryStore, MemoryBackend, MemoryFailureError
-from simple_actio.trace import normalize_library_version
+from simple_actio.trace import normalize_library_version, validate_trace
 from controlplane.deferred import DeferredError
 from controlplane.gitstore import GitStore
 from controlplane.paths import episode_file
@@ -120,6 +121,25 @@ def _first_agent_skill(episode: Episode, agent_slot: str) -> object:
     """首个智能体轮次轨迹里的技能版本;没有智能体轮次或轨迹不成形时为 None。"""
     first = next((t for t in episode.turns if t.speaker_slot == agent_slot), None)
     return None if first is None else _skill_of(first.activation_trace)
+
+
+def _check_turns(episode: Episode, agent_slot: str) -> None:
+    """读回已落盘的部署 episode 时逐轮核对结构,**每一轮**都查,不只首个智能体轮次:说话的角色位是这条 episode
+    绑定过的位,智能体位的每个轮次都带合格的激活轨迹(`validate_trace`,v1 与 v2 都接受)。不合抛 MindAgentDataError,
+    信息写 episode id 与轮次序号:轮次处理器判 T3,不把一条后面轮次坏掉的 episode 当成"技能版本对不上"去重跑
+    (已提交的事件重跑会撞 MemoryEventConflict,见 MA-25)。对手位的轮次按协议没有轨迹与内心独白,这里不查。"""
+    slots = episode.role_assignment.slot_ids()
+    for i, turn in enumerate(episode.turns):
+        where = f"episode {episode.id} turn {i}"
+        if turn.speaker_slot not in slots:
+            raise MindAgentDataError(f"{where}: speaker_slot {turn.speaker_slot!r} is not a bound slot")
+        if not isinstance(turn.utterance, str):
+            raise MindAgentDataError(f"{where}: utterance is not a str")
+        if turn.speaker_slot == agent_slot:
+            try:
+                validate_trace(turn.activation_trace)
+            except SimpleActioDataError as exc:
+                raise MindAgentDataError(f"{where}: {exc}") from None
 
 
 def _reusable(episode: Episode, agent_slot: str, skill_version: str, recorded_digest: str | None) -> bool:
@@ -364,7 +384,8 @@ def run_deployment_episodes(
       再删在途记录、最后删 held 快照。删记录就是提交点;崩在它之前,记录还在,这条就算在途。先删记录:反过来
       先删快照再崩,重入会拿一个不存在的 id 去恢复已提交的 episode。删快照失败只记 warning(drop_snapshot)。
     - 重入:记录还在的 episode 先恢复、核对摘要等于 episode_digests 里记的,再按同一 id 重跑,不重新拍快照。
-      记录不在、episode 已落盘且可复用(见 _reusable)的直接复用;技能版本变了的改用
+      记录不在、episode 已落盘的先逐轮核对结构(`_check_turns`,每一轮都查,不合抛 MindAgentDataError,轮次判 T3),
+      再看可复用(见 _reusable)的直接复用;技能版本变了的改用
       rerun_episode_id(部署 id, 技能版本) 重跑,原 episode 留在树里。episode_digests 的值是本改动之前的形状
       (dict)时当作没记过:已提交的 episode 不复用、按同一 id 重跑。
     - 失败:T1(TRANSIENT_REASONS 与传输层 UNAVAILABLE)整条重跑,上限 max_retries_per_episode;其余失败
@@ -400,6 +421,7 @@ def run_deployment_episodes(
         if not store.exists(episode_file(run_id, eid)):
             return False, None
         existing = read_episode(store, run_id, eid)
+        _check_turns(existing, agent_slot)         # 所有轮次,不只首个智能体轮次:坏数据判 T3,不当成旧技能版本去重跑
         return _reusable(existing, agent_slot, skill_version, recorded(eid)), existing
 
     for scenario_id in scenario_ids:

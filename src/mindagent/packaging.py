@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from controlplane.envelope import Envelope, OwnerRef
+from controlplane.envelope import Envelope, OwnerRef, bump
 from controlplane.gitstore import GitStore
 from controlplane.paths import CONTROL_PLANE_ROOT, proposal_file
 from mindagent.analysis import BehaviorFinding
@@ -90,7 +90,8 @@ def package(
 ) -> list[Envelope]:
     """通过筛选的草案按顺序编号 proposal-<round_id>-<n>(n 从 1 起),写成 pending_review,返回写下
     (或已在树里)的信封。重入:同 id 的提案已不是 pending_review(人已审过)就原样保留;仍是
-    pending_review 且载荷相同就不重写。"""
+    pending_review 且载荷相同就不重写;载荷变了就就地改写,信封 `version` 在旧版本上加一(`controlplane.envelope.bump`),
+    不重置为 1。"""
     by_id = {f.id: f for f in findings}
     kept, _ = screen(drafts, verifications, thresholds)
     out: list[Envelope] = []
@@ -102,6 +103,7 @@ def package(
             round_id, by_id[draft.finding_id], draft, verification,
             run_id=run_id, bound_model_id=bound_model_id,
         )
+        existing = None
         if store.exists(rel):
             existing = store.read_product(rel)
             if existing.status != "pending_review" or existing.payload == payload:
@@ -112,6 +114,7 @@ def package(
             status="pending_review", schema_version=1, links=[round_id, draft.finding_id],
             payload=payload,
         )
+        env = bump(env, existing)                    # 改写已有产物:版本号在旧版本上加一,读取方看得出它改过
         store.write_product(rel, env, f"mindagent: proposal {pid}")
         out.append(env)
     return out
