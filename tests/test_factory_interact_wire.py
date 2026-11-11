@@ -783,6 +783,57 @@ def test_leaving_a_rollout_closes_its_instance_even_when_the_rollout_raises(worl
             backend.respond(None, None, [], "a")
 
 
+class _CloseFailsWorlds(StandInTrainingWorlds):
+    """替身世界,退出收尾时训练位端口关不上:先照常收尾(关端口、删世界),再重抛 FactoryMemoryFailureError。
+    文字里放一段路径,验证它不会跟着进日志。"""
+
+    DETAIL = "/srv/secret/rollout-world"
+
+    def close_rollout(self, episode_id, ports, **kwargs):
+        from factory.memory_translate import FactoryMemoryFailureError
+        super().close_rollout(episode_id, ports, **kwargs)
+        raise FactoryMemoryFailureError(f"port did not close: {self.DETAIL}")
+
+
+def test_a_close_failure_does_not_mask_the_exception_the_rollout_body_raised(world, tmp_path, stub, caplog):
+    """本体已在抛真失败(可能是 T1/T3 一类)时,收尾的 close_rollout 也抛:调用方看到的是本体的异常,记下的失败类别
+    不被 FactoryMemoryFailureError(T2)顶替。关不上只记一条 warning,文字里只有类名与 episode id,没有路径。"""
+    class RolloutBodyBroke(Exception):
+        pass
+
+    worlds = _CloseFailsWorlds()
+    _, _, factory, _ = _unit(world, tmp_path, stub, training_worlds=worlds)
+    episode = f"{RUN}-grpo0-t1-r0"
+    with factory(RUN, _cfg()) as policy_for_rollout:
+        with caplog.at_level(logging.WARNING, logger="factory.interact_policy"):
+            with pytest.raises(RolloutBodyBroke, match="rollout broke") as caught:
+                with policy_for_rollout(episode, "t1"):
+                    raise RolloutBodyBroke("rollout broke")
+    assert caught.value.__context__ is None                   # 没有被收尾的异常串进来
+    warnings = [r for r in caplog.records if r.name == "factory.interact_policy"]
+    assert len(warnings) == 1 and warnings[0].levelno == logging.WARNING
+    assert "FactoryMemoryFailureError" in caplog.text and "RolloutBodyBroke" in caplog.text
+    assert episode in caplog.text
+    assert _CloseFailsWorlds.DETAIL not in caplog.text and "port did not close" not in caplog.text
+
+
+def test_a_close_failure_after_a_normal_rollout_still_raises_the_memory_failure(world, tmp_path, stub, caplog):
+    """本体正常结束、训练位端口关不上:照旧重抛 FactoryMemoryFailureError(RoleMemoryFailureError 的子类,
+    编排器写 failed、派发器判 T2),不记 warning。"""
+    from factory.memory_translate import FactoryMemoryFailureError
+    from simulator.realtime.backend_timeout import RoleMemoryFailureError
+
+    worlds = _CloseFailsWorlds()
+    _, _, factory, _ = _unit(world, tmp_path, stub, training_worlds=worlds)
+    with factory(RUN, _cfg()) as policy_for_rollout:
+        with caplog.at_level(logging.WARNING, logger="factory.interact_policy"):
+            with pytest.raises(FactoryMemoryFailureError, match="port did not close") as caught:
+                with policy_for_rollout(f"{RUN}-grpo0-t1-r0", "t1"):
+                    pass
+    assert isinstance(caught.value, RoleMemoryFailureError)
+    assert not [r for r in caplog.records if r.name == "factory.interact_policy"]
+
+
 @pytest.fixture
 def starling_training_worlds(tmp_path_factory):
     """真 starling-serve 上的 `StarlingTrainingWorlds`(空种子起点)。返回 `(worlds, session)`。

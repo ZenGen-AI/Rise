@@ -12,7 +12,8 @@
    `policy_for_rollout(episode_id, scenario_id)` 是上下文管理器,每条 rollout 进出一次。进入时建这条 rollout 的世界
    (`TrainingWorlds.open_rollout`,从种子里该情境的世界复制起点),在 `VllmPolicy` 外面新造一个带记忆的 SimpleActio 实例
    (`memory_role_backend`,端口是训练位人格在这个世界里的端口);服务端随后按 episode id 加入同一个世界开对手位端口。
-   退出时(正常、异常都一样)`close_rollout`:关训练位端口,等服务端端口关完再删世界。
+   退出时(正常、异常都一样)`close_rollout`:关训练位端口,等服务端端口关完再删世界。训练位端口关不上时,本体正常结束
+   就重抛(判 T2);本体已在抛异常则原异常优先,关不上只记 warning,不盖掉它的类别。
 退出时(正常、训练抛异常都一样)先注销情境,再由 `policy_context` 停服务放租约。
 
 对手后端经 `OpponentSwitch` 交给运行时:运行时在装配期就造好(它还要服务 MindAgent 部署),而 vLLM 对手要用
@@ -36,6 +37,7 @@
 """
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, ExitStack, contextmanager
@@ -82,6 +84,8 @@ from trainscheduler.config import load_opponent_section
 
 if TYPE_CHECKING:       # 只给类型注解用:运行时不导入 factory.memory_runtime,没装 Starling 时本模块照常可用
     from factory.memory_runtime import TrainingWorlds
+
+_log = logging.getLogger(__name__)
 
 TRAINED_ADAPTER = "trained"          # 训练位在 vLLM 服务里的适配器名;站内对手的适配器名就是它的 model_ref
 OPPONENT_TIMEOUT_S = 60.0            # 对手发言的 HTTP 上限:60 秒加一轮记忆最坏 20 秒,低于服务端后端调用上限 90 秒(factory.wire)
@@ -362,8 +366,10 @@ def make_policy_factory(
                     # SimpleActio 实例。记忆是这条 rollout 的世界里训练位人格的端口:open_rollout 先删后建,重试也从起点出发;
                     # 服务端开会话时按 episode id 加入同一个世界开对手位端口。退出时(正常、异常都一样)close_rollout:
                     # 关训练位端口,等服务端端口关完再删世界,等不到就留给保留表与启动清扫,这条 rollout 照常结束。
-                    # 训练位端口关不上时 close_rollout 重抛 FactoryMemoryFailureError(转换后端 close 译的)不接:
-                    # 它是 RoleMemoryFailureError 的子类,穿出轨迹源后由编排器写 failed、派发器判 T2。
+                    # 训练位端口关不上时 close_rollout 重抛 FactoryMemoryFailureError(转换后端 close 译的),本体正常结束
+                    # 才让它穿出去:它是 RoleMemoryFailureError 的子类,穿出轨迹源后由编排器写 failed、派发器判 T2。
+                    # 本体已在抛异常(真失败,可能是 T1/T3 一类)时原异常优先,关不上只记一条 warning(只有类名):
+                    # 否则收尾的失败顶替它,记下的失败类别就错了。世界照既有约定留给保留表与启动清扫。
                     holder = interlocutors[cfg.trained_slot]
                     try:
                         memory = training_worlds.open_rollout(run_id, scenario_id, episode_id, holder)
@@ -387,10 +393,20 @@ def make_policy_factory(
                         except Exception:
                             pass        # close_rollout 已记 warning,世界留给清扫
                         raise
+                    in_flight: str | None = None       # 本体抛出的异常的类名;只存类名,不留着异常和回溯
                     try:
                         yield backend
+                    except BaseException as exc:
+                        in_flight = type(exc).__name__
+                        raise
                     finally:
-                        training_worlds.close_rollout(episode_id, [backend])
+                        try:
+                            training_worlds.close_rollout(episode_id, [backend])
+                        except Exception as close_exc:
+                            if in_flight is None:
+                                raise
+                            _log.warning("training rollout %s: close_rollout failed (%s) while %s was in flight",
+                                         episode_id, type(close_exc).__name__, in_flight)
 
                 registered: list[str] = []
                 # 先绑定再交出 policy_for_rollout:建世界要从钉住的种子分叉。digests 是派发器解出的起点摘要,
