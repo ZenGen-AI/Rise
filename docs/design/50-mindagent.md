@@ -878,9 +878,9 @@ join 等不到时,服务端把资源移进滞留表,由回收线程过后再关�
 | `tests/test_ma_analysis.py` [已落地] | 20 | 判定、阈值等号、`not` 包裹、库外技能 |
 | `tests/test_ma_proposals.py` [已落地] | 21 | 规则模板、严格解析、重试、成本条数 |
 | `tests/test_ma_verify.py` [已落地] | 10 | 精准命中、触发过宽、优先级压不过、跨情境按世界回放 |
-| `tests/test_ma_packaging.py` [已落地] | 9 | 筛选、编号、重入不改写 |
+| `tests/test_ma_packaging.py` [已落地] | 11 | 筛选、编号、重入不改写 |
 | `tests/test_ma_admit.py` [已落地] | 65 | 三个崩溃点、T2、5 种坏 run id、记忆增量、抽取失败按类别分两路与部分失败、世界锁与在途快照延后、绑定对校验 |
-| `tests/test_ma_rounds.py` [已落地] | 74 | 空库沉默、R18、R19 重入、取代、读不出、过期提案、世界锁、按在途记录回滚、验证快照与重放世界、验证重放的记忆异常与收尾 close 失败 |
+| `tests/test_ma_rounds.py` [已落地] | 75 | 空库沉默、R18、R19 重入、取代、读不出、过期提案、世界锁、按在途记录回滚、验证快照与重放世界、验证重放的记忆异常与收尾 close 失败 |
 | `tests/test_ma_e2e.py` [已落地] | 1 | 第 6 章走查例子 |
 | `tests/test_ma_memory_layout.py` [已落地] | 47 | 世界布局、情境 id 与路径校验、世界锁、在途记录的读写与校验、按后端的旧布局识别 |
 | `tests/test_ma_deployment_starling.py` [已落地] | 12 | 真 `starling-serve` 上的部署重试、崩溃重入、门② 抽取失败、一个世界里两个位的回滚;未装客户端或服务端时跳过 |
