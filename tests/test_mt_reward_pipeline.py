@@ -125,7 +125,7 @@ def test_a_component_without_a_rule_is_an_error():
 
 @pytest.mark.parametrize("gamma", [0.0, -0.1, 1.1, float("nan")])
 def test_outcome_split_rejects_a_gamma_outside_zero_one(gamma):
-    with pytest.raises(ValueError, match="gamma must be in"):
+    with pytest.raises(ValueError, match="gamma must be > 0 and <= 1"):
         OutcomeSplitAttribution({"goal": ["agreed"]}, gamma=gamma)
 
 

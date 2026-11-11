@@ -48,7 +48,7 @@ class OutcomeSplitAttribution:
 
     def __init__(self, rules: dict[str, list[str]], gamma: float = 1.0) -> None:
         if not (0 < gamma <= 1):  # NaN 也会落到这里
-            raise ValueError(f"gamma must be in (0, 1], got {gamma}")
+            raise ValueError(f"gamma must be > 0 and <= 1, got {gamma}")
         self._rules = {name: list(words) for name, words in rules.items()}
         self._gamma = gamma
 

@@ -98,8 +98,16 @@ def redact_message(text: str) -> str:
 
 
 def key_names(keys: Iterable[object]) -> list[str]:
-    """给错误信息列键名。键不一定是字符串(yaml 里可以写 1: 2),字符串和整数混着排序会抛 TypeError,所以先转成字符串。"""
-    return sorted(str(k) for k in keys)
+    """给错误信息列键名。键不一定是字符串(yaml 里可以写 1: 2),字符串和整数混着排序会抛 TypeError,所以先转成字符串。
+    超过 Python 整数转字符串位数上限(默认 4300 位)的整数键,str() 会抛 ValueError,这时写成 <int>。"""
+    return sorted(_key_name(k) for k in keys)
+
+
+def _key_name(key: object) -> str:
+    try:
+        return str(key)
+    except ValueError:
+        return "<int>"
 
 
 def describe(exc: BaseException) -> str:
@@ -118,7 +126,8 @@ def describe(exc: BaseException) -> str:
     if isinstance(exc, ValueError):
         text = str(exc)
         cut = text.find(", got ")
-        return f"{name}: {redact_message(text if cut == -1 else text[:cut])}"
+        # 信息里的换行换成空格:这句话要嵌进一行错误信息
+        return f"{name}: {redact_message(text if cut == -1 else text[:cut])}".replace("\r", " ").replace("\n", " ")
     return name
 
 

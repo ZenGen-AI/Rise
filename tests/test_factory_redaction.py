@@ -79,3 +79,20 @@ def test_a_numeric_list_in_the_backend_field_is_not_echoed(tmp_path, capsys):
     assert "has no" in err
     assert NUMBER not in err
     assert (git_head(store), tree_files(store)) == (head, files)
+
+
+def test_describe_keeps_a_multi_line_message_on_one_line():
+    assert configio.describe(ValueError("a\nb\r\nc")) == "ValueError: a b  c"
+
+
+def test_key_names_writes_an_integer_too_long_to_print_as_a_placeholder():
+    huge = 10 ** 5000  # 超过 Python 默认的 4300 位整数转字符串上限
+    assert configio.key_names(["b", huge, 1]) == ["1", "<int>", "b"]
+
+
+def test_the_gamma_range_survives_redaction():
+    from mindtrainer.reward_pipeline import OutcomeSplitAttribution
+
+    with pytest.raises(ValueError) as info:
+        OutcomeSplitAttribution({"goal": ["agreed"]}, gamma=1.5)
+    assert configio.describe(info.value) == "ValueError: gamma must be > 0 and <= 1"

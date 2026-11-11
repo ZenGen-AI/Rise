@@ -357,7 +357,7 @@ def _validate_reward(r: RewardConfig) -> str | None:
             if not words or not all(isinstance(w, str) and w for w in words):
                 return f"reward.outcome_rules[{name!r}] needs a non-empty keyword list"
         if not (0 < r.gamma <= 1):  # NaN 也会落到这里
-            return f"reward.gamma must be in (0, 1], got {_short(r.gamma)}"
+            return f"reward.gamma must be > 0 and <= 1, got {_short(r.gamma)}"
     if r.attribution == "judge":
         if not r.judge_model_id:
             return "reward.judge_model_id is required for judge attribution"
