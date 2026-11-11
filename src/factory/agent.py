@@ -403,8 +403,8 @@ class AgentRuntime:
             if self._server is None:
                 self._server = create_server(
                     self._backends, port=0, turn_timeout_s=self._timeout,
-                    # 拉起模式只放宽后端调用上限,收尾的 join 仍是服务端默认 60 秒:准入退避的 65 秒预算以它为前提
-                    # (ADMISSION_WAIT_S ≥ join + 5)。外部模式三者由 factory.memory_budget 一起推出、一起传。
+                    # 替身只放宽后端调用上限,收尾的 join 仍是服务端默认 60 秒:准入退避的 65 秒预算以它为前提
+                    # (ADMISSION_WAIT_S ≥ join + 5)。接记忆服务时三者由 factory.memory_budget 一起推出、一起传。
                     # 等不到的在途线程进滞留表,由回收线程重试
                     **({} if self._backend_timeout is None else {"backend_timeout_s": self._backend_timeout}),
                     **({} if self._join_timeout is None else {"resource_join_timeout_s": self._join_timeout}),

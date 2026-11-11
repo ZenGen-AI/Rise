@@ -108,8 +108,8 @@ def _agent(ctx) -> Handler:
     # ctx.runtime 非空时是 assemble 造的共用运行时(--interact 与 agent 开关同开),它的收尾已登记过,
     # 部署管理面也已是这里的 mem.store。轮次处理器、门② 与运行时共用这一个管理面:端口数是它的实例内状态
     bridge = ctx.bridge("agent") if _has_bridge_role(ctx.store, "agent") else None
-    # Starling:整条流的 deadline 按 max_turns × 每轮折算(拉起 40 秒,FC-31;外部模式按服务端点推出,FC-51),
-    # 训练路的流 deadline 由轨迹源自己传;替身不传,保持 AgentRuntime 的缺省。外部模式另传等端口全关与准入退避的上限,
+    # Starling:整条流的 deadline 按 max_turns × 每轮折算(拉起与外部模式都按服务端点推出,FC-31、FC-51),
+    # 训练路的流 deadline 由轨迹源自己传;替身不传,保持 AgentRuntime 的缺省。推出的预算另传等端口全关与准入退避的上限,
     # 两者随服务端收尾的 join 一起放长
     extra: dict = {"stream_deadline_s": config.max_turns * budget.deploy_per_turn_s} if starling else {}
     if budget.derived:

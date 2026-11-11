@@ -1,17 +1,16 @@
 """记忆调用的时间预算(设计四补丁;90 篇"客户端超时"表与"时间预算"两行、FC-50、FC-51)。纯函数,不导入 `starling`。
 
-外部模式下抽取与嵌入的超时、重试由 Starling 默认世界的端点决定(看板里配)。rise 不给它封顶,而是按这些端点推出
-Starling 一侧的最坏耗时(`memory_worst_case`),再由此推出 rise 自己的各层时限(`memory_time_budget`),每一层都
-严格大于它包住的那一层:内层先超时,外层才看得到分类过的失败。
+接了记忆服务时,rise 按 rise 设置里的抽取与嵌入两个端点推出 Starling 一侧的最坏耗时(`memory_worst_case`),再由此
+推出 rise 自己的各层时限(`memory_time_budget`),每一层都严格大于它包住的那一层:内层先超时,外层才看得到分类过的失败。
+两种模式同一个公式,只是端点的来处不同:拉起模式是 rise 自己写的(超时与重试来自记忆配置,受
+`factory.memory_config.MAX_MEMORY_CALL_MS` 限制),外部模式是 Starling 默认世界的(看板里配,rise 不封顶)。
 
-拉起模式与替身沿用固定的各层(`SPAWN_LAYERS`,与接服务之前的常量相同);`spawn_time_budget` 只把按拉起配置算出的
-最坏耗时填进去供日志看,不改各层。
+替身没有网络调用,用固定的各层(`BASE_LAYERS`,与接服务之前的常量相同);推出的每一层也不低于它。
 
 `mindagent`、`mindtrainer`、`simulator` 不导入 `factory`:这里算出的值由组合根以参数传给它们。
 """
 from __future__ import annotations
 
-import dataclasses
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -104,8 +103,8 @@ def memory_worst_case(extraction: Mapping, embedding: Mapping, *,
 
 @dataclass(frozen=True)
 class MemoryTimeBudget:
-    """rise 各层时限,秒(90 篇时间预算表)。`derived` 为真:由 Starling 的端点推出(外部模式);为假:拉起模式与替身的
-    固定值。`worst` 是算出的 Starling 一侧最坏耗时,替身没有(None)。
+    """rise 各层时限,秒(90 篇时间预算表)。`derived` 为真:由记忆服务的端点推出(拉起与外部模式);为假:替身的固定值
+    `BASE_LAYERS`。`worst` 是算出的 Starling 一侧最坏耗时,替身没有(None)。
 
     | 层 | 包住的是 |
     |---|---|
@@ -167,7 +166,7 @@ class MemoryTimeBudget:
 
     def describe(self) -> str:
         """装配期日志的一行。"""
-        head = "derived from the memory service's endpoints" if self.derived else "fixed spawn-mode layers"
+        head = "derived from the memory service's endpoints" if self.derived else "fixed stand-in layers"
         worst = "" if self.worst is None else (
             f"memory turn worst case {self.worst.memory_turn_s:g}s, handle call {self.worst.handle_call_s:g}s; ")
         return (f"memory time budget ({head}): {worst}handle timeout {self.handle_s:g}s, "
@@ -176,8 +175,8 @@ class MemoryTimeBudget:
                 f"close wait {self.close_wait_s:g}s, admission wait {self.admission_wait_s:g}s")
 
 
-# 拉起模式与替身:接服务之前的常量,不随端点变(90 篇时间预算表的"拉起"一列)
-SPAWN_LAYERS = MemoryTimeBudget(
+# 接服务之前的常量(90 篇时间预算表的"下限"一列):替身的各层就是它,推出的各层每层不低于它
+BASE_LAYERS = MemoryTimeBudget(
     derived=False, worst=None, handle_s=30.0, drain_window_s=60.0, port_close_s=60.0,
     deploy_turn_s=40.0, deploy_per_turn_s=40.0, opponent_s=60.0, policy_s=120.0, backend_s=90.0,
     interact_turn_s=150.0, message_s=120.0, per_turn_deadline_s=150.0, join_s=60.0, close_wait_s=70.0,
@@ -195,14 +194,9 @@ CLOSE_WAIT_MARGIN_S = 10.0
 ADMISSION_MARGIN_S = 5.0
 
 
-def spawn_time_budget(extraction: Mapping, embedding: Mapping) -> MemoryTimeBudget:
-    """拉起模式:各层是 `SPAWN_LAYERS`,只把按 rise 配置的端点算出的最坏耗时填进 `worst` 供日志看。"""
-    return dataclasses.replace(SPAWN_LAYERS, worst=memory_worst_case(extraction, embedding))
-
-
-def memory_time_budget(extraction: Mapping, embedding: Mapping, *, policy_s: float = SPAWN_LAYERS.policy_s,
-                       opponent_s: float = SPAWN_LAYERS.opponent_s) -> MemoryTimeBudget:
-    """外部模式:由 rise 设置里的两个端点推出各层。每层取"内层加余量"与拉起模式常量的较大者,所以只会放宽:
+def memory_time_budget(extraction: Mapping, embedding: Mapping, *, policy_s: float = BASE_LAYERS.policy_s,
+                       opponent_s: float = BASE_LAYERS.opponent_s) -> MemoryTimeBudget:
+    """拉起与外部模式:由 rise 设置里的两个端点推出各层。每层取"内层加余量"与 `BASE_LAYERS` 的较大者,所以只会放宽:
 
     | 层 | 取值 |
     |---|---|
@@ -213,14 +207,14 @@ def memory_time_budget(extraction: Mapping, embedding: Mapping, *, policy_s: flo
     | 训练位等提交 | 策略 HTTP + 一轮记忆 + 10 |
     | 相邻消息 | 后端 + 30 |
     | 训练流每轮 | 训练位等提交与后端的较大者 |
-    | 部署流每轮 | 部署等提交与后端的较大者(外部模式下部署路的后端调用也取 `backend_s`) |
+    | 部署流每轮 | 部署等提交与后端的较大者(部署路的后端调用也取 `backend_s`) |
     | 收尾 join | 后端与句柄的较大者 + 10 |
     | 等端口全关 | join + 10 |
     | 准入退避 | join + 5 |
 
     返回之前核对包含关系,不成立抛 ValueError(余量都是正数,走不到)。"""
     w = memory_worst_case(extraction, embedding)
-    base = SPAWN_LAYERS
+    base = BASE_LAYERS
     handle_s = max(base.handle_s, w.handle_call_s + HANDLE_MARGIN_S)
     deploy_turn_s = max(base.deploy_turn_s, w.memory_turn_s + DEPLOY_TURN_MARGIN_S)
     backend_s = max(base.backend_s, opponent_s + w.memory_turn_s + TURN_MARGIN_S)

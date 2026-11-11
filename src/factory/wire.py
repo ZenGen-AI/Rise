@@ -161,8 +161,8 @@ class Assembly:
 
 
 # --interact 的时间预算(设计源 6.4 节),外层必须高于内层的最坏耗时,内层才先超时、外层看到分类过的失败。
-# 真机(eager,两适配器)每轮 20 到 65 秒,2026-11-02 从 60/25/60/90/90 整体放宽到下面这组。这是替身与拉起模式的值;
-# 外部模式由 factory.memory_budget 按记忆服务的端点推出(FC-51),经 MemoryWiring.budget 交给装配,只会更长。
+# 真机(eager,两适配器)每轮 20 到 65 秒,2026-11-02 从 60/25/60/90/90 整体放宽到下面这组。这是替身的值;
+# 接记忆服务时(拉起与外部模式)由 factory.memory_budget 按服务的端点推出(FC-51),经 MemoryWiring.budget 交给装配,只会更长。
 INTERACT_TURN_TIMEOUT_S = 150.0     # 服务端等一次提交:训练位策略 HTTP 120 秒加一轮记忆最坏 20 秒;默认的 5 秒是给罐头后端定的
 INTERACT_BACKEND_TIMEOUT_S = 90.0   # 服务端单次后端调用:对手 HTTP 60 秒加一轮记忆最坏 20 秒
 INTERACT_MESSAGE_TIMEOUT_S = 120.0  # 客户端相邻两条服务端消息:间隔以一个对手轮为界,高于后端调用上限
@@ -181,13 +181,13 @@ def memory_wiring(repo_root: Path, env: Mapping[str, str], *, deployment: bool) 
 def deploy_turn_timeout_s(*, interact: bool, starling: bool, budget=None) -> float | None:
     """共用运行时里「服务端等一次提交」的上限(设计二 6.4 节、FC-31、FC-51);None 即保持 AgentRuntime 的默认 5 秒。
 
-    `budget` 是 `factory.memory_budget.MemoryTimeBudget`,缺省是拉起模式的固定值。`--interact` 开着取它的
-    `interact_turn_s`(拉起 150 秒),与 `--enable agent` 同开也是它:两条路共用一个运行时,取较大值。只有 `--enable agent`
-    且是 Starling 时取 `deploy_turn_s`(拉起 40 秒)。替身没有网络调用,保持现值。"""
+    `budget` 是 `factory.memory_budget.MemoryTimeBudget`,缺省是固定的 `BASE_LAYERS`。`--interact` 开着取它的
+    `interact_turn_s`(替身 150 秒),与 `--enable agent` 同开也是它:两条路共用一个运行时,取较大值。只有 `--enable agent`
+    且是 Starling 时取 `deploy_turn_s`(按服务端点推出)。替身没有网络调用,保持现值。"""
     if budget is None:
-        from factory.memory_budget import SPAWN_LAYERS
+        from factory.memory_budget import BASE_LAYERS
 
-        budget = SPAWN_LAYERS
+        budget = BASE_LAYERS
     if interact:
         return max(INTERACT_TURN_TIMEOUT_S, budget.interact_turn_s)
     if starling:
@@ -196,8 +196,8 @@ def deploy_turn_timeout_s(*, interact: bool, starling: bool, budget=None) -> flo
 
 
 def _runtime_timeouts(options: FactoryOptions, keys: frozenset[str], memory) -> dict:
-    """交给 AgentRuntime 的服务端与客户端时限。替身与拉起模式与接服务之前相同:`--interact` 时后端调用 90 秒、相邻消息
-    120 秒,收尾 join 用服务端缺省 60 秒;只开部署路时都用缺省。外部模式(`budget.derived`)四项都取推出的值:
+    """交给 AgentRuntime 的服务端与客户端时限。替身与接服务之前相同:`--interact` 时后端调用 90 秒、相邻消息
+    120 秒,收尾 join 用服务端缺省 60 秒;只开部署路时都用缺省。接记忆服务时(`budget.derived`)四项都取推出的值:
     部署路的对手位也是带记忆的实例,后端调用与收尾 join 同样要包住一轮记忆。"""
     budget = None if memory is None else memory.budget
     out: dict = {}
@@ -271,7 +271,7 @@ def _interact_wiring(
     endpoint = select_endpoint(read_endpoints_config(store), options.endpoint)
     client = build_compute_client(endpoint, read_host_map(env=environ))
     budget = memory.budget
-    # 训练位与对手的 HTTP 上限:替身与拉起模式用 make_policy_factory 的缺省(与接服务之前相同);外部模式传预算里的值,
+    # 训练位与对手的 HTTP 上限:替身用 make_policy_factory 的缺省(与接服务之前相同);接记忆服务时传预算里的值,
     # 后端调用与等提交两层正是按它们加一轮记忆推出的
     limits = {"policy_timeout_s": budget.policy_s, "opponent_timeout_s": budget.opponent_s} if budget.derived else {}
     policy_factory = make_policy_factory(
@@ -283,7 +283,7 @@ def _interact_wiring(
         "policy_endpoint": endpoint.endpoint_id,
         "memory_resolver": memory.memory_resolver,
     }
-    if budget.derived:          # 外部模式:流 deadline 与准入退避随服务端的 join 一起放长;其余入口用轨迹源的缺省
+    if budget.derived:          # 接记忆服务:流 deadline 与准入退避随服务端的 join 一起放长;替身用轨迹源的缺省
         wiring["source_options"] = {"per_turn_deadline_s": budget.per_turn_deadline_s,
                                     "admission_wait_s": budget.admission_wait_s}
     return wiring

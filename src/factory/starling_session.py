@@ -32,7 +32,7 @@ _ADMIN_PATH = "/api/v1/client/admin/"
 _STOPPING = "starling session is stopping"
 
 # 90 篇"客户端超时"表(FC-46):句柄调用缺省 30 秒;管理调用(建世界、分叉、快照、恢复)要拷库,给 300 秒。
-# 外部模式下句柄超时与排空窗口由 `factory.memory_budget` 按服务的端点推出,装配期经 `retune` 换上(FC-51)
+# 句柄超时与排空窗口由 `factory.memory_budget` 按服务的端点推出(拉起与外部模式),装配期经 `retune` 换上(FC-51)
 HANDLE_TIMEOUT_S = 30.0
 ADMIN_TIMEOUT_S = 300.0
 # 排空窗口:一个会话丢失后这么久之内,在它丢失时有可写句柄的世界上开句柄收到 world_held 判瞬态

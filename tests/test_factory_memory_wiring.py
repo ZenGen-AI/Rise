@@ -203,7 +203,10 @@ def test_the_starling_wiring_logs_only_its_backend_name(tmp_path, store, fake, c
 
 
 @needs_service
-def test_with_starling_the_round_handler_gets_starling_memory_and_a_40s_budget(tmp_path, store, fake, monkeypatch):
+def test_with_starling_the_round_handler_gets_starling_memory_and_the_derived_spawn_budget(
+        tmp_path, store, fake, monkeypatch):
+    """拉起模式缺省 timeout_ms 4000、max_retries 0:一轮记忆最坏 76 秒,部署等提交 96、后端 146、收尾 join 156、
+    等端口全关 166、准入退避 161、句柄超时 58(FC-51,数字的推法见 test_factory_memory_budget)。"""
     from simple_actio.memory_starling import StarlingDeploymentStore
     import factory.handlers as fh
     seen = {}
@@ -214,8 +217,11 @@ def test_with_starling_the_round_handler_gets_starling_memory_and_a_40s_budget(t
         assert isinstance(r["memory_store"], StarlingDeploymentStore)
         assert r["memory_layout"].root == tmp_path / "mem"
         assert r["memory_runtime"]["backend"] == "starling"
-        assert r["stream_deadline_s"] == r["config"].max_turns * 40.0
-        assert r["client_factory"].__self__._timeout == 40.0           # AgentRuntime 的服务端等提交
+        runtime = r["client_factory"].__self__
+        assert r["stream_deadline_s"] == r["config"].max_turns * 146.0
+        assert (runtime._timeout, runtime._backend_timeout, runtime._join_timeout) == (96.0, 146.0, 156.0)
+        assert (r["close_wait_s"], r["admission_wait_s"]) == (166.0, 161.0)
+        assert r["memory_store"]._session.handle_timeout_s == 58.0     # 装配期经 retune 换上
         assert (tmp_path / "mem" / ".owner").read_text(encoding="utf-8").strip() == str(store.repo_root.resolve())
         assert callable(asm.on_locked)
     finally:
@@ -361,7 +367,9 @@ def test_the_stand_in_round_handler_keeps_the_defaults(store, monkeypatch):
 
 
 def test_a_context_without_a_shared_runtime_gets_the_starling_budget_too(store, monkeypatch):
-    """手工拼的 BuildContext(runtime 为 None)时 _agent 自己造运行时:Starling 一样等 40 秒、整条流 max_turns × 40。"""
+    """手工拼的 BuildContext(runtime 为 None)时 _agent 自己造运行时,时限与共用运行时同一个判法:拉起模式缺省配置
+    推出的部署等提交 96 秒、后端 146、收尾 join 156,整条流 max_turns × 146。"""
+    from factory.memory_budget import memory_time_budget
     import factory.handlers as fh
     from simple_actio.memory import FileTupleStore
     from factory.wire import BuildContext
@@ -371,15 +379,17 @@ def test_a_context_without_a_shared_runtime_gets_the_starling_budget_too(store, 
     seen = {}
     monkeypatch.setattr(fh, "make_start_round_handler", lambda **kw: seen.setdefault("round", kw) and None or (lambda s, a: None))
     root = store.repo_root.parent / "mem-ctx"
+    spawn = {"timeout_ms": 4000, "max_retries": 0}
     memory = DeploymentMemory(FileTupleStore(root / "deploy", held_root=root / "held", replay_root=root / "replay"),
-                              MemoryLayout(root), {"backend": "starling"})
+                              MemoryLayout(root), {"backend": "starling"}, memory_time_budget(spawn, spawn))
     ctx = BuildContext(store=store, accept_mock_evidence=False, confirm_directives=None, planner_backend="heuristic",
                        env={}, log_dir=None, deployment_memory=memory)
     fh._agent(ctx)
     try:
         r = seen["round"]
-        assert r["stream_deadline_s"] == r["config"].max_turns * 40.0
-        assert r["client_factory"].__self__._timeout == 40.0
+        runtime = r["client_factory"].__self__
+        assert r["stream_deadline_s"] == r["config"].max_turns * 146.0
+        assert (runtime._timeout, runtime._backend_timeout, runtime._join_timeout) == (96.0, 146.0, 156.0)
     finally:
         wire._close_all(ctx.closers)
 
@@ -825,7 +835,7 @@ def test_external_mode_passes_every_derived_layer_to_the_runtime_and_the_round_h
         asm.close()
 
 
-def test_spawn_mode_and_the_stand_in_pass_no_derived_layer(store, monkeypatch):
+def test_the_stand_in_passes_no_derived_layer(store, monkeypatch):
     import factory.handlers as fh
     seen = {}
     monkeypatch.setattr(fh, "make_start_round_handler", lambda **kw: seen.setdefault("round", kw) and None or (lambda s, a: None))

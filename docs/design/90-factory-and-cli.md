@@ -208,7 +208,7 @@ factory 是组合根:系统里唯一知道所有包的地方。它把各子系�
 | `factory.starling_service` | 拉起模式的服务进程:`spawn_service`、`SpawnedService`(拉起、等 ready、退出后退避重起、停止),残留服务六项核对 | `factory.memory_config`、`controlplane.lock` | [已落地] |
 | `factory.starling_session` | `ServiceSession`(当前客户端、代号、按代号的端口计数、排空窗口、管理调用的传输)、`service_runtime`(运行时身份)、`ServiceIdentity` | `starling_client`、`factory.memory_config` | [已落地] |
 | `factory.starling_names` | 世界名与标签:`deploy_world`、`empty_seed_world`、`seed_world`、`rollout_world`、`replay_world`、`labels`、`root_label`、`new_suffix`;rise 设置 `rise_settings`(外部模式的端点取自服务默认世界,`endpoints`)与设置摘要 | `factory.memory_config` | [已落地] |
-| `factory.memory_budget` | 记忆时间预算:Starling 一侧最坏耗时 `memory_worst_case`(单次调用 `endpoint_call_ms`),外部模式推出的各层 `memory_time_budget`,拉起模式的固定各层 `SPAWN_LAYERS` 与 `spawn_time_budget`;纯函数,不导入 `starling` | 无 | [已落地] |
+| `factory.memory_budget` | 记忆时间预算:Starling 一侧最坏耗时 `memory_worst_case`(单次调用 `endpoint_call_ms`),拉起与外部模式推出的各层 `memory_time_budget`,接服务之前的常量 `BASE_LAYERS`(替身的值、推出各层的下限);纯函数,不导入 `starling` | 无 | [已落地] |
 | `factory.seed` | 子命令 `factory seed`:`build_seeds` 从部署世界分叉种子,返回 `SeedResult` 列表;参数解析在 `build_parser`,惰性导入 | `factory.memory_runtime`、`factory.starling_names`、`factory.agent` | [已落地] |
 | factory.memory_translate | 转换后端:包在每个 SimpleActio 实例外面,接住 simple_actio 的 MemoryFailureError,按 `transient` 改抛本模块的两个异常。FactoryMemoryUnavailableError 继承 RoleMemoryUnavailableError(瞬态),FactoryMemoryFailureError 继承 RoleMemoryFailureError(确定性)。两个基类在 `src/simulator/realtime/backend_timeout.py`,所以 simulator 与 mindtrainer 不导入 simple_actio(FC-30)。查询词嵌入失败与 `embed_pending` 有嵌入失败都由 Starling 适配器译成瞬态 MemoryFailureError,不静默;`close` 里的记忆失败一律按确定性处理 [已落地] | `simple_actio`、`simulator.realtime`、`factory.errors` | [已落地] |
 | `factory.vllm_policy`、`factory.opponents` | 现有 `VllmPolicy` 与 `ExternalApiBackend`;各补一个 `respond_guided`:指导语非空时追加到唯一的 system 消息末尾,以“当前要点：”起头,一行一条;连续两条 system 消息不是所有兼容端点都接受。训练位策略 HTTP 上限取 120 秒(`POLICY_TIMEOUT_S`,2026-11-02 按真机延迟从 60 秒放宽)[已落地]。`VllmPolicy`(训练位与站内 vLLM 对手)的请求体带 `chat_template_kwargs: {enable_thinking: false}`,关掉基座聊天模板的思考段:开着时推理与回复一起进 `content`、长度不可控,真机单次 6.4 到 208.3 秒并有空回复;关掉 4.6 到 17.3 秒。外部 API 对手不带这个字段,别的兼容端点不一定认 [已落地] | `compute`、`simulator` | [已落地] |
@@ -604,11 +604,11 @@ SESSION_CLOSE_WAIT_S = 70.0   # mindagent.deployment;服务端 join 上限 60 �
 
 "停守护进程"分两半。ServiceSession 记下致命原因后,一切记忆调用都抛瞬态 MemoryFailureError,所以在途的指令与轮次只会延后,不判 T2 或 T3。组合根给派发器与每个处理器套一层:调用返回或抛出之后查致命状态,查到就抛 `FactoryConfigError`。调和循环不接它(处理器异常原样上抛,派发器只接 `DirectiveFailedError`,`src/controlplane/daemon.py:349-360`;`reconcile_once` 只接 `DeferredError`,`:469`),命令行译成退出码 2(`src/factory/cli.py` 的 `main`)。
 
-客户端超时 [已落地]。句柄调用与管理调用用两个超时(`HANDLE_TIMEOUT_S`、`ADMIN_TIMEOUT_S`,`factory.starling_session`);外部模式的句柄超时与排空窗口按服务端点推出,装配期经 `ServiceSession.retune` 换上(FC-51):
+客户端超时 [已落地]。句柄调用与管理调用用两个超时(`HANDLE_TIMEOUT_S`、`ADMIN_TIMEOUT_S`,`factory.starling_session`);两种模式的句柄超时与排空窗口都按服务端点推出,装配期经 `ServiceSession.retune` 换上(FC-51):
 
 | 调用 | 超时 | 理由 |
 |---|---|---|
-| 句柄调用(`open`、`recall`、`remember_event`、`embed_pending`、`digest`、`close`) | 拉起模式 30 秒,`connect` 的缺省(`S:clients/python/starling_client/client.py:29`);外部模式取时间预算的"句柄"一层 | 句柄调用卡住时在这一层内判瞬态,它小于服务端收尾 join 与等端口全关的上限,对手位端口照常在等待期内关上 |
+| 句柄调用(`open`、`recall`、`remember_event`、`embed_pending`、`digest`、`close`) | 时间预算的"句柄"一层(拉起模式缺省配置 58 秒);`connect` 的缺省 30 秒(`S:clients/python/starling_client/client.py:29`)只在 retune 之前用 | 句柄调用卡住时在这一层内判瞬态,它小于服务端收尾 join 与等端口全关的上限,对手位端口照常在等待期内关上 |
 | 管理调用(`create_world`、`fork`、`upgrade_seed`、`snapshot`、`restore`、`delete_snapshot`、`digest(world)`、`pending_events(world)`、`close_world`、`list_worlds`) | 300 秒 | `restore` 先排空在途调用至多 30 秒(`S:python/starling/dashboard/world_manager.py:160`)再复制、校验;`fork`、`snapshot` 是整库复制。30 秒不够,超时后重入每次又多一份 `pre-rollback` 归档 |
 
 做法:ServiceSession 另持一个管理用的传输对象,与当前客户端同一个 URL 与 token,超时 300 秒,直接 POST `/api/v1/client/admin/<op>`。管理请求的请求体不带 `session_id`(`S:clients/python/starling_client/client.py:149-197`),服务端路由也不查会话(`S:python/starling/dashboard/routes/client.py:503-520`),所以它不是第二个会话:不开句柄、不发心跳、不占写占用。客户端的 `_admin` 只多了一步本地的会话存活检查(`client.py:87-108`);rise 绕开它,会话过期后管理调用照常可用,恢复不必等重连。传输对象是客户端包的 `starling_client.Transport`(定义在私有模块 `_transport`,`S:clients/python/starling_client/_transport.py:46-51`),它的签名由 `tests/test_factory_starling_session.py` 的一条用例钉住;Starling 以后给管理方法加单次超时参数时,换成公开接口。服务进程退出时两个传输都立刻抛 ServiceUnavailable(`_transport.py:89-92`),不等超时。
@@ -725,7 +725,7 @@ TypeScript 命令行:`rise <review|approve|reject|confirm|status> [id] [reason]`
 | 续训与替身 [已落地] | 续训时重算摘要与身份;种子世界、Starling 版本、抽取或嵌入模型任一变了,哈希不同,升 T3。替身路径的 `backend` 是 `stand-in`,换成真 Starling 同样改哈希。判错的代价:哈希不变,续训的后半程与前半程就不是同一个实验 |
 | 每条 rollout 一个世界 [已落地] | 整条 rollout 从情境钉住的种子世界分叉出一个世界(替身是内存里的空世界),训练位与对手位都是其中的主体,互不召回,用完即收尾(替身删,Starling 只关不删),见下表与第 5 章。同组 `group_size` 条 rollout 从同一个种子世界出发、互相看不见,组内优势只反映策略;代价是记忆不在一条 run 内累积(FC-35) |
 | 时间预算:等待上限 [已落地] | `--interact` 下客户端等相邻两条服务端消息(`_next_msg`,`INTERACT_MESSAGE_TIMEOUT_S`)超时视作 `timeout`(T1,按条重跑)并 abort 会话。整条流按 `max_turns ×` 每轮兜底,由轨迹源经 `client_factory(deadline_s=)` 传。服务端等一次提交的 `turn_timeout_s` 与相邻消息方向相反、互不嵌套(FC-32):服务端等一次提交,客户端等相邻两条消息的间隔,一轮里有几个对手都不叠加。两个开关同开时共用一个运行时,等提交取较大值。各层的取值见下面的时间预算表 |
-| 时间预算:内层与记忆 [已落地] | 外层上限高于内层最坏耗时,内层先超时,外层才看得到分类过的失败。记忆一轮的最坏耗时按 Starling 的端点算(`factory.memory_budget.memory_worst_case`),公式见下表。拉起模式的各层是固定值;外部模式由公式推出,每层严格包住内层(FC-51) |
+| 时间预算:内层与记忆 [已落地] | 外层上限高于内层最坏耗时,内层先超时,外层才看得到分类过的失败。记忆一轮的最坏耗时按 Starling 的端点算(`factory.memory_budget.memory_worst_case`),公式见下表。拉起与外部模式的各层都由公式推出,每层严格包住内层(FC-51) |
 | 对手位包 SimpleActio [已落地] | 三种驱动的对手后端都由对手工厂包进 SimpleActio 实例;部署会话的对手位同样包(FC-25)。部署对手位的记忆是部署世界的端口,跨会话积累(FC-34)[已落地]。对手位的技能与经验为空:现阶段只有 MindAgent 产出技能,训练路不读技能库。对手的激活轨迹随落盘 episode 保存,不下发给训练位 |
 | 启动清扫 | 去掉:记忆根下没有 rollout 世界(替身在内存里,Starling 在服务里),可回收世界留给 Starling 清理(SYS-40);`runs/` 存在就是旧布局,装配期拒绝(第 18 条) |
 
@@ -744,24 +744,24 @@ TypeScript 命令行:`rise <review|approve|reject|confirm|status> [id] [reason]`
 
 设抽取一次调用 `E`、嵌入一次 `M`,一次句柄调用最坏 `max(M, 7E, 4M)`,一轮记忆最坏 `M + 2 × 7E + 4M`。embed_pending 的 4 次只算一批走批量路径;积压超过一批时 Starling 循环到某批一行都没嵌上,整批以 4xx 失败时逐行回退,两者都没有上界(`S:src/memory/memory_ops.cpp:808-814`、`S:src/embedding/embedding_worker.cpp:294-306`)。
 
-时间预算 [已落地]。拉起模式与替身用固定值;外部模式每层取"内层加余量"与拉起值的较大者(`factory.memory_budget.memory_time_budget`),所以只会放宽。8787 一列是看板现在的两个端点(抽取 `timeout_ms` 120000、不写 `max_retries`;嵌入 `timeout_ms` 0、不写)推出的值:
+时间预算 [已落地]。拉起与外部模式走同一个公式(`factory.memory_budget.memory_time_budget`),只是端点的来处不同:拉起模式是 rise 自己写进 rise 设置的端点(`timeout_ms`、`max_retries` 来自记忆配置,受第 12 条的 4000 毫秒上限),外部模式是看板默认世界的端点。每层取"内层加余量"与下限的较大者,所以只会放宽。下限是接服务之前的常量(`BASE_LAYERS`);替身没有网络调用,`--interact` 下用这一列,部署路保持 5 秒与 15 秒。拉起一列按缺省配置(`timeout_ms` 4000、`max_retries` 0)推出;8787 一列是看板现在的两个端点(抽取 `timeout_ms` 120000、不写 `max_retries`;嵌入 `timeout_ms` 0、不写)推出的值:
 
-| 层 | 包住的是 | 拉起模式 | 外部模式取值 | 8787 |
-|---|---|---|---|---|
-| 抽取一次 `E`、嵌入一次 `M` | 端点 | 4、4 | 公式 | 487、247 |
-| 一次句柄调用、一轮记忆 | 公式 | 28、76 | 公式 | 3409、8053 |
-| 句柄超时 | 一次句柄调用 | 30 | + 30 | 3439 |
-| 排空窗口、关端口等在途 | 句柄超时 | 60 | + 10 | 3449 |
-| 部署等一次提交 | 一轮记忆 | 40 | + 20 | 8073 |
-| 服务端单次后端调用 | 对手 HTTP 60 加一轮记忆 | 90 | + 10 | 8123 |
-| 训练位等一次提交 | 策略 HTTP 120 加一轮记忆 | 150 | + 10 | 8183 |
-| 客户端等相邻消息 | 后端调用 | 120 | + 30 | 8153 |
-| 训练流、部署流每轮 | 两种等提交与后端调用中较大的 | 150、40 | 较大者 | 8183、8123 |
-| 服务端收尾 join | 后端调用与句柄超时 | 60 | 较大者 + 10 | 8133 |
-| 等世界端口全关 | join | 70 | + 10 | 8143 |
-| 准入退避 | join | 65 | + 5 | 8138 |
+| 层 | 包住的是 | 下限 | 推出取值 | 拉起 | 8787 |
+|---|---|---|---|---|---|
+| 抽取一次 `E`、嵌入一次 `M` | 端点 | 无 | 公式 | 4、4 | 487、247 |
+| 一次句柄调用、一轮记忆 | 公式 | 无 | 公式 | 28、76 | 3409、8053 |
+| 句柄超时 | 一次句柄调用 | 30 | + 30 | 58 | 3439 |
+| 排空窗口、关端口等在途 | 句柄超时 | 60 | + 10 | 68 | 3449 |
+| 部署等一次提交 | 一轮记忆 | 40 | + 20 | 96 | 8073 |
+| 服务端单次后端调用 | 对手 HTTP 60 加一轮记忆 | 90 | + 10 | 146 | 8123 |
+| 训练位等一次提交 | 策略 HTTP 120 加一轮记忆 | 150 | + 10 | 206 | 8183 |
+| 客户端等相邻消息 | 后端调用 | 120 | + 30 | 176 | 8153 |
+| 训练流、部署流每轮 | 两种等提交与后端调用中较大的 | 150、40 | 较大者 | 206、146 | 8183、8123 |
+| 服务端收尾 join | 后端调用与句柄超时 | 60 | 较大者 + 10 | 156 | 8133 |
+| 等世界端口全关 | join | 70 | + 10 | 166 | 8143 |
+| 准入退避 | join | 65 | + 5 | 161 | 8138 |
 
-单位都是秒。拉起模式的"一次句柄调用、一轮记忆"按 `timeout_ms` 4000、`max_retries` 0 算。拉起值是接服务之前定的,其中两处不包住:按真公式一轮记忆最坏 76 秒,高于部署等提交 40 秒;收尾 join 60 秒低于后端调用 90 秒。外部模式两处都包住。外部模式下部署路的后端调用与收尾 join 也取推出值,轮次处理器另收等端口全关与准入退避两个上限;装配期在日志里写一行各层取值。
+单位都是秒。下限一列本身有两处不包住(一轮记忆最坏 76 秒高于部署等提交 40 秒,收尾 join 60 秒低于后端调用 90 秒),所以接了记忆服务就不用它,只拿它当下限。第 12 条的上限只约束尝试的总时长,不计重试之间的退避:它允许的最坏(`timeout_ms` 1、`max_retries` 3999)一次调用最坏约 33 小时,各层随之推出,仍一层包一层。部署路的后端调用与收尾 join 也取推出值,轮次处理器另收等端口全关与准入退避两个上限;装配期在日志里写一行各层取值。
 
 每条 rollout 一个世界,按时刻 [已落地]:
 
@@ -798,7 +798,7 @@ TypeScript 命令行:`rise <review|approve|reject|confirm|status> [id] [reason]`
 | 9 | 对手用 `external_api` 时凭证环境变量在场 | 与 `factory.bridges` 同一口径:凭证在装配期解析,缺就起不来;异常只报变量名 |
 | 10 | `policy` 与 `policy_factory` 不同时给 | 两个来源说不清谁生效,宁可报错。组合根从不给具体的 `policy`,所以这一条从命令行够不到,装配期没有可检查的:把关的是派发器自己抛的 `ValueError`,测试钉住的也是它 |
 | 11 | `--enable` 含 `plan`、`scheduler.yaml` 的 `allow_interact` 为真时,必须同时传 `--interact` [已落地] | 规划器可能写出 interact 指令,而没有 `--interact` 时派发必然判 `failed`,闭环停住。这是启动时就看得出的配置矛盾,不留到第一条指令。错误信息点名缺 `--interact`,并说明二选一:加 `--interact`,或把 `allow_interact` 关掉 |
-| 12 | 环境变量 `RISE_MEMORY_CONFIG` 一旦设置,就指向仓库外的 0600 普通文件,键恰好合规,地址不带 `user:password@` | 文件不存在、缺键、多余键、权限过宽、路径在仓库里、地址带 userinfo;拉起模式下 `timeout_ms × (max_retries + 1)` 超过 4000 毫秒(拉起模式的各层按每次记忆调用至多 4 秒定);外部模式下出现端点、模型、超时、重试任一键。报错只写键名与路径,不回显取值 |
+| 12 | 环境变量 `RISE_MEMORY_CONFIG` 一旦设置,就指向仓库外的 0600 普通文件,键恰好合规,地址不带 `user:password@` | 文件不存在、缺键、多余键、权限过宽、路径在仓库里、地址带 userinfo;拉起模式下 `timeout_ms × (max_retries + 1)` 超过 4000 毫秒(各层按端点推出,不靠它;它限住的是一次尝试的总时长,不计退避);外部模式下出现端点、模型、超时、重试任一键。报错只写键名与路径,不回显取值 |
 | 13 | 记忆配置设置且是拉起模式时,`OPENAI_API_KEY` 非空 [已落地];外部模式下查默认世界的抽取与嵌入角色都绑了带密钥的 provider(按 `info()` 的 `key_set`),嵌入的 `dim` 是正整数 [已落地] | 拉起模式:Starling 固定读这个变量,空则抽取与嵌入必败,报错只写变量名。外部模式:角色没绑、端点不是 provider、`key_set` 不为真或 `dim` 不是正数,文字写角色名,提示在看板里绑 |
 | 14 | 产物树里的 `memory_library/` 为空,配置在不在场都查(只在 `agent`、`admit` 构造器里) | 旧目录不迁移,`load_library` 不再读它;非空就有记忆条目无人认领,拒绝启动并要求人工处理 |
 | 15 | 记忆配置设置后,`starling-client`(拉起模式下另有 `starling-memory`)不是 editable 安装,来源有 git 提交 [已落地] | editable 安装的源码目录随时在变,运行时身份无从钉住;没有提交就无法与服务报的提交比对 |
@@ -949,7 +949,7 @@ factory 是第九个工作包,前八个全部落地后才施工。前置关系:1
 | FC-28 | 一个记忆根目录只属于一个控制面仓库:根目录下 `.owner` 文件记该仓库的绝对路径,首次使用时先写临时文件再以硬链接发布;装配期读到的路径与当前仓库不同,就退出码 2,信息写两个路径 [已落地] | 不记归属,靠使用者自觉;每个仓库在根目录下建自己的子目录;直接以 `O_EXCL` 建 `.owner`(被打断会留下 0 字节文件) | 两个仓库共用一个根目录时,部署记忆会混写,启动清扫又会删掉对方在途会话的副本;仓库锁只挡同一个仓库的进程,挡不住另一个仓库的进程 | 换仓库路径(移动或重新克隆)后要人工改 `.owner` |
 | FC-29 | 组合根按记忆配置在场与否选部署记忆管理面:在场用 StarlingDeploymentStore,不在场用 FileTupleStore。FileTupleStore 把数据存成 JSON 文件,根目录是 `<git 目录>/rise-memory`,不是临时目录(重启要保留)。部署驱动器改收实例工厂 make_instance(episode_id, memory, holder),由轮次处理器用组合根给的模型后端工厂造出它,每次尝试新造一个实例 [已落地] | MindAgent 自己读配置、自己选实现;替身不落盘;驱动器仍收一个现成的实例 | 只有组合根读记忆配置;管理面在 `simple_actio`,MindAgent 不导入 `starling`,依赖边界仍可扫描。替身也落盘,备份起点、成功后删快照的提交点协议在两种实现上一样成立。实例按 episode 新造,事件 key 才带各自的逻辑 episode id | 覆盖部署世界必须先关实例与端口,驱动器要管实例的完整生命周期;替身路径在 git 目录里多一个目录 |
 | FC-30 | 组合根给每个 SimpleActio 实例外套转换后端(模块 factory.memory_translate),接住 simple_actio 的 MemoryFailureError,按 `transient` 改抛两个 factory 异常子类。FactoryMemoryUnavailableError 继承 simulator 的 RoleMemoryUnavailableError(瞬态),FactoryMemoryFailureError 继承 RoleMemoryFailureError(确定性)。两个基类在 `src/simulator/realtime/backend_timeout.py` [已落地] | simulator 导入 simple_actio 的异常;把记忆失败并进 `role_backend_failure` | simulator 与 mindtrainer 不导入 simple_actio,只有组合根知道两边。并进 `role_backend_failure` 会被译成延后,确定性的故障反复重试,抽取端点的网络抖动又不该升人工 | 组合根多一层包装;分类依赖 simple_actio 对 `transient` 的穷举映射 |
-| FC-31 | 部署路(`--enable agent`)的时间预算随记忆配置放宽。拉起模式下服务端等提交取 40 秒,整条流按 `max_turns × 40` 秒折算;外部模式按 FC-51 推出。替身时保持现值 5 秒与 15 秒;`--interact` 同开时共用一个运行时,等提交取较大的 150 秒、后端单次调用取 90 秒 [已落地] | 部署路一律放宽;一律不变 | 部署现值是按罐头后端定的,罐头在 1 秒内返回;接上真记忆后每轮最坏多 20 秒。替身读本地文件、没有网络调用,放宽只会让超时检测变钝 | 真实模型接进部署路时要再按它的延迟加;不放宽,含网络记忆的部署会话会撞 5 秒超时,轮次判 `failed` |
+| FC-31 | 部署路(`--enable agent`)的时间预算随记忆配置放宽。接了记忆服务时(拉起与外部模式)按 FC-51 推出:拉起模式缺省配置下服务端等提交 96 秒,整条流按 `max_turns × 146` 秒折算。替身时保持现值 5 秒与 15 秒;`--interact` 同开时共用一个运行时,等提交取较大的训练位一层、后端单次调用同一个值 [已落地] | 部署路一律放宽;一律不变 | 部署现值是按罐头后端定的,罐头在 1 秒内返回;接上真记忆后每轮最坏多一轮记忆(拉起缺省配置 76 秒)。替身读本地文件、没有网络调用,放宽只会让超时检测变钝 | 真实模型接进部署路时要再按它的延迟加;不放宽,含网络记忆的部署会话会撞 5 秒超时,轮次判 `failed` |
 | FC-32 | `--interact` 的客户端新增消息间隔上限:等相邻两条服务端消息 120 秒(`_next_msg`),超时视作 `timeout`(T1,按条重跑)并 abort;整条流按 `max_turns × 150` 兜底,由轨迹源经 `client_factory(deadline_s=)` 传。服务端等客户端一次提交的 `turn_timeout_s` 取 150 秒,单次后端调用 90 秒。等提交与等相邻消息方向相反、互不嵌套 [已落地] | 只靠整条流 deadline;两个超时取同一个计时器;保持 2026-11-02 之前的 90 秒与 90 秒 | 现在客户端只有整条流的 deadline,服务端失联时要等满整条流。训练位一轮最坏约 140 秒(HTTP 120 秒加记忆 20 秒),低于 150 秒;对手一轮约 80 秒,低于后端的 90 秒,后端又低于相邻消息的 120 秒;内层先超时,外层才看得到分类过的失败。每条对手发言都是一条消息,一轮里有几个对手都不叠加。真机(eager、两个适配器)每轮 20 到 65 秒,原先训练位 60 秒、等提交 90 秒没有余量 | 真模型一轮超过 150 秒会判 `timeout` 重跑;卡死的会话发现得更晚;客户端要用带超时的队列在接收线程里取消息 |
 | FC-33 | 记忆以世界为单位:部署一个情境一个世界,训练一条 rollout 一个世界,种子按情境。端口绑定 `(世界, 主体)`;快照、恢复、摘要按整个世界;锁按情境,取代人格锁 | 一个人格一个库;所有情境共处一个世界;按主体局部恢复 | 情境是模拟世界的单位,在场与共识发生在情境里。所有情境一个世界,回滚一个情境的 episode 会退掉别的情境。局部恢复要在多主体共享的表里逐行剔除 | 同一人格在两个情境里记忆不相通;回滚会退掉同世界里别人在快照之后的写入,靠"别的轮次有未提交快照就延后"挡住 |
 | FC-34 | 部署对手位进部署世界,跨会话积累。组合根只造一个部署管理面,交给轮次处理器、门② 与服务端三方;`AgentRuntime` 多收可选的 `deployment_store`,只在启用部署轮次时传。对手位经运行时里的部署登记表拿到 round_id | 每会话一份空记忆;放宽 `CreateSession.episode_id` 的白名单,允许 `/` | 对手人格也是这个世界里的人,应当记得以前的相遇。`wait_closed` 的端口计数在管理面实例内,两个管理面互相看不到对方开的端口。episode id 要拼进落盘路径,白名单不能放宽 | 对手行为随部署次数漂移,轮次之间比较多一个变量;运行时多一张登记表;驱动器恢复前最多等 `SESSION_CLOSE_WAIT_S` |
@@ -964,12 +964,12 @@ factory 是第九个工作包,前八个全部落地后才施工。前置关系:1
 | FC-43 | rollout 世界名带 8 位随机后缀,后缀在调用 `fork` 之前定;`world_exists` 换后缀;分叉超时按确切世界名查,摘要等于钉住的摘要才用;`attempt` 标签只给人看;无种子时从 rise 建的空种子分叉 [已落地] | 用重试序号;先删后建;超时按 `(episode_id, attempt)` 查;每条 rollout `create_world` | 客户端不能删世界;`attempt` 只在进程内计数,续训重跑时会查到上一个进程留下、已有写入的世界;分叉没有幂等键;`create_world` 建不出可回收世界 | 世界名不能由 episode id 推出,靠标签找;多一个常驻的空种子 |
 | FC-44 | 子命令 `factory seed` 从部署世界分叉种子,世界名与标签由 rise 生成,世界锁内查在途 episode;`bind` 按起点摘要钉住种子版本 [已落地] | 人在看板里分叉并手打标签 | 标签与世界名不靠人手写;种子停在已提交状态上;在跑的 run 不会被新版本换掉起点 | 多一个子命令;升级种子仍由人在看板做 |
 | FC-45 | extra `memory` 装客户端与服务端两行,钉同一个提交;安装来源必须有 git 提交,不再接受 `record:` [已落地] | 只装客户端;两行各钉各的 | 外部模式只用客户端,拉起模式与测试两行都要;没有提交就无法与服务报的提交比对 | 不用拉起模式的机器也要编译 C++ |
-| FC-46 | 一个进程仍只用一个服务会话。句柄调用超时 30 秒;管理调用走一个不带会话的传输对象,超时 300 秒 [已落地] | 全部 300 秒;管理操作另开一个会话;请 Starling 给管理方法加单次超时 | 句柄调用 30 秒内判瞬态,短于收尾 join 60 秒与 `SESSION_CLOSE_WAIT_S` 70 秒,服务卡住时对手位端口仍在等待期内关上;恢复的排空已用满 30 秒,整库的分叉与快照更长。管理请求不带会话,所以不是第二个会话 | 依赖客户端包的私有模块 `_transport`,升级 Starling 时要核对;Starling 给管理方法加单次超时后换掉 |
+| FC-46 | 一个进程仍只用一个服务会话。句柄调用超时取时间预算的"句柄"一层(拉起模式缺省配置 58 秒,FC-51);管理调用走一个不带会话的传输对象,超时 300 秒 [已落地] | 全部 300 秒;管理操作另开一个会话;请 Starling 给管理方法加单次超时 | 句柄调用在这一层内判瞬态,短于收尾 join 与等端口全关(拉起缺省配置 156 秒与 166 秒),服务卡住时对手位端口仍在等待期内关上;恢复的排空已用满 30 秒,整库的分叉与快照更长。管理请求不带会话,所以不是第二个会话 | 依赖客户端包的私有模块 `_transport`,升级 Starling 时要核对;Starling 给管理方法加单次超时后换掉 |
 | FC-47 | 运行期服务身份变了就停守护进程:端口不是 rise 关的却收到 `handle_closed` 判瞬态并换会话;每次换会话重新核对 `info()` 的提交、协议、抽取配置摘要与 token,不符或遇到 Unauthorized、ProtocolMismatch,以及拉起的服务重启 3 次用完,都按装配错误退出(退出码 2)[已落地] | 只在装配期核对;`handle_closed` 一律判永久;重启次数用完后逐条判失败 | 外部看板重启后旧句柄回 `handle_closed`,判永久会把一次重启变成一批 T2 与 T3;用户升级源码树再重启看板,不核对就会把两套记忆行为拼进同一个实验,而训练记录里的运行时身份还是旧值 | 看板一升级,在跑的守护进程就退出,要人重启 |
 | FC-48 | 已有部署世界的设置核对放在持仓库锁之后:`run` 在 `on_locked` 里做,`reconcile` 本来先取锁 [已落地] | 装配期在锁外核对;把恢复时只读句柄引起的 `world_held` 判瞬态 | 锁外核对时,第二个 `run` 撞上仓库锁之前已开过只读句柄,在跑守护进程的恢复会回 `world_held`,判 T3;改判瞬态会放过真冲突 | 出错时守护进程不开跑 |
 | FC-49 | rise 第一次建某个部署世界时写创建标记 `deploy/<scenario_id>.created`;标记在而世界不在判永久失败,不静默重建 [已落地] | `ensure_world` 见不在就建;加命令列出或修复 | 看板删世界的路由不经过 rise,静默重建会让部署记忆悄悄从空开始 | 有意从空开始时,人要在看板删世界后再删标记 |
 | FC-50 | 外部模式下抽取与嵌入的端点、模型、密钥、超时、重试一律取 Starling 默认世界的角色端点,rise 配置里不许出现;拉起模式照旧由 rise 配置给出 [已落地] | rise 配置显式给端点,密钥取看板进程的 `OPENAI_API_KEY` | 用户在看板里配好模型与密钥,rise 再配一份就有两处要同步,且看板进程的环境变量 rise 查不到;provider 端点的地址与密钥由服务补,rise 不经手 | 看板里换模型或调超时,已有部署世界报 `world_settings_mismatch`,要按"改了抽取或嵌入配置"处理 |
-| FC-51 | 外部模式的各层时限由端点按 Starling 真实的最坏耗时推出,每层严格包住内层,且不低于拉起模式的值;不给端点封顶 [已落地] | 照拉起模式拒绝 `timeout_ms × (max_retries + 1)` 超过 4 秒的端点;固定各层 | 端点在用户的看板里,拒绝它等于外部模式用不了;固定各层时内层会比外层先失败的那一层被外层截断,失败分类丢失 | 端点慢时各层随之变长,8787 现在的端点推出的部署等提交约 2.2 小时,卡住的会话要等这么久才判超时 |
+| FC-51 | 拉起与外部模式的各层时限都由端点按 Starling 真实的最坏耗时推出,每层严格包住内层,且不低于接服务之前的常量;外部模式不给端点封顶 [已落地] | 外部模式照拉起模式拒绝 `timeout_ms × (max_retries + 1)` 超过 4 秒的端点;拉起模式沿用固定各层 | 端点在用户的看板里,拒绝它等于外部模式用不了;固定各层时内层会比外层先失败的那一层被外层截断,失败分类丢失,拉起模式的固定值就有两处不包住 | 端点慢时各层随之变长,8787 现在的端点推出的部署等提交约 2.2 小时,卡住的会话要等这么久才判超时;拉起模式缺省配置下部署等提交从 40 秒变 96 秒、收尾 join 从 60 秒变 156 秒 |
 
 ## 8. 失败处理与可观测
 
@@ -1055,7 +1055,7 @@ factory 是第九个工作包,前八个全部落地后才施工。前置关系:1
 | `--interact` 装配 | 十一条拒绝项:第 3、9 条合用一组测试,第 10 条没有装配测试(钉住的是派发器的 `ValueError`),其余八条各有测试;打开后派发器带上实时客户端与策略工厂;真推理的 rollout 失败走延后通道、一直失败升 T3;不打开时 interact 指令的失败原因点名开关;收尾时服务停不下来判 T2;外部 API 对手超时或回 503 一次后整条重跑、一直回 503 时指令保持 `pending`、回 404 判 `failed`(T2);scripted 对手位没有台词时派发期判 T2;`opponent` 段在装配之后改了,下一条指令用新值,读不到或写坏了判 T2 且不带地址 | 假 serve、本机 HTTP 桩 | `tests/test_factory_interact_wire.py` | 111 [已落地] |
 | `--interact` 端到端 | `factory reconcile --once --interact` 走到候选 `pending_review`,episode 都在产物树里 | 假 vLLM(本地 HTTP 回固定文本)、mock 执行器 | `tests/test_factory_interact_e2e.py` | 2 [已落地] |
 | 记忆配置读取与安装来源 | 文件不存在、权限过宽、路径在仓库里、缺键或多余键、地址带 userinfo;`url` 与 `token_file` 只给一个、地址不是回环、`world_prefix` 不合格式;`OPENAI_API_KEY` 为空、editable 安装、没有 git 提交、两行依赖不同提交、`.owner` 属于别的仓库,各自退出码 2、不回显取值;`.owner` 先写临时文件再以硬链接发布,并发首次使用只有一个成功,读到 0 字节的旧 `.owner` 拒绝 | 临时目录、临时仓库、假的安装元数据 | `tests/test_factory_memory_config.py` | 89 [已落地] |
-| 记忆后端选择与持锁核对 | 没设变量走替身并只记一次启动日志,不导入客户端;只开 `plan`、`nominate`、`track` 不读变量;`--interact`、`agent`、`admit` 任一在场就读且坏配置退出码 2;旧布局拒绝;装配顺序 ① 至 ⑦ 与失败时先关会话再停服务;持锁之后的部署世界核对(`run` 经 `on_locked`,`reconcile` 在锁内),创建标记在而世界不在、`root` 标签不符、设置不同各退出码 2;服务会话守卫停守护进程;部署路等提交取 40 秒、替身保持 5 秒、同开取 150 秒 | 真 `starling-serve` 子进程、假抽取与嵌入端点、FileTupleStore、临时仓库 | `tests/test_factory_memory_wiring.py` | 61 [已落地] |
+| 记忆后端选择与持锁核对 | 没设变量走替身并只记一次启动日志,不导入客户端;只开 `plan`、`nominate`、`track` 不读变量;`--interact`、`agent`、`admit` 任一在场就读且坏配置退出码 2;旧布局拒绝;装配顺序 ① 至 ⑦ 与失败时先关会话再停服务;持锁之后的部署世界核对(`run` 经 `on_locked`,`reconcile` 在锁内),创建标记在而世界不在、`root` 标签不符、设置不同各退出码 2;服务会话守卫停守护进程;拉起模式的部署路取推出的各层(缺省配置等提交 96 秒)、替身保持 5 秒、同开取训练位一层 | 真 `starling-serve` 子进程、假抽取与嵌入端点、FileTupleStore、临时仓库 | `tests/test_factory_memory_wiring.py` | 61 [已落地] |
 | 解析器与按标签找种子 | 没有种子时每个情境取空种子摘要;有种子时取最新版本、没有种子的情境取空种子;同版本按 `created_at` 再按名字排;翻完所有页;一个情境都没有种子判 T2;瞬态延后、永久交给派发器;嵌入向量变了摘要就变;`import factory.memory_runtime` 不需要客户端 | 假会话与真 `starling-serve` 子进程 | `tests/test_factory_memory_runtime.py` | 16 [已落地] |
 | 训练世界 | 同一 rollout 的训练位与对手位在同一世界、互不召回;同组两条 rollout 从同一起点出发、互不可见;服务端找不到世界时会话被拒;客户端在服务端端口关完之后才收尾世界,端口晚关时等着;同名世界仍被占时重试判瞬态;分叉超时按确切世界名复用,摘要不等就换后缀;`world_exists` 至多换 3 次后缀;只关带 rise 标签的世界。替身与 Starling 两个 `TrainingWorlds` 过同一套契约 | 替身世界;真 `starling-serve` 子进程加本机回环的假抽取与嵌入端点 | `tests/test_factory_training_worlds.py` | 48 [已落地] |
 | 服务进程 | 拉起、等 ready、读回端口;残留服务六项核对逐项各一条,含命令行被截断、pid 复用、数据目录锁已释放;归属锁被占退出码 2;退出后退避重起,重启次数用完退出码 2;停止时 SIGTERM 后 SIGKILL | 注入 pid 与命令行读取函数,真 `starling-serve` 子进程 | `tests/test_factory_starling_service.py` | 26 [已落地] |
@@ -1101,7 +1101,7 @@ factory 是第九个工作包,前八个全部落地后才施工。前置关系:1
 | 瞬态异常让进程退出 | 需要外部监督者,但没有任何工作包交付监督脚本、重启退避或崩溃计数;规划与轮次处理器在非桥接瞬态异常下没有重入次数上限,只有 MindTrainer 的续训次数有上限 | 调和循环无状态,重启从树续接 |
 | `logs` 看不到成功调用的桥接日志 | 只能看到失败记录登记的引用 | 直接看 `.rise/logs/<run>/` |
 | 默认诊断资产是一个一级维度、两道题的最小夹具 | 只证明流程,规划器只看到一个维度 | 换真实题库 |
-| 一条部署会话超过缺省的 15 秒即 `DEADLINE_EXCEEDED`;`--interact` 下客户端等相邻两条服务端消息 120 秒、整条流按 `max_turns × 150` 兜底 [已落地] | 轮次 `failed` | `AgentRuntime` 的 `interact_deadline_s` 只是没给流 deadline 时的缺省,不在 `agent.yaml` 里;流 deadline 由调用方经 `client_factory(deadline_s=)` 传,没有人再改写这个属性 [已落地]。部署路:只有 `--enable agent` 且是 Starling 时服务端等提交 40 秒、整条流 `max_turns × 40` 秒,替身时保持 5 秒与 15 秒;`--interact` 开着取 150 秒(FC-31)[已落地] |
+| 一条部署会话超过缺省的 15 秒即 `DEADLINE_EXCEEDED`;`--interact` 下客户端等相邻两条服务端消息 120 秒、整条流按 `max_turns × 150` 兜底 [已落地] | 轮次 `failed` | `AgentRuntime` 的 `interact_deadline_s` 只是没给流 deadline 时的缺省,不在 `agent.yaml` 里;流 deadline 由调用方经 `client_factory(deadline_s=)` 传,没有人再改写这个属性 [已落地]。部署路:只有 `--enable agent` 且是 Starling 时按端点推出(拉起模式缺省配置下服务端等提交 96 秒、整条流 `max_turns × 146` 秒),替身时保持 5 秒与 15 秒;`--interact` 开着取训练位一层(FC-31)[已落地] |
 | Starling 未上 PyPI,只能源码或 git 安装 | 服务端源码构建依赖 C++ 工具链,本机一次约 179 秒(环境测量,不作预算依据);extra 两行钉的是 Starling 的同一个合并提交 | 不装 extra 的环境走替身记忆,只测替身路径 |
 | 记忆服务必须与 SimpleActio 实例同机 | 服务只听回环地址;跨机会让每轮 recall 都跨机往返;模拟器移到计算层后,服务与记忆根目录都在 GPU 主机上 | 记忆配置的 `root` 指本机目录 |
 | 部署对手位的记忆随部署次数漂移 [已落地] | 一个情境部署得越多,对手越熟悉智能体;轮次之间比较行为时多一个变量 | 验证重放不受影响:重放只跑智能体位,对手的话按存档原样回放 |
@@ -1138,7 +1138,7 @@ factory 是第九个工作包,前八个全部落地后才施工。前置关系:1
 | embed_pending 的 4 次批量嵌入是否够 [计划中] | 一轮积压超过一批 32 行,或整批以 4xx 失败逐行回退时,实际次数超过 4,句柄调用可能先于推出的上限超时 | 记一轮里抽取产出的语句数;构造一批 4xx,看逐行回退的次数 |
 | 每条 rollout 开一个世界对 GRPO 一步总时长的影响 [计划中] | 一步 `groups_per_step × group_size` 条 rollout 各分叉一次种子、等服务端端口关完、关世界 | 跑一步,计分叉、等端口关完、关世界的总耗时 |
 | 外部端点同一模型名换了向量,摘要会变、续训升 T3,但旧向量不可复现 [计划中] | 要复现需缓存向量 | 观察一个月内同一端点的向量是否稳定,再决定要不要加向量缓存 |
-| 两个开关同开时服务端等提交取训练位一层、后端单次调用取同一个值(拉起模式 150 秒与 90 秒)[已落地] | 部署会话只是多等,超时检测变钝。整条流 deadline 按调用方给:`client_factory(*, deadline_s=)`,轨迹源与部署驱动器各自传 `max_turns × 150` 与 `max_turns × 40` | 装配测试断言同开时运行时的 `turn_timeout_s` 是 150 秒、`message_timeout_s` 是 120 秒、后端上限是 90 秒(`test_both_switches_share_the_larger_turn_timeout`) |
+| 两个开关同开时服务端等提交取训练位一层、后端单次调用取同一个值(替身 150 秒与 90 秒,拉起模式缺省配置 206 秒与 146 秒)[已落地] | 部署会话只是多等,超时检测变钝。整条流 deadline 按调用方给:`client_factory(*, deadline_s=)`,轨迹源与部署驱动器各传自己的每轮乘 `max_turns` | 装配测试断言同开时运行时的 `turn_timeout_s` 是 150 秒、`message_timeout_s` 是 120 秒、后端上限是 90 秒(`test_both_switches_share_the_larger_turn_timeout`) |
 | 服务端关端口的耗时是否远低于 70 秒 [计划中] | 超过 `SESSION_CLOSE_WAIT_S` 时,部署恢复要人工处理,训练世界进保留表 | 跑 100 条部署 episode,记每条从客户端结束到服务端端口关完的耗时 |
 | 部署对手位积累记忆后,智能体位的行为是否随部署次数漂移 [计划中] | 轮次之间的发现集合不可比 | 同一模型连续部署 5 轮,比较每轮的发现集合 |
 | TypeScript 泛化只按测试文件的用例清单核对过 | 本次没有在 `cli/` 仓库里实跑 vitest,用例数按源码里的 `it(` 计 | 在仓库里跑一次 `npx vitest run` |

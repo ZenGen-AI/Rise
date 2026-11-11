@@ -575,8 +575,8 @@ vLLM 服务按指令起停,不常驻。一条 interact 指令派发时起服务,
 | HTTP 上限:训练位策略、对手 | 不适用,只在 `--interact` 下用 | 训练位 120 秒(`src/factory/vllm_policy.py` 的 `POLICY_TIMEOUT_S`),对手 60 秒(`src/factory/interact_policy.py` 的 `OPPONENT_TIMEOUT_S`)[已落地] |
 | 记忆单次网络调用 | 不适用 | 拉起模式 4 秒:Starling 的 `timeout_ms` 配 4000、`max_retries` 配 0;外部模式按看板端点的 `timeout_ms` 与 `max_retries`,由组合根推出各层(`factory.memory_budget`) |
 | 创建会话 | 10 秒(`create_timeout_s`) | 不变 |
-| 一轮的最坏耗时 | 不适用 | 对手位是 HTTP 60 秒加一轮记忆,训练位是 HTTP 120 秒加一轮记忆。一轮记忆的最坏按 Starling 的端点算:recall 嵌入 1 次,remember 2 次各抽取至多 7 次,embed_pending 嵌入 4 次。拉起模式的后端调用 90 秒、等提交 150 秒;外部模式由组合根推出,严格包住这两项 |
-| 服务端收尾等在途线程的 `join` | 60 秒(`resource_join_timeout_s`) | 不变:准入退避预算 `ADMISSION_WAIT_S` 65 秒以它加 5 秒为前提;被放弃的对手调用跑得比它久时,线程进滞留表,由回收线程收走 |
+| 一轮的最坏耗时 | 不适用 | 对手位是 HTTP 60 秒加一轮记忆,训练位是 HTTP 120 秒加一轮记忆。一轮记忆的最坏按 Starling 的端点算:recall 嵌入 1 次,remember 2 次各抽取至多 7 次,embed_pending 嵌入 4 次。替身的后端调用 90 秒、等提交 150 秒;接记忆服务时(拉起与外部模式)由组合根按端点推出,严格包住这两项,拉起缺省配置是 146 秒与 206 秒 |
+| 服务端收尾等在途线程的 `join` | 60 秒(`resource_join_timeout_s`) | 替身不变,接记忆服务时由组合根推出(拉起缺省配置 156 秒,准入退避与等端口全关随之放长):准入退避预算 `ADMISSION_WAIT_S` 65 秒以它加 5 秒为前提;被放弃的对手调用跑得比它久时,线程进滞留表,由回收线程收走 |
 | 训练位端口 close 的等待 | 不适用 | 60 秒,与服务端 join 同值;超时抛 FactoryMemoryFailureError(RoleMemoryFailureError 的子类),编排器判 T2,这条 rollout 不重试。close 抛其他异常同样译成它、不重试,即使 rollout 本身已结束:close 失败说明世界状态不可信 |
 | 收尾 rollout 世界前等服务端端口全关 [已落地] | 不适用 | `SESSION_CLOSE_WAIT_S` 70 秒,即服务端 join 的 60 秒加 10 秒余量;等不到时世界进保留表:端口还开着时同名重试先有界等待(默认 70 秒)端口关上,仍没关上才判瞬态;rollout 照常结束 |
 

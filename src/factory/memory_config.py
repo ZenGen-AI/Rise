@@ -39,8 +39,8 @@ CLIENT_DIST = "starling-client"
 STARLING_DIST = "starling-memory"
 DEFAULT_TIMEOUT_MS = 4000
 DEFAULT_MAX_RETRIES = 0
-# 拉起模式下一次记忆网络调用的超时乘尝试数上限:timeout_ms × (max_retries + 1) 不得超过它。拉起模式的外层时限是常量
-# (`factory.memory_budget.SPAWN_LAYERS`),按"每次至多 4 秒"定的;外部模式的外层时限按 Starling 的端点推出,不受它限。
+# 拉起模式下一次记忆网络调用的超时乘尝试数上限:timeout_ms × (max_retries + 1) 不得超过它。两种模式的外层时限都由
+# `factory.memory_budget` 按端点推出;这条上限只管拉起模式(外部模式的端点在看板里,不受它限)。它不计重试之间的退避。
 MAX_MEMORY_CALL_MS = 4000
 
 ENDPOINT_KEYS = ("extraction_base_url", "extraction_model", "embedding_base_url", "embedding_model", "embedding_dim")
@@ -265,7 +265,7 @@ def read_memory_config(*, env: Mapping[str, str] | None = None, repo_root: Path)
     if timeout_ms * (max_retries + 1) > MAX_MEMORY_CALL_MS:
         raise FactoryConfigError(
             f"memory config: timeout_ms × (max_retries + 1) must not exceed {MAX_MEMORY_CALL_MS} ms; "
-            "spawn-mode turn budgets assume at most 4 s per memory call"
+            "spawn mode allows at most 4 s of attempts per memory call"
         )
     return MemoryConfig(
         root=root, extraction_base_url=extraction_base_url, extraction_model=extraction_model,

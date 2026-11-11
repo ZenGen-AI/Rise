@@ -321,7 +321,7 @@ def make_start_round_handler(
     register_episode(部署 id, round_id)与 unregister_episode(部署 id)原样交给部署驱动器:stream_deadline_s 为
     None 时客户端工厂用它自己的现值;两个登记回调让服务端给部署会话的对手位在同一世界里开端口,缺省什么都不做。
     close_wait_s(回滚与部署驱动器等世界端口全关的上限)与 admission_wait_s(准入退避的总等待)缺省是本包的常量;
-    组合根在外部模式下按服务端点推出更长的值传进来(服务端收尾的 join 随之放长)。"""
+    组合根接记忆服务时按服务端点推出更长的值传进来(服务端收尾的 join 随之放长)。"""
     generator = RULE_GENERATOR if bridge is None else BRIDGE_GENERATOR
     runtime = copy.deepcopy(memory_runtime)
 

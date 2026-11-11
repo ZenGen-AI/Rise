@@ -53,7 +53,7 @@ from controlplane.deferred import DeferredError
 from controlplane.gitstore import GitStore
 from controlplane.lock import git_dir
 from factory.errors import FactoryConfigError
-from factory.memory_budget import SPAWN_LAYERS, MemoryTimeBudget, memory_time_budget, spawn_time_budget
+from factory.memory_budget import BASE_LAYERS, MemoryTimeBudget, memory_time_budget
 from factory.memory_config import (
     MEMORY_CONFIG_ENV,
     MemoryConfig,
@@ -99,7 +99,7 @@ class DeploymentMemory:
     store: DeploymentMemoryStore
     layout: MemoryLayout
     runtime: dict
-    budget: MemoryTimeBudget = SPAWN_LAYERS      # 各层时限;外部模式按服务端点推出
+    budget: MemoryTimeBudget = BASE_LAYERS       # 各层时限;接记忆服务时按服务端点推出
 
 
 def stand_in_memory_root(repo_root: Path) -> Path:
@@ -690,8 +690,8 @@ class _Admin:
 
 # ---------------- 组合根选后端 ----------------
 
-# 部署路的等提交与整条流的每轮(设计二 6.4 节、FC-31、FC-51)在 `MemoryWiring.budget`:拉起模式 40 秒与 40 秒
-# (`factory.memory_budget.SPAWN_LAYERS`),外部模式按服务的端点推出。替身没有网络调用,保持 AgentRuntime 默认的 5 秒与 15 秒。
+# 部署路的等提交与整条流的每轮(设计二 6.4 节、FC-31、FC-51)在 `MemoryWiring.budget`:拉起与外部模式都按服务的端点推出
+# (`factory.memory_budget.memory_time_budget`)。替身没有网络调用,保持 AgentRuntime 默认的 5 秒与 15 秒。
 
 _INSTALL_HINT = "run pip install '.[memory]' (or uv sync --extra memory)"
 
@@ -706,7 +706,7 @@ class MemoryWiring:
       (`run_daemon(on_locked=)`、`reconcile_one_tick` 的锁内)。第二个进程撞锁之前不能开过任何句柄。
     - `closers`:按登记顺序是关会话、拉起模式下停服务;组合根最先登记,逆序执行时最后跑。
     - `session`:服务会话,组合根据它查致命状态。
-    - `budget`:各层时限(`factory.memory_budget`)。替身与拉起模式是固定的 `SPAWN_LAYERS`,外部模式按服务的端点推出。"""
+    - `budget`:各层时限(`factory.memory_budget`)。替身是固定的 `BASE_LAYERS`,拉起与外部模式按服务的端点推出。"""
 
     backend: str
     deployment: DeploymentMemory | None
@@ -715,7 +715,7 @@ class MemoryWiring:
     on_locked: Callable[[], None] | None = None
     closers: tuple[Callable[[], None], ...] = ()
     session: object | None = None
-    budget: MemoryTimeBudget = SPAWN_LAYERS
+    budget: MemoryTimeBudget = BASE_LAYERS
 
 
 def _known_scenarios(repo_root: Path) -> tuple[str, ...]:
@@ -792,7 +792,7 @@ class ServiceHandle:
     runtime: dict
     empty_seed: tuple[str, str]
     closers: tuple[Callable[[], None], ...]
-    budget: MemoryTimeBudget = SPAWN_LAYERS
+    budget: MemoryTimeBudget = BASE_LAYERS
 
     def close(self) -> None:
         first: Exception | None = None
@@ -819,7 +819,7 @@ def open_memory_service(repo_root: Path, env: Mapping[str, str]) -> ServiceHandl
     ① 读 RISE_MEMORY_CONFIG:没设(或空串)返回 None(替身),不导入 `starling_client`、不拉起服务;② 安装来源:
     `starling-client` 非 editable、有 git 提交,拉起模式下 `starling-memory` 也要且两者同一提交;③ 拉起模式下
     `OPENAI_API_KEY` 非空;④ 认领记忆根、查旧布局;⑤ 拉起或连接服务,造服务会话(协议、token、提交不一致在这里退出码 2);
-    ⑥ 算 rise 设置、运行时身份与各层时限(外部模式按服务端点推出,并据此换上会话的句柄超时与排空窗口);
+    ⑥ 算 rise 设置、运行时身份与各层时限(两种模式都按 rise 设置里的端点推出,并据此换上会话的句柄超时与排空窗口);
     ⑦ `ensure_world` 空种子。**不**开任何部署世界的句柄。⑤ 之后任何一步失败,先关会话、
     停服务再上抛。配置有任何问题都是 `FactoryConfigError`(退出码 2)。"""
     config = read_memory_config(env=env, repo_root=repo_root)
@@ -853,7 +853,7 @@ def open_memory_service(repo_root: Path, env: Mapping[str, str]) -> ServiceHandl
         closers.insert(0, session.close)                 # 先关会话,再停服务
         settings = starling_names.rise_settings(config, session.info)     # 外部模式的端点取自服务默认世界
         runtime = service_runtime(session.info, settings, config)
-        budget = _time_budget(config, settings)
+        budget = memory_time_budget(settings["extraction"], settings["embedding"])     # FC-51:两种模式同一公式
         session.retune(handle_timeout_s=budget.handle_s, drain_window_s=budget.drain_window_s)
         _log.info("%s", budget.describe())
         prefix, label = config.world_prefix, starling_names.root_label(config.root)
@@ -867,13 +867,6 @@ def open_memory_service(repo_root: Path, env: Mapping[str, str]) -> ServiceHandl
         raise
     return ServiceHandle(session, config, settings, prefix, label, memory_layout, runtime, empty_seed, tuple(closers),
                          budget)
-
-
-def _time_budget(config: MemoryConfig, settings: dict) -> MemoryTimeBudget:
-    """⑥ 之后:外部模式按 rise 设置里的两个端点推出各层(FC-51),拉起模式是固定的 `SPAWN_LAYERS`(算出的最坏只进日志)。"""
-    if config.mode == "external":
-        return memory_time_budget(settings["extraction"], settings["embedding"])
-    return spawn_time_budget(settings["extraction"], settings["embedding"])
 
 
 def memory_wiring(repo_root: Path, env: Mapping[str, str], *, deployment: bool) -> MemoryWiring:
