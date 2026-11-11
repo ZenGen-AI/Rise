@@ -180,13 +180,19 @@ def _restore(memory_store: DeploymentMemoryStore, world_id: str, rec_path: Path,
         raise RestoreFailedError(f"{what}: memory ports still open after {close_wait_s:g}s", point=point)
     try:
         rec = layout.read_record(rec_path)
+        if rec.world_id != world_id:
+            # 记录里的世界 id 过了白名单,可以进信息
+            raise RestoreFailedError(f"{what}: record belongs to world {rec.world_id}", point=point)
         digest = memory_store.restore(world_id, rec.snapshot_id)
     except MemoryFailureError as exc:
         if exc.transient:            # world_busy:服务端还在排空,轮次延后、重入先恢复
             raise DeferredError(f"{what}: {type(exc).__name__}") from exc
         raise RestoreFailedError(f"{what}: {type(exc).__name__}", point=point) from exc
-    except (MindAgentDataError, OSError) as exc:
+    except MindAgentDataError as exc:
         raise RestoreFailedError(f"{what}: {type(exc).__name__}", point=point) from exc
+    except OSError as exc:
+        # from None:OSError 的原文带文件的绝对路径,不留在 __cause__ 里
+        raise RestoreFailedError(f"{what}: {type(exc).__name__}", point=point) from None
     if expected is not None and digest != expected:
         raise RestoreFailedError(f"{what}: digest mismatch", point=point)
     return digest
@@ -266,6 +272,15 @@ def _open_session(client_factory, scenario, assignment, personas, agent_slot, *,
         return client
 
 
+def _client_op(call: Callable[[], _T]) -> _T:
+    """客户端的 submit_turn 与 drain_until_end:传输与协议错误归成一次失败的尝试(_classify_client_error)。
+    只包这两个调用:实例 respond 抛的 RuntimeError 是策略自己的异常,要原样上抛,不能归成客户端错误。"""
+    try:
+        return call()
+    except (grpc.RpcError, RuntimeError) as exc:
+        raise _classify_client_error(exc) from exc
+
+
 def _attempt(instance, client_factory, scenario, assignment, personas, agent_slot, *,
              episode_id: str, deadline_s: float | None, admission_wait_s: float = ADMISSION_WAIT_S,
              sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.monotonic) -> Episode:
@@ -285,18 +300,16 @@ def _attempt(instance, client_factory, scenario, assignment, personas, agent_slo
                     "role_memory_unavailable" if exc.transient else "role_memory_failure",
                     type(exc).__name__, exc.transient,
                 ) from None
-            try:
-                client.submit_turn(utterance, thought, activation_trace=trace)
-            except (grpc.RpcError, RuntimeError) as exc:
-                raise _classify_client_error(exc) from exc
-        try:
-            episode = client.drain_until_end()
-        except (grpc.RpcError, RuntimeError) as exc:
-            raise _classify_client_error(exc) from exc
+            _client_op(lambda: client.submit_turn(utterance, thought, activation_trace=trace))
+        episode = _client_op(client.drain_until_end)
     finally:
         if not client.closed:
-            # 不发 EndSession:服务端按断连判 FAILED,不落盘半截 episode
-            client.abort()
+            # 不发 EndSession:服务端按断连判 FAILED,不落盘半截 episode。abort 再抛也不盖掉在途的异常,
+            # 只记类名
+            try:
+                client.abort()
+            except Exception as exc:
+                _log.warning("aborting the session of %s failed: %s", episode_id, type(exc).__name__)
     if episode.terminated_reason in ACCEPTED_REASONS:
         return episode
     raise _AttemptFailed(

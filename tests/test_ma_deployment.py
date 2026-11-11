@@ -385,6 +385,23 @@ def test_an_instance_exception_aborts_the_fake_session_unwrapped(store, mem):
     assert f.clients[0].aborted
 
 
+def test_an_abort_that_raises_does_not_mask_the_exception_in_flight(store, mem, caplog):
+    class Crash(Exception):
+        pass
+
+    class AbortFails(_FakeClient):
+        def submit_turn(self, *a, **kw):
+            raise Crash()
+
+        def abort(self):
+            raise RuntimeError("/abs/path/secret")
+
+    with caplog.at_level("WARNING", logger="mindagent.deployment"):
+        with pytest.raises(Crash):
+            _run(store, lambda **kw: AbortFails(), mem)
+    assert "RuntimeError" in caplog.text and "secret" not in caplog.text
+
+
 def test_episode_ids_are_deterministic():
     assert deployment_episode_id("zengen-v3", "scen-a", 2) == "deploy-zengen-v3-scen-a-2"
 
@@ -803,7 +820,8 @@ def test_a_close_failure_after_a_successful_run_is_a_round_failure_reporting_onl
     with pytest.raises(AgentRoundFailedError) as info:
         _run(store, _Factory(), m)
     assert info.value.point == "mindagent.deployment.memory"
-    assert type(boom).__name__ in info.value.reason and "secret" not in info.value.reason
+    # 实例 close 经 _guard:端口抛的 OSError 先改成只带类名的永久 MemoryFailureError,再由 _memory_op 判 T3
+    assert info.value.reason == f"close instance for {EID}: MemoryFailureError" and "secret" not in info.value.reason
     assert m.layout.snapshot(ROUND, EID).exists()                      # 没走到提交点:快照留给轮次回滚
 
 
@@ -1051,6 +1069,26 @@ def test_a_restore_from_a_snapshot_that_is_gone_keeps_the_record_and_fails_the_r
     with pytest.raises(RestoreFailedError, match=f"restore {EID} in world {WORLD}: MemoryFailureError") as info:
         _run(store, _Factory(), mem, digests=digests)
     assert info.value.point == "mindagent.deployment.restore" and rec.exists()
+
+
+def test_a_record_of_another_world_at_this_episodes_path_fails_the_restore_and_is_kept(store, mem):
+    rec = _foreign_record(mem, ROUND, EID, "s2")                       # 本轮本条的路径,记录却属于 s2
+    f = _Factory()
+    with pytest.raises(RestoreFailedError, match="record belongs to world s2") as info:
+        _run(store, f, mem)
+    assert info.value.point == "mindagent.deployment.restore" and rec.exists() and f.clients == []
+
+
+def test_an_os_error_from_restore_keeps_no_cause_with_the_path(store, mem, monkeypatch):
+    digests = {}
+    with pytest.raises(OSError):
+        _run(store, lambda **kw: (_ for _ in ()).throw(OSError("x")), mem, digests=digests)
+    monkeypatch.setattr(mem.store, "restore",
+                        lambda world, sid: (_ for _ in ()).throw(PermissionError(13, "denied", "/abs/root/s1.json")))
+    with pytest.raises(RestoreFailedError, match="PermissionError") as info:
+        _run(store, _Factory(), mem, digests=digests)
+    assert info.value.__cause__ is None and info.value.__suppress_context__
+    assert "/abs/root" not in str(info.value)
 
 
 def test_an_unreadable_record_of_this_round_stops_the_round_as_a_data_error_and_is_kept(store, mem):
