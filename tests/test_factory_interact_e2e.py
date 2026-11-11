@@ -180,3 +180,32 @@ def test_an_interact_directive_runs_through_the_real_entry(tmp_path, capsys, stu
     # 每个 episode 只落盘一次:提交说明里每个 episode 恰好一条
     written = [s for s in _commit_subjects(store) if s.startswith("episode: ") and s.endswith(f" for {RUN}")]
     assert sorted(written) == sorted(f"episode: {e.id} for {RUN}" for e in episodes)
+
+
+def test_a_generated_scripted_opponent_with_no_lines_fails_the_directive_after_the_write_back(
+        tmp_path, capsys, fake_serve):
+    """生成路:情境与人格到派发时才生成,台词检查只能放在策略上下文进入时。只开 --interact、没有 agent.yaml,
+    运行时的全局台词是空的;模板生成的情境也没有对手剧本,所以 scripted 对手位无话可说。
+    派发器先回写情境与人格,再在策略上下文里判 T2,点名回写出的情境 id 与角色位,不起服务。"""
+    from factory.agent import AGENT_CONFIG
+
+    store = _repo(tmp_path, BASE)
+    store._git("rm", "-q", "--", AGENT_CONFIG)
+    store._git("commit", "-q", "-m", "test: no agent.yaml", "--", AGENT_CONFIG)
+    _schedule_interact_directive(store)
+    directive_path = f"{run_dir(RUN)}/directive.yaml"
+    assert store.read_product(directive_path).payload["training_config"]["scenario_ids"] == []
+
+    code = main(["reconcile", str(store.repo_root), "--once", "--interact"], env=hosts_env(tmp_path))
+    out = capsys.readouterr()
+    assert code == 0, out.err
+
+    directive = store.read_product(directive_path)
+    assert directive.status == "failed" and directive.payload["failure"]["category"] == "T2"
+    cfg = directive.payload["training_config"]
+    assert cfg["scenario_ids"] == ["scen-auto-0", "scen-auto-1"]          # 生成路已回写,检查看的是回写后的情境
+    reason = directive.payload["failure"]["reason"]
+    assert "have no lines to say" in reason
+    assert "scen-auto-0:b" in reason and "scen-auto-1:b" in reason
+    assert fake_serve.calls == []                                          # 在起服务、占租约之前判
+    assert not store.exists(f"{run_dir(RUN)}/training_run.yaml")
