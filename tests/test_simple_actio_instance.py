@@ -676,12 +676,12 @@ _ALLOWED = ("simple_actio", "simulator.datamodel", "__future__", "copy", "datacl
 
 # memory_starling.py 是 simple_actio 里唯一导入 starling_client 的文件(客户端异常的映射与 RemoteMemory 的包装)。
 # os 供创建标记的原子替换用,threading 供部署管理面守端口计数(与 memory.py 同一个理由),collections.abc 供类型注解,
-# 都是标准库,只对本文件放宽
-_ALLOWED_MEMORY_STARLING = _ALLOWED + ("starling_client", "os", "collections.abc", "threading")
+# math 供 wait_closed 拒收 inf 与 nan(与 memory.py 同一个理由),都是标准库,只对本文件放宽
+_ALLOWED_MEMORY_STARLING = _ALLOWED + ("starling_client", "os", "collections.abc", "threading", "math")
 
 # memory.py 的 FileTupleStore 用 threading.Lock 与 Condition 守端口计数:端口在服务端线程关,驱动器在另一条线程上等;
-# secrets 给快照 id 与重放世界名的随机后缀用(40 篇 5.1 节)
-_ALLOWED_MEMORY = _ALLOWED + ("threading", "secrets")
+# secrets 给快照 id 与重放世界名的随机后缀用(40 篇 5.1 节);math.isfinite 给 wait_closed 拒收 inf 与 nan
+_ALLOWED_MEMORY = _ALLOWED + ("threading", "secrets", "math")
 
 
 def _allowed(mod, allowed=_ALLOWED):
