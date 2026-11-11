@@ -26,7 +26,6 @@ from factory.evaluation import build_mock_evaluator
 from factory.switches import handler_keys
 from inference_bridge import CliBridge
 from mindtrainer.data_producer import TemplateDataProducer
-from mindtrainer.dispatch import make_mindtrainer_dispatcher
 
 if TYPE_CHECKING:  # factory.agent 与 factory.memory_runtime 拖进 grpc 与 mindagent,只在类型检查时导入
     from simple_actio.memory_port import DeploymentMemoryStore
@@ -35,6 +34,18 @@ if TYPE_CHECKING:  # factory.agent 与 factory.memory_runtime 拖进 grpc 与 mi
     from factory.memory_runtime import DeploymentMemory, MemoryWiring, TrainingWorlds
 
 _log = logging.getLogger("factory.wire")
+
+
+def make_mindtrainer_dispatcher(**kwargs) -> Dispatcher:
+    """mindtrainer.dispatch.make_mindtrainer_dispatcher 的惰性转发。
+
+    mindtrainer.dispatch 经 orchestrator 与 trajectory_source 载入 grpc 和 simulator.realtime;模块层直接导入
+    会让 `import factory.cli`(含 --help 与只读子命令)为此付出启动代价。名字留在本模块里,
+    测试仍可在 factory.wire 上替换它。"""
+    from mindtrainer.dispatch import make_mindtrainer_dispatcher as _make
+
+    return _make(**kwargs)
+
 
 PLANNER_BACKENDS = ("bridge", "heuristic")
 EXECUTORS = ("mock", "roll")
