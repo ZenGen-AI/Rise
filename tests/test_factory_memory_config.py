@@ -106,24 +106,44 @@ def test_bad_keys_are_refused(tmp_path, change, needle):
     assert needle in str(info.value) and "s3cret" not in str(info.value)
 
 
-@pytest.mark.parametrize("timeout_ms, max_retries", [(4000, 0), (2000, 1), (1000, 3)])
-def test_a_memory_call_budget_up_to_four_seconds_is_accepted(tmp_path, timeout_ms, max_retries):
+@pytest.mark.parametrize("timeout_ms, max_retries", [
+    (4000, 0),                                             # 一次尝试,不退避
+    (1500, 1),                                             # 2 × 1500 + 退避 1000 = 4000,恰在上限上
+    (333, 2),                                              # 3 × 333 + 退避 1000 + 2000 = 3999
+    (1, 2),                                                # 重试次数的上限:三次尝试加 3000 毫秒退避
+])
+def test_a_memory_call_budget_up_to_four_seconds_with_backoff_is_accepted(tmp_path, timeout_ms, max_retries):
     cfg = _read(tmp_path, _write(tmp_path, _payload(tmp_path, timeout_ms=timeout_ms, max_retries=max_retries)))
     assert (cfg.timeout_ms, cfg.max_retries) == (timeout_ms, max_retries)
 
 
 @pytest.mark.parametrize("change", [
-    {"timeout_ms": 4001}, {"timeout_ms": 2001, "max_retries": 1}, {"timeout_ms": 10000},
+    {"timeout_ms": 4001}, {"timeout_ms": 10000},
     {"max_retries": 1},                                    # 默认 timeout_ms=4000 加一次重试即 8 秒
+    # 下面几组只算尝试数(timeout_ms × (max_retries + 1))都不超 4000,加上退避才超:
+    {"timeout_ms": 2000, "max_retries": 1},                # 2 × 2000 + 1000 = 5000
+    {"timeout_ms": 1501, "max_retries": 1},                # 2 × 1501 + 1000 = 4002
+    {"timeout_ms": 334, "max_retries": 2},                 # 3 × 334 + 1000 + 2000 = 4002
+    {"timeout_ms": 1000, "max_retries": 3},                # 4 × 1000 + 1000 + 2000 + 4000 = 11000
+    {"timeout_ms": 7, "max_retries": 3},                   # 4 × 7 + 7000:尝试数再小,退避自己就超了
 ])
-def test_a_memory_call_budget_over_four_seconds_is_refused(tmp_path, change):
-    """外层时限(部署 40 秒、对手 25 秒、--interact 90 秒)按每次记忆网络调用至多 4 秒折算;超出就不再是内层先超时。"""
+def test_a_memory_call_budget_over_four_seconds_counting_backoff_is_refused(tmp_path, change):
+    """外层时限(部署 40 秒、对手 25 秒、--interact 90 秒)按每次记忆网络调用至多 4 秒折算,这 4 秒含重试之间的退避;
+    超出就不再是内层先超时。"""
     with pytest.raises(FactoryConfigError) as info:
         _read(tmp_path, _write(tmp_path, _payload(tmp_path, **change)))
     msg = str(info.value)
-    assert "timeout_ms" in msg and "max_retries" in msg and "4000" in msg
+    assert "timeout_ms" in msg and "max_retries" in msg and "backoff" in msg and "4000" in msg
     if "timeout_ms" in change:
         assert str(change["timeout_ms"]) not in msg                  # 只写键名与上限,不回显取值
+
+
+@pytest.mark.parametrize("max_retries", [3999, 10 ** 12])
+def test_a_huge_retry_count_is_refused_at_once(tmp_path, max_retries):
+    """退避的和不随重试次数逐项累加:再大的 max_retries 也在常数时间内判定,不挂起。"""
+    with pytest.raises(FactoryConfigError) as info:
+        _read(tmp_path, _write(tmp_path, _payload(tmp_path, timeout_ms=1, max_retries=max_retries)))
+    assert "backoff" in str(info.value)
 
 
 def test_the_file_must_be_private_absolute_present_and_outside_the_repo(tmp_path):

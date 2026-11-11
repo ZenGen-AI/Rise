@@ -27,6 +27,27 @@ EMBED_MAX_BATCH_INPUTS = 10               # 一次批量嵌入 HTTP 的输入条
 REMEMBER_EVENTS_PER_TURN = 2
 
 
+def call_ms(timeout_ms: int, max_retries: int) -> int:
+    """一次 HTTP 调用(含重试与退避)的最坏耗时,毫秒:`(r + 1) × t + Σ_{i<r} min(1000 × 2^i, 30000)`。
+
+    `t` 是单次尝试的超时 `timeout_ms`,`r` 是重试次数 `max_retries`。尝试数 `r + 1`(S:src/net/http_post_json.cpp:182-183);
+    第 i 次重试之前退避 `min(1000 × 2^i, 30000)` 毫秒,首次 1 秒、翻倍、封顶 30 秒(http_post_json.cpp:148-151、:180)。
+    `endpoint_call_ms`(Starling 端点)与 `factory.memory_config`(拉起模式的 4 秒上限)共用这一处算术。
+
+    退避一旦到顶,余下的重试每次都是 30 秒,一次加完;`max_retries` 取很大的值时也是常数时间。"""
+    if timeout_ms < 0 or max_retries < 0:
+        raise ValueError("timeout_ms and max_retries must be non-negative")
+    backoff = 0
+    wait = BACKOFF_FIRST_MS
+    for i in range(max_retries):
+        if wait >= BACKOFF_MAX_MS:
+            backoff += BACKOFF_MAX_MS * (max_retries - i)
+            break
+        backoff += wait
+        wait *= 2
+    return (max_retries + 1) * timeout_ms + backoff
+
+
 def endpoint_call_ms(endpoint: Mapping) -> int:
     """Starling 对一个端点发一次 HTTP 调用(含重试与退避)的最坏耗时,毫秒。
 
@@ -36,18 +57,13 @@ def endpoint_call_ms(endpoint: Mapping) -> int:
     - 重试次数 `r`:端点 `max_retries` 按 is None 判,缺取缺省 3(engine.py:221-222、:240-241;openai_adapter.hpp:28、
       openai_embedding_adapter.hpp:21)。`provider` 为 `anthropic` 时 Python 侧不设这两项,一律取缺省
       (engine.py:202-209;S:include/starling/extractor/anthropic_adapter.hpp:21-22)。
-    - 尝试数 `r + 1`(S:src/net/http_post_json.cpp:182-183);第 i 次重试之前退避 `min(1000 × 2^i, 30000)` 毫秒,
-      首次 1 秒、翻倍、封顶 30 秒(http_post_json.cpp:148-151、:180)。
-    最坏 = `(r + 1) × t + Σ_{i<r} min(1000 × 2^i, 30000)`。"""
+    - 最坏 = `call_ms(t, r)` = `(r + 1) × t + Σ_{i<r} min(1000 × 2^i, 30000)`(尝试数与退避见 `call_ms`)。"""
     anthropic = str(endpoint.get("provider") or "").lower() == "anthropic"
     timeout_ms = None if anthropic else endpoint.get("timeout_ms")
     max_retries = None if anthropic else endpoint.get("max_retries")
     t = timeout_ms if timeout_ms else STARLING_DEFAULT_TIMEOUT_MS
     r = STARLING_DEFAULT_MAX_RETRIES if max_retries is None else max_retries
-    if t < 0 or r < 0:
-        raise ValueError("timeout_ms and max_retries must be non-negative")
-    backoff = sum(min(BACKOFF_FIRST_MS * 2 ** i, BACKOFF_MAX_MS) for i in range(r))
-    return (r + 1) * t + backoff
+    return call_ms(t, r)
 
 
 def embed_pending_calls() -> int:

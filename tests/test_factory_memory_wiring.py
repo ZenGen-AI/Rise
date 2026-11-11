@@ -506,11 +506,11 @@ def test_a_bad_memory_config_is_exit_code_2_even_with_the_stand_in_files_absent(
 
 
 def test_a_memory_call_budget_over_four_seconds_is_exit_code_2(store, tmp_path, capsys):
-    """I-3:timeout_ms × (max_retries + 1) 超过 4000 毫秒,装配期按配置错误退出,外层时限不再被内层顶穿。"""
+    """I-3:一次调用 timeout_ms × (max_retries + 1) 加重试之间的退避超过 4000 毫秒,装配期按配置错误退出,外层时限不再被内层顶穿。"""
     env = _memory_env(tmp_path)
     path = tmp_path / "memory.yaml"
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
-    data.update(timeout_ms=2001, max_retries=1)
+    data.update(timeout_ms=2001, max_retries=1)                   # 2 × 2001 + 退避 1000 = 5002
     path.write_text(yaml.safe_dump(data), encoding="utf-8")
     assert main(["reconcile", str(store.repo_root), "--once", "--enable", "agent"], env=env) == 2
     err = capsys.readouterr().err

@@ -7,6 +7,7 @@ import pytest
 from factory.memory_budget import (
     BASE_LAYERS,
     EXTRACTION_CALLS_PER_REMEMBER,
+    call_ms,
     embed_pending_calls,
     endpoint_call_ms,
     memory_time_budget,
@@ -38,6 +39,32 @@ def test_one_http_call_worst_case_is_attempts_times_timeout_plus_backoff(endpoin
 def test_a_negative_leaf_is_refused():
     with pytest.raises(ValueError):
         endpoint_call_ms({"timeout_ms": 1000, "max_retries": -1})
+
+
+@pytest.mark.parametrize("timeout_ms, max_retries, want", [
+    (4000, 0, 4000),
+    (1500, 1, 4000),                                        # 2 × 1500 + 1000
+    (333, 2, 3999),                                         # 3 × 333 + 1000 + 2000
+    (1, 5, 6 * 1 + 1000 + 2000 + 4000 + 8000 + 16000),      # 退避还没到顶
+    (1, 6, 7 * 1 + 1000 + 2000 + 4000 + 8000 + 16000 + 30000),   # 第 6 次重试之前的退避 32 秒,封顶 30 秒
+])
+def test_call_ms_is_attempts_times_timeout_plus_capped_backoff(timeout_ms, max_retries, want):
+    assert call_ms(timeout_ms, max_retries) == want
+    assert endpoint_call_ms({"timeout_ms": timeout_ms, "max_retries": max_retries}) == want    # 端点走同一处算术
+
+
+def test_call_ms_matches_the_term_by_term_sum_and_does_not_loop_over_a_huge_retry_count():
+    for t in (1, 10, 4000):
+        for r in range(60):
+            assert call_ms(t, r) == (r + 1) * t + sum(min(1000 * 2 ** i, 30000) for i in range(r))
+    # 前五次重试退避 1 + 2 + 4 + 8 + 16 = 31 秒,第六次起每次 30 秒(32 秒封顶),一次加完
+    assert call_ms(1, 10 ** 12) == (10 ** 12 + 1) + 31000 + 30000 * (10 ** 12 - 5)
+
+
+@pytest.mark.parametrize("timeout_ms, max_retries", [(-1, 0), (1000, -1)])
+def test_call_ms_refuses_a_negative_argument(timeout_ms, max_retries):
+    with pytest.raises(ValueError):
+        call_ms(timeout_ms, max_retries)
 
 
 def test_remember_event_is_seven_extraction_calls_and_embed_pending_is_four_batched_calls():
@@ -135,19 +162,19 @@ def test_spawn_mode_at_the_default_config_derives_layers_that_each_contain_the_o
 
 
 @pytest.mark.parametrize("timeout_ms, max_retries, call_s, turn_s, deploy_turn_s, join_s", [
-    # 记忆配置的上限是 timeout_ms × (max_retries + 1) ≤ 4000,退避不计在内:
-    (2000, 1, 5.0, 95.0, 115.0, 175.0),                     # 2 × 2 秒 + 退避 1 秒
-    (1000, 3, 11.0, 209.0, 229.0, 289.0),                   # 4 × 1 秒 + 退避 1 + 2 + 4 秒
-    # 上限允许的最坏:timeout_ms 1、max_retries 3999。尝试共 4 秒,退避 1 + 2 + 4 + 8 + 16 秒后每次 30 秒,
-    # 一次调用最坏 119855 秒,一轮记忆 2277245 秒(约 26 天);各层随之推出,仍然一层包一层
-    (1, 3999, 119855.0, 2277245.0, 2277265.0, 2277325.0),
+    # 记忆配置的上限是 call_ms(timeout_ms, max_retries) ≤ 4000,重试之间的退避计在内;一次调用最坏不超过 4 秒,
+    # 一轮记忆不超过缺省配置的 76 秒。max_retries 至多 2(三次重试仅退避就 7 秒),timeout_ms 随之收紧:
+    (1500, 1, 4.0, 76.0, 96.0, 156.0),                      # 2 × 1.5 秒 + 退避 1 秒,恰在上限上,与缺省配置同值
+    (333, 2, 3.999, 75.981, 95.981, 155.981),               # 3 × 0.333 秒 + 退避 1 + 2 秒,max_retries 取最大时 timeout_ms 的最大值
+    (1, 2, 3.003, 57.057, 77.057, 137.057),                 # 3 × 1 毫秒 + 退避 3 秒
 ])
 def test_spawn_mode_at_the_config_maximum_still_derives_layers_that_each_contain_the_one_inside(
         timeout_ms, max_retries, call_s, turn_s, deploy_turn_s, join_s):
-    assert timeout_ms * (max_retries + 1) <= MAX_MEMORY_CALL_MS
+    assert call_ms(timeout_ms, max_retries) <= MAX_MEMORY_CALL_MS
     b = _spawn_budget(timeout_ms=timeout_ms, max_retries=max_retries)
-    assert (b.worst.extraction_call_s, b.worst.embedding_call_s, b.worst.memory_turn_s) == (call_s, call_s, turn_s)
-    assert (b.deploy_turn_s, b.join_s) == (deploy_turn_s, join_s)
+    assert b.worst.extraction_call_s == b.worst.embedding_call_s == pytest.approx(call_s)
+    assert b.worst.memory_turn_s == pytest.approx(turn_s)
+    assert (b.deploy_turn_s, b.join_s) == pytest.approx((deploy_turn_s, join_s))
     _assert_every_layer_strictly_contains_the_one_inside(b)
 
 

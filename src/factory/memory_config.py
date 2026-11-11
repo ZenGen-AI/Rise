@@ -32,6 +32,7 @@ import yaml
 
 from factory.configio import key_names
 from factory.errors import FactoryConfigError
+from factory.memory_budget import call_ms
 
 MEMORY_CONFIG_ENV = "RISE_MEMORY_CONFIG"
 API_KEY_ENV = "OPENAI_API_KEY"
@@ -39,8 +40,9 @@ CLIENT_DIST = "starling-client"
 STARLING_DIST = "starling-memory"
 DEFAULT_TIMEOUT_MS = 4000
 DEFAULT_MAX_RETRIES = 0
-# 拉起模式下一次记忆网络调用的超时乘尝试数上限:timeout_ms × (max_retries + 1) 不得超过它。两种模式的外层时限都由
-# `factory.memory_budget` 按端点推出;这条上限只管拉起模式(外部模式的端点在看板里,不受它限)。它不计重试之间的退避。
+# 拉起模式下一次记忆网络调用的最坏耗时上限,毫秒:`factory.memory_budget.call_ms(timeout_ms, max_retries)`,即
+# timeout_ms × (max_retries + 1) 加重试之间的退避,不得超过它。两种模式的外层时限都由 `factory.memory_budget` 按端点推出;
+# 这条上限只管拉起模式(外部模式的端点在看板里,不受它限)。
 MAX_MEMORY_CALL_MS = 4000
 
 ENDPOINT_KEYS = ("extraction_base_url", "extraction_model", "embedding_base_url", "embedding_model", "embedding_dim")
@@ -262,10 +264,10 @@ def read_memory_config(*, env: Mapping[str, str] | None = None, repo_root: Path)
     embedding_dim = _check_int("embedding_dim", data["embedding_dim"], minimum=1)
     timeout_ms = _check_int("timeout_ms", data.get("timeout_ms", DEFAULT_TIMEOUT_MS), minimum=1)
     max_retries = _check_int("max_retries", data.get("max_retries", DEFAULT_MAX_RETRIES), minimum=0)
-    if timeout_ms * (max_retries + 1) > MAX_MEMORY_CALL_MS:
+    if call_ms(timeout_ms, max_retries) > MAX_MEMORY_CALL_MS:
         raise FactoryConfigError(
-            f"memory config: timeout_ms × (max_retries + 1) must not exceed {MAX_MEMORY_CALL_MS} ms; "
-            "spawn mode allows at most 4 s of attempts per memory call"
+            f"memory config: timeout_ms × (max_retries + 1) plus the backoff between retries must not exceed "
+            f"{MAX_MEMORY_CALL_MS} ms; spawn mode allows at most 4 s per memory call, retries and backoff included"
         )
     return MemoryConfig(
         root=root, extraction_base_url=extraction_base_url, extraction_model=extraction_model,
