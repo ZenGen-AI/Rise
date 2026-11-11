@@ -191,6 +191,81 @@ def test_a_reopen_while_the_previous_attempt_is_still_open_does_not_wait(case):
     assert worlds.close_rollout(EP, [a], wait_s=1.0) is True
 
 
+def test_a_late_server_join_after_the_episode_was_reopened_lands_in_the_new_world(case):
+    """竞态窗口 1(设计里按"几乎不可能"留着不修,这里有意钉住现状):服务端还没来得及 join,客户端的 close_rollout 就收尾了。
+    此时没有任何服务端端口计过数,close_rollout 不等、直接删世界(返回真,不进保留表),重试之前到的 join 判非瞬态。
+    同名重试先删后建了新世界之后再到的 join 落进新世界:读到的是起点而不是旧世界里写过的内容,也不抛错。
+    这个端口记在新世界的计数上,重试自己的 close_rollout 等不到它就把新世界放进保留表,由保留表收尾。"""
+    worlds = case.worlds
+    old = worlds.open_rollout("run-1", "s1", EP, "pa")
+    old.remember(EV)
+    assert old.digest() != case.start
+    assert worlds.close_rollout(EP, [old], wait_s=0.05) is True       # 没有服务端端口在计数里:不等,世界删了
+    assert EP not in worlds._worlds and EP not in worlds._held
+    with pytest.raises(MemoryFailureError) as lost:                   # 重试之前到的 join:没有世界可进
+        worlds.join_rollout(EP, "pb")
+    assert lost.value.transient is False
+    again = worlds.open_rollout("run-1", "s1", EP, "pa")             # 同名重试:先删后建
+    late = worlds.join_rollout(EP, "pb")                              # 晚到的 join 进了新世界
+    assert late.digest() == again.digest() == case.start              # 读到起点,旧世界里写的不在
+    assert worlds.close_rollout(EP, [again], wait_s=0.05) is False    # 晚到的端口还开着:新世界进保留表
+    assert EP in worlds._held and EP not in worlds._worlds
+    worlds.release_session(EP, [late])
+    third = worlds.open_rollout("run-1", "s1", EP, "pa")             # 晚到的端口关上后,同名重试照常
+    assert third.digest() == case.start
+    assert worlds.close_rollout(EP, [third], wait_s=1.0) is True
+
+
+def test_a_server_open_in_flight_at_close_keeps_the_world_and_a_later_join_lands_in_the_new_one(case, monkeypatch):
+    """窗口 1 的另一半,同样有意钉住现状:服务端的 join 已经计了数、端口还没开出来(开端口卡在闸门上)时客户端收尾。
+    close_rollout 等不到计数归零,世界进保留表并返回假;同名重试等满 held_wait_s 也等不到,判瞬态,不删旧世界。
+    端口随后开在旧世界里(join 在锁内取的是旧表项),不抛错;它关上之后重试才先删后建,再到的 join 落进新世界。"""
+    worlds = case.worlds
+    original = worlds._port
+    entered, gate, calls = threading.Event(), threading.Event(), []
+
+    def gated(world, holder, release):
+        if holder == "pb" and not calls:                              # 只卡第一个服务端 join
+            calls.append(holder)
+            entered.set()
+            assert gate.wait(5.0)
+        return original(world, holder, release)
+
+    monkeypatch.setattr(worlds, "_port", gated)
+    old = worlds.open_rollout("run-1", "s1", EP, "pa")
+    old.remember(EV)
+    joined = {}
+
+    def server_join():
+        try:
+            joined["port"] = worlds.join_rollout(EP, "pb")
+        except BaseException as exc:                                   # 线程里的异常带回主线程断言
+            joined["error"] = exc
+
+    server = threading.Thread(target=server_join)
+    server.start()
+    try:
+        assert entered.wait(5.0)
+        assert worlds.close_rollout(EP, [old], wait_s=0.05) is False  # 计数是 1:等不到,世界进保留表
+        assert EP in worlds._held and EP not in worlds._worlds
+        with pytest.raises(MemoryFailureError) as held:               # 重试等满 held_wait_s 仍被占着
+            worlds.open_rollout("run-1", "s1", EP, "pa")
+        assert held.value.transient is True
+    finally:
+        gate.set()
+        server.join(5.0)
+    assert "error" not in joined and not server.is_alive()
+    stale = joined["port"]
+    assert stale.digest() != case.start                               # 端口开在旧世界里,旧世界写的还在
+    worlds.release_session(EP, [stale])
+    again = worlds.open_rollout("run-1", "s1", EP, "pa")             # 旧端口关上:先删后建
+    assert again.digest() == case.start
+    late = worlds.join_rollout(EP, "pb")                              # 之后再到的 join 进了新世界
+    assert late.digest() == case.start
+    assert worlds.close_rollout(EP, [again], wait_s=0.05) is False    # 它还开着:新世界进保留表
+    worlds.release_session(EP, [late])
+
+
 def test_a_world_kept_after_the_wait_is_logged_by_its_episode_id_only(case, caplog):
     worlds = case.worlds
     a = worlds.open_rollout("run-1", "s1", EP, "pa")
