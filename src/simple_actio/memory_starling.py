@@ -12,6 +12,7 @@
 本包不导入 `factory`。"""
 from __future__ import annotations
 
+import math
 import os
 import threading
 from collections.abc import Iterable
@@ -659,7 +660,8 @@ class StarlingDeploymentStore:
         """等该部署世界打开着的端口数降到 0:到了返回 True,超过 timeout_s 秒返回 False。端口可以在别的线程上关。
         不发请求:没有句柄的世界端口数是 0,立刻返回 True。重放端口记在重放世界名下,不算进来。"""
         key = self._deploy(world_id)
-        if isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float)) or not timeout_s >= 0:
-            raise SimpleActioDataError(f"wait_closed.timeout_s: expected a non-negative number, got {timeout_s!r}")
+        if (isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float))
+                or not math.isfinite(timeout_s) or timeout_s < 0):
+            raise SimpleActioDataError(f"wait_closed.timeout_s: expected a finite non-negative number, got {timeout_s!r}")
         with self._all_closed:
             return self._all_closed.wait_for(lambda: self._open.get(key, 0) == 0, timeout_s)

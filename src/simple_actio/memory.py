@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import secrets
 import threading
 from copy import deepcopy
@@ -440,6 +441,14 @@ def _read_ledger(path: Path) -> _Ledger:
         raise MemoryFailureError(type(exc).__name__, transient=False) from None
 
 
+def _exists(path: Path) -> bool:
+    """`Path.exists()` 的 OSError(如 PermissionError)与读写同口径:永久失败,只报类名,不带路径。"""
+    try:
+        return path.exists()
+    except OSError as exc:
+        raise MemoryFailureError(type(exc).__name__, transient=False) from None
+
+
 def _write_json(path: Path, doc: dict) -> None:
     """先写 <path>.tmp 再 replace 到正式文件,中途崩溃不会留下半个库。"""
     tmp = path.with_name(path.name + ".tmp")
@@ -539,7 +548,7 @@ class FileTupleStore:
 
     @staticmethod
     def _load_at(path: Path) -> _Ledger:
-        return _read_ledger(path) if path.exists() else _Ledger()
+        return _read_ledger(path) if _exists(path) else _Ledger()
 
     def _load(self, world_id: str) -> _Ledger:
         return self._load_at(self._path(world_id))
@@ -577,7 +586,7 @@ class FileTupleStore:
         """在重放世界上开只读端口。文件不在是永久失败(与 Starling 的 world_not_found 同类),不建。"""
         path = self._replay_path(replay_world)
         _check_name(holder, "holder")
-        if not path.exists():
+        if not _exists(path):
             raise MemoryFailureError("open_replay: world_not_found", transient=False)
         return _FilePort(self, replay_world, holder, path=path, key=replay_world, read_only=True)
 
@@ -660,7 +669,7 @@ class FileTupleStore:
         with self._lock:
             if self._open.get(self._deploy_key(world_id), 0) > 0:
                 raise MemoryFailureError("restore: world has an open port", transient=False)
-            if not path.exists():
+            if not _exists(path):
                 raise MemoryFailureError("restore: snapshot_not_found", transient=False)
             ledger = _read_snapshot(path)
             self._save(world_id, ledger)
@@ -682,7 +691,7 @@ class FileTupleStore:
         name = f"{STAND_IN_WORLD_PREFIX}.verify.{round_id}.{world_id}.{secrets.token_hex(4)}"
         target = self._replay_path(name)            # 拼出来超过 128 字符时在这里拒绝,不写任何文件
         with self._lock:
-            if not path.exists():
+            if not _exists(path):
                 raise MemoryFailureError("fork_replay: snapshot_not_found", transient=False)
             _write_ledger(target, _read_snapshot(path))
         return name
@@ -699,8 +708,9 @@ class FileTupleStore:
         """等该部署世界打开着的端口数降到 0:到了返回 True,超过 timeout_s 秒返回 False。端口可以在别的线程上关。
         重放端口记在重放世界名下,不算进来。"""
         self._path(world_id)
-        if isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float)) or not timeout_s >= 0:
-            raise SimpleActioDataError(f"wait_closed.timeout_s: expected a non-negative number, got {timeout_s!r}")
+        if (isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float))
+                or not math.isfinite(timeout_s) or timeout_s < 0):
+            raise SimpleActioDataError(f"wait_closed.timeout_s: expected a finite non-negative number, got {timeout_s!r}")
         key = self._deploy_key(world_id)
         with self._all_closed:
             return self._all_closed.wait_for(lambda: self._open.get(key, 0) == 0, timeout_s)

@@ -248,7 +248,7 @@ def test_ports_close_into_the_count_wait_closed_reads(store_factory):
     assert store.wait_closed("s1", 0.05) is True and store.wait_closed("s2", 0.0) is True
 
 
-@pytest.mark.parametrize("bad", [-1, True, None, "1"])
+@pytest.mark.parametrize("bad", [-1, True, None, "1", float("inf"), float("nan")])
 def test_wait_closed_rejects_a_bad_timeout(store_factory, bad):
     store, _, _ = store_factory()
     with pytest.raises(SimpleActioDataError):

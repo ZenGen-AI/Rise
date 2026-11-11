@@ -305,7 +305,7 @@ def test_wait_closed_needs_every_holder_port_of_the_world_closed(tmp_path):
     assert store.wait_closed("s1", 0.05) is True
 
 
-@pytest.mark.parametrize("bad", [-1, True, None, "1"])
+@pytest.mark.parametrize("bad", [-1, True, None, "1", float("inf"), float("nan")])
 def test_wait_closed_rejects_a_bad_timeout(tmp_path, bad):
     with pytest.raises(SimpleActioDataError, match="timeout_s"):
         _store(tmp_path).wait_closed("s1", bad)
@@ -612,6 +612,23 @@ def test_a_failed_save_leaves_no_temp_file_and_the_old_library_intact(tmp_path, 
     assert info.value.transient is False and "disk gone" not in str(info.value)
     assert (tmp_path / "deploy" / "s1.json").read_bytes() == before
     assert sorted(p.name for p in (tmp_path / "deploy").iterdir()) == ["s1.json"]
+
+
+def test_a_permission_error_from_exists_is_a_permanent_failure_that_names_only_the_class(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    ref = store.snapshot("s1", note="n")
+
+    def denied(self, **kw):
+        raise PermissionError(13, "Permission denied", str(self))
+
+    monkeypatch.setattr(Path, "exists", denied)
+    for call in (lambda: store.digest("s1"),
+                 lambda: store.open_replay("rise.verify.r1.s1.00000000", "pa"),
+                 lambda: store.restore("s1", ref.snapshot_id),
+                 lambda: store.fork_replay("s1", ref.snapshot_id, round_id="r1")):
+        with pytest.raises(MemoryFailureError) as info:
+            call()
+        assert str(info.value) == "PermissionError" and info.value.transient is False
 
 
 def test_a_corrupt_error_message_reports_only_the_exception_class(tmp_path):
