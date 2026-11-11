@@ -374,3 +374,18 @@ def test_with_a_message_timeout_a_stream_ending_without_end_session_still_raises
     assert client.closed
     _assert_request_stream_released(stub)
     _assert_receiver_exits(client)
+
+
+def test_with_a_message_timeout_an_interrupt_while_waiting_abandons_the_session_and_reraises():
+    client, stub = _fake_client_with_timeout([_ready()])
+    _assert_receiver_exits(client)                     # 脚本已放完:先等接收线程退出,再换掉它写的队列
+
+    class _Interrupting:
+        def get(self, timeout=None):
+            raise KeyboardInterrupt
+
+    client._recv_q = _Interrupting()
+    with pytest.raises(KeyboardInterrupt):
+        client.submit_turn("x")
+    assert client.closed
+    _assert_request_stream_released(stub)

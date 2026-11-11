@@ -272,6 +272,10 @@ class EnvironmentServiceClient:
                 reason="timeout",
                 failure_detail=f"no server message within {self._message_timeout_s}s",
             ))
+        except BaseException:
+            # 等的时候被打断(KeyboardInterrupt 等):与无上限的 next() 同口径,先放弃会话、放掉请求流再原样上抛
+            self._abandon("client_transport_error")
+            raise
         if item is _STREAM_END:
             self._abandon("stream_ended_without_end_session")
             raise RuntimeError("server closed the stream without sending EndSession")
