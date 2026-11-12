@@ -764,8 +764,8 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.17" },
-    { name = "starling-client", marker = "extra == 'memory'", git = "https://github.com/ruijieguo/starling?subdirectory=clients%2Fpython&rev=83aa79fb9da5bdd8f4e538a4cc0d68284ca7a25d" },
-    { name = "starling-memory", extras = ["dashboard"], marker = "extra == 'memory'", git = "https://github.com/ruijieguo/starling?rev=83aa79fb9da5bdd8f4e538a4cc0d68284ca7a25d" },
+    { name = "starling-client", marker = "extra == 'memory'", git = "https://github.com/ruijieguo/starling?subdirectory=clients%2Fpython&rev=01e149d1e2139362b1b047e263f9b5b1ecba162e" },
+    { name = "starling-memory", extras = ["dashboard"], marker = "extra == 'memory'", git = "https://github.com/ruijieguo/starling?rev=01e149d1e2139362b1b047e263f9b5b1ecba162e" },
 ]
 provides-extras = ["dev", "memory"]
 
@@ -942,7 +942,7 @@ wheels = [
 [[package]]
 name = "starling-client"
 version = "0.1.0"
-source = { git = "https://github.com/ruijieguo/starling?subdirectory=clients%2Fpython&rev=83aa79fb9da5bdd8f4e538a4cc0d68284ca7a25d#83aa79fb9da5bdd8f4e538a4cc0d68284ca7a25d" }
+source = { git = "https://github.com/ruijieguo/starling?subdirectory=clients%2Fpython&rev=01e149d1e2139362b1b047e263f9b5b1ecba162e#01e149d1e2139362b1b047e263f9b5b1ecba162e" }
 dependencies = [
     { name = "httpx" },
 ]
@@ -950,7 +950,7 @@ dependencies = [
 [[package]]
 name = "starling-memory"
 version = "0.0.1"
-source = { git = "https://github.com/ruijieguo/starling?rev=83aa79fb9da5bdd8f4e538a4cc0d68284ca7a25d#83aa79fb9da5bdd8f4e538a4cc0d68284ca7a25d" }
+source = { git = "https://github.com/ruijieguo/starling?rev=01e149d1e2139362b1b047e263f9b5b1ecba162e#01e149d1e2139362b1b047e263f9b5b1ecba162e" }
 
 [package.optional-dependencies]
 dashboard = [
