@@ -142,6 +142,72 @@ def test_an_ssh_that_dies_at_once_is_an_error_not_a_silent_tunnel_to_nowhere():
             pass
 
 
+def _wait_until(cond, timeout=5.0):
+    import time
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if cond():
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def test_an_ssh_that_dies_mid_session_is_restarted_on_the_same_local_port():
+    """真机 2026-11-12:161 拒绝 SSH 约 80 秒,隧道进程退出后没再起来,之后对手请求全部连不上。
+    看守线程要在同一个本地端口上重新拉起 ssh,调用方手里的 base_url 不用变。"""
+    spawned = []
+
+    def spawn(argv):
+        spawned.append(list(argv))
+        return FakeProc()
+
+    with _tunnel(spawn, watch_s=0.01) as t:
+        port = t.local_port
+        spawned_first = spawned[0]
+        t._proc._rc = 255                                         # ssh 中途退出
+        assert _wait_until(lambda: t.restarts == 1)
+        assert len(spawned) == 2 and spawned[1] == spawned_first  # 同一条命令,同一个本地端口
+        assert t.local_port == port and t._proc.poll() is None
+
+
+def test_a_restart_that_keeps_failing_backs_off_and_succeeds_once_ssh_is_back():
+    """主机拒绝 SSH 时重启一直失败:按退避重试,不放弃;主机恢复后接上。"""
+    attempts = []
+    host_up = {"v": True}
+
+    def spawn(argv):
+        attempts.append(1)
+        return FakeProc(dies_at_once=not host_up["v"])
+
+    with _tunnel(spawn, watch_s=0.01, restart_backoff_max_s=0.02) as t:
+        host_up["v"] = False
+        t._proc._rc = 255
+        assert _wait_until(lambda: len(attempts) >= 4)            # 起了几次都立刻退出,还在试
+        assert t.restarts == 0
+        host_up["v"] = True
+        assert _wait_until(lambda: t.restarts == 1)
+        assert t._proc.poll() is None
+
+
+def test_closing_stops_the_watcher_and_the_restarted_ssh():
+    procs = []
+
+    def spawn(argv):
+        procs.append(FakeProc())
+        return procs[-1]
+
+    with _tunnel(spawn, watch_s=0.01) as t:
+        t._proc._rc = 255
+        assert _wait_until(lambda: t.restarts == 1)
+        watcher = t._watcher
+    assert not watcher.is_alive()
+    assert procs[-1].terminated                                   # 关掉的是重启后的那一个
+    count = len(procs)
+    import time
+    time.sleep(0.05)
+    assert len(procs) == count                                    # 退出之后不再重启
+
+
 def test_a_tunnel_whose_port_never_opens_is_an_error_and_is_cleaned_up():
     proc = FakeProc()
     with pytest.raises(OSError, match="not accept"):

@@ -5,8 +5,10 @@ SshTransport 是一问一答的:每次调用起一个 ssh、拿回输出就结�
 """
 from __future__ import annotations
 
+import logging
 import socket
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -18,6 +20,8 @@ from compute.transport import _ALIAS
 
 if TYPE_CHECKING:
     from compute.client import ComputeClient
+
+_log = logging.getLogger(__name__)
 
 
 def free_local_port() -> int:
@@ -60,6 +64,11 @@ class SshTunnel:
     """上下文管理器。进入时起 `ssh -N -L`,等本地端口真能连上;退出时终止 ssh,不听话就强杀。
 
     只转发回环到回环:本地端只绑 127.0.0.1(不对局域网开放),远端端只连远端的 127.0.0.1。
+
+    进入之后有一个看守线程:ssh 进程退出(主机拒绝 SSH、网络断了一阵)就在**同一个本地端口**上重新拉起,
+    失败按 1、2、4…至多 `restart_backoff_max_s` 秒退避重试,直到退出上下文。端口不变,所以调用方手里的
+    base_url 一直有效,不用重建会话。断开期间的请求照旧连不上、按各自的失败分类处理(真机 2026-11-12:161 拒绝
+    SSH 约 80 秒,隧道没再起来,之后 25 分钟的对手请求全部连不上,整条 rollout 判延后)。
     """
 
     def __init__(
@@ -71,6 +80,8 @@ class SshTunnel:
         open_timeout_s: float = 30.0,
         close_grace_s: float = 5.0,
         poll_s: float = 0.25,
+        watch_s: float = 2.0,
+        restart_backoff_max_s: float = 30.0,
         spawn: Callable[[Sequence[str]], Any] = _spawn,
         port_ready: Callable[[int], bool] = port_accepts,
     ) -> None:
@@ -82,9 +93,15 @@ class SshTunnel:
         self._open_timeout = open_timeout_s
         self._close_grace = close_grace_s
         self._poll = poll_s
+        self._watch = watch_s
+        self._backoff_max = restart_backoff_max_s
         self._spawn = spawn
         self._port_ready = port_ready
         self._proc: Any = None
+        self._lock = threading.Lock()       # 护 _proc:看守线程换进程、退出时取进程,两边不能交错
+        self._stopping = threading.Event()
+        self._watcher: threading.Thread | None = None
+        self.restarts = 0                   # 看守线程成功重启的次数;只给日志与测试看
         self.local_port = 0
 
     def argv(self) -> list[str]:
@@ -97,27 +114,79 @@ class SshTunnel:
 
     def __enter__(self) -> "SshTunnel":
         self.local_port = free_local_port()
-        self._proc = self._spawn(self.argv())
-        deadline = time.monotonic() + self._open_timeout
         try:
-            while True:
-                if self._proc.poll() is not None:
-                    raise OSError(f"the ssh tunnel process exited with code {self._proc.poll()}")
-                if self._port_ready(self.local_port):
-                    return self
-                if time.monotonic() >= deadline:
-                    raise OSError(f"the tunnel's local port did not accept connections within {self._open_timeout:g}s")
-                time.sleep(self._poll)
+            self._proc = self._open()
         except BaseException:
             self._terminate()
             raise
+        self._watcher = threading.Thread(target=self._watch_loop, name="ssh-tunnel-watch", daemon=True)
+        self._watcher.start()
+        return self
 
     def __exit__(self, *exc: object) -> bool:
         self._terminate()
         return False
 
+    def _open(self) -> Any:
+        """起一个 ssh,等本地端口能连上后返回进程;起不来就终止它并抛 OSError。进入与看守线程重启共用。"""
+        proc = self._spawn(self.argv())
+        deadline = time.monotonic() + self._open_timeout
+        try:
+            while True:
+                if proc.poll() is not None:
+                    raise OSError(f"the ssh tunnel process exited with code {proc.poll()}")
+                if self._port_ready(self.local_port):
+                    return proc
+                if time.monotonic() >= deadline:
+                    raise OSError(f"the tunnel's local port did not accept connections within {self._open_timeout:g}s")
+                if self._stopping.wait(self._poll):
+                    raise OSError("the tunnel is closing")
+        except BaseException:
+            self._stop_proc(proc)
+            raise
+
+    def _watch_loop(self) -> None:
+        """ssh 退出就在同一个本地端口上重启,失败按指数退避一直试,直到退出上下文。
+
+        日志只写远端端口与退出码或异常类名,不写别名:别名里有用户名与主机地址。"""
+        failures = 0
+        while not self._stopping.wait(self._watch):
+            with self._lock:
+                proc = self._proc
+            if proc is None or proc.poll() is None:
+                continue
+            _log.warning("ssh tunnel to remote port %d exited (code %s); restarting on local port %d",
+                         self._remote_port, proc.poll(), self.local_port)
+            while not self._stopping.is_set():
+                try:
+                    fresh = self._open()
+                except OSError as exc:
+                    failures += 1
+                    delay = min(2.0 ** (failures - 1), self._backoff_max)
+                    _log.warning("ssh tunnel restart failed (%s); retrying in %gs", type(exc).__name__, delay)
+                    if self._stopping.wait(delay):
+                        return
+                    continue
+                with self._lock:
+                    if self._stopping.is_set():      # 正在退出:新起的这个不交出去,自己关掉
+                        self._stop_proc(fresh)
+                        return
+                    self._proc = fresh
+                failures = 0
+                self.restarts += 1
+                _log.warning("ssh tunnel to remote port %d restored", self._remote_port)
+                break
+
     def _terminate(self) -> None:
-        proc, self._proc = self._proc, None
+        self._stopping.set()
+        watcher, self._watcher = self._watcher, None
+        if watcher is not None:
+            watcher.join(timeout=self._open_timeout + self._close_grace)
+        with self._lock:
+            proc, self._proc = self._proc, None
+        self._stop_proc(proc)
+
+    def _stop_proc(self, proc: Any) -> None:
         if proc is None or proc.poll() is not None:
             return
         proc.terminate()
