@@ -646,7 +646,7 @@ TypeScript 命令行:`rise <review|approve|reject|confirm|status> [id] [reason]`
 | RecipeStore | `handle_admit_recipe`、`handle_record_track` [已落地] | 无 |
 | MindAgent | `make_start_round_handler`、`make_admit_proposal_handler` [已落地] | 实时客户端工厂、罐头后端、人格 loader;另要部署记忆管理面 DeploymentMemoryStore 与记忆运行时身份。配置在场用 StarlingDeploymentStore,不在场用 FileTupleStore(FC-29)。轮次处理器造出 make_instance,交给部署驱动器。组合根只造一个管理面,交给轮次处理器、门② 与服务端三方;部署驱动器每次尝试前向 `AgentRuntime` 登记 episode id 到 round_id,尝试结束注销,登记与注销的回调由组合根注入轮次处理器(`mindagent` 不导入 `factory`);验证实例工厂收 `(extra_skills, scenario_id)`;门② 处理器判 `(scenario_id, persona_id)` 是否是部署配置里绑定的一对,绑定对由组合根从 `agent.yaml` 读出后经 `bound_pairs` 注入 [已落地] |
 | SimpleActio | `instantiate(memory=..., replay_read_only=..., episode_id=..., holder=...)`:构造带记忆端口的实例,`episode_id` 是逻辑 episode id、事件 key 的前缀,`holder` 是事件 key 的 `@` 后缀,可写端口不给就抛 `ValueError`;`memories=` 保留为替身记忆的简写;部署记忆管理面 DeploymentMemoryStore,放在 `simple_actio`,所以 MindAgent 不导入 `starling`;`memory_starling`:唯一导入 `starling` 的模块;激活轨迹模式 simple_actio.trace.v2;部署管理面按世界取键,`open(world_id, holder)`,外加 `wait_closed`;事件 key 是 `<前缀>#<turn_index>@<主体>` [已落地] | 本机记忆配置、运行时身份、库目录与每条 rollout 一个世界,由组合根装配 [已落地] |
-| Starling | 可选 extra `memory`:`starling-client` 与 `starling-memory[dashboard]` 两行,钉同一个 git 提交 `467f77d`(Starling 记忆服务第 5、6 期都已合并;2026-11-11 从 `cff319d` 经 `0e0620e` 升,客户端与协议未变)[已落地]。rise 只经客户端 `starling_client` 连记忆服务:会话的管理调用(建世界、分叉、快照、恢复、删快照、列世界、`info`)与句柄上的 `recall`(带 `strict`、`include_volatile`)、`remember_event`(带 `interlocutor` 与 `epoch`)、`embed_pending`、`digest`、`pending_events`、`abandon_event`、`close`。三段写入、摘要、快照与嵌入循环都在服务里;`[key] ` 文本前缀在 Starling 一侧加 | 服务地址与 token 由本机记忆配置给出;拉起模式由组合根起停服务 |
+| Starling | 可选 extra `memory`:`starling-client` 与 `starling-memory[dashboard]` 两行,钉同一个 git 提交 `87f458f`(Starling 记忆服务第 5、6 期都已合并;2026-11-11 从 `cff319d` 经 `0e0620e` 升到 `467f77d`,2026-11-12 再升到 `87f458f`,客户端与协议未变;`87f458f` 加了库迁移 0040,见 00 篇第 869 行)[已落地]。rise 只经客户端 `starling_client` 连记忆服务:会话的管理调用(建世界、分叉、快照、恢复、删快照、列世界、`info`)与句柄上的 `recall`(带 `strict`、`include_volatile`)、`remember_event`(带 `interlocutor` 与 `epoch`)、`embed_pending`、`digest`、`pending_events`、`abandon_event`、`close`。三段写入、摘要、快照与嵌入循环都在服务里;`[key] ` 文本前缀在 Starling 一侧加 | 服务地址与 token 由本机记忆配置给出;拉起模式由组合根起停服务 |
 | 外部推理桥接 | `CliBridge` [已落地] | `backends.yaml` 的 `planner`、`agent` 两个角色 |
 | 远端计算层 | `ComputeClient`;`--executor roll` 与 `--evaluator someval` 已在用 [已落地];`--interact` 的策略工厂经 `serve` 按指令起停 vLLM [已落地] | 无 |
 
@@ -731,7 +731,7 @@ TypeScript 命令行:`rise <review|approve|reject|confirm|status> [id] [reason]`
 
 记忆的最坏耗时 [已落地]。Starling 对一个端点的一次 HTTP 调用最坏 `(r + 1) × t + Σ_{i<r} min(1000 × 2^i, 30000)` 毫秒,出处在 `S:src/net/http_post_json.cpp:148-151`、`:180-183`:
 
-| 项 | 取值 | 出处(Starling `cff319d`,`467f77d` 上这些文件未改) |
+| 项 | 取值 | 出处(Starling `cff319d`,`87f458f` 上这些文件未改) |
 |---|---|---|
 | 单次尝试上限 `t` | 端点 `timeout_ms`;0 或缺取 60000 | `S:python/starling/dashboard/engine.py:218-220`、`:238-239`;`S:include/starling/extractor/openai_adapter.hpp:27` |
 | 重试次数 `r` | 端点 `max_retries`;缺取 3,0 是不重试 | `engine.py:221-222`、`:240-241`;`openai_adapter.hpp:28` |

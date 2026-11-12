@@ -19,7 +19,7 @@ def test_the_service_reports_the_pinned_commit_and_never_logs_its_token(service)
         info = client.info()
     finally:
         client.close()
-    assert info["commit"] == starling_client.COMMIT == "467f77d89320a1652d174370f2e6d796eb2a4daf"
+    assert info["commit"] == starling_client.COMMIT == "87f458ff7fb7b8860a9375fb54447aadea4c99ff"
     assert info["protocol"] == starling_client.PROTOCOL
     assert service.token not in service.stderr_path.read_text("utf-8", "replace")
 
