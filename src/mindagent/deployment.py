@@ -204,14 +204,15 @@ def _restore(memory_store: DeploymentMemoryStore, world_id: str, rec_path: Path,
             # 记录里的世界 id 过了白名单,可以进信息
             raise RestoreFailedError(f"{what}: record belongs to world {rec.world_id}", point=point)
         digest = memory_store.restore(world_id, rec.snapshot_id)
+    # 三类原因都 from None:原因只报类名,原异常也不经 __cause__ 跟着回溯走。OSError 的原文带文件的绝对路径;
+    # 记忆失败的原文来自服务或替身,不保证不含端点;MindAgentDataError 带着相对路径与记录问题。
     except MemoryFailureError as exc:
         if exc.transient:            # world_busy:服务端还在排空,轮次延后、重入先恢复
-            raise DeferredError(f"{what}: {type(exc).__name__}") from exc
-        raise RestoreFailedError(f"{what}: {type(exc).__name__}", point=point) from exc
+            raise DeferredError(f"{what}: {type(exc).__name__}") from None
+        raise RestoreFailedError(f"{what}: {type(exc).__name__}", point=point) from None
     except MindAgentDataError as exc:
-        raise RestoreFailedError(f"{what}: {type(exc).__name__}", point=point) from exc
+        raise RestoreFailedError(f"{what}: {type(exc).__name__}", point=point) from None
     except OSError as exc:
-        # from None:OSError 的原文带文件的绝对路径,不留在 __cause__ 里
         raise RestoreFailedError(f"{what}: {type(exc).__name__}", point=point) from None
     if expected is not None and digest != expected:
         raise RestoreFailedError(f"{what}: digest mismatch", point=point)

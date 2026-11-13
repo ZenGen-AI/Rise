@@ -129,7 +129,8 @@ class MemoryLayout:
         try:
             doc = json.loads(path.read_bytes().decode("utf-8"))
         except (OSError, ValueError) as exc:     # JSONDecodeError、UnicodeDecodeError 都是 ValueError
-            raise MindAgentDataError(f"在途记录读不出: {rel}: {type(exc).__name__}") from exc
+            # from None:OSError 的原文带绝对路径,JSONDecodeError 的 doc 属性是记录全文,都不能经 __cause__ 跟着回溯走
+            raise MindAgentDataError(f"在途记录读不出: {rel}: {type(exc).__name__}") from None
         if not isinstance(doc, dict) or set(doc) != _RECORD_KEYS:
             raise MindAgentDataError(f"在途记录不是带 world_id、snapshot_id、digest 三个键的对象: {rel}")
         record = SnapshotRecord(doc["world_id"], doc["snapshot_id"], doc["digest"])

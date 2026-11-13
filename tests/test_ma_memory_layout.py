@@ -48,6 +48,21 @@ def test_an_unreadable_record_is_a_data_error_naming_it_relative_to_the_root(tmp
     assert str(tmp_path) not in str(info.value)
 
 
+def test_a_record_that_cannot_be_read_leaves_no_cause_carrying_its_path_or_text(tmp_path):
+    """读不出的原异常不挂在 __cause__ 上:OSError 的原文带绝对路径,JSONDecodeError 的 doc 是记录全文,
+    日志打 traceback 时会带出来。"""
+    lay = MemoryLayout(tmp_path)
+    p = lay.snapshot("r1", "deploy-m-s1-1"); p.parent.mkdir(parents=True)
+    p.write_text('{"world_id": "s1", "snapshot_id": "secret-ish"')       # 不完整的 JSON
+    with pytest.raises(MindAgentDataError) as bad_json:
+        lay.read_record(p)
+    p.unlink()
+    with pytest.raises(MindAgentDataError) as missing:
+        lay.read_record(p)
+    for info in (bad_json, missing):
+        assert info.value.__cause__ is None and info.value.__suppress_context__
+
+
 @pytest.mark.parametrize("body", [
     b"\xff\xfe",                                                                       # 不是 UTF-8
     b'{"world_id": "s1", "snapshot_id": "x", "digest": "d", "note": "n"}',             # 多一个键

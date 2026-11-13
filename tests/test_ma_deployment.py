@@ -1091,9 +1091,11 @@ def test_a_restore_failure_is_split_by_its_transient_flag_and_keeps_the_record(s
     monkeypatch.setattr(mem.store, "restore",
                         lambda world, sid: (_ for _ in ()).throw(MemoryFailureError("world_busy", transient=transient)))
     f = _WorldFactory(mem, {"end_reason": "role_backend_failure"})
-    with pytest.raises(raised):
+    with pytest.raises(raised) as info:
         _run(store, f, mem, **f.hooks())
     assert mem.layout.snapshot(ROUND, EID).exists()                     # 记录与快照都留着,重入先恢复
+    # 原因只报类名,原异常也不挂在 __cause__ 上:记忆失败的原文来自服务或替身,不保证不含端点
+    assert info.value.__cause__ is None and info.value.__suppress_context__
 
 
 def test_a_restore_from_a_snapshot_that_is_gone_keeps_the_record_and_fails_the_restore(store, mem):
@@ -1105,6 +1107,7 @@ def test_a_restore_from_a_snapshot_that_is_gone_keeps_the_record_and_fails_the_r
     with pytest.raises(RestoreFailedError, match=f"restore {EID} in world {WORLD}: MemoryFailureError") as info:
         _run(store, _Factory(), mem, digests=digests)
     assert info.value.point == "mindagent.deployment.restore" and rec.exists()
+    assert info.value.__cause__ is None and info.value.__suppress_context__
 
 
 def test_a_record_of_another_world_at_this_episodes_path_fails_the_restore_and_is_kept(store, mem):
