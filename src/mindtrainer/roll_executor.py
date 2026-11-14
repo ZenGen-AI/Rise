@@ -249,12 +249,24 @@ class RollExecutor:
             if hits:
                 raise TrainingDataRejectedError(bad_lines, hits)
 
-        # 2. 作业身份。run_id 与起点存点必须进哈希,否则起点不同而数据相同的两次续训
+        # 2. 本段的续训起点。第一段(first_step == 0)从 load() 记下的基座起步,不续训;
+        #    同一进程内的后续段接上一段刚写出的存点:run_sft_stage 结尾把它记在 _stage_ref 上,
+        #    而 load() 只在编排器开头调一次,所以这里不能再取 _base_uri——它是整次 run 的起点基座,
+        #    拿它当 --resume 会让 ROLL 去基座目录里找 pipeline/worker_state_pipeline.json 而失败
+        #    (2026-11-14 在 171 上就是这样:第二段的 --resume 指向 Qwen3.8-Flash-Next)。
+        #    跨进程续训(_stage_ref 还是 None)才回落到 _base_uri,那时 load() 收到的就是上一段的存点。
+        resume_uri = (
+            self._stage_ref.uri
+            if first_step > 0 and self._stage_ref is not None
+            else self._base_uri
+        )
+
+        # 3. 作业身份。run_id 与本段的续训起点必须进哈希,否则起点不同而数据相同的两次续训
         #    会撞同一目录(设计 §5.2 第 4 步)。last_step 是开区间终点。
         #    运行环境(ROLL 提交、依赖、镜像)也进哈希:换了 ROLL 就是另一个作业,不会接上旧版本的成功记录。
         job_id = hashlib.sha256(
             "\0".join([
-                self.run_id, self._base_uri, str(first_step), str(last_step),
+                self.run_id, resume_uri, str(first_step), str(last_step),
                 hashlib.sha256(data).hexdigest(), self.endpoint.sft_template, LAUNCHER_VERSION,
                 (self.roll_record or {}).get("roll_env", ""),
             ]).encode("utf-8")
@@ -288,7 +300,7 @@ class RollExecutor:
             "--eval-steps", str(last_step),
         ]
         if first_step > 0:
-            argv += ["--resume", self._remote_path(self._base_uri)]
+            argv += ["--resume", self._remote_path(resume_uri)]
         # Ray 用 Unix 域套接字,路径上限 107 字节,ROLL 因此要求 ROLL_RAY_TEMP_DIR 至多 37 个字符
         # (ray_temp_dir.py)。work_root 可以很长,所以不能放在它下面;用 job_id 的前 8 位区分作业,
         # 否则两个作业会共用一个 Ray 会话。B1 的第一次尝试就死在这里。

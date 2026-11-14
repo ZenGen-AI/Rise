@@ -205,6 +205,28 @@ def test_resume_adds_the_resume_flag():
     assert argv[argv.index("--max-steps") + 1] == "3"
 
 
+def test_a_later_stage_in_the_same_process_resumes_from_the_previous_stage():
+    """同一进程内的第二段必须从上一段的存点续训,不能回落到 load() 的起点基座。
+
+    2026-11-14 在 171 上撞到过:load() 只在编排器开头收一次起点基座,而 run_sft_stage 的
+    --resume 取的就是它,于是第二段让 ROLL 去基座目录里找 pipeline/worker_state_pipeline.json,
+    报 FileNotFoundError 退出。第一段成功、第二段必挂,单段的测试看不出来。"""
+    client = FakeClient()
+    hook = _ckpt_hook(2); hook.client = client; client.job_hook = hook
+    executor, _ = _staged(client, [[_episode("e0")], [_episode("e1")]])   # 第一段:[0, 2)
+    stage_one_ckpt = executor._stage_ref
+    assert stage_one_ckpt is not None
+
+    executor.run_sft_stage(
+        [[_episode("e2")], [_episode("e3")]],
+        first_step=2, trained_slot="a",
+        prior_batches=[[_episode("e0")], [_episode("e1")]],
+    )
+    argv = client.run_calls[1][1].argv
+    assert argv[argv.index("--resume") + 1] == stage_one_ckpt.uri[len("ssh://gpu-1"):]
+    assert argv[argv.index("--resume") + 1] != fake_endpoint().base_model_path
+
+
 def test_metrics_missing_when_the_history_is_shorter_than_the_steps_run():
     """条数不符一律失败,绝不按位置合成 step(设计 §5.2 第 7 步)。"""
     client = FakeClient()

@@ -913,7 +913,7 @@ interact 的 `config_hash` 覆盖配置层的东西 [已落地]:情境 id、人�
 | 未核实项 | 影响 | 核实办法 |
 |---|---|---|
 | ROLL 对离线分组 GRPO 数据的语义 | 算法正确性无保证 | 接入 ROLL 前对照其文档与源码 |
-| 多段训练与续训:`--resume` 的路径层级、`completion.json` 里 `last_step` 在续训时是全局下标还是作业内下标、`prior_batches` 前缀是否真能让 ROLL 按位置跳过已消费的批次 | 崩溃恢复设计的核心,至今只在假客户端下验证过,真机只跑过单段 | 在验证主机上跑两段,第二段带 `--resume`,对照 `log_history` 与存点 |
+| 多段训练与续训:`--resume` 的路径层级、`completion.json` 里 `last_step` 在续训时是全局下标还是作业内下标、`prior_batches` 前缀是否真能让 ROLL 按位置跳过已消费的批次 | 崩溃恢复设计的核心,至今只在假客户端下验证过,真机只跑过单段 | 2026-11-14 在 171 上跑 4 步、每 2 步一段:第一段跑通(2 步,loss 4.5882 → 4.2072,存点在 `checkpoints/20261114-011557/checkpoint-1`);第二段当场暴露一处缺陷并已修 —— `run_sft_stage` 的 `--resume` 取的是 `load()` 记下的起点基座,同一进程内的后续段没有更新它,ROLL 去基座目录找 `pipeline/worker_state_pipeline.json` 而 `FileNotFoundError`(修法:同进程后续段接 `_stage_ref` 的存点,跨进程续训才回落到 `_base_uri`;`job_id` 同步改用本段起点;回归用例 `test_a_later_stage_in_the_same_process_resumes_from_the_previous_stage` 已做突变检验)。修完重跑仍待做:第二段是否真从上一段存点接上、`log_history` 的步号是全局还是作业内、`prior_batches` 前缀是否真被 ROLL 按位置跳过 |
 | 一步的行数:`数据并行度 × 梯度累积 × 每卡批大小` 与 `sft_batch_size` 个剧集展开后的行数是否对得上 | 对不上时 `drop_last` 静默丢行,或训练脚本以「实际步数不等于 max_steps」拒绝 | 实现 `validate_sft_data` 预检;真机上已确认恰好 8 行一步时通过 |
 | 存点与导出产物的属主 | 容器内是 root,存点与导出目录里的权重文件权限为 `-rw-------`,宿主机上的普通用户读不了;若 vLLM 服务以别的用户或在别的容器里运行,读不到适配器 | 起 vLLM 服务时核对运行用户;或用 `docker run --user` 让容器以宿主机用户运行,并核对镜像内路径的写权限 |
 | 远端 Python 版本 | 助手按 3.8 语法写,实际版本更低则无法运行 | 在验证主机上跑一次助手的 `probe` |
