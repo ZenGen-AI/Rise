@@ -149,11 +149,13 @@ def _staged(client: FakeClient, batches, *, first_step=0, prior=()):
 def _ckpt_hook(last_step: int, *, first_step: int = 0, losses=None):
     """模拟作业结束时留在输出目录里的文件:布局照 B1 在 .181 上的实测(见 training_artifacts)。
 
-    losses 默认给 [first_step, last_step) 每步一个数;log_history 是从本次作业起点累积的,
-    所以它的下标是本次作业内的步号,system/step 也从 0 起。"""
+    log_history 照 2026-11-14 在 171 上的实测:续训作业接过之前的 log_history 再往后追加,
+    system/step 是全局步号,所以存点里是 0..last_step-1 全部的步,存点目录叫 checkpoint-{last_step-1}。
+    losses 默认给这些步每步一个数。first_step 只为调用处读得清楚,不影响产物。"""
+    del first_step
     def hook(job_id, spec):
         out = dict(zip(spec.argv, spec.argv[1:]))["--output-dir"]
-        hook.client.files.update(training_artifacts(out, last_step - first_step, losses=losses))
+        hook.client.files.update(training_artifacts(out, last_step, losses=losses))
     return hook
 
 
@@ -217,7 +219,8 @@ def test_a_later_stage_in_the_same_process_resumes_from_the_previous_stage():
     stage_one_ckpt = executor._stage_ref
     assert stage_one_ckpt is not None
 
-    executor.run_sft_stage(
+    hook2 = _ckpt_hook(4, first_step=2); hook2.client = client; client.job_hook = hook2
+    results = executor.run_sft_stage(
         [[_episode("e2")], [_episode("e3")]],
         first_step=2, trained_slot="a",
         prior_batches=[[_episode("e0")], [_episode("e1")]],
@@ -225,6 +228,18 @@ def test_a_later_stage_in_the_same_process_resumes_from_the_previous_stage():
     argv = client.run_calls[1][1].argv
     assert argv[argv.index("--resume") + 1] == stage_one_ckpt.uri[len("ssh://gpu-1"):]
     assert argv[argv.index("--resume") + 1] != fake_endpoint().base_model_path
+    assert [r.step for r in results] == [2, 3]
+
+
+def test_a_resumed_stage_reads_its_own_steps_from_the_cumulative_history():
+    """续训作业的 log_history 带着之前各段的步,system/step 是全局步号(171 上实测)。
+    第二段要取第 2、3 步自己的 loss,不能把第 0、1 步的 loss 当成它们。"""
+    client = FakeClient()
+    losses = [4.59, 4.21, 3.87, 3.07]   # 171 上 run-s1-2 第二段存点里的四条,保留两位
+    hook = _ckpt_hook(4, first_step=2, losses=losses); hook.client = client; client.job_hook = hook
+    _, results = _staged(client, [[_episode("e2")], [_episode("e3")]], first_step=2,
+                         prior=[[_episode("e0")], [_episode("e1")]])
+    assert [(r.step, r.metrics["sft_loss"]) for r in results] == [(2, 3.87), (3, 3.07)]
 
 
 def test_metrics_missing_when_the_history_is_shorter_than_the_steps_run():

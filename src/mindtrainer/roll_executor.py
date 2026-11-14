@@ -381,8 +381,10 @@ class RollExecutor:
     def _parse_metrics(self, ckpt_dir: str, first_step: int, last_step: int) -> list[StepResult]:
         """从存点里的 log_history 取每步的 sft 损失,与 [first_step, last_step) 对账。
 
-        log_history 的 system/step 是本次作业内的步号(从 0 起);续训时作业起点是 first_step,
-        所以全局步号 = first_step + system/step。按 system/step 对账、不按下标:乱序、重复、
+        log_history 的 system/step 是全局步号:续训作业从 --resume 的存点里接过之前的 log_history
+        再往后追加,所以第二段的存点里是 0..last_step-1 全部的步(2026-11-14 在 171 上实测:
+        段 [2, 4) 的存点记着 0、1、2、3 四条)。此前这里按作业内步号换算(first_step + system/step),
+        第二段就把第 0、1 步的 loss 记成了第 2、3 步,不报错、只是数错。按 system/step 对账、不按下标:乱序、重复、
         多出来的步都不能被按位置收下。读不到、缺步、缺 loss 键都抛 MetricsMissingError:
         绝不退化成按位置编号。_update_summary 直接读 metrics["sft_loss"],缺键会是 KeyError,
         所以这里一并覆盖(设计 §5.2 第 7 步)。
@@ -399,8 +401,7 @@ class RollExecutor:
         seen: dict[int, float] = {}
         for entry in history if isinstance(history, list) else []:
             try:
-                local = int(entry["system/step"])
-                seen[first_step + local] = float(entry["sft_train/loss@sum"])
+                seen[int(entry["system/step"])] = float(entry["sft_train/loss@sum"])
             except (ValueError, TypeError, KeyError):
                 continue
         wanted = list(range(first_step, last_step))

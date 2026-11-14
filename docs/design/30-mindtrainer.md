@@ -3,7 +3,7 @@
 | 项 | 内容 |
 |---|---|
 | 一句话 | 权重级训练子系统:读训练指令与数据集清单,跑 SFT 与 GRPO 加 OPD,产出候选 checkpoint,崩溃后从存点续训 |
-| 状态 | 部分落地:配置、两种轨迹源、奖励管线、分组、mock 执行器、续训、编排、派发器、数据合成接线 [已落地];ROLL LoRA SFT 真实执行器与适配器导出转换器 [已落地],已由 `factory run --executor roll` 装配,已在真实主机上从训练指令端到端跑到待审候选一次(单段两步训练加导出),多段与续训尚未在真机上跑过;数据合成的失败留痕仍只有指令的 `failure` 字段,没有独立的失败记录产物(统一写入函数不在本包);场景二接通 [已落地]:interact 指令经 `--interact` 在真实入口跑完,训练位由 vLLM 上的真实模型说话,训练仍是 mock(策略工厂、一个 vLLM 进程挂最多两个 LoRA、按指令起停、`policy_backend` 训练记录块),端到端测试用本机 HTTP 替身代替 vLLM,真机未跑;服务停不掉时的收尾判 T2、不开 `--interact` 时失败原因点名该开关 [已落地];带记忆的场景二 [已落地]:训练位是带记忆的智能体,起点记忆摘要与记忆运行时身份进 `config_hash`,每条 rollout 从同一起点出发,`--interact` 下服务端等提交 150 秒、客户端等相邻消息 120 秒(按真机延迟定);记忆后端缺省是替身,设了记忆配置才装配 Starling,真端点的延迟与每条 rollout 分叉世界的耗时未核实;Starling 一侧连记忆服务、rollout 世界从种子分叉 [已落地];真实 GRPO 加 OPD 训练 [推迟] |
+| 状态 | 部分落地:配置、两种轨迹源、奖励管线、分组、mock 执行器、续训、编排、派发器、数据合成接线 [已落地];ROLL LoRA SFT 真实执行器与适配器导出转换器 [已落地],已由 `factory run --executor roll` 装配,已在真实主机上从训练指令端到端跑到待审候选:单段两步(2026-11-02、11-06)与两段四步(2026-11-14,第二段带 `--resume`),跨进程续训尚未在真机上跑过;数据合成的失败留痕仍只有指令的 `failure` 字段,没有独立的失败记录产物(统一写入函数不在本包);场景二接通 [已落地]:interact 指令经 `--interact` 在真实入口跑完,训练位由 vLLM 上的真实模型说话,训练仍是 mock(策略工厂、一个 vLLM 进程挂最多两个 LoRA、按指令起停、`policy_backend` 训练记录块),端到端测试用本机 HTTP 替身代替 vLLM,真机未跑;服务停不掉时的收尾判 T2、不开 `--interact` 时失败原因点名该开关 [已落地];带记忆的场景二 [已落地]:训练位是带记忆的智能体,起点记忆摘要与记忆运行时身份进 `config_hash`,每条 rollout 从同一起点出发,`--interact` 下服务端等提交 150 秒、客户端等相邻消息 120 秒(按真机延迟定);记忆后端缺省是替身,设了记忆配置才装配 Starling,真端点的延迟与每条 rollout 分叉世界的耗时未核实;Starling 一侧连记忆服务、rollout 世界从种子分叉 [已落地];真实 GRPO 加 OPD 训练 [推迟] |
 | 所在层 | 计算层 |
 | 代码位置 | `src/mindtrainer`;`src/mindtrainer/data_spec.py`、`src/mindtrainer/data_producer.py`;真实执行器与转换器在 `src/mindtrainer/roll_executor.py` 与 `src/mindtrainer/roll_converter.py`,经 `src/compute` 调远端主机 |
 | 基线提交 | `b826440`(2026-10-21) |
@@ -885,7 +885,7 @@ interact 的 `config_hash` 覆盖配置层的东西 [已落地]:情境 id、人�
 | 续训判定与崩溃续训 | [已落地] | 逐字节等价只在 mock 下有证据 |
 | 调和循环接线 | [已落地] | `scripts/run_controlplane.py` 用 mock 执行器与转换器 |
 | 数据合成接线 | [已落地] | 工作包 2 |
-| ROLL LoRA SFT 真实执行器、适配器导出转换器、阶段协议 | [已落地] | 远端计算层 `compute` 是它们的前置,已先于执行器与转换器落地;已在真实主机上各跑通一次,多段与续训、端到端调和循环仍待验证 |
+| ROLL LoRA SFT 真实执行器、适配器导出转换器、阶段协议 | [已落地] | 远端计算层 `compute` 是它们的前置,已先于执行器与转换器落地;已在真实主机上跑通单段与两段续训(2026-11-14);跨进程续训仍待验证 |
 | interact 在真实入口跑通:策略工厂、一个 vLLM 进程挂最多两个 LoRA、按指令起停、超时口径、`policy_backend` 记录 | [已落地] | 真推理加 mock 训练;目前用本机 HTTP 替身代替 vLLM 验证了推理链路的接线与发言落盘,奖励管线未对真实发言验证,真机没跑过,不证明模型变好 |
 | 真实 GRPO 加 OPD 训练、适配器合并回完整权重 | [推迟] | |
 | 带记忆的 interact:训练位 SimpleActio 实例、`memory` 块与哈希、`policy_for_rollout`、三元组上行、记忆失败分类、创建被拒按终止原因重跑、新时间预算 | [已落地] | 缺省走替身记忆,设了记忆配置才装配 Starling;训练记录带 `memory` 块。真端点延迟与每条 rollout 分叉世界的耗时未核实,见下方未核实项 |
@@ -913,7 +913,7 @@ interact 的 `config_hash` 覆盖配置层的东西 [已落地]:情境 id、人�
 | 未核实项 | 影响 | 核实办法 |
 |---|---|---|
 | ROLL 对离线分组 GRPO 数据的语义 | 算法正确性无保证 | 接入 ROLL 前对照其文档与源码 |
-| 多段训练与续训:`--resume` 的路径层级、`completion.json` 里 `last_step` 在续训时是全局下标还是作业内下标、`prior_batches` 前缀是否真能让 ROLL 按位置跳过已消费的批次 | 崩溃恢复设计的核心,至今只在假客户端下验证过,真机只跑过单段 | 2026-11-14 在 171 上跑 4 步、每 2 步一段:第一段跑通(2 步,loss 4.5882 → 4.2072,存点在 `checkpoints/20261114-011557/checkpoint-1`);第二段当场暴露一处缺陷并已修 —— `run_sft_stage` 的 `--resume` 取的是 `load()` 记下的起点基座,同一进程内的后续段没有更新它,ROLL 去基座目录找 `pipeline/worker_state_pipeline.json` 而 `FileNotFoundError`(修法:同进程后续段接 `_stage_ref` 的存点,跨进程续训才回落到 `_base_uri`;`job_id` 同步改用本段起点;回归用例 `test_a_later_stage_in_the_same_process_resumes_from_the_previous_stage` 已做突变检验)。修完重跑仍待做:第二段是否真从上一段存点接上、`log_history` 的步号是全局还是作业内、`prior_batches` 前缀是否真被 ROLL 按位置跳过 |
+| 多段训练与续训:`--resume` 的路径层级、`completion.json` 里 `last_step` 在续训时是全局下标还是作业内下标、`prior_batches` 前缀是否真能让 ROLL 按位置跳过已消费的批次 | 崩溃恢复设计的核心 | 2026-11-14 在 171 上跑通(树 `s1-ms`、`run-s1-2`:4 步、每 2 步一段,第二段带 `--resume`):指令 `executed`、候选 `pending_review`、导出 `exports/5d42ae5b`,修好后整轮 553 秒。四条 loss 4.588、4.207、3.866、3.068 连续下降,第二段确实接上了第一段的存点。实测结论:`--resume` 要给存点目录本身(`.../checkpoints/<时间戳>/checkpoint-<N>`);续训作业接过之前的 `log_history` 再追加,`system/step` 与 `completion.json` 的 `first_step`、`last_step` 都是全局步号;前缀批次被 ROLL 按位置跳过(第二段 `updates: 2`)。跑的过程中查出并修了两处缺陷:同一进程内的后续段 `--resume` 回落到起点基座(第二段 `FileNotFoundError`);按作业内步号换算 `log_history`,会把第 0、1 步的 loss 记成第 2、3 步(不报错,只是记错数)。跨进程续训(崩溃后重启再接)仍只在假客户端下验证过 |
 | 一步的行数:`数据并行度 × 梯度累积 × 每卡批大小` 与 `sft_batch_size` 个剧集展开后的行数是否对得上 | 对不上时 `drop_last` 静默丢行,或训练脚本以「实际步数不等于 max_steps」拒绝 | 实现 `validate_sft_data` 预检;真机上已确认恰好 8 行一步时通过 |
 | 存点与导出产物的属主 | 容器内是 root,存点与导出目录里的权重文件权限为 `-rw-------`,宿主机上的普通用户读不了;若 vLLM 服务以别的用户或在别的容器里运行,读不到适配器 | 起 vLLM 服务时核对运行用户;或用 `docker run --user` 让容器以宿主机用户运行,并核对镜像内路径的写权限 |
 | 远端 Python 版本 | 助手按 3.8 语法写,实际版本更低则无法运行 | 在验证主机上跑一次助手的 `probe` |

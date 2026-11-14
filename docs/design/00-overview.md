@@ -30,7 +30,7 @@ Rise(Recursive Interactive Social mind Evolution,递归交互式社会心智进�
 | 诊断评测 | [已落地] | 编排器、真实 SoMEval 运行器与污染准入检查都在;`factory run --enable` 注入 mock 评估器,`--evaluator someval` 注入真实评估器。缺省入口与 `scripts/run_controlplane.py` 不注入,那两条路径仍由占位桩写报告 |
 | MindTrainer | [已落地] | batch 与 interact 轨迹源、奖励管线、续训;训练由 mock 执行器完成。不传 `--interact` 时闭环组合根不装配实时客户端,interact 指令判 `failed`;`--interact` 装配实时客户端与策略工厂。真实 ROLL LoRA SFT 由 `--executor roll` 装配 |
 | 闭环:规划、提名、配方、智能体、桥接、组合根 | [已落地] | 九个工作包全部落地并有端到端测试;闭环默认不启用,要 `factory run --enable` 显式打开,默认入口仍走 mock 训练与占位诊断 |
-| 远端计算层(经 SSH)、ROLL LoRA SFT 真实执行器与适配器导出转换器 | [已落地] | `factory run --executor roll` 装配它们(默认入口与 `run_controlplane.py` 仍用 mock);已在真实主机上从训练指令端到端跑到待审候选一次,只跑过单段两步,多段与续训未在真机上验证 |
+| 远端计算层(经 SSH)、ROLL LoRA SFT 真实执行器与适配器导出转换器 | [已落地] | `factory run --executor roll` 装配它们(默认入口与 `run_controlplane.py` 仍用 mock);已在真实主机上从训练指令端到端跑到待审候选:单段两步,以及 2026-11-14 在 171 上两段四步、第二段带 `--resume`;跨进程续训未在真机上验证 |
 | vLLM 服务组件 | [已落地] | 命令拼装、SSH 隧道、服务生命周期;真机端到端待 GPU 空闲后补 |
 | 真实 SoMEval 运行器、SoMBench 题库导入、训练数据污染准入检查 | [已落地] | 由 `--evaluator someval` 启用,默认仍是 mock;真机只验证到预测阶段,判分与真实裁判未在真机上跑通 |
 | 智能体记忆:场景二每个角色位都是带记忆的 SimpleActio 智能体,记忆由 Starling 提供 | [已落地] | 记忆端口加 Starling 适配器,记忆在仓库之外;训练路每条 rollout 从同一起点出发;部署记忆持久累积;会话资源有序关闭。分八步施工,前五步只用替身 |
@@ -842,7 +842,7 @@ V2 要做多租户、配方跨工厂流通、数据结构升级。这些无法�
 | 还没做的 | 现状 | 影响 |
 |---|---|---|
 | 真实 GRPO 加 OPD、真实 judge | [推迟],仍用确定性 mock | 报告等级恒为 `mock` 或更低,策略经验不会聚合出任何条目(它只收 `real`),提名增益也缺真实判据 |
-| 真机多段训练与续训 | ROLL LoRA SFT 只在真机上跑通单段两步 | 多段流水线与续训未验证 |
+| 真机跨进程续训 | 单段与两段续训已在真机上跑通(2026-11-14) | 崩溃后由新进程接着跑的路径未在真机上验证 |
 | SoMEval 判分在真机上跑通 | 只验证到预测阶段 | `real` 等级尚未产生过 |
 | vLLM 端到端 | 组件已落地,真机待补 | 真实推理服务未经真机验证 |
 | interact 在真实入口接通 | [已落地],端到端测试用本机 HTTP 替身代替 vLLM,真机未跑 | 真模型进实时会话,对手位有固定对话、远端 vLLM 上的对手模型、外部 API 三种驱动;训练仍是 mock,证明会话与落盘,不证明学习效果 |
@@ -926,7 +926,7 @@ V2 要做多租户、配方跨工厂流通、数据结构升级。这些无法�
 | 28 | [计划中] 外部端点上同一个模型名换了向量,摘要会变、续训升 T3,但旧向量无法复现 | 想复现旧状态必须缓存向量 | 先观察一个月内同一端点的向量是否稳定,再决定要不要加向量缓存 |
 | 29 | [计划中] 服务端关端口的耗时分布未核实:正常收尾是否远低于 70 秒 | 收尾常超 70 秒时,部署轮次频繁延后,恢复前超时判 `RestoreFailedError` 等人;训练重试频繁落到瞬态记忆失败 | 跑 100 条部署 episode,记录每条从客户端结束到服务端端口关完的耗时 |
 | 30 | [计划中] 部署对手位积累记忆后,智能体位的行为是否随部署次数漂移未核实 | 轮次之间的发现集合随对手记忆变化,分不清是模型变了还是对手变了 | 同一模型连续部署 5 轮,比较每轮的发现集合 |
-| 31 | [计划中] 看板服务的进程环境里有没有 `OPENAI_API_KEY`、它报的提交是什么 | 外部模式下 rise 查不到密钥,首次抽取、嵌入或召回才报 `endpoint_key_missing`;提交不同则拒绝启动 | 用 `token_file` 连上调 `info()`;建一个空世界写一条事件 |
+| 31 | [已落地] 2026-11-14 用 `token_file` 连本机 8787 调 `POST /api/v1/client/info` 核实:服务报 `version 0.0.1`、`commit 01e149d1e2139362b1b047e263f9b5b1ecba162e`(与钉住的 `01e149d` 一致)、`protocol 1`;`default_settings` 里抽取与嵌入两个端点都在,嵌入是 `text-embedding-v4`、`dim 1024`,抽取是 `deepseek-v4.1-flash` 且 `thinking_type` 为空(按 provider 名 `cn-flash` 解析)。llm 段与嵌入段不含 `base_url`,外部模式本来就不需要它 | 提交一致,装配期的比对不会拒启动。`OPENAI_API_KEY` 是否存在仍未直接从进程环境读到,但首次抽取与嵌入在 11-13 的真机跑里都成功,说明服务侧拿得到密钥 | 无;自动评测仍不在这条链上 |
 | 32 | [已落地] uv 锁得住同一仓库、同一提交的两个 git 依赖(一个带子目录);从 git URL 装时服务报完整提交,不是 `unknown`。2026-11-10 用 uv 0.10.7 在临时副本里钉 `cff319d` 核实:`uv lock` 锁出 `starling-client` 0.1.0(带子目录 `clients/python`)与 `starling-memory` 0.0.1 两项,新增 26 个包;`uv sync --extra memory` 从 PyPI 装上 `httpx2==2.16.0`;两份 `direct_url.json` 的 `vcs_info.commit_id`、`starling_client.COMMIT` 与服务 `info()` 的 `commit` 都是完整的 40 位提交,`protocol` 是 1 | extra 装得上;拉起模式比客户端与服务两个提交的设计不用改。只有源码树里未构建的客户端副本报 `unknown`,那不是支持的安装方式 | 升级 Starling 时用新提交重跑 `scripts/check_starling_deps.py`,七项全 OK 才改钉住的提交 |
 | 33 | [计划中] rise 的事件会不会得到写入结果 `no_store` 或 `rejected` | 得到时判永久失败:部署轮次 T3,训练 rollout T2 | 部署与训练各跑一轮真实对话,统计写入结果 |
 | 34 | [计划中] rollout 世界、重放世界、孤儿快照与 `pre-rollback` 归档的堆积速度 | Starling 第 6 期(2026-11-11 起钉住,现为 `01e149d`)加了后台清理:可回收世界按 `retention_group` 每组留最近 200 份、只留 14 天,`pre-rollback` 归档留 14 天;带 held 快照或开着的世界跳过。rise 的 rollout 世界(分组是 run id)与重放世界(分组是轮次 id)都已传 `reclaimable=True` 与分组键。孤儿 held 快照所在的世界不会被清 | 跑一个训练 run 与一个部署轮次,按标签数世界、量数据目录,看清理记录(`GET /api/worlds/cleanup_log`)是否按上面的规则删 |
