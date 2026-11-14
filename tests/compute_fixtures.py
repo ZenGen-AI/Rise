@@ -87,6 +87,8 @@ class FakeClient:
         self.run_calls: list[tuple[str, JobSpec, bool]] = []  # (job_id, spec, lease)
         self.put_calls: list[str] = []
         self.preflight_calls = 0
+        self.preflight_holders: list[str | None] = []
+        self.lease_holder_reply: tuple[str | None, bool] = (None, False)
         self.rename_calls: list[tuple[str, str]] = []
         self.rm_tmp_calls: list[str] = []
         self.mem_available_gib = 32.0
@@ -95,8 +97,12 @@ class FakeClient:
 
     def preflight(self, *, own_holder: str | None = None) -> None:
         self.preflight_calls += 1
+        self.preflight_holders.append(own_holder)
         if self.busy:
             raise ComputeBusyError("the GPU lease is held by job someone-else")
+
+    def lease_holder(self) -> tuple[str | None, bool]:
+        return self.lease_holder_reply
 
     def put(self, path: str, data: bytes, *, executable: bool = False) -> None:
         self.files[path] = data

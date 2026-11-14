@@ -118,7 +118,29 @@ class RollExecutor:
             except ComputeError as exc:
                 raise InvalidTrainingConfigError(f"the ROLL runtime is not usable: {exc}") from exc
             self._runtime_bound = True
-        self.client.preflight()
+        self.client.preflight(own_holder=self._own_lease_holder())
+
+    def _own_lease_holder(self) -> str | None:
+        """租约当前被本 run 自己起的作业占着时返回它的作业名,否则 None(交给 preflight 照常判忙)。
+
+        守护进程崩溃重启后,上一进程起的远端作业还在跑、还占着租约;新进程的 preflight 若把它当成
+        "别人的作业",就会一直延后到它跑完,这段时间作业的超时也没人管(2026-11-14 在 171 上实测到)。
+        认法:租约持有者是作业名,它的 spec.json 里 --output-dir 落在 <work_root>/runs/<run_id>/ 下。
+        只读,不改任何远端状态;认不出(读不到 spec、没有 --output-dir、路径不在本 run 下)一律 None。"""
+        try:
+            holder, stale = self.client.lease_holder()
+        except (HelperError, ComputeError):
+            return None            # 查不到就当没占:交给 preflight 按原样判,不把延后变成失败
+        if not holder or stale:
+            return None
+        work = self.endpoint.work_root.rstrip("/")
+        try:
+            spec = json.loads(self.client.get(f"{work}/jobs/{holder}/spec.json"))
+            argv = list(spec["argv"])
+            out_dir = str(argv[argv.index("--output-dir") + 1])
+        except (HelperError, ValueError, TypeError, KeyError, IndexError):
+            return None
+        return holder if out_dir.startswith(f"{work}/runs/{self.run_id}/") else None
 
     def bind_runtime(self, client: ComputeClient, endpoint: ComputeEndpoint, roll_record: dict) -> None:
         """换上部署好的运行环境:派生端点(roll_root、sft_template、launch_prefix 指向系统建的容器)、

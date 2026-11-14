@@ -1,6 +1,8 @@
 """RollExecutor:load 的三种引用、存点回认、阶段作业、指标对账、逐步方法拒绝。"""
 from __future__ import annotations
 
+import json
+
 import pytest
 from compute_fixtures import FakeClient, fake_endpoint, training_artifacts
 from compute.errors import ComputeBusyError, HelperError
@@ -121,6 +123,49 @@ def test_preflight_delegates_to_the_client():
 def test_preflight_raises_compute_busy():
     with pytest.raises(ComputeBusyError):
         _executor(FakeClient(busy=True)).preflight()
+
+
+def _orphan(client: FakeClient, run_id: str, *, holder: str = "job-a1") -> None:
+    """造一份"上一进程起的作业还占着租约":租约持有者是 holder,它的 spec 指向本 run 的输出目录。"""
+    client.lease_holder_reply = (holder, False)
+    client.files[f"/srv/rise/work/jobs/{holder}/spec.json"] = json.dumps(
+        {"argv": ["python3", "train.py", "--output-dir", f"/srv/rise/work/runs/{run_id}/{holder}"]}
+    ).encode("utf-8")
+
+
+def test_preflight_claims_a_lease_its_own_run_left_behind():
+    """守护进程崩溃重启:上一进程起的作业还在跑、还占着租约,新进程要认下它是自己的,
+    否则一直延后到它跑完,这段时间作业超时没人管(2026-11-14 在 171 上实测到)。"""
+    client = FakeClient()
+    _orphan(client, RUN)
+    _executor(client).preflight()
+    assert client.preflight_holders == ["job-a1"]
+
+
+def test_preflight_does_not_claim_another_runs_lease():
+    """别的 run 的作业占着租约时照常判忙:认错会去抢别人的卡。"""
+    client = FakeClient()
+    _orphan(client, "run-2")
+    _executor(client).preflight()
+    assert client.preflight_holders == [None]
+
+
+def test_preflight_does_not_claim_a_stale_lease():
+    """租约已陈旧(作业退出了):不用认,preflight 本就能取。"""
+    client = FakeClient()
+    _orphan(client, RUN)
+    client.lease_holder_reply = ("job-a1", True)
+    _executor(client).preflight()
+    assert client.preflight_holders == [None]
+
+
+def test_preflight_survives_a_lease_whose_spec_cannot_be_read():
+    """读不到 spec(作业目录被清、JSON 坏了)时按"不是自己的"处理,不能因此把 preflight 弄失败。"""
+    client = FakeClient()
+    client.lease_holder_reply = ("job-a1", False)
+    client.files["/srv/rise/work/jobs/job-a1/spec.json"] = b"{not json"
+    _executor(client).preflight()
+    assert client.preflight_holders == [None]
 
 
 def test_step_methods_refuse_to_run():
